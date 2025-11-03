@@ -1,0 +1,23 @@
+# Cargo build
+**/target
+prelibs/**
+# Cargo config
+.cargo
+**/build
+# Profile-guided optimization
+/tmp
+pgo-data.profdata
+
+# MacOS nuisances
+.DS_Store
+
+# Proofs
+**/proof-with-pis.json
+**/proof-with-io.json
+
+# Env
+.env
+
+*.dump
+**/temp
+**/*.bin

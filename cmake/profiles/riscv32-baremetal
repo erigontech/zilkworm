@@ -1,0 +1,18 @@
+[settings]
+os=baremetal
+arch=riscv32
+compiler=gcc
+compiler.version=13
+compiler.libcxx=libstdc++11
+compiler.cppstd=gnu20
+build_type=Release
+
+[conf]
+tools.build:compiler_executables={"c": "/home/som/.sp1/riscv/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-gcc","cpp": "/home/som/.sp1/riscv/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-g++", "ar":"/home/som/.sp1/riscv/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-ar"}
+tools.build:cflags=["-march=rv32im","-mabi=ilp32","-mcmodel=medany"]
+tools.build:cxxflags=["-march=rv32im","-mabi=ilp32","-mcmodel=medany"]
+tools.build:sharedlinkflags=["-march=rv32im","-mabi=ilp32","-nostdlib","-Wl,--gc-sections"]
+
+[buildenv]
+CC=riscv32-unknown-elf-gcc
+CXX=riscv32-unknown-elf-g++

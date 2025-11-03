@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "guest_program",
+    "prover",
+]
+resolver = "2"
+
+[workspace.dependencies]
+alloy-sol-types = "1.0"

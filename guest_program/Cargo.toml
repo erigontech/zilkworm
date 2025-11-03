@@ -1,0 +1,25 @@
+[package]
+version = "0.1.0"
+name = "z6m_guest"
+edition = "2021"
+
+
+[dependencies]
+alloy-sol-types = { workspace = true }
+cxx = "1.0.160"                 # runtime bridge
+#sp1-zkvm = "5.0.8"
+
+[dependencies.libm]
+version = "0.2.15"
+default-features = false
+
+[dependencies.sp1-zkvm]
+version = "5.2.1"
+default-features = false
+features = ["embedded", "lib"]
+
+[build-dependencies]
+cmake = "0.1.54"
+cxx-build = "1.0.160"           # build-time codegen & C++ compilation
+cc = "1.2.29"
+pkg-config = "0.3"
