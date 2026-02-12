@@ -42,23 +42,26 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMMON_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_FLAGS}")
 set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} ${COMMON_FLAGS}")
 
-if(DEFINED CMAKE_LINKER)
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=${CMAKE_LINKER}")
+# --- Linker selection ---
+# Prefer lld, fall back to the GCC toolchain's ld.
+# Use CACHE FORCE to prevent CMake's auto-detected /usr/bin/ld from overriding.
+find_program(_LLD ld.lld)
+if(_LLD)
+  set(CMAKE_LINKER "${_LLD}" CACHE FILEPATH "RISC-V linker" FORCE)
+  set(_RISCV_LINKER_FLAGS "-fuse-ld=lld")
 else()
-  # Prefer lld, fall back to the GCC toolchain's ld
-  find_program(_LLD ld.lld)
-  if(_LLD)
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
-  elseif(_RISCV_GCC)
-    find_program(_RISCV_LD riscv-none-elf-ld)
-    if(_RISCV_LD)
-      set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=${_RISCV_LD}")
-      # Add GCC library paths so the linker can find crtbegin.o, libgcc, etc.
-      set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L${RISCV_GCC_ROOT}/lib/gcc/riscv-none-elf/${_RISCV_GCC_VERSION}/rv32im/ilp32")
-      set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L${RISCV_SYSROOT}/lib/rv32im/ilp32")
+  find_program(_RISCV_LD riscv-none-elf-ld)
+  if(_RISCV_LD)
+    set(CMAKE_LINKER "${_RISCV_LD}" CACHE FILEPATH "RISC-V linker" FORCE)
+    set(_RISCV_LINKER_FLAGS "-fuse-ld=${_RISCV_LD}")
+    if(RISCV_GCC_ROOT)
+      set(_RISCV_LINKER_FLAGS "${_RISCV_LINKER_FLAGS} -L${RISCV_GCC_ROOT}/lib/gcc/riscv-none-elf/${_RISCV_GCC_VERSION}/rv32im/ilp32")
+      set(_RISCV_LINKER_FLAGS "${_RISCV_LINKER_FLAGS} -L${RISCV_SYSROOT}/lib/rv32im/ilp32")
     endif()
   endif()
 endif()
+
+set(CMAKE_EXE_LINKER_FLAGS "${_RISCV_LINKER_FLAGS}" CACHE STRING "" FORCE)
 
 set(BUILD_TESTING OFF CACHE BOOL "Disable Silkworm tests")
 set(SILKWORM_WASM_API OFF CACHE BOOL "No WASM for bare-metal")
