@@ -110,6 +110,9 @@ SECTIONS
     _ebss = .;
   } > REGION_BSS AT > REGION_BSS :bss
 
+  /* Newlib's _sbrk needs the `end` symbol (end of BSS = start of heap area) */
+  PROVIDE(end = _ebss);
+
   /* fictitious region that represents the memory available for the heap */
   .heap (NOLOAD) : ALIGN(2097152)
   {

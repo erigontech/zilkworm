@@ -52,22 +52,20 @@ target_compile_options(z6m_guest PRIVATE
     -ffunction-sections
 )
 
-# # Link Silkworm libs (uncomment when z6m_debug target is defined)
-# target_link_options(z6m_guest PRIVATE -Wl,--start-group)
-# target_link_libraries(z6m_guest PRIVATE
-#  c gcc nosys stdc++
-#  silkworm_dev silkworm_core)
-# target_link_options(z6m_guest PRIVATE -Wl,--end-group)
-# ########################
-
-
 target_link_options(z6m_guest PRIVATE
     -nostdlib
-    -nodefaultlibs
     -Wl,-T,${MEMORY_SCRIPT}
     -Wl,-T,${LINKER_SCRIPT}
     -Wl,-e,_start
     -Wl,--gc-sections
+)
+
+# Link libraries inside --start-group/--end-group for circular dependency resolution
+target_link_libraries(z6m_guest PRIVATE
+    -Wl,--start-group
+    silkworm_dev silkworm_core
+    c gcc nosys stdc++
+    -Wl,--end-group
 )
 
 
