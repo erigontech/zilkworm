@@ -1,4 +1,7 @@
-#include <stdint.h>
+#include <zilk_core/dev/state_transition.hpp>
+#include <cstdint>
+#include <array>
+#include <string>
 
 #include "include/airbender_csr.hpp"
 #include "include/quasi_uart.hpp"
@@ -58,11 +61,32 @@ static void init_memory() {
     }
 }
 
+namespace {
+    uint64_t run_json_test(const std::string& json_str) {
+        const auto terminate_on_error = false;
+        const auto show_diagnostics = true;
+        auto state_transition = silkworm::cmd::state_transition::StateTransition(json_str, terminate_on_error, show_diagnostics);
+        return state_transition.run();
+    }
+
+    uint64_t run_unified_rlp(const std::string& unified_rlp_str) {
+        auto state_transition = silkworm::cmd::state_transition::StateTransition(unified_rlp_str);
+            // Run the state transition function of silkworm - EVMONE - silkworm_validate_transition and back
+            auto res = state_transition.run_rlp();
+        std::string msg = "[state_transition] run successful, gas used: " + std::to_string(res);
+        sys_println(msg.c_str());
+        return res;
+    }
+}
+
 [[noreturn]] static void workload() {
     uint32_t n = airbender::csr_read_word();
 
-    airbender::QuasiUART uart;
-    uart.write_cstr("Computing Fibonacci number...");
+    // airbender::QuasiUART uart;
+    // uart.write_cstr("Computing Fibonacci number...");
+
+    sys_println("Computing Fibonacci number...");
+
 
     uint32_t a = 0;
     uint32_t b = 1;

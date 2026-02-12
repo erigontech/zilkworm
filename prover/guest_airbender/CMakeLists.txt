@@ -13,6 +13,7 @@ set(MEMORY_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/memory.x")
 add_executable(z6m_guest
     src/main.cpp
     src/simple_allocator.cpp
+    src/mem_builtins.c
     src/start.S
 )
 
@@ -32,12 +33,15 @@ add_library(silkworm_dev STATIC IMPORTED GLOBAL)
 set_target_properties(silkworm_dev PROPERTIES
   IMPORTED_LOCATION "${SW_BIN}/zilk_core/dev/libsilkworm_dev.a"
 )
+if (EXISTS "${SW_INC_INSTALL}")
+  target_include_directories(z6m_guest PRIVATE "${SW_INC_INSTALL}")
+endif()
 # ======================================
 
 
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
 target_compile_options(z6m_guest PRIVATE
-    -ffreestanding
+    # -ffreestanding
     -fno-exceptions
     -fno-rtti
     -fno-unwind-tables
@@ -48,13 +52,13 @@ target_compile_options(z6m_guest PRIVATE
     -ffunction-sections
 )
 
-# Link Silkworm libs (uncomment when z6m_debug target is defined)
-# target_link_options(z6m_debug PRIVATE -Wl,--start-group)
-# target_link_libraries(z6m_debug PRIVATE
+# # Link Silkworm libs (uncomment when z6m_debug target is defined)
+# target_link_options(z6m_guest PRIVATE -Wl,--start-group)
+# target_link_libraries(z6m_guest PRIVATE
 #  c gcc nosys stdc++
 #  silkworm_dev silkworm_core)
-# target_link_options(z6m_debug PRIVATE -Wl,--end-group)
-########################
+# target_link_options(z6m_guest PRIVATE -Wl,--end-group)
+# ########################
 
 
 target_link_options(z6m_guest PRIVATE

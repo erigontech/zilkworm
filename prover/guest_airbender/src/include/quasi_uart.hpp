@@ -82,3 +82,9 @@ private:
 };
 
 } // namespace airbender
+
+static inline void sys_println(std::string_view s)
+{
+    airbender::QuasiUART uart;
+    uart.write_cstr(s.data());
+}
