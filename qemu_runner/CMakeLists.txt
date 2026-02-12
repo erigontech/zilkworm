@@ -14,8 +14,7 @@ project(SilkwormRVDemo C CXX ASM)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ========== Architecture detection ==========
-# Detect based on CMAKE_SYSTEM_PROCESSOR set in toolchain file
+
 set(START_ASM "start.S" CACHE STRING "Assembly startup file")
 set(QEMU_SYSTEM "qemu-system-riscv32" CACHE STRING "QEMU system emulator")
 
