@@ -12,14 +12,11 @@
 namespace airbender_print_detail {
 
 inline void csr_write_word(uint32_t value) {
-    asm volatile("csrrw x0, 0x7C0, %0" :: "r"(value) : "memory");
+    asm volatile("csrrw x0, 0x7C0, %0" ::"r"(value) : "memory");
 }
 
 inline uint32_t pack_le_u32(const uint8_t b[4]) {
-    return static_cast<uint32_t>(b[0])
-         | (static_cast<uint32_t>(b[1]) << 8)
-         | (static_cast<uint32_t>(b[2]) << 16)
-         | (static_cast<uint32_t>(b[3]) << 24);
+    return static_cast<uint32_t>(b[0]) | (static_cast<uint32_t>(b[1]) << 8) | (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
 }
 
 inline void write_str(const char* data, size_t len) {
@@ -47,7 +44,7 @@ inline void write_str(const char* data, size_t len) {
     }
 }
 
-} // namespace airbender_print_detail
+}  // namespace airbender_print_detail
 
 inline void sys_print(const char* msg) {
     size_t len = 0;
