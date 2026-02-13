@@ -52,12 +52,6 @@ inline void sys_print(const char* msg) {
     airbender_print_detail::write_str(msg, len);
 }
 
-inline void sys_println(const char* msg) {
-    sys_print(msg);
-    sys_print("\n");
-}
-
 inline void sys_println(std::string_view s) {
     airbender_print_detail::write_str(s.data(), s.size());
-    sys_print("\n");
 }
