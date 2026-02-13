@@ -122,17 +122,22 @@ SECTIONS
     _eheap = .;
   } > REGION_HEAP
 
-  /* fake output .got section */
-  /* Dynamic relocations are unsupported. This section is only used to detect
-     relocatable code in the input files and raise an error if relocatable code
-     is found */
-  .got (INFO) :
+  /* GOT section – needed because some pre-built libraries are compiled with
+     -fPIC.  We place it right after .data so the global-pointer relaxation
+     still reaches it. */
+  .got : ALIGN(4)
   {
     KEEP(*(.got .got.*));
-  }
+  } > REGION_DATA AT > REGION_DATAINIT :data
 
   .eh_frame (INFO) : { KEEP(*(.eh_frame)) }
   .eh_frame_hdr (INFO) : { *(.eh_frame_hdr) }
+
+  /* Discard C++ exception tables – we build with -fno-exceptions */
+  /DISCARD/ :
+  {
+    *(.gcc_except_table .gcc_except_table.*)
+  }
 }
 
 /* Do not exceed this mark in the error messages above                                    | */
@@ -196,12 +201,5 @@ Set _sidata to an address smaller than 'ORIGIN(REGION_DATAINIT) + LENGTH(REGION_
 ASSERT(SIZEOF(.stack) >= (_max_hart_id + 1) * _hart_stack_size, "
 ERROR(riscv-rt): .stack section is too small for allocating stacks for all the harts.
 Consider changing `_max_hart_id` or `_hart_stack_size`.");
-
-ASSERT(SIZEOF(.got) == 0, "
-.got section detected in the input files. Dynamic relocations are not
-supported. If you are linking to C code compiled using the `gcc` crate
-then modify your build script to compile the C code _without_ the
--fPIC flag. See the documentation of the `gcc::Config.fpic` method for
-details.");
 
 /* Do not exceed this mark in the error messages above                                    | */

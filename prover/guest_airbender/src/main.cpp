@@ -114,8 +114,10 @@ static std::string read_blob_string_from_csr()
 
 [[noreturn]] static void workload()
 {
-    auto input_string = read_blob_string_from_csr();
-    uint32_t out[8] = {29, 8, 0, 0, 0, 0, 0, 0};
+    auto input_str = read_blob_string_from_csr();
+    auto result = run_unified_rlp(input_str);
+
+    uint32_t out[8] = {static_cast<uint32_t>(result), 8, 0, 0, 0, 0, 0, 0};
     airbender::finish_success(out);
 }
 

@@ -14,6 +14,7 @@ add_executable(z6m_guest
     src/main.cpp
     src/simple_allocator.cpp
     src/mem_builtins.c
+    src/runtime_stubs.c
     src/start.S
 )
 
@@ -64,18 +65,13 @@ target_link_options(z6m_guest PRIVATE
 target_link_libraries(z6m_guest PRIVATE
     -Wl,--start-group
     silkworm_dev silkworm_core
+    "${CMAKE_BINARY_DIR}/zilkworm/third_party/libevmone.a"
+    "${CMAKE_BINARY_DIR}/zilkworm/deps/src/blst/libblst.a"
+    "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-loader.a"
+    "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-instructions.a"
     c gcc nosys stdc++
     -Wl,--end-group
 )
-
-
-# If you later see unresolved symbols from 3rd-party .a's, also add:
-# target_link_libraries(z6m_debug PRIVATE
-#   "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-loader.a"
-#   "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-instructions.a"
-#   "${CMAKE_BINARY_DIR}/zilkworm/third_party/libevmone.a"
-#   "${CMAKE_BINARY_DIR}/zilkworm/deps/src/blst/libblst.a"
-# )
 
 
 set_target_properties(z6m_guest PROPERTIES
