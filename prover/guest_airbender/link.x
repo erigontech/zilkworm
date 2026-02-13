@@ -98,6 +98,8 @@ SECTIONS
     PROVIDE(__global_pointer$ = . + 0x800);
     *(.sdata .sdata.* .sdata2 .sdata2.*);
     *(.data .data.*);
+    /* GOT entries – some pre-built libraries are compiled with -fPIC */
+    *(.got .got.*);
     . = ALIGN(4);
     _edata = .;
   } > REGION_DATA AT > REGION_DATAINIT :data
@@ -121,14 +123,6 @@ SECTIONS
     . = ALIGN(2097152);
     _eheap = .;
   } > REGION_HEAP
-
-  /* GOT section – needed because some pre-built libraries are compiled with
-     -fPIC.  We place it right after .data so the global-pointer relaxation
-     still reaches it. */
-  .got : ALIGN(4)
-  {
-    KEEP(*(.got .got.*));
-  } > REGION_DATA AT > REGION_DATAINIT :data
 
   .eh_frame (INFO) : { KEEP(*(.eh_frame)) }
   .eh_frame_hdr (INFO) : { *(.eh_frame_hdr) }

@@ -20,6 +20,11 @@ if(QEMU_DEBUG)
     include_directories(${SILKWORM_MAIN_DIR}/qemu_runner/src/include)
 endif()
 
+if(AIRBENDER)
+    add_compile_definitions(-DAIRBENDER)
+    include_directories(${CMAKE_SOURCE_DIR}/zilk_core)
+endif()
+
 add_subdirectory(core)
 add_subdirectory(dev)
 

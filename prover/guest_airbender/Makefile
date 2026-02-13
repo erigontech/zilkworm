@@ -17,7 +17,7 @@ zilkworm:
 		-DCMAKE_INSTALL_PREFIX=$(BUILD_DIR)/zilkworm-install \
 	    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
 		-G "Unix Makefiles" \
-		-DQEMU_DEBUG=ON \
+		-DAIRBENDER=ON \
 		-Wno-dev
 	cmake --build $(BUILD_DIR)/zilkworm -j --target install
 

@@ -5,6 +5,8 @@
 #include <sp1_syscalls.hpp>
 #elif defined(QEMU_DEBUG)
 #include <semihosting.hpp>
+#elif defined(AIRBENDER)
+#include <airbender_print.hpp>
 #else
 #include <iostream>
 #include <string_view>
