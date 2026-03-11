@@ -25,6 +25,7 @@ RUN apt-get update && \
         npm \
         pkg-config \
         libssl-dev \
+        libgmp-dev \
         protobuf-compiler \
         libprotobuf-dev && \
     rm -rf /var/lib/apt/lists/*

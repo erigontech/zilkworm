@@ -118,7 +118,8 @@ eest-mfbd-build: z6m_eest_convert
 
 eest-blockchain-tests: eest-mfbd-build
 	cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-		-DEEST_MFBD_DIR=$(EEST_MFBD_DIR)
+		-DEEST_MFBD_DIR=$(EEST_MFBD_DIR) \
+		-DEVMONE_PRECOMPILES_GMP=ON -DEVMONE_PRECOMPILES_LIBSECP256K1=ON
 	cmake --build build
 	ctest --test-dir build --parallel
 
@@ -129,7 +130,8 @@ EEST_JSON_DIR ?= $(EEST_FIXTURES_DIR)/blockchain_tests
 
 eest-blockchain-tests-json:
 	cmake -B build/eest-json -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-		-DEEST_JSON_DIR=$(EEST_JSON_DIR)
+		-DEEST_JSON_DIR=$(EEST_JSON_DIR) \
+		-DEVMONE_PRECOMPILES_GMP=ON -DEVMONE_PRECOMPILES_LIBSECP256K1=ON
 	cmake --build build/eest-json
 	ctest --test-dir build/eest-json --parallel
 

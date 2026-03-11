@@ -107,6 +107,63 @@ else()
   )
 endif()
 
+# TODO: This is copied from evmone/test/state/CMakeLists.txt. Refactor to avoid duplication.
+include(FetchContent)
+
+option(EVMONE_PRECOMPILES_LIBSECP256K1 "Enable precompiles implementations using libsecp256k1 library" OFF)
+if(EVMONE_PRECOMPILES_LIBSECP256K1)
+    FetchContent_Declare(
+        libsecp256k1
+        URL https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.7.1.tar.gz
+        URL_HASH SHA256=958f204dbafc117e73a2604285dc2eb2a5128344d3499c114dcba5de54cb7a9e
+    )
+    set(BUILD_SHARED_LIBS_ORIG ${BUILD_SHARED_LIBS})
+    set(BUILD_SHARED_LIBS OFF)
+    set(SECP256K1_ENABLE_MODULE_ECDH OFF)
+    set(SECP256K1_ENABLE_MODULE_RECOVERY ON)
+    set(SECP256K1_ENABLE_MODULE_EXTRAKEYS OFF)
+    set(SECP256K1_ENABLE_MODULE_SCHNORRSIG OFF)
+    set(SECP256K1_ENABLE_MODULE_MUSIG OFF)
+    set(SECP256K1_ENABLE_MODULE_ELLSWIFT OFF)
+    set(SECP256K1_ASM OFF)
+    set(SECP256K1_BUILD_BENCHMARK OFF)
+    set(SECP256K1_BUILD_TESTS OFF)
+    set(SECP256K1_BUILD_EXHAUSTIVE_TESTS OFF)
+    set(SECP256K1_BUILD_CTIME_TESTS OFF)
+    set(SECP256K1_BUILD_EXAMPLES OFF)
+    set(SECP256K1_ENABLE_API_VISIBILITY_ATTRIBUTES OFF)
+    set(SECP256K1_VALGRIND OFF)
+    FetchContent_MakeAvailable(libsecp256k1)
+    foreach(TARGET secp256k1 secp256k1_precomputed)
+        set_target_properties(
+            ${TARGET}
+            PROPERTIES
+            COMPILE_OPTIONS $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w>
+            CXX_CLANG_TIDY ""
+        )
+    endforeach()
+    add_library(libsecp256k1::secp256k1 ALIAS secp256k1)
+    target_link_libraries(evmone PRIVATE libsecp256k1::secp256k1)
+    target_compile_definitions(evmone PUBLIC EVMONE_PRECOMPILES_LIBSECP256K1=1)
+    target_sources(evmone PRIVATE
+        evmone/test/state/precompiles_libsecp256k1.hpp
+        evmone/test/state/precompiles_libsecp256k1.cpp
+    )
+    set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_ORIG})
+endif()
+
+option(EVMONE_PRECOMPILES_GMP "Enable precompiles implementations via the GMP/MPIR library" OFF)
+if(EVMONE_PRECOMPILES_GMP)
+    list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/evmone/cmake)
+    find_package(GMP REQUIRED)
+    target_link_libraries(evmone PRIVATE GMP::gmp)
+    target_compile_definitions(evmone PUBLIC EVMONE_PRECOMPILES_GMP=1)
+    target_sources(evmone PRIVATE
+        evmone/test/state/precompiles_gmp.hpp
+        evmone/test/state/precompiles_gmp.cpp
+    )
+endif()
+
 if(SILKWORM_CORE_USE_ABSEIL)
   # Propagate SILKWORM_CORE_USE_ABSEIL to allow using Silkworm's preferred FlatHashMap.
   find_package(absl REQUIRED)
