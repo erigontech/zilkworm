@@ -52,7 +52,8 @@ xpack-elf:
 xpack-elf-eest: eest-mfbd-build
 	cmake -B$(BUILD_DIR) -S. $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_TESTING=ON \
-		-DEEST_MFBD_DIR=$(EEST_MFBD_DIR)
+		-DEEST_MFBD_DIR=$(EEST_MFBD_DIR) \
+		-DEVMONE_PRECOMPILES_LIBSECP256K1=ON
 	cmake --build $(BUILD_DIR) -j$$(nproc) --verbose
 
 eest-blockchain-tests: xpack-elf-eest
@@ -66,7 +67,8 @@ EEST_JSON_DIR ?= $(CURDIR)/../test-fixtures-cache/eest_stable/fixtures/blockchai
 xpack-elf-eest-json:
 	cmake -B$(BUILD_DIR) -S. $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_TESTING=ON \
-		-DEEST_JSON_DIR=$(EEST_JSON_DIR)
+		-DEEST_JSON_DIR=$(EEST_JSON_DIR) \
+		-DEVMONE_PRECOMPILES_LIBSECP256K1=ON
 	cmake --build $(BUILD_DIR) -j$$(nproc) --verbose
 
 eest-blockchain-tests-json: xpack-elf-eest-json
