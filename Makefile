@@ -15,7 +15,7 @@ z6m_guest:
 		-DSP1=ON
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
 z6m_prover: z6m_guest
-	cargo build --release --manifest-path prover/prover_hypercube/Cargo.toml
+	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
 
 test_hc: z6m_prover
 	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp
@@ -25,7 +25,7 @@ z6m_guest_turbo:
 	(cd prover/guest_turbo && cargo prove build)
 
 z6m_prover_turbo: z6m_guest_turbo
-	cargo build --release --manifest-path prover/prover_turbo/Cargo.toml
+	cd prover && cargo build --release --manifest-path prover_turbo/Cargo.toml
 
 selftest: z6m_prover
 	prover/target/release/z6m_prover execute --is-test --file-name third_party/eest-fixtures/blockchain_tests/static/state_tests/stExample/add11.json
