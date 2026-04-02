@@ -16,7 +16,7 @@ endif()
 
 if(QEMU_DEBUG)
     add_compile_definitions(-DQEMU_DEBUG)
-    include_directories(${CMAKE_SOURCE_DIR}/qemu_runner/src/include)
+    include_directories(${SILKWORM_MAIN_DIR}/qemu_runner/src/include)
 endif()
 
 add_subdirectory(core)
