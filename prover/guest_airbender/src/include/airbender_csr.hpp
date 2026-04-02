@@ -75,12 +75,30 @@ inline uint32_t bigint_trigger(uint32_t* mut_ptr, const uint32_t* immut_ptr, uin
     return x12;
 }
 
-// Keccak delegation is disabled for now -- clang refuses to produce correct assembly
-// for it. A better way would probably be to export it from Rust as a C function and link to it.
-//
-// inline uint32_t keccak_f1600_delegate(const uint32_t* state_ptr) {
-//    TODO
-// }
+/// Keccak-f[1600] via CSR 0x7CB delegation.
+/// State: 31 × u64 words (25 state + 6 scratch) at 256-byte-aligned address.
+/// Protocol: set x10=0 (control, auto-bumped), x11=state ptr, emit 649 csrrw.
+inline void keccak_f1600_delegate(uint64_t state[25]) {
+    uint64_t __attribute__((aligned(256))) buf[32];
+    for (int i = 0; i < 25; i++) buf[i] = state[i];
+    for (int i = 25; i < 31; i++) buf[i] = 0;
+
+    register uint32_t ctrl asm("x10") = 0;
+    register void*    sptr asm("x11") = (void*)buf;
+
+    asm volatile(
+        "li t0, 649\n"
+        "1:\n"
+        "  csrrw x0, 0x7CB, x0\n"
+        "  addi t0, t0, -1\n"
+        "  bnez t0, 1b\n"
+        : "+r"(ctrl)
+        : "r"(sptr)
+        : "t0", "memory"
+    );
+
+    for (int i = 0; i < 25; i++) state[i] = buf[i];
+}
 
 [[noreturn]] inline void finish_error() {
     asm volatile("csrrw x0, cycle, x0" ::: "memory");

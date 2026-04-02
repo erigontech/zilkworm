@@ -104,6 +104,14 @@ if(SILKWORM_CORE_USE_ABSEIL)
   target_link_libraries(evmone PRIVATE absl::flat_hash_map)
 endif()
 
+if(AIRBENDER)
+  target_compile_definitions(evmone PRIVATE AIRBENDER)
+  target_include_directories(evmone PRIVATE
+    ${CMAKE_SOURCE_DIR}/prover/guest_airbender/src/include
+    ${CMAKE_SOURCE_DIR}/zilk_core
+  )
+endif()
+
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/evmone/include
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
