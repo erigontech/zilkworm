@@ -52,6 +52,10 @@ silkworm_library(
 
 target_compile_features(silkworm_core PUBLIC cxx_std_23)
 
+if(EVMONE_PRECOMPILES_LIBSECP256K1)
+  target_link_libraries(silkworm_core PRIVATE libsecp256k1::secp256k1)
+endif()
+
 # unit tests
 # set(TEST_TARGET silkworm_core_test)
 
