@@ -25,13 +25,13 @@
 
 namespace silkworm::cmd::state_transition {
 
-StateTransition::StateTransition(std::string_view json_str, const bool terminate_on_error, const bool show_diagnostics)
+StateTransition::StateTransition(std::string_view json_str, const bool terminate_on_error, const bool show_diagnostics) noexcept
     : json_str_{json_str},
       terminate_on_error_{terminate_on_error},
       show_diagnostics_{show_diagnostics} {
 }
 
-StateTransition::StateTransition(ByteView& unified_rlp)
+StateTransition::StateTransition(ByteView& unified_rlp) noexcept
     : unified_rlp_{unified_rlp} {
 }
 

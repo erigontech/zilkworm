@@ -1,6 +1,6 @@
 BUILD_DIR := $(CURDIR)/build
-CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im-clang.cmake
-# CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im.cmake
+# CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im-clang.cmake
+CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im.cmake
 LINKER_SCRIPT := $(CURDIR)/link.x
 START_ASM := start.S
 

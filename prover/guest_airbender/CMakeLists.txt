@@ -37,6 +37,11 @@ set_target_properties(silkworm_dev PROPERTIES
 if (EXISTS "${SW_INC_INSTALL}")
   target_include_directories(z6m_guest PRIVATE "${SW_INC_INSTALL}")
 endif()
+# FetchContent deps live in the zilkworm build tree, not the install prefix.
+target_include_directories(z6m_guest SYSTEM PRIVATE
+  "${SW_BIN}/_deps/nlohmann_json-src/include"
+  "${SW_BIN}/_deps/magic_enum-src/include"
+)
 # ======================================
 
 

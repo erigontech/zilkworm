@@ -1,12 +1,11 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
+TESTS_DIR := third_party/eest-fixtures/blockchain_tests/prague
+
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
-.PHONY: z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
-        execute-block selftest tests eest-rlp-build \
-        eest-blockchain-tests-json eest-prover-test-json tests-json \
-        release-artifacts
+.PHONY: z6m_guest z6m_guest_airbender z6m_prover selftest tests
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -18,6 +17,8 @@ z6m_guest:
 		-DCMAKE_BUILD_TYPE=Release \
 		-DSP1=ON
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
+z6m_guest_airbender:
+	$(MAKE) -C prover/guest_airbender z6m_guest
 z6m_prover: z6m_guest
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
 
@@ -31,99 +32,25 @@ z6m_guest_turbo:
 z6m_prover_turbo: z6m_guest_turbo
 	cd prover && cargo build --release --manifest-path prover_turbo/Cargo.toml
 
+selftest: z6m_prover
+	prover/target/release/z6m_prover execute --is-test --file-name third_party/eest-fixtures/blockchain_tests/static/state_tests/stExample/add11.json
+
 execute-block: z6m_prover
 	prover/target/release/z6m_prover execute --file-name prover/temp/blocks/23519000/unifiedBlockAndStateRlp23519000.bin
 
-SELFTEST_JSON := third_party/eest-fixtures/blockchain_tests/static/state_tests/stExample/add11.json
-SELFTEST_RLP  := build/selftest.rlp
+TESTFILES := $(shell find $(TESTS_DIR)/${TESTS_SUBDIR} -type f -name '*.json')
+RELTESTS := $(patsubst $(TESTS_DIR)/%,%,$(TESTFILES))
+LOGFILES := $(addprefix target/logs/,$(RELTESTS:.json=.log))
 
-selftest: z6m_prover z6m_eest_convert
-	@mkdir -p $(dir $(SELFTEST_RLP))
-	$(EEST_CONVERT_BIN) emit --json $(SELFTEST_JSON) --index 0 > $(SELFTEST_RLP)
-	prover/target/release/z6m_prover execute --file-name $(SELFTEST_RLP)
-
-TESTS_LOG_DIR := target/logs
-
-tests: z6m_prover eest-rlp-build
-	@mkdir -p $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
-	prover/target/release/z6m_prover --test-service \
-		--test-dir $(EEST_RLP_DIR)/$(TESTS_SUBDIR) \
-		--execution-log-dir $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
+tests: $(LOGFILES)
 
 .DELETE_ON_ERROR:
 
-EEST_CONVERT_BIN := prover/target/release/z6m_eest_convert
+target/logs/%.log: $(TESTS_DIR)/%.json
+	@mkdir -p $(dir $@)
+	prover/target/release/z6m_prover execute --is-test --file-name $< 2>&1 | tee $@ || (echo "CRASHED! $@" && rm $@)
 
-# Phony: delegate freshness to cargo's own incremental build (~ms when up-to-date).
-z6m_eest_convert:
-	cd prover && cargo build --release --manifest-path common/Cargo.toml \
-		--no-default-features --features eest-convert --bin z6m_eest_convert
-
-# Batched-RLP fixtures tree, produced by `z6m_eest_convert bulk-convert` from
-# the third_party/eest-fixtures submodule (sparse-checkout in CI). The output
-# is content-addressed by the eest-fixtures sha so different submodule
-# checkouts coexist in third_party/eest-fixtures-rlp/dev-<sha>/. CI overrides
-# EEST_RLP_DIR with a cache-keyed path.
-EEST_SHA := $(shell git -C third_party/eest-fixtures rev-parse --short=12 HEAD 2>/dev/null)
-EEST_RLP_DIR ?= $(CURDIR)/third_party/eest-fixtures-rlp/dev-$(EEST_SHA)
-
-# Skip the converter run if the output dir already has a manifest from a
-# previous successful build. To force regeneration: `rm $(EEST_RLP_DIR)/manifest.json`.
-eest-rlp-build: z6m_eest_convert
-	@if [ -f "$(EEST_RLP_DIR)/manifest.json" ]; then \
-	    echo "  $(EEST_RLP_DIR) already populated; skipping bulk-convert"; \
-	else \
-	    mkdir -p "$(EEST_RLP_DIR)"; \
-	    $(EEST_CONVERT_BIN) bulk-convert \
-	        --input-dir $(CURDIR)/third_party/eest-fixtures/blockchain_tests \
-	        --output-dir "$(EEST_RLP_DIR)/blockchain_tests"; \
-	    printf '{"eest_sha":"%s"}\n' "$(EEST_SHA)" > "$(EEST_RLP_DIR)/manifest.json"; \
-	fi
-
-eest-blockchain-tests: eest-rlp-build
-	cmake -B build/eest -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-		-DEEST_RLP_DIR=$(EEST_RLP_DIR)
+eest-blockchain-tests: 
+	cmake -B build/eest -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DTESTS_DIR=third_party/eest-fixtures/blockchain_tests
 	cmake --build build/eest
 	ctest --test-dir build/eest --parallel
-
-eest-prover-test: z6m_prover eest-rlp-build
-	prover/target/release/z6m_prover --test-service --test-dir $(EEST_RLP_DIR)
-
-EEST_JSON_DIR ?= $(CURDIR)/third_party/eest-fixtures
-
-eest-blockchain-tests-json:
-	cmake -B build/eest-json -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-		-DEEST_JSON_DIR=$(EEST_JSON_DIR)
-	cmake --build build/eest-json
-	ctest --test-dir build/eest-json --parallel
-
-eest-prover-test-json: z6m_prover
-	prover/target/release/z6m_prover --test-service --test-dir $(EEST_JSON_DIR)
-
-tests-json: z6m_prover
-	@mkdir -p $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
-	prover/target/release/z6m_prover --test-service \
-		--test-dir $(EEST_JSON_DIR)/$(TESTS_SUBDIR) \
-		--execution-log-dir $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
-
-# Stage release artifacts into ./temp/
-RELEASE_DIR := temp
-RELEASE_BINS := \
-	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
-	prover/target/release/z6m_prover:z6m_prover_hypercube \
-	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
-
-release-artifacts:
-	@mkdir -p $(RELEASE_DIR)
-	@names=""; \
-	for pair in $(RELEASE_BINS); do \
-	    src=$${pair%%:*}; dst=$${pair##*:}; \
-	    if [ ! -f "$$src" ]; then echo "missing: $$src" >&2; exit 1; fi; \
-	    cp "$$src" "$(RELEASE_DIR)/$$dst"; \
-	    names="$$names $$dst"; \
-	done; \
-	(cd $(RELEASE_DIR) && sha256sum $$names > SHA256SUMS.txt)
-	@echo "release artifacts staged in $(RELEASE_DIR)/:"
-	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
-	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
-	@cat $(RELEASE_DIR)/SHA256SUMS.txt
