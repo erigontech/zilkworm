@@ -5,7 +5,7 @@ TESTS_DIR := third_party/eest-fixtures/blockchain_tests/prague
 
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
-.PHONY: z6m_guest z6m_guest_airbender z6m_prover selftest tests
+.PHONY: z6m_guest z6m_guest_airbender z6m_prover z6m_prover_airbender selftest tests
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -21,6 +21,8 @@ z6m_guest_airbender:
 	$(MAKE) -C prover/guest_airbender z6m_guest
 z6m_prover: z6m_guest
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
+z6m_prover_airbender: z6m_guest_airbender
+	cd prover/prover_airbender && cargo build --release
 
 test_hc: z6m_prover
 	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp
