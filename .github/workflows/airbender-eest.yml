@@ -1,0 +1,152 @@
+name: Airbender EEST State Tests
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'prover/guest_airbender/**'
+      - 'prover/prover_airbender/**'
+      - 'zilk_core/**'
+      - 'third_party/**'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'prover/guest_airbender/**'
+      - 'prover/prover_airbender/**'
+      - 'zilk_core/**'
+      - 'third_party/**'
+  workflow_dispatch:
+
+jobs:
+  airbender-eest:
+    name: Build and Run Airbender EEST State Tests
+    runs-on: ubuntu-latest
+    container: ubuntu:25.10
+    environment: ci
+    steps:
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          TZ: Etc/UTC
+        run: |
+          apt update
+          apt install -y \
+            build-essential cmake ninja-build \
+            git git-lfs \
+            python3 \
+            nodejs npm \
+            curl
+          npm i -g xpm
+          xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
+          echo 'export PATH=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:$PATH' >> ~/.bashrc
+          echo "PATH=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:$PATH" >> $GITHUB_ENV
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Verify tool versions
+        run: |
+          riscv-none-elf-gcc --version
+          riscv-none-elf-g++ --version
+          cmake --version
+          ninja --version
+          git --version
+          git lfs version
+          rustc --version
+          cargo --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          submodules: recursive
+          lfs: true
+
+      - name: Configure cargo for private dependencies
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<'TOML'
+          [net]
+          git-fetch-with-cli = true
+          TOML
+          # Strip leading whitespace from heredoc (GitHub Actions indentation)
+          sed -i 's/^[[:space:]]*//' ~/.cargo/config.toml
+          git config --global url."https://${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Build guest ELF
+        run: make z6m_guest_airbender
+
+      - name: Build prover
+        run: make z6m_prover_airbender
+
+      - name: Run EEST state tests
+        id: run_tests
+        shell: bash
+        run: |
+          set +e
+          cd prover/prover_airbender
+          make eest 2>&1 | tee output.log
+          exit_code=${PIPESTATUS[0]}
+
+          # Count results from individual log files
+          total=$(find target/eest-logs -name '*.log' 2>/dev/null | wc -l)
+          failed=$(grep -rl 'CRASHED\|ERROR\|FAILED' target/eest-logs/ 2>/dev/null | wc -l)
+          passed=$((total - failed))
+
+          if (( total > 0 )); then
+            passed_percent=$(( passed * 100 / total ))
+          else
+            passed_percent=0
+          fi
+
+          echo "passed=$passed" >> $GITHUB_OUTPUT
+          echo "passed_percent=$passed_percent" >> $GITHUB_OUTPUT
+          echo "failed=$failed" >> $GITHUB_OUTPUT
+          echo "total=$total" >> $GITHUB_OUTPUT
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+
+      - name: Print test summary
+        if: always()
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "   AIRBENDER EEST STATE TEST SUMMARY"
+          echo "========================================"
+          echo ""
+          echo "Passed: ${{ steps.run_tests.outputs.passed }} / ${{ steps.run_tests.outputs.total }} (${{ steps.run_tests.outputs.passed_percent }}%)"
+          echo "Failed: ${{ steps.run_tests.outputs.failed }}"
+          echo "========================================"
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: airbender-eest-logs
+          path: |
+            prover/prover_airbender/output.log
+            prover/prover_airbender/target/eest-logs/
+          retention-days: 30
+
+      - name: Check failure threshold
+        if: always()
+        shell: bash
+        run: |
+          failed=${{ steps.run_tests.outputs.failed }}
+          total=${{ steps.run_tests.outputs.total }}
+          exit_code=${{ steps.run_tests.outputs.exit_code }}
+
+          if [[ "$total" == "0" ]]; then
+            echo "ERROR: No test results found"
+            exit 1
+          fi
+
+          if (( failed > 5 )); then
+            echo "Too many failures - ${failed} failed out of ${total}"
+            echo "failed" > failed.log
+            exit 1
+          fi
+
+          if (( failed > 0 )); then
+            echo "WARNING: ${failed} test(s) failed, but within acceptable threshold (<=5)"
+          else
+            echo "SUCCESS: All ${total} tests passed!"
+          fi
