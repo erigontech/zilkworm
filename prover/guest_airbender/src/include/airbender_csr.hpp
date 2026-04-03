@@ -126,19 +126,6 @@ inline void blake_trigger_full_rounds(uint32_t* state, const uint32_t* input, ui
 
 // --- BigInt U256 ---
 
-/// Macro version — guaranteed zero call overhead (no jal/ret possible).
-#define AIRBENDER_BIGINT_CSR(mut_ptr, immut_ptr, mask_val)                     \
-    do {                                                                        \
-        register uintptr_t _a0 asm("x10") =                                    \
-            reinterpret_cast<uintptr_t>(mut_ptr);                               \
-        register uintptr_t _a1 asm("x11") =                                    \
-            reinterpret_cast<uintptr_t>(immut_ptr);                             \
-        register uint32_t  _a2 asm("x12") = (mask_val);                        \
-        asm volatile("csrrw x0, 0x7CA, x0"                                     \
-                     : "+r"(_a2) : "r"(_a0), "r"(_a1) : "memory");             \
-    } while (0)
-
-/// Function version — kept for call sites that need a return value.
 [[gnu::always_inline]] inline uint32_t bigint_trigger(
     uint32_t* mut_ptr, const uint32_t* immut_ptr, uint32_t mask) {
     register uintptr_t x10 asm("x10") = reinterpret_cast<uintptr_t>(mut_ptr);
