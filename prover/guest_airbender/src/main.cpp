@@ -30,10 +30,22 @@ namespace
 
 int main()
 {
-    auto [buf, len] = airbender::read_input_from_csr();
-    silkworm::ByteView bv{buf, len};
-    auto result = run_unified_rlp(bv);
+    // First word: is_test flag (0=unified RLP, 1=JSON test)
+    uint32_t is_test_flag = airbender::csr_read_word();
 
-    uint32_t out[8] = {static_cast<uint32_t>(result), 8, 0, 0, 0, 0, 0, 0};
+    auto [buf, len] = airbender::read_input_from_csr();
+
+    uint64_t result = 0;
+    if (is_test_flag == 1) {
+        // EEST JSON test mode
+        std::string json_str(reinterpret_cast<const char*>(buf), len);
+        result = run_json_test(json_str);
+    } else {
+        // Normal unified RLP block execution
+        silkworm::ByteView bv{buf, len};
+        result = run_unified_rlp(bv);
+    }
+
+    uint32_t out[8] = {static_cast<uint32_t>(result), static_cast<uint32_t>(result >> 32), 0, 0, 0, 0, 0, 0};
     airbender::finish_success(out);
 }

@@ -65,6 +65,10 @@ enum Command {
         /// Data directory override
         #[arg(long)]
         data_dir: Option<PathBuf>,
+
+        /// Input file is an EEST JSON test fixture (not unified RLP)
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        is_test: bool,
     },
 }
 
@@ -81,15 +85,31 @@ struct ExecutionLog {
 
 /// Build the oracle data that the QuasiUARTSource feeds to the guest.
 ///
-/// Protocol (matching runner.rs in zksync-airbender):
-///   word 0: num_bytes (u32, little-endian byte count)
-///   words 1..N: file contents packed into u32 words (LE, zero-padded tail)
-fn build_oracle(input_file: &Path) -> Result<Vec<u32>> {
+/// Protocol:
+///   word 0: dispatch flag (0=unified RLP, 1=EEST JSON test)
+///   word 1: num_bytes (u32, little-endian byte count)
+///   words 2..N: file contents packed into u32 words (LE, zero-padded tail)
+fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>> {
     let bytes = fs::read(input_file)
         .map_err(|e| eyre!("failed to read input file '{}': {}", input_file.display(), e))?;
+
+    // If is_test, minify the JSON first
+    let bytes = if is_test {
+        let value: serde_json::Value = serde_json::from_str(
+            std::str::from_utf8(&bytes).map_err(|e| eyre!("invalid UTF-8 in test file: {}", e))?,
+        )
+        .map_err(|e| eyre!("invalid JSON in test file: {}", e))?;
+        serde_json::to_vec(&value).map_err(|e| eyre!("JSON re-serialize failed: {}", e))?
+    } else {
+        bytes
+    };
+
     let num_bytes = bytes.len() as u32;
     let num_words = (bytes.len() + 3) / 4;
-    let mut oracle = Vec::with_capacity(1 + num_words);
+    // +2 capacity: dispatch word + byte count + data words
+    let mut oracle = Vec::with_capacity(2 + num_words);
+    // Dispatch word: 1 = test mode, 0 = unified RLP
+    oracle.push(if is_test { 1u32 } else { 0u32 });
     oracle.push(num_bytes);
     for chunk in bytes.chunks(4) {
         let mut word = [0u8; 4];
@@ -148,6 +168,7 @@ fn execute_block(
     input_path: &Path,
     block_number: u64,
     max_cycles: usize,
+    is_test: bool,
 ) -> Result<ExecutionLog> {
     if !input_path.exists() {
         bail!(
@@ -157,7 +178,7 @@ fn execute_block(
         );
     }
 
-    let oracle = build_oracle(input_path)?;
+    let oracle = build_oracle(input_path, is_test)?;
     let source = QuasiUARTSource::new_with_reads(oracle);
 
     let mut config = SimulatorConfig::simple(guest_bin);
@@ -266,7 +287,7 @@ fn run_test_service(
             format_timestamp(),
             block_number
         );
-        match execute_block(guest_bin, &input_path, block_number, max_cycles) {
+        match execute_block(guest_bin, &input_path, block_number, max_cycles, false) {
             Ok(log) => {
                 println!(
                     "[{}] block={} gas_used={} cycles={} time={:.2}s freq={} reached_end={}",
@@ -323,6 +344,7 @@ fn main() -> Result<()> {
             block_number,
             file_name,
             data_dir,
+            is_test,
         }) => {
             let data_dir = data_dir.unwrap_or_else(|| args.data_dir.clone());
             let input_path = resolve_input_path(block_number, file_name, &data_dir)?;
@@ -332,7 +354,7 @@ fn main() -> Result<()> {
                 block_number_from_filename(&input_path)
             };
 
-            let log = execute_block(&guest_bin, &input_path, block_num, args.cycles)?;
+            let log = execute_block(&guest_bin, &input_path, block_num, args.cycles, is_test)?;
 
             println!(
                 "Executed block {} (gas_used={}, cycles={}, time={:.2}s, freq={} cycles/s, reached_end={})",
