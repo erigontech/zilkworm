@@ -12,6 +12,7 @@ set(MEMORY_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/memory.x")
 
 add_executable(z6m_guest
     src/main.cpp
+    src/airbender_runtime.cpp
     src/simple_allocator.cpp
     src/mem_builtins.c
     src/runtime_stubs.c

@@ -23,6 +23,7 @@ endif()
 if(AIRBENDER)
     add_compile_definitions(-DAIRBENDER)
     include_directories(${CMAKE_SOURCE_DIR}/zilk_core)
+    include_directories(${CMAKE_SOURCE_DIR}/prover/guest_airbender/src/include)
 endif()
 
 add_subdirectory(core)

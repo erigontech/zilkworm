@@ -6,7 +6,7 @@
 #elif defined(QEMU_DEBUG)
 #include <semihosting.hpp>
 #elif defined(AIRBENDER)
-#include <airbender_print.hpp>
+#include <airbender_csr.hpp>
 #else
 #include <iostream>
 #include <string_view>
