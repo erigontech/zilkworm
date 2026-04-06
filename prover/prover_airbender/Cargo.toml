@@ -8,9 +8,28 @@ name = "z6m_prover_airbender"
 path = "src/main.rs"
 
 [dependencies]
-risc_v_simulator = { git = "https://github.com/somnergy/zksync-airbender", branch = "popzxc-cpp-example" }
+# Core simulator (always needed for execution)
+risc_v_simulator = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
+
+# Proving dependencies
+execution_utils = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
+prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "main", features = ["prover"] }
+risc_v_cycles = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
+prover_examples = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
+setups = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
+worker = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
+trace_and_split = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
+verifier_common = { git = "https://github.com/somnergy/zksync-airbender", branch = "main", features = ["proof_utils", "replace_csr"] }
+
+# GPU prover (optional, requires CUDA)
+gpu_prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "main", optional = true }
+
 clap = { version = "4.0", features = ["derive"] }
 eyre = "0.6"
 chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[features]
+default = []
+gpu = ["gpu_prover", "prover_examples/gpu"]

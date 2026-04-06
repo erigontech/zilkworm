@@ -28,3 +28,27 @@ int fesetround(int round)
     (void)round;
     return 0; /* success */
 }
+
+/*
+ * Linker --wrap stubs: eliminate ~104KB of ryu float-to-string tables
+ * from newlib. These are pulled in via printf's %f/%g support but
+ * never meaningfully used during Ethereum block execution.
+ */
+struct _reent;
+char *__wrap__dtoa_r(struct _reent *r, double d, int mode, int ndigits,
+                     int *decpt, int *sign, char **rve)
+{
+    (void)r; (void)d; (void)mode; (void)ndigits;
+    static char buf[] = "0";
+    if (decpt) *decpt = 1;
+    if (sign)  *sign  = 0;
+    if (rve)   *rve   = buf + 1;
+    return buf;
+}
+
+double __wrap__strtod_r(struct _reent *r, const char *s, char **end)
+{
+    (void)r;
+    if (end) *end = (char *)s;
+    return 0.0;
+}

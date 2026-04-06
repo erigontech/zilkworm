@@ -1,5 +1,10 @@
+#![allow(incomplete_features)]
+#![feature(generic_const_exprs)]
+#![feature(allocator_api)]
+
 use clap::{Parser, Subcommand};
 use eyre::{bail, eyre, Result};
+use execution_utils::get_padded_binary;
 use risc_v_simulator::abstractions::non_determinism::QuasiUARTSource;
 use risc_v_simulator::runner::run_simple_with_entry_point_and_non_determimism_source;
 use risc_v_simulator::sim::SimulatorConfig;
@@ -8,6 +13,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+mod prove;
+use prove::{
+    create_proofs_for_block, create_recursion_proofs, serialize_to_file, ProvingLimit,
+};
 
 /// Default path to the airbender guest binary, relative to the project root.
 const DEFAULT_GUEST_BIN: &str = "prover/guest_airbender/build/z6m_guest.bin";
@@ -69,6 +79,37 @@ enum Command {
         /// Input file is an EEST JSON test fixture (not unified RLP)
         #[arg(long, action = clap::ArgAction::SetTrue)]
         is_test: bool,
+    },
+
+    /// Prove a block (generate ZK proof)
+    Prove {
+        /// Block number (used to locate the input file in data_dir)
+        #[arg(long, default_value_t = 0)]
+        block_number: u64,
+
+        /// Direct path to the unified RLP input file
+        #[arg(long)]
+        file_name: Option<PathBuf>,
+
+        /// Data directory override
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Input file is an EEST JSON test fixture (not unified RLP)
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        is_test: bool,
+
+        /// Use GPU (CUDA) for proving
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        gpu: bool,
+
+        /// Output directory for proof artifacts
+        #[arg(long, default_value = "proofs")]
+        output_dir: PathBuf,
+
+        /// How far to prove (base, final-recursion, or final-proof)
+        #[arg(long, value_enum)]
+        until: Option<ProvingLimit>,
     },
 }
 
@@ -290,13 +331,13 @@ fn run_test_service(
         match execute_block(guest_bin, &input_path, block_number, max_cycles, false) {
             Ok(log) => {
                 println!(
-                    "[{}] block={} gas_used={} cycles={} time={:.2}s freq={} reached_end={}",
+                    "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={}",
                     format_timestamp(),
                     log.block_number,
                     log.gas_used,
                     log.cycle_count,
                     log.exec_time_secs,
-                    log.freq_cycles_per_sec,
+                    log.freq_cycles_per_sec as f64 / 1e9,
                     log.reached_end,
                 );
                 if let Err(e) = persist_execution_log(&log_file, &log) {
@@ -314,6 +355,13 @@ fn run_test_service(
         }
     }
     Ok(())
+}
+
+/// Load the guest flat binary and convert to padded u32 words for proving.
+fn load_guest_binary_for_proving(guest_bin: &Path) -> Result<Vec<u32>> {
+    let bytes = fs::read(guest_bin)
+        .map_err(|e| eyre!("failed to read guest binary '{}': {}", guest_bin.display(), e))?;
+    Ok(get_padded_binary(&bytes))
 }
 
 fn main() -> Result<()> {
@@ -357,20 +405,152 @@ fn main() -> Result<()> {
             let log = execute_block(&guest_bin, &input_path, block_num, args.cycles, is_test)?;
 
             println!(
-                "Executed block {} (gas_used={}, cycles={}, time={:.2}s, freq={} cycles/s, reached_end={})",
+                "Executed block {} (gas_used={}, cycles={}, time={:.2}s, freq={:.2} GHz, reached_end={})",
                 log.block_number,
                 log.gas_used,
                 log.cycle_count,
                 log.exec_time_secs,
-                log.freq_cycles_per_sec,
+                log.freq_cycles_per_sec as f64 / 1e9,
                 log.reached_end,
             );
 
             let log_file = data_dir.join("executionLogs.log");
             persist_execution_log(&log_file, &log)?;
         }
+
+        Some(Command::Prove {
+            block_number,
+            file_name,
+            data_dir,
+            is_test,
+            gpu,
+            output_dir,
+            until,
+        }) => {
+            let data_dir = data_dir.unwrap_or_else(|| args.data_dir.clone());
+            let input_path = resolve_input_path(block_number, file_name, &data_dir)?;
+            let block_num = if block_number > 0 {
+                block_number
+            } else {
+                block_number_from_filename(&input_path)
+            };
+
+            if !input_path.exists() {
+                bail!(
+                    "input file for block {} not found at {}",
+                    block_num,
+                    input_path.display()
+                );
+            }
+
+            println!(
+                "[{}] Proving block {} (gpu={}, input={})",
+                format_timestamp(),
+                block_num,
+                gpu,
+                input_path.display(),
+            );
+
+            // Load guest binary for proving (padded to circuit domain)
+            let binary = load_guest_binary_for_proving(&guest_bin)?;
+
+            // Build oracle data (same format as execution)
+            let oracle = build_oracle(&input_path, is_test)?;
+
+            // Calculate number of circuit instances needed
+            let num_instances = (args.cycles / risc_v_cycles::NUM_CYCLES) + 1;
+            println!(
+                "Will prove with up to {} circuit instances (NUM_CYCLES={}).",
+                num_instances,
+                risc_v_cycles::NUM_CYCLES,
+            );
+
+            let wall_start = Instant::now();
+
+            // Generate base proofs
+            let (proof_list, proof_metadata) =
+                create_proofs_for_block(&binary, oracle, num_instances, gpu)?;
+
+            // Extract gas_used from final register values (x10=low32, x11=high32)
+            let gas_used = proof_metadata.register_values[10].value as u64
+                | ((proof_metadata.register_values[11].value as u64) << 32);
+            let base_proofs = proof_metadata.basic_proof_count;
+
+            // Create output directory
+            fs::create_dir_all(&output_dir)?;
+
+            match until {
+                Some(ProvingLimit::FinalRecursion) => {
+                    // Base + 1st recursion layer
+                    let (recursion_proof_list, recursion_proof_metadata) =
+                        create_recursion_proofs(proof_list, proof_metadata, gpu)?;
+
+                    recursion_proof_list.write_to_directory(&output_dir);
+                    serialize_to_file(
+                        &recursion_proof_metadata,
+                        &output_dir.join("metadata.json"),
+                    );
+
+                    let program_proof =
+                        execution_utils::ProgramProof::from_proof_list_and_metadata(
+                            &recursion_proof_list,
+                            &recursion_proof_metadata,
+                        );
+                    serialize_to_file(
+                        &program_proof,
+                        &output_dir.join("recursion_program_proof.json"),
+                    );
+
+                    println!(
+                        "Recursion proof written to {}",
+                        output_dir.join("recursion_program_proof.json").display()
+                    );
+                }
+                Some(ProvingLimit::FinalProof) => {
+                    // Base + both recursion layers (full proof pipeline)
+                    let (recursion_proof_list, recursion_proof_metadata) =
+                        create_recursion_proofs(proof_list, proof_metadata, gpu)?;
+
+                    let program_proof =
+                        execution_utils::ProgramProof::from_proof_list_and_metadata(
+                            &recursion_proof_list,
+                            &recursion_proof_metadata,
+                        );
+                    serialize_to_file(
+                        &program_proof,
+                        &output_dir.join("final_program_proof.json"),
+                    );
+
+                    println!(
+                        "Final proof written to {}",
+                        output_dir.join("final_program_proof.json").display()
+                    );
+                }
+                Some(ProvingLimit::Base) | None => {
+                    // Base proofs only
+                    proof_list.write_to_directory(&output_dir);
+                    serialize_to_file(&proof_metadata, &output_dir.join("metadata.json"));
+
+                    println!("Base proofs written to {}", output_dir.display());
+                }
+            }
+
+            let cycles = base_proofs as u64 * risc_v_cycles::NUM_CYCLES as u64;
+
+            let total_wall = wall_start.elapsed();
+            println!(
+                "[{}] Proving complete for block {} in {:.2}s (gas_used={}, cycles={}, proofs={})",
+                format_timestamp(),
+                block_num,
+                total_wall.as_secs_f64(),
+                gas_used,
+                cycles,
+                base_proofs,
+            );
+        }
+
         None => {
-            bail!("no command provided; pass --test-service or a subcommand (e.g. execute)");
+            bail!("no command provided; pass --test-service or a subcommand (e.g. execute, prove)");
         }
     }
 

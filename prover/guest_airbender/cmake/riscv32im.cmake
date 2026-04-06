@@ -9,7 +9,7 @@ set(CMAKE_ASM_COMPILER riscv-none-elf-gcc)
 set(BUILD_SHARED_LIBS OFF)
 
 set(common_flags "-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC")
-set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin -fipa-pta -funroll-loops")
+set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin -fipa-pta -funroll-loops -flto")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
 set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags}" CACHE STRING "" FORCE)
