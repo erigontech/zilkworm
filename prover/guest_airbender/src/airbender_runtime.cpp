@@ -12,6 +12,12 @@ extern "C"
     extern uint32_t _sstack, _estack;
     extern uint32_t _sidata, _sdata, _edata;
     extern uint32_t _sirodata, _srodata, _erodata;
+
+    // C++ global constructor/destructor arrays (from .init_array/.fini_array)
+    extern void (*__preinit_array_start[])(void);
+    extern void (*__preinit_array_end[])(void);
+    extern void (*__init_array_start[])(void);
+    extern void (*__init_array_end[])(void);
 }
 
 extern "C" void eh_personality() {}
@@ -43,9 +49,18 @@ static void init_memory()
         copy_section(reinterpret_cast<const uint8_t*>(&_sidata), sdata, edata);
 }
 
+static void run_global_constructors()
+{
+    for (auto p = __preinit_array_start; p != __preinit_array_end; ++p)
+        (*p)();
+    for (auto p = __init_array_start; p != __init_array_end; ++p)
+        (*p)();
+}
+
 extern "C" [[noreturn]] void _start_rust()
 {
     init_memory();
+    run_global_constructors();
     main();
 }
 

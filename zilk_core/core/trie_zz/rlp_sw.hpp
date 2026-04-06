@@ -20,7 +20,7 @@
 #include "mpt.hpp"
 
 namespace silkworm::mpt {
-#if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG)
+#if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG) && !defined(AIRBENDER)
 inline thread_local Bytes static_buffer = []() {
     Bytes buf;
     buf.reserve(1024);

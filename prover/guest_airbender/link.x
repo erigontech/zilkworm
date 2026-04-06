@@ -90,6 +90,32 @@ SECTIONS
     _erodata = .;
   } > REGION_RODATA AT > REGION_RODATAINIT :rodata
 
+  /* C++ global constructors / destructors (init_array style).
+     Read-only function-pointer arrays kept directly in ROM (VMA = LMA)
+     so they are available immediately — no copy required. */
+  .preinit_array : ALIGN(4)
+  {
+    PROVIDE_HIDDEN(__preinit_array_start = .);
+    KEEP(*(.preinit_array))
+    PROVIDE_HIDDEN(__preinit_array_end = .);
+  } > REGION_TEXT AT > REGION_TEXT :text
+
+  .init_array : ALIGN(4)
+  {
+    PROVIDE_HIDDEN(__init_array_start = .);
+    KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
+    KEEP(*(.init_array EXCLUDE_FILE(*crtbegin.o *crtbegin?.o *crtend.o *crtend?.o) .ctors))
+    PROVIDE_HIDDEN(__init_array_end = .);
+  } > REGION_TEXT AT > REGION_TEXT :text
+
+  .fini_array : ALIGN(4)
+  {
+    PROVIDE_HIDDEN(__fini_array_start = .);
+    KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*) SORT_BY_INIT_PRIORITY(.dtors.*)))
+    KEEP(*(.fini_array EXCLUDE_FILE(*crtbegin.o *crtbegin?.o *crtend.o *crtend?.o) .dtors))
+    PROVIDE_HIDDEN(__fini_array_end = .);
+  } > REGION_TEXT AT > REGION_TEXT :text
+
   .data : ALIGN(4096)
   {
     _sidata = LOADADDR(.data);
