@@ -38,9 +38,10 @@ jobs:
             curl
           npm i -g xpm
           xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
-          RISCV_GCC_BIN=$(ls -d $HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/*/.content/bin | head -1)
-          echo "export PATH=$RISCV_GCC_BIN:\$PATH" >> ~/.bashrc
-          echo "PATH=$RISCV_GCC_BIN:$PATH" >> $GITHUB_ENV
+          RISCV_GCC_BIN=$(find $HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc -name 'riscv-none-elf-gcc' -type f 2>/dev/null | head -1 | xargs dirname)
+          echo "Found riscv-gcc at: $RISCV_GCC_BIN"
+          ls -la "$RISCV_GCC_BIN/" | head -5
+          echo "$RISCV_GCC_BIN" >> $GITHUB_PATH
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
