@@ -17,10 +17,13 @@ z6m_guest:
 		-DCMAKE_BUILD_TYPE=Release \
 		-DSP1=ON
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
-z6m_guest_airbender:
-	$(MAKE) -C prover/guest_airbender z6m_guest
+
 z6m_prover: z6m_guest
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
+
+z6m_guest_airbender:
+	$(MAKE) -C prover/guest_airbender z6m_guest
+
 z6m_prover_airbender: z6m_guest_airbender
 	cd prover/prover_airbender && cargo build --release
 
