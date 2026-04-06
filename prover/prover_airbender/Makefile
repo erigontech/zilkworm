@@ -29,6 +29,5 @@ $(LOGDIR)/%.log: $(EEST_DIR)/%.json
 	@mkdir -p $(dir $@)
 	$(PROVER) --guest-bin $(GUEST_BIN) execute --is-test --file-name $< 2>&1 | tee $@ || (echo "CRASHED! $@" && rm $@)
 
--
 clean-logs:
 	rm -rf $(LOGDIR)
