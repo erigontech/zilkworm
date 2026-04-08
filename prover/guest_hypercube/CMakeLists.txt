@@ -14,13 +14,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_definitions(SP1)
 
-include(CableBuildInfo)
-cable_add_buildinfo_library(
-    PROJECT_NAME zilkworm
-    GIT_DESCRIBE ""
-    GIT_BRANCH ""
-)
-
 include(GNUInstallDirs)
 
 set(SILKWORM_MAIN_DIR "${Z6M_ROOT}")

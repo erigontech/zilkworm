@@ -36,26 +36,11 @@ project(zilkworm)
 set(PROJECT_VERSION 0.1.0-alpha.1)
 
 include(CTest)
-include(CableBuildInfo)
 
 string(REGEX MATCH "([0-9]+)\\.([0-9]+)\\.([0-9]+)" _ ${PROJECT_VERSION})
 set(PROJECT_VERSION_MAJOR ${CMAKE_MATCH_1})
 set(PROJECT_VERSION_MINOR ${CMAKE_MATCH_2})
 set(PROJECT_VERSION_PATCH ${CMAKE_MATCH_3})
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(CABLE_GIT_DESCRIBE "c0deadded1111111111111111111111111111111")
-  set(CABLE_GIT_BRANCH "dev")
-endif()
-
-cable_add_buildinfo_library(
-  PROJECT_NAME
-  "${PROJECT_NAME}"
-  GIT_DESCRIBE
-  "${CABLE_GIT_DESCRIBE}"
-  GIT_BRANCH
-  "${CABLE_GIT_BRANCH}"
-)
 
 option(SILKWORM_WASM_API "Build WebAssembly API" OFF)
 option(SILKWORM_CORE_ONLY "Only build Silkworm Core" OFF)
