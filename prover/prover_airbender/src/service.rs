@@ -31,6 +31,7 @@ pub struct ServiceConfig {
     pub max_cycles: usize,
     pub gpu: bool,
     pub until: Option<ProvingLimit>,
+    pub setup_dir: Option<PathBuf>,
     pub ethproofs: Option<EthProofsConfig>,
 }
 
@@ -257,6 +258,7 @@ impl AirbenderService {
         let gpu = self.config.gpu;
         let guest_path = self.config.guest_base.display().to_string();
         let until = self.config.until.clone().unwrap_or(ProvingLimit::Base);
+        let setup_dir = self.config.setup_dir.clone();
 
         if let Some(client) = &self.eth_client {
             client.proving(block_number).await;
@@ -268,7 +270,14 @@ impl AirbenderService {
             #[cfg(feature = "gpu")]
             {
                 let (proof, cycles) = tokio::task::spawn_blocking(move || {
-                    let prover = crate::prove::create_gpu_prover(&guest_path, &until);
+                    let prover = if let Some(dir) = setup_dir {
+                        let setup_path = dir.join("setup.bin");
+                        let cache = crate::prove::load_setup(&setup_path)
+                            .expect("failed to load setup cache");
+                        crate::prove::create_gpu_prover_from_cache(cache)
+                    } else {
+                        crate::prove::create_gpu_prover(&guest_path, &until)
+                    };
                     crate::prove::gpu_prove(&prover, oracle, block_number)
                 })
                 .await

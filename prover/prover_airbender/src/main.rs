@@ -94,6 +94,10 @@ struct Args {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     save_all_responses: bool,
 
+    /// Path to precomputed setup cache directory (from `setup` command)
+    #[arg(long)]
+    setup_dir: Option<PathBuf>,
+
     /// Ethproofs API endpoint URL
     #[arg(long, env = "ETHPROOFS_ENDPOINT")]
     ethproofs_endpoint: Option<String>,
@@ -131,6 +135,17 @@ enum Command {
         is_test: bool,
     },
 
+    /// Precompute circuit setup (cached to disk for reuse by prove/service)
+    Setup {
+        /// Output directory for the setup cache file
+        #[arg(long, default_value = "temp")]
+        setup_dir: PathBuf,
+
+        /// How far to prove (base, final-recursion, or final-proof)
+        #[arg(long, value_enum, default_value = "base")]
+        until: ProvingLimit,
+    },
+
     /// Prove a block (generate ZK proof)
     Prove {
         /// Block number (used to locate the input file in data_dir)
@@ -160,6 +175,10 @@ enum Command {
         /// How far to prove (base, final-recursion, or final-proof)
         #[arg(long, value_enum)]
         until: Option<ProvingLimit>,
+
+        /// Path to precomputed setup cache (from `setup` command)
+        #[arg(long)]
+        setup_dir: Option<PathBuf>,
     },
 }
 
@@ -484,6 +503,7 @@ async fn main() -> Result<()> {
             max_cycles: args.cycles,
             gpu: args.gpu,
             until: args.until,
+            setup_dir: args.setup_dir.clone(),
             ethproofs,
         };
 
@@ -540,6 +560,33 @@ async fn main() -> Result<()> {
             persist_execution_log(&log_file, &log)?;
         }
 
+        Some(Command::Setup {
+            setup_dir,
+            until,
+        }) => {
+            #[cfg(feature = "gpu")]
+            {
+                let guest_path = guest_base.display().to_string();
+                println!(
+                    "[{}] Computing setup (until={:?}, guest={})",
+                    format_timestamp(), until, guest_path,
+                );
+                let start = Instant::now();
+                let cache = prove::compute_setup(&guest_path, &until);
+                println!(
+                    "[{}] Setup computed in {:.2}s",
+                    format_timestamp(), start.elapsed().as_secs_f64(),
+                );
+                fs::create_dir_all(&setup_dir)?;
+                let setup_path = setup_dir.join("setup.bin");
+                prove::save_setup(&cache, &setup_path)?;
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                bail!("Compiled without GPU support. Rebuild with --features gpu");
+            }
+        }
+
         Some(Command::Prove {
             block_number,
             file_name,
@@ -548,6 +595,7 @@ async fn main() -> Result<()> {
             gpu,
             output_dir,
             until,
+            setup_dir,
         }) => {
             let data_dir = data_dir.unwrap_or_else(|| args.data_dir.clone());
             let input_path = resolve_input_path(block_number, file_name, &data_dir)?;
@@ -576,16 +624,21 @@ async fn main() -> Result<()> {
                 input_path.display(),
             );
 
-            // Build oracle data (same format as execution)
             let oracle = build_oracle(&input_path, is_test)?;
-
             let wall_start = Instant::now();
 
             if gpu {
                 #[cfg(feature = "gpu")]
                 {
-                    let guest_path = guest_base.display().to_string();
-                    let prover = prove::create_gpu_prover(&guest_path, &until);
+                    let prover = if let Some(dir) = setup_dir {
+                        let setup_path = dir.join("setup.bin");
+                        println!("Loading cached setup from {}", setup_path.display());
+                        let cache = prove::load_setup(&setup_path)?;
+                        prove::create_gpu_prover_from_cache(cache)
+                    } else {
+                        let guest_path = guest_base.display().to_string();
+                        prove::create_gpu_prover(&guest_path, &until)
+                    };
                     let (proof, cycles) = prove::gpu_prove(&prover, oracle, block_num);
 
                     fs::create_dir_all(&output_dir)?;

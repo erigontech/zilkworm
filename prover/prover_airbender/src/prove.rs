@@ -3,6 +3,7 @@
 use eyre::{bail, eyre, Result};
 use riscv_transpiler::abstractions::non_determinism::QuasiUARTSource;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -34,8 +35,6 @@ use gpu_prover::machine_type::MachineType;
 use riscv_transpiler::cycle::{
     IMStandardIsaConfig, IWithoutByteAccessIsaConfigWithDelegation,
 };
-#[cfg(feature = "gpu")]
-use std::collections::BTreeMap;
 
 #[cfg(not(feature = "gpu"))]
 use execution_utils::unrolled::UnrolledProgramProof;
@@ -51,28 +50,38 @@ pub enum ProvingLimit {
     FinalProof,
 }
 
-/// Create an UnrolledProver for z6m's guest binary.
-/// Uses MachineType::Full (with signed mul/div) for the base layer,
-/// unlike the default CLI which uses FullUnsigned.
 #[cfg(feature = "gpu")]
-pub fn create_gpu_prover(
+impl ProvingLimit {
+    pub fn to_unrolled_level(&self) -> UnrolledProverLevel {
+        match self {
+            ProvingLimit::Base => UnrolledProverLevel::Base,
+            ProvingLimit::FinalRecursion => UnrolledProverLevel::RecursionUnrolled,
+            ProvingLimit::FinalProof => UnrolledProverLevel::RecursionUnified,
+        }
+    }
+}
+
+// ─── Cached setup data ─────────────────────────────────────────────────────
+
+/// Serializable setup cache: everything needed to construct an UnrolledProver
+/// without recomputing circuit setups.
+#[cfg(feature = "gpu")]
+#[derive(Serialize, Deserialize)]
+pub struct SetupCache {
+    pub max_level: UnrolledProverLevel,
+    pub level_data: BTreeMap<UnrolledProverLevel, UnrolledProverLevelData>,
+}
+
+// ─── Setup computation ─────────────────────────────────────────────────────
+
+/// Compute all level data for a given guest binary and proof target.
+/// This is the expensive part (~75s) that we want to cache.
+#[cfg(feature = "gpu")]
+pub fn compute_setup(
     path_without_ext: &str,
     until: &ProvingLimit,
-) -> UnrolledProver {
-    let mut config = ExecutionProverConfiguration::default();
-    config.replay_worker_threads_count = 8;
-    // Reduce host memory allocation to fit in ~8GB pinned memory
-    config.host_allocators_per_job_count = 96;      // 6 GB
-    config.host_allocators_per_device_count = 32;    // 2 GB
-    config.min_free_host_allocators_per_job = 16;    // 1 GB
-
-    let max_level = match until {
-        ProvingLimit::Base => UnrolledProverLevel::Base,
-        ProvingLimit::FinalRecursion => UnrolledProverLevel::RecursionUnrolled,
-        ProvingLimit::FinalProof => UnrolledProverLevel::RecursionUnified,
-    };
-
-    let mut prover = ExecutionProver::with_configuration(config);
+) -> SetupCache {
+    let max_level = until.to_unrolled_level();
     let mut level_data = BTreeMap::new();
 
     // ── Base layer: z6m guest with Full machine (signed mul/div) ───────
@@ -81,14 +90,6 @@ pub fn create_gpu_prover(
         let text_path = format!("{}.text", path_without_ext);
         let (binary, binary_u32) = read_binary(Path::new(&bin_path));
         let (text, text_u32) = read_binary(Path::new(&text_path));
-        prover.add_binary(
-            UnrolledProverLevel::Base as usize,
-            ExecutionKind::Unrolled,
-            MachineType::Full,  // z6m guest uses signed mul/div
-            binary_u32.clone(),
-            text_u32.clone(),
-            None,
-        );
         log::info!("Computing base layer setup (Full machine)");
         let mut padded_binary = binary.clone();
         pad_bytecode_bytes_for_proving(&mut padded_binary);
@@ -108,14 +109,8 @@ pub fn create_gpu_prover(
         level_data.insert(
             UnrolledProverLevel::Base,
             UnrolledProverLevelData {
-                binary,
-                text,
-                binary_u32,
-                text_u32,
-                setup,
-                compiled_layouts,
-                hash_chain,
-                preimage,
+                binary, text, binary_u32, text_u32,
+                setup, compiled_layouts, hash_chain, preimage,
             },
         );
     }
@@ -126,14 +121,6 @@ pub fn create_gpu_prover(
         let binary_u32 = binary_u8_to_u32(&binary);
         let text = RECURSION_UNROLLED_TXT.to_vec();
         let text_u32 = binary_u8_to_u32(&text);
-        prover.add_binary(
-            UnrolledProverLevel::RecursionUnrolled as usize,
-            ExecutionKind::Unrolled,
-            MachineType::Reduced,
-            binary_u32.clone(),
-            text_u32.clone(),
-            None,
-        );
         log::info!("Computing recursion in unrolled layer setup");
         let mut padded_binary = binary.clone();
         pad_bytecode_bytes_for_proving(&mut padded_binary);
@@ -147,23 +134,15 @@ pub fn create_gpu_prover(
         let compiled_layouts = get_unrolled_circuits_artifacts_for_machine_type::<
             IWithoutByteAccessIsaConfigWithDelegation,
         >(&padded_binary_u32);
-        let previous_level_data = &level_data[&UnrolledProverLevel::Base];
+        let previous = &level_data[&UnrolledProverLevel::Base];
         let (hash_chain, preimage) = UnrolledProgramSetup::continue_recursion_chain(
-            &setup.end_params,
-            &previous_level_data.hash_chain,
-            &previous_level_data.preimage,
+            &setup.end_params, &previous.hash_chain, &previous.preimage,
         );
         level_data.insert(
             UnrolledProverLevel::RecursionUnrolled,
             UnrolledProverLevelData {
-                binary,
-                text,
-                binary_u32,
-                text_u32,
-                setup,
-                compiled_layouts,
-                hash_chain,
-                preimage,
+                binary, text, binary_u32, text_u32,
+                setup, compiled_layouts, hash_chain, preimage,
             },
         );
     }
@@ -174,14 +153,6 @@ pub fn create_gpu_prover(
         let binary_u32 = binary_u8_to_u32(&binary);
         let text = RECURSION_UNIFIED_TXT.to_vec();
         let text_u32 = binary_u8_to_u32(&text);
-        prover.add_binary(
-            UnrolledProverLevel::RecursionUnified as usize,
-            ExecutionKind::Unified,
-            MachineType::Reduced,
-            binary_u32.clone(),
-            text_u32.clone(),
-            None,
-        );
         log::info!("Computing recursion in unified layer setup");
         let mut padded_binary = binary.clone();
         pad_bytecode_bytes_for_proving(&mut padded_binary);
@@ -195,32 +166,87 @@ pub fn create_gpu_prover(
         let compiled_layouts = get_unified_circuit_artifact_for_machine_type::<
             IWithoutByteAccessIsaConfigWithDelegation,
         >(&padded_binary_u32);
-        let previous_level_data = &level_data[&UnrolledProverLevel::RecursionUnrolled];
+        let previous = &level_data[&UnrolledProverLevel::RecursionUnrolled];
         let (hash_chain, preimage) = UnrolledProgramSetup::continue_recursion_chain(
-            &setup.end_params,
-            &previous_level_data.hash_chain,
-            &previous_level_data.preimage,
+            &setup.end_params, &previous.hash_chain, &previous.preimage,
         );
         level_data.insert(
             UnrolledProverLevel::RecursionUnified,
             UnrolledProverLevelData {
-                binary,
-                text,
-                binary_u32,
-                text_u32,
-                setup,
-                compiled_layouts,
-                hash_chain,
-                preimage,
+                binary, text, binary_u32, text_u32,
+                setup, compiled_layouts, hash_chain, preimage,
             },
         );
     }
 
+    SetupCache { max_level, level_data }
+}
+
+/// Save a setup cache to disk using bincode.
+#[cfg(feature = "gpu")]
+pub fn save_setup(cache: &SetupCache, path: &Path) -> Result<()> {
+    let data = bincode::serialize(cache)
+        .map_err(|e| eyre!("failed to serialize setup: {}", e))?;
+    std::fs::write(path, &data)
+        .map_err(|e| eyre!("failed to write setup to {}: {}", path.display(), e))?;
+    log::info!("Setup saved to {} ({:.1} MB)", path.display(), data.len() as f64 / 1e6);
+    Ok(())
+}
+
+/// Load a setup cache from disk.
+#[cfg(feature = "gpu")]
+pub fn load_setup(path: &Path) -> Result<SetupCache> {
+    let data = std::fs::read(path)
+        .map_err(|e| eyre!("failed to read setup from {}: {}", path.display(), e))?;
+    let cache: SetupCache = bincode::deserialize(&data)
+        .map_err(|e| eyre!("failed to deserialize setup: {}", e))?;
+    log::info!("Setup loaded from {} ({:.1} MB)", path.display(), data.len() as f64 / 1e6);
+    Ok(cache)
+}
+
+// ─── GPU prover construction ───────────────────────────────────────────────
+
+/// Build an UnrolledProver from cached setup data.
+/// Only creates the ExecutionProver (GPU init) and registers binaries.
+#[cfg(feature = "gpu")]
+pub fn create_gpu_prover_from_cache(cache: SetupCache) -> UnrolledProver {
+    let mut config = ExecutionProverConfiguration::default();
+    config.replay_worker_threads_count = 8;
+    config.host_allocators_per_job_count = 96;
+    config.host_allocators_per_device_count = 32;
+    config.min_free_host_allocators_per_job = 16;
+
+    let mut prover = ExecutionProver::with_configuration(config);
+
+    // Register each level's binary with the GPU prover
+    for (&level, data) in &cache.level_data {
+        let (kind, machine) = match level {
+            UnrolledProverLevel::Base => (ExecutionKind::Unrolled, MachineType::Full),
+            UnrolledProverLevel::RecursionUnrolled => (ExecutionKind::Unrolled, MachineType::Reduced),
+            UnrolledProverLevel::RecursionUnified => (ExecutionKind::Unified, MachineType::Reduced),
+        };
+        prover.add_binary(
+            level as usize,
+            kind,
+            machine,
+            data.binary_u32.clone(),
+            data.text_u32.clone(),
+            None,
+        );
+    }
+
     UnrolledProver {
-        max_level,
-        level_data,
+        max_level: cache.max_level,
+        level_data: cache.level_data,
         prover,
     }
+}
+
+/// Create an UnrolledProver from scratch (computes setup + GPU init).
+#[cfg(feature = "gpu")]
+pub fn create_gpu_prover(path_without_ext: &str, until: &ProvingLimit) -> UnrolledProver {
+    let cache = compute_setup(path_without_ext, until);
+    create_gpu_prover_from_cache(cache)
 }
 
 /// Prove a block using GPU. Returns (proof, cycles).

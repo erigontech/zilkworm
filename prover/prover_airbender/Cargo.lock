@@ -6266,6 +6266,7 @@ name = "z6m_prover_airbender"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bincode",
  "chrono",
  "clap",
  "execution_utils",
