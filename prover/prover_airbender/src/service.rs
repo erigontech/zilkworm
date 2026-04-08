@@ -54,6 +54,9 @@ pub struct AirbenderService {
     eth_client: Option<EthproofsClient>,
     #[cfg(feature = "gpu")]
     gpu_prover: Option<Arc<UnrolledProver>>,
+    /// Hex-encoded end_params from the highest recursion level setup.
+    /// Used as verifier_id when posting to ethproofs.
+    verifier_id: String,
 }
 
 impl AirbenderService {
@@ -86,11 +89,27 @@ impl AirbenderService {
             None
         };
 
+        // Compute verifier_id from the highest-level setup's end_params
+        #[cfg(feature = "gpu")]
+        let verifier_id = if let Some(ref p) = gpu_prover {
+            let max_level = p.max_level;
+            let data = &p.level_data[&max_level];
+            let end_params = &data.setup.end_params;
+            let hex: String = end_params.iter().map(|w| format!("{:08x}", w)).collect();
+            info!("Verifier ID (end_params): 0x{}", hex);
+            format!("0x{}", hex)
+        } else {
+            "airbender-z6m".to_string()
+        };
+        #[cfg(not(feature = "gpu"))]
+        let verifier_id = "airbender-z6m".to_string();
+
         Ok(Self {
             config,
             eth_client,
             #[cfg(feature = "gpu")]
             gpu_prover,
+            verifier_id,
         })
     }
 
@@ -320,7 +339,7 @@ impl AirbenderService {
                         block_number,
                         cycles,
                         proving_millis,
-                        "airbender-z6m",
+                        &self.verifier_id,
                     )
                     .await;
             }
