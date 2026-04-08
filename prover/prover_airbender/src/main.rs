@@ -4,10 +4,9 @@
 
 use clap::{Parser, Subcommand};
 use eyre::{bail, eyre, Result};
-use execution_utils::get_padded_binary;
-use risc_v_simulator::abstractions::non_determinism::QuasiUARTSource;
-use risc_v_simulator::runner::run_simple_with_entry_point_and_non_determimism_source;
-use risc_v_simulator::sim::SimulatorConfig;
+use riscv_transpiler::abstractions::non_determinism::QuasiUARTSource;
+use riscv_transpiler::ir::{preprocess_bytecode, FullMachineDecoderConfig};
+use riscv_transpiler::vm::{DelegationsCounters, RamWithRomRegion, SimpleTape, State, VM};
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -15,15 +14,18 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 mod prove;
-use prove::{
-    create_proofs_for_block, create_recursion_proofs, serialize_to_file, ProvingLimit,
-};
+mod service;
+
+use prove::{serialize_to_file, ProvingLimit};
 
 /// Default path to the airbender guest binary, relative to the project root.
-const DEFAULT_GUEST_BIN: &str = "prover/guest_airbender/build/z6m_guest.bin";
+const DEFAULT_GUEST_BIN: &str = "prover/guest_airbender/build/z6m_guest";
 
 /// Default maximum cycles for the simulator.
 const DEFAULT_CYCLES: usize = 5_000_000_000;
+
+/// Default RAM bound in bytes (1 GB).
+const DEFAULT_RAM_BOUND: usize = 1 << 30;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,6 +35,10 @@ const DEFAULT_CYCLES: usize = 5_000_000_000;
 struct Args {
     #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "command")]
     test_service: bool,
+
+    /// Run as a continuous proving service (polls RPC for new blocks)
+    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "command")]
+    service: bool,
 
     /// Root data directory containing a blocks/ subdirectory
     #[arg(long, default_value = "temp")]
@@ -48,13 +54,57 @@ struct Args {
     #[arg(long)]
     execution_log_file: Option<PathBuf>,
 
-    /// Path to the guest binary (ELF flat binary)
+    /// Path to the guest binary (without .bin/.text extension)
     #[arg(long)]
     guest_bin: Option<PathBuf>,
 
     /// Maximum simulator cycles
     #[arg(long, default_value_t = DEFAULT_CYCLES)]
     cycles: usize,
+
+    /// RPC URL for fetching blocks (required for --service)
+    #[arg(long)]
+    rpc_url: Option<String>,
+
+    /// Use GPU (CUDA) for proving in service mode
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    gpu: bool,
+
+    /// Prove every N-th block (service mode)
+    #[arg(long)]
+    prove_every: Option<u64>,
+
+    /// Execute (without proof) every N-th block (service mode)
+    #[arg(long)]
+    execute_every: Option<u64>,
+
+    /// Post to ethproofs every N-th block (service mode)
+    #[arg(long)]
+    post_every: Option<u64>,
+
+    /// Output directory for proofs (service mode)
+    #[arg(long, default_value = "proofs")]
+    output_dir: PathBuf,
+
+    /// How far to prove (base, final-recursion, or final-proof)
+    #[arg(long, value_enum)]
+    until: Option<ProvingLimit>,
+
+    /// Save all RPC responses (service mode)
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    save_all_responses: bool,
+
+    /// Ethproofs API endpoint URL
+    #[arg(long, env = "ETHPROOFS_ENDPOINT")]
+    ethproofs_endpoint: Option<String>,
+
+    /// Ethproofs API bearer token
+    #[arg(long, env = "ETHPROOFS_TOKEN")]
+    ethproofs_token: Option<String>,
+
+    /// Ethproofs cluster ID
+    #[arg(long, env = "ETHPROOFS_CLUSTER_ID")]
+    ethproofs_cluster_id: Option<u64>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -130,7 +180,7 @@ struct ExecutionLog {
 ///   word 0: dispatch flag (0=unified RLP, 1=EEST JSON test)
 ///   word 1: num_bytes (u32, little-endian byte count)
 ///   words 2..N: file contents packed into u32 words (LE, zero-padded tail)
-fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>> {
+pub(crate) fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>> {
     let bytes = fs::read(input_file)
         .map_err(|e| eyre!("failed to read input file '{}': {}", input_file.display(), e))?;
 
@@ -179,21 +229,29 @@ fn resolve_input_path(
     Ok(path)
 }
 
-/// Locate the guest binary: CLI override > DEFAULT_GUEST_BIN relative to cwd.
+/// Locate the guest binary base path (without .bin/.text extension).
 fn resolve_guest_bin(cli_override: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = cli_override {
-        if p.exists() {
-            return Ok(p.to_path_buf());
+        // If user passed path ending in .bin, strip it
+        let base = if p.extension().map_or(false, |e| e == "bin") {
+            p.with_extension("")
+        } else {
+            p.to_path_buf()
+        };
+        let bin_path = PathBuf::from(format!("{}.bin", base.display()));
+        if bin_path.exists() {
+            return Ok(base);
         }
-        bail!("guest binary not found at {}", p.display());
+        bail!("guest binary not found at {}", bin_path.display());
     }
     let default = PathBuf::from(DEFAULT_GUEST_BIN);
-    if default.exists() {
+    let bin_path = PathBuf::from(format!("{}.bin", default.display()));
+    if bin_path.exists() {
         return Ok(default);
     }
     bail!(
         "guest binary not found at default path '{}'; pass --guest-bin or run from the project root",
-        DEFAULT_GUEST_BIN
+        bin_path.display()
     );
 }
 
@@ -203,9 +261,9 @@ fn format_timestamp() -> String {
         .to_string()
 }
 
-/// Run the airbender simulator on a single block and return the execution log.
+/// Run the VM on a single block and return the execution log.
 fn execute_block(
-    guest_bin: &Path,
+    guest_base: &Path,
     input_path: &Path,
     block_number: u64,
     max_cycles: usize,
@@ -222,17 +280,37 @@ fn execute_block(
     let oracle = build_oracle(input_path, is_test)?;
     let source = QuasiUARTSource::new_with_reads(oracle);
 
-    let mut config = SimulatorConfig::simple(guest_bin);
-    config.entry_point = 0;
-    config.cycles = max_cycles;
-    config.diagnostics = None;
+    let bin_path = format!("{}.bin", guest_base.display());
+    let text_path = format!("{}.text", guest_base.display());
+
+    let (_, binary_u32) = execution_utils::setups::read_binary(Path::new(&bin_path));
+    let (_, text_u32) = execution_utils::setups::read_binary(Path::new(&text_path));
+
+    let instructions = preprocess_bytecode::<FullMachineDecoderConfig>(&text_u32);
+    let tape = SimpleTape::new(&instructions);
+    let mut ram =
+        RamWithRomRegion::<{ prover::common_constants::rom::ROM_SECOND_WORD_BITS }>::from_rom_content(
+            &binary_u32,
+            DEFAULT_RAM_BOUND,
+        );
+
+    let mut state = State::initial_with_counters(DelegationsCounters::default());
+    let mut non_determinism_source = source;
 
     let wall_start = Instant::now();
-    let output = run_simple_with_entry_point_and_non_determimism_source(config, source);
+    let finished = VM::<DelegationsCounters>::run_basic_unrolled(
+        &mut state,
+        &mut ram,
+        &mut (),
+        &tape,
+        max_cycles,
+        &mut non_determinism_source,
+    );
     let wall_elapsed = wall_start.elapsed();
 
-    let cycles = output.measurements.time.exec_cycles as u64;
-    let exec_secs = output.measurements.time.exec_time.as_secs_f64();
+    let cycles = (state.timestamp - riscv_transpiler::common_constants::INITIAL_TIMESTAMP)
+        / riscv_transpiler::common_constants::TIMESTAMP_STEP;
+    let exec_secs = wall_elapsed.as_secs_f64();
     let freq = if exec_secs > 0.0 {
         (cycles as f64 / exec_secs) as u64
     } else {
@@ -240,7 +318,7 @@ fn execute_block(
     };
 
     // The guest stores gas_used in register a0 (x10) via finish_success.
-    let gas_used = output.state.registers[10] as u64;
+    let gas_used = state.registers[10].value as u64;
 
     Ok(ExecutionLog {
         block_number,
@@ -248,7 +326,7 @@ fn execute_block(
         cycle_count: cycles,
         exec_time_secs: wall_elapsed.as_secs_f64(),
         freq_cycles_per_sec: freq,
-        reached_end: output.reached_end,
+        reached_end: finished,
         input_path: input_path.to_path_buf(),
     })
 }
@@ -295,7 +373,7 @@ fn run_test_service(
     start_block: u64,
     end_block: u64,
     data_dir: &Path,
-    guest_bin: &Path,
+    guest_base: &Path,
     max_cycles: usize,
     execution_log_file: Option<&Path>,
 ) -> Result<()> {
@@ -328,7 +406,7 @@ fn run_test_service(
             format_timestamp(),
             block_number
         );
-        match execute_block(guest_bin, &input_path, block_number, max_cycles, false) {
+        match execute_block(guest_base, &input_path, block_number, max_cycles, false) {
             Ok(log) => {
                 println!(
                     "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={}",
@@ -357,19 +435,63 @@ fn run_test_service(
     Ok(())
 }
 
-/// Load the guest flat binary and convert to padded u32 words for proving.
-fn load_guest_binary_for_proving(guest_bin: &Path) -> Result<Vec<u32>> {
-    let bytes = fs::read(guest_bin)
-        .map_err(|e| eyre!("failed to read guest binary '{}': {}", guest_bin.display(), e))?;
-    Ok(get_padded_binary(&bytes))
-}
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
-fn main() -> Result<()> {
     let args = Args::parse();
 
-    let guest_bin = resolve_guest_bin(args.guest_bin.as_deref())?;
-    println!("Guest binary: {}", guest_bin.display());
+    let guest_base = resolve_guest_bin(args.guest_bin.as_deref())?;
+    println!("Guest binary base: {}", guest_base.display());
 
+    // ── Service mode ────────────────────────────────────────────────────
+    if args.service {
+        let rpc_url = args
+            .rpc_url
+            .ok_or_else(|| eyre!("--service requires --rpc-url"))?;
+
+        let ethproofs = match (
+            args.ethproofs_endpoint,
+            args.ethproofs_token,
+            args.ethproofs_cluster_id,
+        ) {
+            (Some(endpoint), Some(token), Some(cluster_id)) => {
+                Some(z6m_common::EthProofsConfig {
+                    endpoint,
+                    token,
+                    cluster_id,
+                })
+            }
+            _ => None,
+        };
+
+        let svc_config = service::ServiceConfig {
+            start_block: args.start_block,
+            end_block: args.end_block,
+            prove_every: args.prove_every,
+            execute_every: args.execute_every,
+            post_every: args.post_every,
+            rpc_url,
+            save_all_responses: args.save_all_responses,
+            data_dir: args.data_dir.clone(),
+            output_dir: args.output_dir,
+            guest_base: guest_base.clone(),
+            max_cycles: args.cycles,
+            gpu: args.gpu,
+            until: args.until,
+            ethproofs,
+        };
+
+        let svc = service::AirbenderService::new(svc_config)?;
+        return svc.run().await;
+    }
+
+    // ── Test-service mode (batch execution from disk) ───────────────────
     if args.test_service {
         let start = args
             .start_block
@@ -381,7 +503,7 @@ fn main() -> Result<()> {
             start,
             end,
             &args.data_dir,
-            &guest_bin,
+            &guest_base,
             args.cycles,
             args.execution_log_file.as_deref(),
         );
@@ -402,7 +524,7 @@ fn main() -> Result<()> {
                 block_number_from_filename(&input_path)
             };
 
-            let log = execute_block(&guest_bin, &input_path, block_num, args.cycles, is_test)?;
+            let log = execute_block(&guest_base, &input_path, block_num, args.cycles, is_test)?;
 
             println!(
                 "Executed block {} (gas_used={}, cycles={}, time={:.2}s, freq={:.2} GHz, reached_end={})",
@@ -443,110 +565,48 @@ fn main() -> Result<()> {
                 );
             }
 
+            let until = until.unwrap_or(ProvingLimit::Base);
+
             println!(
-                "[{}] Proving block {} (gpu={}, input={})",
+                "[{}] Proving block {} (gpu={}, until={:?}, input={})",
                 format_timestamp(),
                 block_num,
                 gpu,
+                until,
                 input_path.display(),
             );
-
-            // Load guest binary for proving (padded to circuit domain)
-            let binary = load_guest_binary_for_proving(&guest_bin)?;
 
             // Build oracle data (same format as execution)
             let oracle = build_oracle(&input_path, is_test)?;
 
-            // Calculate number of circuit instances needed
-            let num_instances = (args.cycles / risc_v_cycles::NUM_CYCLES) + 1;
-            println!(
-                "Will prove with up to {} circuit instances (NUM_CYCLES={}).",
-                num_instances,
-                risc_v_cycles::NUM_CYCLES,
-            );
-
             let wall_start = Instant::now();
 
-            // Generate base proofs
-            let (proof_list, proof_metadata) =
-                create_proofs_for_block(&binary, oracle, num_instances, gpu)?;
+            if gpu {
+                #[cfg(feature = "gpu")]
+                {
+                    let guest_path = guest_base.display().to_string();
+                    let prover = prove::create_gpu_prover(&guest_path, &until);
+                    let (proof, cycles) = prove::gpu_prove(&prover, oracle, block_num);
 
-            // Extract gas_used from final register values (x10=low32, x11=high32)
-            let gas_used = proof_metadata.register_values[10].value as u64
-                | ((proof_metadata.register_values[11].value as u64) << 32);
-            let base_proofs = proof_metadata.basic_proof_count;
+                    fs::create_dir_all(&output_dir)?;
+                    serialize_to_file(&proof, &output_dir.join("proof.json"));
 
-            // Create output directory
-            fs::create_dir_all(&output_dir)?;
-
-            match until {
-                Some(ProvingLimit::FinalRecursion) => {
-                    // Base + 1st recursion layer
-                    let (recursion_proof_list, recursion_proof_metadata) =
-                        create_recursion_proofs(proof_list, proof_metadata, gpu)?;
-
-                    recursion_proof_list.write_to_directory(&output_dir);
-                    serialize_to_file(
-                        &recursion_proof_metadata,
-                        &output_dir.join("metadata.json"),
-                    );
-
-                    let program_proof =
-                        execution_utils::ProgramProof::from_proof_list_and_metadata(
-                            &recursion_proof_list,
-                            &recursion_proof_metadata,
-                        );
-                    serialize_to_file(
-                        &program_proof,
-                        &output_dir.join("recursion_program_proof.json"),
-                    );
-
+                    let total_wall = wall_start.elapsed();
                     println!(
-                        "Recursion proof written to {}",
-                        output_dir.join("recursion_program_proof.json").display()
+                        "[{}] Proving complete for block {} in {:.2}s (cycles={})",
+                        format_timestamp(),
+                        block_num,
+                        total_wall.as_secs_f64(),
+                        cycles,
                     );
                 }
-                Some(ProvingLimit::FinalProof) => {
-                    // Base + both recursion layers (full proof pipeline)
-                    let (recursion_proof_list, recursion_proof_metadata) =
-                        create_recursion_proofs(proof_list, proof_metadata, gpu)?;
-
-                    let program_proof =
-                        execution_utils::ProgramProof::from_proof_list_and_metadata(
-                            &recursion_proof_list,
-                            &recursion_proof_metadata,
-                        );
-                    serialize_to_file(
-                        &program_proof,
-                        &output_dir.join("final_program_proof.json"),
-                    );
-
-                    println!(
-                        "Final proof written to {}",
-                        output_dir.join("final_program_proof.json").display()
-                    );
+                #[cfg(not(feature = "gpu"))]
+                {
+                    bail!("Compiled without GPU support. Rebuild with --features gpu");
                 }
-                Some(ProvingLimit::Base) | None => {
-                    // Base proofs only
-                    proof_list.write_to_directory(&output_dir);
-                    serialize_to_file(&proof_metadata, &output_dir.join("metadata.json"));
-
-                    println!("Base proofs written to {}", output_dir.display());
-                }
+            } else {
+                bail!("CPU proving not yet implemented in z6m. Use --gpu.");
             }
-
-            let cycles = base_proofs as u64 * risc_v_cycles::NUM_CYCLES as u64;
-
-            let total_wall = wall_start.elapsed();
-            println!(
-                "[{}] Proving complete for block {} in {:.2}s (gas_used={}, cycles={}, proofs={})",
-                format_timestamp(),
-                block_num,
-                total_wall.as_secs_f64(),
-                gas_used,
-                cycles,
-                base_proofs,
-            );
         }
 
         None => {

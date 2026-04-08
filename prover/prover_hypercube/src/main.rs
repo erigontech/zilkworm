@@ -1,11 +1,10 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-mod ethproofs_client;
 mod service;
 mod stdin_builders;
 
-use crate::ethproofs_client::EthProofsConfig;
+use z6m_common::EthProofsConfig;
 use z6m_common::{fetch_block_and_witness, FetchRequest};
 use crate::service::{
     AppConfig, ExecuteOptions, ProveOptions, ServiceConfig,
@@ -53,19 +52,6 @@ struct Args {
     /// Custom path for the execution log output (only used in --test-service mode)
     #[arg(long)]
     execution_log_file: Option<PathBuf>,
-
-    /// If set, write one log file per input fixture under this directory (mirrors --test-dir layout).
-    /// Mutually exclusive with --execution-log-file.
-    #[arg(long, conflicts_with = "execution_log_file")]
-    execution_log_dir: Option<PathBuf>,
-
-    /// Directory of pre-converted batched-RLP EEST fixtures to run in test-service mode.
-    #[arg(long)]
-    test_dir: Option<PathBuf>,
-
-    /// Max test file size in bytes (default 20MB, 0 = no limit)
-    #[arg(long, default_value = "20971520")]
-    max_file_size: u64,
 
     #[arg(long, default_value = "pk.bin")]
     pk_path: PathBuf,
@@ -128,9 +114,12 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Path to the unified RLP input file (overrides --block-number lookup)
+        /// Whether the input file is an Ethereum/tests file
         #[arg(long)]
         file_name: Option<PathBuf>,
+
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        is_test: bool,
 
         /// Data directory
         #[arg(long)]
@@ -138,13 +127,16 @@ enum Command {
     },
     /// Generate a proof for a block
     Prove {
-        /// Block number to prove
+        /// JSON file to load ethereum/tests format test from
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Path to the unified RLP input file (overrides --block-number lookup)
+        /// Whether the input file is an Ethereum/tests file
         #[arg(long)]
         file_name: Option<PathBuf>,
+
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        is_test: bool,
 
         /// Data directory
         #[arg(long)]
@@ -185,26 +177,16 @@ async fn main() -> Result<()> {
         if args.command.is_some() {
             bail!("--test-service cannot be combined with a subcommand");
         }
-        if let Some(test_dir) = args.test_dir {
-            Z6mProverService::run_test_service_eest(
-                test_dir,
-                args.execution_log_file.clone(),
-                args.execution_log_dir.clone(),
-                args.max_file_size,
-            )
-            .await?;
-        } else {
-            let start = args.start_block.ok_or_else(|| eyre!("--test-service requires --start-block (or --test-dir for EEST tests)"))?;
-            let end = args.end_block.ok_or_else(|| eyre!("--test-service requires --end-block (or --test-dir for EEST tests)"))?;
-            Z6mProverService::run_test_service(
-                start,
-                end,
-                args.execute_every,
-                args.data_dir.clone(),
-                args.execution_log_file.clone(),
-            )
-            .await?;
-        }
+        let start = args.start_block.ok_or_else(|| eyre!("--test-service requires --start-block"))?;
+        let end = args.end_block.ok_or_else(|| eyre!("--test-service requires --end-block"))?;
+        Z6mProverService::run_test_service(
+            start,
+            end,
+            args.execute_every,
+            args.data_dir.clone(),
+            args.execution_log_file.clone(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -255,6 +237,7 @@ async fn main() -> Result<()> {
         } else if let Some(Command::Prove {
             block_number,
             file_name,
+            is_test,
             data_dir,
             pk_path: _,
             proof_path,
@@ -265,6 +248,7 @@ async fn main() -> Result<()> {
                 .prove_block(&ProveOptions {
                     block_number,
                     file_name,
+                    is_test,
                     data_dir: data_dir.unwrap_or_else(|| args.data_dir.clone()),
                     proof_path,
                     proof_type,
@@ -313,11 +297,13 @@ async fn main() -> Result<()> {
         Some(Command::Execute {
             block_number,
             file_name,
+            is_test,
             data_dir,
         }) => {
             let opts = ExecuteOptions {
                 block_number,
                 file_name,
+                is_test,
                 data_dir: data_dir.unwrap_or_else(|| args.data_dir.clone()),
             };
             let log = Z6mProverService::execute_block_static(opts).await.unwrap();

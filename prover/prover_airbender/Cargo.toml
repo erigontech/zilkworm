@@ -8,28 +8,39 @@ name = "z6m_prover_airbender"
 path = "src/main.rs"
 
 [dependencies]
-# Core simulator (always needed for execution)
-risc_v_simulator = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
+# Core VM (always needed for execution)
+riscv_transpiler = { path = "../../../zksync-airbender/riscv_transpiler", features = ["delegation"] }
 
 # Proving dependencies
-execution_utils = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
-prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "main", features = ["prover"] }
-risc_v_cycles = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
-prover_examples = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
-setups = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
-worker = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
-trace_and_split = { git = "https://github.com/somnergy/zksync-airbender", branch = "main" }
-verifier_common = { git = "https://github.com/somnergy/zksync-airbender", branch = "main", features = ["proof_utils", "replace_csr"] }
+execution_utils = { path = "../../../zksync-airbender/execution_utils", default-features = false, features = ["prover", "security_80", "verifier_binaries"] }
+prover = { path = "../../../zksync-airbender/prover", features = ["prover"] }
+worker = { path = "../../../zksync-airbender/worker" }
+setups = { path = "../../../zksync-airbender/circuit_defs/setups" }
 
 # GPU prover (optional, requires CUDA)
-gpu_prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "main", optional = true }
+gpu_prover = { path = "../../../zksync-airbender/gpu_prover", optional = true }
 
-clap = { version = "4.0", features = ["derive"] }
+# Shared z6m prover infrastructure (block fetching, RLP encoding)
+z6m_common = { path = "../common" }
+
+# Async runtime + networking
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+url = "2.5"
+
+# CLI + serialization
+clap = { version = "4.0", features = ["derive", "env"] }
 eyre = "0.6"
 chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+base64 = "0.22"
+log = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [features]
 default = []
-gpu = ["gpu_prover", "prover_examples/gpu"]
+gpu = ["dep:gpu_prover", "execution_utils/gpu_prover"]

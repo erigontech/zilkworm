@@ -162,22 +162,25 @@ inline void keccak_f1600_delegate(uint64_t state[25]) {
 // --- Program termination ---
 
 [[noreturn]] inline void finish_error() {
-    asm volatile("csrrw x0, cycle, x0" ::: "memory");
+    // CSR 0xC00 (cycle) is not supported by the GPU tracer — just loop forever
+    // asm volatile("csrrw x0, cycle, x0" ::: "memory");
     asm volatile("1: j 1b\n");
     __builtin_unreachable();
 }
 
 [[gnu::noinline]] [[noreturn]] inline void finish_success_extended(const uint32_t data[16]) {
-    const uint32_t* ptr = data;
+    // Must use x26 (s10) as base register to match the EXIT_SEQUENCE pattern
+    // expected by zksync-airbender's find_binary_exit_point.
+    register const uint32_t* ptr asm("x26") = data;
     asm volatile(
-        "lw x10, 0(%0)\n"  "lw x11, 4(%0)\n"
-        "lw x12, 8(%0)\n"  "lw x13, 12(%0)\n"
-        "lw x14, 16(%0)\n" "lw x15, 20(%0)\n"
-        "lw x16, 24(%0)\n" "lw x17, 28(%0)\n"
-        "lw x18, 32(%0)\n" "lw x19, 36(%0)\n"
-        "lw x20, 40(%0)\n" "lw x21, 44(%0)\n"
-        "lw x22, 48(%0)\n" "lw x23, 52(%0)\n"
-        "lw x24, 56(%0)\n" "lw x25, 60(%0)\n"
+        "lw x10, 0(x26)\n"  "lw x11, 4(x26)\n"
+        "lw x12, 8(x26)\n"  "lw x13, 12(x26)\n"
+        "lw x14, 16(x26)\n" "lw x15, 20(x26)\n"
+        "lw x16, 24(x26)\n" "lw x17, 28(x26)\n"
+        "lw x18, 32(x26)\n" "lw x19, 36(x26)\n"
+        "lw x20, 40(x26)\n" "lw x21, 44(x26)\n"
+        "lw x22, 48(x26)\n" "lw x23, 52(x26)\n"
+        "lw x24, 56(x26)\n" "lw x25, 60(x26)\n"
         :: "r"(ptr), "m"(*reinterpret_cast<const uint32_t (*)[16]>(ptr))
         : "x10","x11","x12","x13","x14","x15","x16","x17",
           "x18","x19","x20","x21","x22","x23","x24","x25","memory"
