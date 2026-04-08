@@ -39,15 +39,15 @@ use riscv_transpiler::cycle::{
 #[cfg(not(feature = "gpu"))]
 use execution_utils::unrolled::UnrolledProgramProof;
 
-/// Proving depth control.
+/// Proving depth control — matches the CLI's ProofTarget naming.
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum ProvingLimit {
     /// Base proofs only (no recursion).
     Base,
-    /// Base + unrolled recursion layer.
-    FinalRecursion,
-    /// Base + unrolled + unified recursion (full proof).
-    FinalProof,
+    /// Base + unrolled recursion.
+    Unrolled,
+    /// Base + unrolled + unified recursion.
+    Unified,
 }
 
 #[cfg(feature = "gpu")]
@@ -55,8 +55,8 @@ impl ProvingLimit {
     pub fn to_unrolled_level(&self) -> UnrolledProverLevel {
         match self {
             ProvingLimit::Base => UnrolledProverLevel::Base,
-            ProvingLimit::FinalRecursion => UnrolledProverLevel::RecursionUnrolled,
-            ProvingLimit::FinalProof => UnrolledProverLevel::RecursionUnified,
+            ProvingLimit::Unrolled => UnrolledProverLevel::RecursionUnrolled,
+            ProvingLimit::Unified => UnrolledProverLevel::RecursionUnified,
         }
     }
 }
@@ -239,6 +239,7 @@ pub fn create_gpu_prover_from_cache(cache: SetupCache) -> UnrolledProver {
         max_level: cache.max_level,
         level_data: cache.level_data,
         prover,
+        base_is_full_machine: true,
     }
 }
 

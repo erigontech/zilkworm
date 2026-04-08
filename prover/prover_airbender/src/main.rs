@@ -86,7 +86,7 @@ struct Args {
     #[arg(long, default_value = "proofs")]
     output_dir: PathBuf,
 
-    /// How far to prove (base, final-recursion, or final-proof)
+    /// How far to prove (base, unrolled, or unified)
     #[arg(long, value_enum)]
     until: Option<ProvingLimit>,
 
@@ -141,7 +141,7 @@ enum Command {
         #[arg(long, default_value = "temp")]
         setup_dir: PathBuf,
 
-        /// How far to prove (base, final-recursion, or final-proof)
+        /// How far to prove (base, unrolled, or unified)
         #[arg(long, value_enum, default_value = "base")]
         until: ProvingLimit,
     },
@@ -172,7 +172,7 @@ enum Command {
         #[arg(long, default_value = "proofs")]
         output_dir: PathBuf,
 
-        /// How far to prove (base, final-recursion, or final-proof)
+        /// How far to prove (base, unrolled, or unified)
         #[arg(long, value_enum)]
         until: Option<ProvingLimit>,
 
