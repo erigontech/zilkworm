@@ -43,5 +43,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [features]
-default = []
+default = ["gpu"]
 gpu = ["dep:gpu_prover", "execution_utils/gpu_prover"]

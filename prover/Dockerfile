@@ -11,7 +11,7 @@
 #   SP1 hypercube GPU prover (pre-built sp1-gpu-server binary):
 #     docker build --target hypercube -t somnergy/z6m_prover:hypercube -f prover/Dockerfile prover/
 #
-# Note: airbender target must be built from repo root (needs top-level CMakeLists).
+# Note: airbender target must be built from repo root (needs top-level CMakeLists + zksync-airbender).
 #       hypercube target can be built from prover/ directory.
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -33,8 +33,8 @@ RUN mkdir -p /opt/riscv-gcc && \
     | tar xz -C /opt/riscv-gcc --strip-components=1
 ENV PATH="/opt/riscv-gcc/bin:${PATH}"
 
-# Rust nightly
-ARG RUST_TOOLCHAIN=nightly-2025-09-01
+# Rust nightly (must match zksync-airbender's rust-toolchain.toml)
+ARG RUST_TOOLCHAIN=nightly-2026-02-10
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     --default-toolchain ${RUST_TOOLCHAIN}
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -42,13 +42,13 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /build
 COPY . .
 
-# Build guest binary (C++ → RISC-V)
+# Build guest binary (C++ → RISC-V), produces .bin and .text
 WORKDIR /build/prover/guest_airbender
 RUN make z6m_guest
 
-# Build Rust GPU prover
+# Build Rust GPU prover (gpu is default feature)
 WORKDIR /build/prover/prover_airbender
-RUN cargo build --release --features gpu
+RUN cargo build --release
 
 # ═══════════════════════════════════════════════════════════════════════
 # Target: airbender — runtime image with airbender GPU prover
@@ -60,8 +60,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=airbender-builder /build/prover/prover_airbender/target/release/z6m_prover_airbender /usr/local/bin/
 COPY --from=airbender-builder /build/prover/guest_airbender/build/z6m_guest.bin /opt/z6m/z6m_guest.bin
+COPY --from=airbender-builder /build/prover/guest_airbender/build/z6m_guest.text /opt/z6m/z6m_guest.text
 
-ENTRYPOINT ["z6m_prover_airbender", "--guest-bin", "/opt/z6m/z6m_guest.bin"]
+# --guest-bin takes path without extension; the prover expects both .bin and .text
+ENTRYPOINT ["z6m_prover_airbender", "--guest-bin", "/opt/z6m/z6m_guest"]
 
 # ═══════════════════════════════════════════════════════════════════════
 # Target: hypercube — runtime image with SP1 GPU prover (pre-built binary)
