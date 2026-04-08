@@ -10,11 +10,15 @@ use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use url::Url;
 use z6m_common::{fetch_block_and_witness, FetchRequest};
+
+#[cfg(feature = "gpu")]
+use execution_utils::unrolled_gpu::UnrolledProver;
 
 #[derive(Clone, Debug)]
 pub struct ServiceConfig {
@@ -48,6 +52,8 @@ pub struct ProvingLog {
 pub struct AirbenderService {
     config: ServiceConfig,
     eth_client: Option<EthproofsClient>,
+    #[cfg(feature = "gpu")]
+    gpu_prover: Option<Arc<UnrolledProver>>,
 }
 
 impl AirbenderService {
@@ -60,9 +66,31 @@ impl AirbenderService {
 
         let eth_client = config.ethproofs.clone().map(EthproofsClient::new);
 
+        // Initialize GPU prover once — reused for all blocks
+        #[cfg(feature = "gpu")]
+        let gpu_prover = if config.gpu {
+            info!("Initializing GPU prover (one-time)");
+            let start = Instant::now();
+            let prover = if let Some(ref dir) = config.setup_dir {
+                let setup_path = dir.join("setup.bin");
+                let cache = crate::prove::load_setup(&setup_path)?;
+                crate::prove::create_gpu_prover_from_cache(cache)
+            } else {
+                let guest_path = config.guest_base.display().to_string();
+                let until = config.until.clone().unwrap_or(ProvingLimit::Base);
+                crate::prove::create_gpu_prover(&guest_path, &until)
+            };
+            info!("GPU prover initialized in {:.2}s", start.elapsed().as_secs_f64());
+            Some(Arc::new(prover))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             eth_client,
+            #[cfg(feature = "gpu")]
+            gpu_prover,
         })
     }
 
@@ -255,10 +283,6 @@ impl AirbenderService {
         input_path: &Path,
     ) -> Result<ProvingLog> {
         let oracle = crate::build_oracle(input_path, false)?;
-        let gpu = self.config.gpu;
-        let guest_path = self.config.guest_base.display().to_string();
-        let until = self.config.until.clone().unwrap_or(ProvingLimit::Base);
-        let setup_dir = self.config.setup_dir.clone();
 
         if let Some(client) = &self.eth_client {
             client.proving(block_number).await;
@@ -266,63 +290,55 @@ impl AirbenderService {
 
         let start = Instant::now();
 
-        if gpu {
-            #[cfg(feature = "gpu")]
-            {
-                let (proof, cycles) = tokio::task::spawn_blocking(move || {
-                    let prover = if let Some(dir) = setup_dir {
-                        let setup_path = dir.join("setup.bin");
-                        let cache = crate::prove::load_setup(&setup_path)
-                            .expect("failed to load setup cache");
-                        crate::prove::create_gpu_prover_from_cache(cache)
-                    } else {
-                        crate::prove::create_gpu_prover(&guest_path, &until)
-                    };
-                    crate::prove::gpu_prove(&prover, oracle, block_number)
-                })
-                .await
-                .map_err(|e| eyre::eyre!("Proving task panicked: {}", e))?;
+        #[cfg(feature = "gpu")]
+        {
+            let prover = self.gpu_prover.as_ref()
+                .ok_or_else(|| eyre::eyre!("GPU prover not initialized (--gpu not set?)"))?
+                .clone();
 
-                let proving_millis = start.elapsed().as_millis() as u64;
+            let (proof, cycles) = tokio::task::spawn_blocking(move || {
+                crate::prove::gpu_prove(&prover, oracle, block_number)
+            })
+            .await
+            .map_err(|e| eyre::eyre!("Proving task panicked: {}", e))?;
 
-                // Write proof
-                let block_dir = self.config.output_dir.join(block_number.to_string());
-                fs::create_dir_all(&block_dir)?;
-                crate::prove::serialize_proof_to_file(&proof, &block_dir.join("proof.bin"));
+            let proving_millis = start.elapsed().as_millis() as u64;
 
-                let gas_used = proof.register_final_values[10].value as u64;
+            // Write proof
+            let block_dir = self.config.output_dir.join(block_number.to_string());
+            fs::create_dir_all(&block_dir)?;
+            crate::prove::serialize_proof_to_file(&proof, &block_dir.join("proof.bin"));
 
-                // Post to ethproofs
-                if let Some(client) = &self.eth_client {
-                    let proof_bytes = crate::prove::serialize_proof_to_bytes(&proof);
-                    client
-                        .proved(
-                            &proof_bytes,
-                            block_number,
-                            cycles,
-                            proving_millis,
-                            "airbender-z6m",
-                        )
-                        .await;
-                }
+            let gas_used = proof.register_final_values[10].value as u64;
 
-                let log = ProvingLog {
-                    block_number,
-                    gas_used,
-                    cycle_count: cycles,
-                    num_proofs: 0,
-                    proving_millis,
-                    message: String::from("Success"),
-                };
-                self.persist_proving_log(&log)?;
-                Ok(log)
+            // Post to ethproofs
+            if let Some(client) = &self.eth_client {
+                let proof_bytes = crate::prove::serialize_proof_to_bytes(&proof);
+                client
+                    .proved(
+                        &proof_bytes,
+                        block_number,
+                        cycles,
+                        proving_millis,
+                        "airbender-z6m",
+                    )
+                    .await;
             }
-            #[cfg(not(feature = "gpu"))]
-            {
-                bail!("Compiled without GPU support. Rebuild with --features gpu");
-            }
-        } else {
-            bail!("CPU proving not yet implemented. Use --gpu.");
+
+            let log = ProvingLog {
+                block_number,
+                gas_used,
+                cycle_count: cycles,
+                num_proofs: 0,
+                proving_millis,
+                message: String::from("Success"),
+            };
+            self.persist_proving_log(&log)?;
+            Ok(log)
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            bail!("Compiled without GPU support. Rebuild with --features gpu");
         }
     }
 
