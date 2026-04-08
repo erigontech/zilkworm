@@ -329,6 +329,8 @@ impl AirbenderService {
             crate::prove::serialize_proof_to_file(&proof, &block_dir.join("proof.bin"));
 
             let gas_used = proof.register_final_values[10].value as u64;
+            let (family_proofs, init_proofs, delegation_proofs) = proof.get_proof_counts();
+            let total_proofs = family_proofs + init_proofs + delegation_proofs;
 
             // Post to ethproofs
             if let Some(client) = &self.eth_client {
@@ -348,7 +350,7 @@ impl AirbenderService {
                 block_number,
                 gas_used,
                 cycle_count: cycles,
-                num_proofs: 0,
+                num_proofs: total_proofs,
                 proving_millis,
                 message: String::from("Success"),
             };

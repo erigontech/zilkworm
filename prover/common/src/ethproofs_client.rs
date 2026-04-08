@@ -35,7 +35,19 @@ impl EthproofsClient {
 
     async fn post_json(&self, path: &str, json: &serde_json::Value) -> Result<(), String> {
         let url = format!("{}{}", self.endpoint, path);
-        info!("ethproofs POST {} body_keys={:?}", url, json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+
+        // Print the full request JSON (truncate proof field to avoid flooding logs)
+        let mut debug_json = json.clone();
+        if let Some(obj) = debug_json.as_object_mut() {
+            if let Some(proof_val) = obj.get("proof") {
+                if let Some(s) = proof_val.as_str() {
+                    if s.len() > 100 {
+                        obj.insert("proof".to_string(), serde_json::json!(format!("{}...({} chars)", &s[..80], s.len())));
+                    }
+                }
+            }
+        }
+        info!("ethproofs POST {}\n  {}", url, serde_json::to_string_pretty(&debug_json).unwrap_or_default());
 
         let response = self.client.post(&url)
             .header("Content-Type", "application/json")
@@ -49,7 +61,7 @@ impl EthproofsClient {
         let body = response.text().await.unwrap_or_default();
 
         if status.is_success() {
-            info!("ethproofs {} -> {} {}", path, status, if body.len() > 200 { &body[..200] } else { &body });
+            info!("ethproofs {} -> {} {}", path, status, &body);
             Ok(())
         } else {
             let msg = format!("ethproofs {} -> {} {}", path, status, body);
