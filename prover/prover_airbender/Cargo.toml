@@ -9,16 +9,16 @@ path = "src/main.rs"
 
 [dependencies]
 # Core VM (always needed for execution)
-riscv_transpiler = { path = "../../../zksync-airbender/riscv_transpiler", features = ["delegation"] }
+riscv_transpiler = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", features = ["delegation"] }
 
 # Proving dependencies
-execution_utils = { path = "../../../zksync-airbender/execution_utils", default-features = false, features = ["prover", "security_80", "verifier_binaries"] }
-prover = { path = "../../../zksync-airbender/prover", features = ["prover"] }
-worker = { path = "../../../zksync-airbender/worker" }
-setups = { path = "../../../zksync-airbender/circuit_defs/setups" }
+execution_utils = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", default-features = false, features = ["prover", "security_80", "verifier_binaries"] }
+prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", features = ["prover"] }
+worker = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev" }
+setups = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev" }
 
 # GPU prover (optional, requires CUDA)
-gpu_prover = { path = "../../../zksync-airbender/gpu_prover", optional = true }
+gpu_prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", optional = true }
 
 # Shared z6m prover infrastructure (block fetching, RLP encoding)
 z6m_common = { path = "../common" }

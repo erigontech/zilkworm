@@ -261,7 +261,13 @@ pub fn gpu_prove(
     prover.prove(batch_id, source)
 }
 
-pub fn serialize_to_file<T: serde::Serialize>(el: &T, path: &Path) {
-    let mut dst = std::fs::File::create(path).unwrap();
-    serde_json::to_writer_pretty(&mut dst, el).unwrap();
+/// Serialize proof to bincode (compact binary format).
+pub fn serialize_proof_to_file<T: serde::Serialize>(el: &T, path: &Path) {
+    let data = bincode::serialize(el).expect("failed to serialize proof");
+    std::fs::write(path, &data).expect("failed to write proof");
+}
+
+/// Serialize proof to bincode bytes (for ethproofs submission).
+pub fn serialize_proof_to_bytes<T: serde::Serialize>(el: &T) -> Vec<u8> {
+    bincode::serialize(el).expect("failed to serialize proof")
 }

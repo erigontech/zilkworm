@@ -2,17 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Multi-prover Docker image for z6m
-# Supports both SP1 hypercube (pre-built binary) and airbender (built from source).
 #
 # Usage:
-#   Airbender GPU prover (build from source):
+#   Airbender GPU prover:
 #     docker build --target airbender -t somnergy/z6m_prover:airbender -f prover/Dockerfile .
 #
 #   SP1 hypercube GPU prover (pre-built sp1-gpu-server binary):
 #     docker build --target hypercube -t somnergy/z6m_prover:hypercube -f prover/Dockerfile prover/
 #
-# Note: airbender target must be built from repo root (needs top-level CMakeLists + zksync-airbender).
-#       hypercube target can be built from prover/ directory.
+# Note: airbender target must be built from repo root (needs top-level CMakeLists).
 
 # ═══════════════════════════════════════════════════════════════════════
 # Stage: airbender-builder — cross-compile guest + build Rust GPU prover
@@ -46,7 +44,7 @@ COPY . .
 WORKDIR /build/prover/guest_airbender
 RUN make z6m_guest
 
-# Build Rust GPU prover (gpu is default feature)
+# Build Rust GPU prover (gpu is default feature, deps fetched from git)
 WORKDIR /build/prover/prover_airbender
 RUN cargo build --release
 

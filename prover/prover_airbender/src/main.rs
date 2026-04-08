@@ -16,7 +16,7 @@ use std::time::Instant;
 mod prove;
 mod service;
 
-use prove::{serialize_to_file, ProvingLimit};
+use prove::ProvingLimit;
 
 /// Default path to the airbender guest binary, relative to the project root.
 const DEFAULT_GUEST_BIN: &str = "prover/guest_airbender/build/z6m_guest";
@@ -642,7 +642,7 @@ async fn main() -> Result<()> {
                     let (proof, cycles) = prove::gpu_prove(&prover, oracle, block_num);
 
                     fs::create_dir_all(&output_dir)?;
-                    serialize_to_file(&proof, &output_dir.join("proof.json"));
+                    prove::serialize_proof_to_file(&proof, &output_dir.join("proof.bin"));
 
                     let total_wall = wall_start.elapsed();
                     println!(

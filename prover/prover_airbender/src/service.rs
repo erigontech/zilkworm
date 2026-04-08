@@ -288,13 +288,13 @@ impl AirbenderService {
                 // Write proof
                 let block_dir = self.config.output_dir.join(block_number.to_string());
                 fs::create_dir_all(&block_dir)?;
-                crate::prove::serialize_to_file(&proof, &block_dir.join("proof.json"));
+                crate::prove::serialize_proof_to_file(&proof, &block_dir.join("proof.bin"));
 
                 let gas_used = proof.register_final_values[10].value as u64;
 
                 // Post to ethproofs
                 if let Some(client) = &self.eth_client {
-                    let proof_bytes = serde_json::to_vec(&proof)?;
+                    let proof_bytes = crate::prove::serialize_proof_to_bytes(&proof);
                     client
                         .proved(
                             &proof_bytes,
