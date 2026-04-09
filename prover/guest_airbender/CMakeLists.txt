@@ -75,7 +75,8 @@ target_link_libraries(z6m_guest PRIVATE
     "${CMAKE_BINARY_DIR}/zilkworm/deps/src/blst/libblst.a"
     "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-loader.a"
     "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-instructions.a"
-    "${CMAKE_BINARY_DIR}/zilkworm/_deps/libsecp256k1-build/lib/libsecp256k1.a"
+    # libsecp256k1 disabled — using evmone's built-in ecrecover
+    # "${CMAKE_BINARY_DIR}/zilkworm/_deps/libsecp256k1-build/lib/libsecp256k1.a"
     c gcc nosys stdc++
     -Wl,--end-group
 )

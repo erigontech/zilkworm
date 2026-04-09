@@ -110,7 +110,7 @@ if(AIRBENDER)
     ${CMAKE_SOURCE_DIR}/prover/guest_airbender/src/include
     ${CMAKE_SOURCE_DIR}/zilk_core
   )
-  set(EVMONE_PRECOMPILES_LIBSECP256K1 ON CACHE BOOL "" FORCE)
+  set(EVMONE_PRECOMPILES_LIBSECP256K1 OFF CACHE BOOL "" FORCE)
 endif()
 
 # libsecp256k1: optimized ECDSA recovery (ecrecover precompile).
@@ -121,6 +121,7 @@ if(EVMONE_PRECOMPILES_LIBSECP256K1)
     libsecp256k1
     URL https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.7.1.tar.gz
     URL_HASH SHA256=958f204dbafc117e73a2604285dc2eb2a5128344d3499c114dcba5de54cb7a9e
+    PATCH_COMMAND patch -p1 -N < ${CMAKE_CURRENT_SOURCE_DIR}/patches/secp256k1-bigint-csr.patch || true
   )
   set(BUILD_SHARED_LIBS_ORIG ${BUILD_SHARED_LIBS})
   set(BUILD_SHARED_LIBS OFF)
@@ -144,6 +145,9 @@ if(EVMONE_PRECOMPILES_LIBSECP256K1)
     )
   endforeach()
   add_library(libsecp256k1::secp256k1 ALIAS secp256k1)
+  if(AIRBENDER)
+    target_compile_definitions(secp256k1 PRIVATE AIRBENDER)
+  endif()
   target_link_libraries(evmone PRIVATE libsecp256k1::secp256k1)
   target_compile_definitions(evmone PUBLIC EVMONE_PRECOMPILES_LIBSECP256K1=1)
   set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_ORIG})

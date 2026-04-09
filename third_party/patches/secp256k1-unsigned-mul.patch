@@ -1,0 +1,102 @@
+--- a/src/modinv32_impl.h	2026-01-26 23:41:38.000000000 +0400
++++ b/src/modinv32_impl.h	2026-04-09 18:27:20.637404057 +0400
+@@ -20,6 +20,21 @@
+  * implementation for N=30, using 30-bit signed limbs represented as int32_t.
+  */
+ 
++/* Compute the signed 32x32->64 widening multiply using only unsigned multiplication.
++ * This avoids the signed multiply-high instruction (mulh/mulhsu on RISC-V), which is
++ * not available on some ZK prover hardware (e.g. airbender).
++ *
++ * Identity: signed(a*b) = unsigned(a*b) - (a<0 ? b : 0)*2^32 - (b<0 ? a : 0)*2^32
++ * Using arithmetic right shift: a>>31 is 0 when a>=0, -1 (all 1s) when a<0.
++ * So (a>>31) & b == b when a<0, 0 when a>=0. This gives branchless correction.
++ */
++static SECP256K1_INLINE int64_t secp256k1_mul32(int32_t a, int32_t b) {
++    int32_t a_s = a >> 31;
++    int32_t b_s = b >> 31;
++    uint64_t u_prod = (uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b;
++    return (int64_t)u_prod - ((int64_t)(a_s & b) << 32) - ((int64_t)(b_s & a) << 32);
++}
++
+ #ifdef VERIFY
+ static const secp256k1_modinv32_signed30 SECP256K1_SIGNED30_ONE = {{1}};
+ 
+@@ -426,14 +441,14 @@
+     /* Begin computing t*[d,e]. */
+     di = d->v[0];
+     ei = e->v[0];
+-    cd = (int64_t)u * di + (int64_t)v * ei;
+-    ce = (int64_t)q * di + (int64_t)r * ei;
++    cd = secp256k1_mul32(u, di) + secp256k1_mul32(v, ei);
++    ce = secp256k1_mul32(q, di) + secp256k1_mul32(r, ei);
+     /* Correct md,me so that t*[d,e]+modulus*[md,me] has 30 zero bottom bits. */
+     md -= (modinfo->modulus_inv30 * (uint32_t)cd + md) & M30;
+     me -= (modinfo->modulus_inv30 * (uint32_t)ce + me) & M30;
+     /* Update the beginning of computation for t*[d,e]+modulus*[md,me] now md,me are known. */
+-    cd += (int64_t)modinfo->modulus.v[0] * md;
+-    ce += (int64_t)modinfo->modulus.v[0] * me;
++    cd += secp256k1_mul32(modinfo->modulus.v[0], md);
++    ce += secp256k1_mul32(modinfo->modulus.v[0], me);
+     /* Verify that the low 30 bits of the computation are indeed zero, and then throw them away. */
+     VERIFY_CHECK(((int32_t)cd & M30) == 0); cd >>= 30;
+     VERIFY_CHECK(((int32_t)ce & M30) == 0); ce >>= 30;
+@@ -442,10 +457,10 @@
+     for (i = 1; i < 9; ++i) {
+         di = d->v[i];
+         ei = e->v[i];
+-        cd += (int64_t)u * di + (int64_t)v * ei;
+-        ce += (int64_t)q * di + (int64_t)r * ei;
+-        cd += (int64_t)modinfo->modulus.v[i] * md;
+-        ce += (int64_t)modinfo->modulus.v[i] * me;
++        cd += secp256k1_mul32(u, di) + secp256k1_mul32(v, ei);
++        ce += secp256k1_mul32(q, di) + secp256k1_mul32(r, ei);
++        cd += secp256k1_mul32(modinfo->modulus.v[i], md);
++        ce += secp256k1_mul32(modinfo->modulus.v[i], me);
+         d->v[i - 1] = (int32_t)cd & M30; cd >>= 30;
+         e->v[i - 1] = (int32_t)ce & M30; ce >>= 30;
+     }
+@@ -472,8 +487,8 @@
+     /* Start computing t*[f,g]. */
+     fi = f->v[0];
+     gi = g->v[0];
+-    cf = (int64_t)u * fi + (int64_t)v * gi;
+-    cg = (int64_t)q * fi + (int64_t)r * gi;
++    cf = secp256k1_mul32(u, fi) + secp256k1_mul32(v, gi);
++    cg = secp256k1_mul32(q, fi) + secp256k1_mul32(r, gi);
+     /* Verify that the bottom 30 bits of the result are zero, and then throw them away. */
+     VERIFY_CHECK(((int32_t)cf & M30) == 0); cf >>= 30;
+     VERIFY_CHECK(((int32_t)cg & M30) == 0); cg >>= 30;
+@@ -482,8 +497,8 @@
+     for (i = 1; i < 9; ++i) {
+         fi = f->v[i];
+         gi = g->v[i];
+-        cf += (int64_t)u * fi + (int64_t)v * gi;
+-        cg += (int64_t)q * fi + (int64_t)r * gi;
++        cf += secp256k1_mul32(u, fi) + secp256k1_mul32(v, gi);
++        cg += secp256k1_mul32(q, fi) + secp256k1_mul32(r, gi);
+         f->v[i - 1] = (int32_t)cf & M30; cf >>= 30;
+         g->v[i - 1] = (int32_t)cg & M30; cg >>= 30;
+     }
+@@ -508,8 +523,8 @@
+     /* Start computing t*[f,g]. */
+     fi = f->v[0];
+     gi = g->v[0];
+-    cf = (int64_t)u * fi + (int64_t)v * gi;
+-    cg = (int64_t)q * fi + (int64_t)r * gi;
++    cf = secp256k1_mul32(u, fi) + secp256k1_mul32(v, gi);
++    cg = secp256k1_mul32(q, fi) + secp256k1_mul32(r, gi);
+     /* Verify that the bottom 62 bits of the result are zero, and then throw them away. */
+     VERIFY_CHECK(((int32_t)cf & M30) == 0); cf >>= 30;
+     VERIFY_CHECK(((int32_t)cg & M30) == 0); cg >>= 30;
+@@ -518,8 +533,8 @@
+     for (i = 1; i < len; ++i) {
+         fi = f->v[i];
+         gi = g->v[i];
+-        cf += (int64_t)u * fi + (int64_t)v * gi;
+-        cg += (int64_t)q * fi + (int64_t)r * gi;
++        cf += secp256k1_mul32(u, fi) + secp256k1_mul32(v, gi);
++        cg += secp256k1_mul32(q, fi) + secp256k1_mul32(r, gi);
+         f->v[i - 1] = (int32_t)cf & M30; cf >>= 30;
+         g->v[i - 1] = (int32_t)cg & M30; cg >>= 30;
+     }

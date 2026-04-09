@@ -1,0 +1,165 @@
+--- a/src/field_10x26_impl.h	2026-01-26 23:41:38.000000000 +0400
++++ b/src/field_10x26_impl.h	2026-04-10 01:11:03.837364451 +0400
+@@ -1003,6 +1003,153 @@
+ }
+ #endif
+ 
++#if defined(AIRBENDER) && defined(__riscv)
++
++/* BigInt CSR (0x7CA) accelerated field multiply / square.
++ * Two U256 CSR calls (MUL_LOW + MUL_HIGH) replace ~55 widening multiplies.
++ * Reduction uses  p = 2^256 - c,  c = 2^32 + 977  = 0x1000003D1. */
++
++#ifdef __GNUC__
++#define SECP256K1_ALIGN32 __attribute__((aligned(32)))
++#else
++#define SECP256K1_ALIGN32
++#endif
++
++static SECP256K1_INLINE uint32_t secp256k1_bigint_csr(
++        uint32_t *mut_ptr, const uint32_t *immut_ptr, uint32_t mask) {
++    register uintptr_t x10 __asm__("x10") = (uintptr_t)mut_ptr;
++    register uintptr_t x11 __asm__("x11") = (uintptr_t)immut_ptr;
++    register uint32_t  x12 __asm__("x12") = mask;
++    __asm__ __volatile__("csrrw x0, 0x7CA, x0"
++                 : "+r"(x12) : "r"(x10), "r"(x11) : "memory");
++    return x12;
++}
++
++/* Carry-propagate 10x26 limbs so every limb <= 26 bits (22 for n[9]). */
++static SECP256K1_INLINE void secp256k1_fe_norm26(uint32_t *n) {
++    const uint32_t M = 0x3FFFFFFUL;
++    uint32_t x;
++    uint32_t t0=n[0],t1=n[1],t2=n[2],t3=n[3],t4=n[4],
++             t5=n[5],t6=n[6],t7=n[7],t8=n[8],t9=n[9];
++    t1+=t0>>26; t0&=M; t2+=t1>>26; t1&=M; t3+=t2>>26; t2&=M;
++    t4+=t3>>26; t3&=M; t5+=t4>>26; t4&=M; t6+=t5>>26; t5&=M;
++    t7+=t6>>26; t6&=M; t8+=t7>>26; t7&=M; t9+=t8>>26; t8&=M;
++    x=t9>>22; t9&=0x3FFFFFUL;
++    t0+=x*0x3D1UL; t1+=x<<6; t1+=t0>>26; t0&=M;
++    n[0]=t0;n[1]=t1;n[2]=t2;n[3]=t3;n[4]=t4;
++    n[5]=t5;n[6]=t6;n[7]=t7;n[8]=t8;n[9]=t9;
++}
++
++/* 10x26 → U256 (LE 8×u32).  Same bit-layout as secp256k1_fe_to_storage. */
++static SECP256K1_INLINE void secp256k1_fe_to_u256(uint32_t o[8],const uint32_t n[10]){
++    o[0]=n[0]|(n[1]<<26);         o[1]=(n[1]>>6)|(n[2]<<20);
++    o[2]=(n[2]>>12)|(n[3]<<14);   o[3]=(n[3]>>18)|(n[4]<<8);
++    o[4]=(n[4]>>24)|(n[5]<<2)|(n[6]<<28);
++    o[5]=(n[6]>>4)|(n[7]<<22);    o[6]=(n[7]>>10)|(n[8]<<16);
++    o[7]=(n[8]>>16)|(n[9]<<10);
++}
++
++/* U256 → 10x26.  Same bit-layout as secp256k1_fe_from_storage. */
++static SECP256K1_INLINE void secp256k1_fe_from_u256(uint32_t n[10],const uint32_t i[8]){
++    n[0]= i[0]      &0x3FFFFFFUL;
++    n[1]=(i[0]>>26)|((i[1]<< 6)&0x3FFFFFFUL);
++    n[2]=(i[1]>>20)|((i[2]<<12)&0x3FFFFFFUL);
++    n[3]=(i[2]>>14)|((i[3]<<18)&0x3FFFFFFUL);
++    n[4]=(i[3]>> 8)|((i[4]<<24)&0x3FFFFFFUL);
++    n[5]=(i[4]>> 2) &0x3FFFFFFUL;
++    n[6]=(i[4]>>28)|((i[5]<< 4)&0x3FFFFFFUL);
++    n[7]=(i[5]>>22)|((i[6]<<10)&0x3FFFFFFUL);
++    n[8]=(i[6]>>16)|((i[7]<<16)&0x3FFFFFFUL);
++    n[9]= i[7]>>10;
++}
++
++/* r = a * b  mod p   using BigInt CSR.
++ * Accepts any magnitude inputs; result has magnitude 1. */
++static void secp256k1_fe_mul_bigint(uint32_t *r,
++        const uint32_t *a, const uint32_t *b) {
++    /* C90: all declarations at top of block */
++    int j;
++    uint32_t an[10], bn[10];
++    uint32_t au[8] SECP256K1_ALIGN32;
++    uint32_t bu[8] SECP256K1_ALIGN32;
++    uint32_t lo[8] SECP256K1_ALIGN32;
++    uint32_t res[8];
++    uint64_t acc;
++
++    /* 1 - normalise to 26-bit limbs */
++    for (j=0;j<10;j++){an[j]=a[j];bn[j]=b[j];}
++    secp256k1_fe_norm26(an); secp256k1_fe_norm26(bn);
++
++    /* 2 - pack to aligned U256 */
++    secp256k1_fe_to_u256(au,an); secp256k1_fe_to_u256(bu,bn);
++
++    /* 3 - full U256 x U256  (2 CSR calls) */
++    for (j=0;j<8;j++) lo[j]=au[j];
++    secp256k1_bigint_csr(lo, bu, 0x08);  /* MUL_LOW  -> lo  */
++    secp256k1_bigint_csr(au, bu, 0x10);  /* MUL_HIGH -> au (=hi) */
++
++    /* 4 - reduce:  result = lo + hi*c  where c = 2^32 + 977.
++     *   hi*c = (hi << 32) + hi*977,  folded in one pass:
++     *   word[i] = lo[i] + hi[i]*977 + hi[i-1]  (hi[-1] = 0). */
++    acc  = (uint64_t)lo[0] + (uint64_t)au[0]*977;
++    res[0]=(uint32_t)acc; acc>>=32;
++    for (j=1;j<8;j++){
++        acc += (uint64_t)lo[j] + (uint64_t)au[j]*977 + au[j-1];
++        res[j]=(uint32_t)acc; acc>>=32;
++    }
++    acc += au[7];  /* shifted-out word */
++
++    /* 5 - second fold  (overflow * c,  at most ~67 bits) */
++    if (acc) {
++        uint64_t ov = acc * 977;
++        uint64_t v = (uint64_t)res[0] + (uint32_t)ov;
++        uint32_t c;
++        res[0]=(uint32_t)v;
++        v = (uint64_t)res[1] + (uint32_t)(ov>>32) + (v>>32) + (uint32_t)acc;
++        res[1]=(uint32_t)v;
++        c = (uint32_t)(v>>32);
++        if (acc>>32) c += (uint32_t)(acc>>32);
++        for (j=2; c && j<8; j++){
++            v=(uint64_t)res[j]+c; res[j]=(uint32_t)v; c=(uint32_t)(v>>32);
++        }
++        if (c) { /* wrapped 2^256 again - fold once more */
++            v=(uint64_t)res[0]+0x3D1UL; res[0]=(uint32_t)v;
++            v=(uint64_t)res[1]+1+(v>>32); res[1]=(uint32_t)v;
++            c=(uint32_t)(v>>32);
++            for(j=2;c&&j<8;j++){v=(uint64_t)res[j]+c;res[j]=(uint32_t)v;c=(uint32_t)(v>>32);}
++        }
++    }
++
++    /* 6 - conditional subtract p:  if res >= p  <=>  res + c >= 2^256 */
++    {
++        uint64_t v=(uint64_t)res[0]+0x3D1UL;
++        uint32_t c=(uint32_t)(v>>32);
++        v=(uint64_t)res[1]+1+c; c=(uint32_t)(v>>32);
++        for(j=2;j<8;j++){v=(uint64_t)res[j]+c;c=(uint32_t)(v>>32);}
++        if(c){
++            v=(uint64_t)res[0]+0x3D1UL; res[0]=(uint32_t)v;
++            v=(uint64_t)res[1]+1+(v>>32); res[1]=(uint32_t)v;
++            c=(uint32_t)(v>>32);
++            for(j=2;c&&j<8;j++){v=(uint64_t)res[j]+c;res[j]=(uint32_t)v;c=(uint32_t)(v>>32);}
++        }
++    }
++
++    /* 7 - unpack U256 -> 10x26 */
++    secp256k1_fe_from_u256(r, res);
++}
++
++SECP256K1_INLINE static void secp256k1_fe_impl_mul(secp256k1_fe *r,
++        const secp256k1_fe *a, const secp256k1_fe * SECP256K1_RESTRICT b) {
++    secp256k1_fe_mul_bigint(r->n, a->n, b->n);
++}
++
++SECP256K1_INLINE static void secp256k1_fe_impl_sqr(secp256k1_fe *r,
++        const secp256k1_fe *a) {
++    secp256k1_fe_mul_bigint(r->n, a->n, a->n);
++}
++
++#else /* !AIRBENDER || !__riscv -- original schoolbook implementation */
++
+ SECP256K1_INLINE static void secp256k1_fe_impl_mul(secp256k1_fe *r, const secp256k1_fe *a, const secp256k1_fe * SECP256K1_RESTRICT b) {
+     secp256k1_fe_mul_inner(r->n, a->n, b->n);
+ }
+@@ -1011,6 +1158,8 @@
+     secp256k1_fe_sqr_inner(r->n, a->n);
+ }
+ 
++#endif /* AIRBENDER && __riscv */
++
+ SECP256K1_INLINE static void secp256k1_fe_impl_cmov(secp256k1_fe *r, const secp256k1_fe *a, int flag) {
+     uint32_t mask0, mask1;
+     volatile int vflag = flag;
