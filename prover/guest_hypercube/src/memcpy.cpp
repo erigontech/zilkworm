@@ -20,15 +20,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2005-2020 Rich Felker, et al.
 
-// Use top-level asm to emit the entire function in assembly.
-// This avoids GCC's codegen entirely — the function is pure assembly
-// with C-ABI calling convention (a0=dst, a1=src, a2=n, returns a0).
-__asm__(
-    ".text\n"
-    ".globl memcpy\n"
-    ".p2align 2\n"
-    ".type memcpy,@function\n"
-"memcpy:\n"
+#include <cstddef>
+
+extern "C" [[gnu::naked]] void *__wrap_memcpy(
+    void *__restrict /*dest*/, const void *__restrict /*src*/, size_t /*n*/) noexcept
+{
+    __asm__ volatile(
     // Align src to 8 bytes.
     "andi a3, a1, 7\n"
     "beqz a3, .LBBmemcpy0_16\n"
@@ -535,11 +532,8 @@ __asm__(
     "lbu a1, 0(a1)\n"
     "sb a1, 0(a3)\n"
     "ret\n"
-".Lfunc_end0:\n"
-    ".size memcpy, .Lfunc_end0-memcpy\n"
-
-    // Jump table (in .rodata).
-    ".section .rodata,\"a\",@progbits\n"
+    // Jump table (in .rodata), using pushsection/popsection to stay in .text.
+    ".pushsection .rodata,\"a\",@progbits\n"
     ".p2align 2, 0x0\n"
 ".LJTI0_0:\n"
     ".word .LBBmemcpy0_13\n"   // offset 1: 7 preamble bytes
@@ -549,4 +543,6 @@ __asm__(
     ".word .LBBmemcpy0_26\n"   // offset 5: 3 preamble bytes
     ".word .LBBmemcpy0_38\n"   // offset 6: 2 preamble bytes
     ".word .LBBmemcpy0_41\n"   // offset 7: 1 preamble byte
-);
+    ".popsection\n"
+    );
+}

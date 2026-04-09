@@ -46,6 +46,8 @@ target_link_options(z6m_guest PRIVATE
     -z norelro
     -Wl,--gc-sections
     -Wl,-e,_start
+    -Wl,--wrap=memcpy
+    -Wl,--wrap=memmove
 )
 
 # Library search path: use the toolchain's rv64im/lp64 sysroot libraries.
