@@ -5,10 +5,10 @@
 #
 # Usage:
 #   Airbender GPU prover:
-#     docker build --target airbender -t somnergy/z6m_prover:airbender -f prover/Dockerfile .
+#     docker build --target airbender -f prover/Dockerfile .
 #
 #   SP1 hypercube GPU prover (pre-built sp1-gpu-server binary):
-#     docker build --target hypercube -t somnergy/z6m_prover:hypercube -f prover/Dockerfile prover/
+#     docker build --target hypercube -f prover/Dockerfile prover/
 #
 # Note: airbender target must be built from repo root (needs top-level CMakeLists).
 
@@ -56,9 +56,15 @@ FROM nvidia/cuda:13.1.0-runtime-ubuntu24.04 AS airbender
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+# Run as non-root user (uid 1000 = ubuntu in base image, matches typical host user)
+RUN mkdir -p /home/ubuntu && chown 1000:1000 /home/ubuntu
+
 COPY --from=airbender-builder /build/prover/prover_airbender/target/release/z6m_prover_airbender /usr/local/bin/
-COPY --from=airbender-builder /build/prover/guest_airbender/build/z6m_guest.bin /opt/z6m/z6m_guest.bin
-COPY --from=airbender-builder /build/prover/guest_airbender/build/z6m_guest.text /opt/z6m/z6m_guest.text
+COPY --from=airbender-builder --chown=1000:1000 /build/prover/guest_airbender/build/z6m_guest.bin /opt/z6m/z6m_guest.bin
+COPY --from=airbender-builder --chown=1000:1000 /build/prover/guest_airbender/build/z6m_guest.text /opt/z6m/z6m_guest.text
+
+USER 1000
+WORKDIR /home/ubuntu
 
 # --guest-bin takes path without extension; the prover expects both .bin and .text
 ENTRYPOINT ["z6m_prover_airbender", "--guest-bin", "/opt/z6m/z6m_guest"]
