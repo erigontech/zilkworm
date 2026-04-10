@@ -51,6 +51,14 @@ struct Args {
     #[arg(long)]
     execution_log_file: Option<PathBuf>,
 
+    /// Directory of EEST JSON test files to run in test-service mode
+    #[arg(long)]
+    test_dir: Option<PathBuf>,
+
+    /// Max test file size in bytes (default 20MB, 0 = no limit)
+    #[arg(long, default_value = "20971520")]
+    max_file_size: u64,
+
     #[arg(long, default_value = "pk.bin")]
     pk_path: PathBuf,
 
@@ -175,16 +183,25 @@ async fn main() -> Result<()> {
         if args.command.is_some() {
             bail!("--test-service cannot be combined with a subcommand");
         }
-        let start = args.start_block.ok_or_else(|| eyre!("--test-service requires --start-block"))?;
-        let end = args.end_block.ok_or_else(|| eyre!("--test-service requires --end-block"))?;
-        Z6mProverService::run_test_service(
-            start,
-            end,
-            args.execute_every,
-            args.data_dir.clone(),
-            args.execution_log_file.clone(),
-        )
-        .await?;
+        if let Some(test_dir) = args.test_dir {
+            Z6mProverService::run_test_service_eest(
+                test_dir,
+                args.execution_log_file.clone(),
+                args.max_file_size,
+            )
+            .await?;
+        } else {
+            let start = args.start_block.ok_or_else(|| eyre!("--test-service requires --start-block (or --test-dir for EEST tests)"))?;
+            let end = args.end_block.ok_or_else(|| eyre!("--test-service requires --end-block (or --test-dir for EEST tests)"))?;
+            Z6mProverService::run_test_service(
+                start,
+                end,
+                args.execute_every,
+                args.data_dir.clone(),
+                args.execution_log_file.clone(),
+            )
+            .await?;
+        }
         return Ok(());
     }
 

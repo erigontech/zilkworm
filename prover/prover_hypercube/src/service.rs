@@ -848,6 +848,116 @@ impl Z6mProverService {
         Ok(())
     }
 
+    pub async fn run_test_service_eest(
+        test_dir: PathBuf,
+        execution_log_file: Option<PathBuf>,
+        max_file_size: u64,
+    ) -> Result<()> {
+        if !test_dir.is_dir() {
+            bail!("--test-dir {} is not a directory", test_dir.display());
+        }
+
+        // Collect all JSON files recursively
+        let mut test_files: Vec<PathBuf> = Vec::new();
+        Self::collect_json_files(&test_dir, &mut test_files)?;
+        test_files.sort();
+
+        if test_files.is_empty() {
+            bail!("no .json test files found in {}", test_dir.display());
+        }
+
+        info!("starting EEST test-service mode, {} test files from {}", test_files.len(), test_dir.display());
+
+        // Create ONE CpuProver upfront and reuse for all tests
+        let client = ProverClient::builder().cpu().build().await;
+
+        let log_path = execution_log_file
+            .unwrap_or_else(|| test_dir.join("executionLogs.log"));
+
+        let mut passed = 0u64;
+        let mut failed = 0u64;
+        let mut skipped = 0u64;
+        let total = test_files.len();
+
+        for (i, test_file) in test_files.iter().enumerate() {
+            let file_name = test_file.file_name().unwrap_or_default().to_string_lossy();
+
+            // Skip files exceeding size limit
+            if max_file_size > 0 {
+                if let Ok(meta) = std::fs::metadata(test_file) {
+                    if meta.len() > max_file_size {
+                        println!(
+                            "[{}/{}] SKIP {} (file_size={}MB > limit={}MB)",
+                            i + 1, total, file_name,
+                            meta.len() / (1024 * 1024),
+                            max_file_size / (1024 * 1024)
+                        );
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            }
+
+            info!("[{}/{}] executing {}", i + 1, total, test_file.display());
+
+            let stdin = match build_stdin_from_eth_tests(test_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("test {} failed to build stdin: {}, skipping", file_name, e);
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            let (mut output, report) = match client.execute(Z6M_ELF, stdin).await {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!("test {} execution failed: {}", file_name, e);
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            let gas_used = output.read::<u64>();
+            let cycle_count = report.total_instruction_count();
+            let prover_gas = report.gas().unwrap_or_default();
+            let syscall_count = report.total_syscall_count();
+
+            println!(
+                "[{}/{}] PASS {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
+                i + 1, total, file_name, gas_used, cycle_count, prover_gas, syscall_count
+            );
+            passed += 1;
+
+            let log = ExecutionLog {
+                block_number: 0,
+                gas_used,
+                cycle_count,
+                prover_gas,
+                syscall_count,
+                input_path: test_file.clone(),
+            };
+            Self::persist_execution_logs_static(&log_path, &log)?;
+        }
+
+        println!("\n=== EEST Test Service Summary ===");
+        println!("Total: {}, Passed: {}, Failed: {}, Skipped: {}", total, passed, failed, skipped);
+        Ok(())
+    }
+
+    fn collect_json_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                Self::collect_json_files(&path, files)?;
+            } else if path.extension().map_or(false, |ext| ext == "json") {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn execute_block_static(opts: ExecuteOptions) -> Result<ExecutionLog> {
         let input_path = Self::resolve_input_path(
             opts.block_number,

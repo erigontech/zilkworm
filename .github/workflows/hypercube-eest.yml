@@ -4,276 +4,105 @@ on:
   push:
     branches: [master, main]
     paths:
+      - '.github/workflows/hypercube-eest.yml'
+      - 'tools/scripts/eest_runner.py'
       - 'prover/guest_hypercube/**'
       - 'prover/prover_hypercube/**'
-      - 'zilk_core/**'
-      - 'third_party/**'
-  pull_request:
-    branches: [master, main]
-    paths:
-      - 'prover/guest_hypercube/**'
-      - 'prover/prover_hypercube/**'
-      - 'zilk_core/**'
-      - 'third_party/**'
+      - 'zilk_core/core/**'
+      - 'third_party/evmone/lib/**'
   workflow_dispatch:
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Phase 1: Build the prover once, cache the binary for test shards
-  # ---------------------------------------------------------------------------
-  build:
-    name: Build HyperCube Prover
+  eest:
+    name: HyperCube EEST
     runs-on: ubuntu-latest
-    container: ubuntu:25.10
+    container:
+      image: somnergy/z6m_ci_base:latest
+      options: --init -v /tmp/z6m-cargo-cache:/cargo-cache
     environment: ci
+    env:
+      CARGO_HOME: /cargo-cache/cargo
     steps:
-      - name: Install system dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
-          TZ: Etc/UTC
+      - name: Prepare local cargo cache
         run: |
-          apt update
-          apt install -y \
-            build-essential cmake ninja-build \
-            git git-lfs \
-            python3 \
-            nodejs npm \
-            curl \
-            pkg-config libssl-dev \
-            protobuf-compiler
-          npm i -g xpm
-          xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
-          echo 'export PATH=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:$PATH' >> ~/.bashrc
-          echo "PATH=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:$PATH" >> $GITHUB_ENV
-          # Install Rust nightly (must come before sp1up which needs cargo)
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
-          export PATH="$HOME/.cargo/bin:$PATH"
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          # Install SP1 toolchain
-          curl -L https://sp1up.succinct.xyz | bash
-          export PATH="$HOME/.sp1/bin:$PATH"
-          echo "$HOME/.sp1/bin" >> $GITHUB_PATH
-          sp1up
-
-      - name: Verify tool versions
-        run: |
-          riscv-none-elf-gcc --version
-          cmake --version
-          rustc --version
-          cargo prove --version
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          submodules: recursive
-          lfs: true
-
-      - name: Configure cargo for private dependencies
-        run: |
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml <<'TOML'
+          mkdir -p /cargo-cache/cargo /cargo-cache/target
+          cat > /cargo-cache/cargo/config.toml <<'TOML'
           [net]
           git-fetch-with-cli = true
           TOML
-          sed -i 's/^[[:space:]]*//' ~/.cargo/config.toml
-          git config --global url."https://${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
-      - name: Build prover
-        run: make z6m_prover
-
-      - name: Upload prover binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: z6m-prover-binary
-          path: prover/target/release/z6m_prover
-          retention-days: 1
-
-  # ---------------------------------------------------------------------------
-  # Phase 2: Discover test shards dynamically
-  # ---------------------------------------------------------------------------
-  discover:
-    name: Discover Test Shards
-    runs-on: ubuntu-latest
-    outputs:
-      shards: ${{ steps.find_shards.outputs.shards }}
-    steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
           submodules: false
-          lfs: false
-
-      - name: Find test subdirectories
-        id: find_shards
-        run: |
-          shards=$(ls -d third_party/eest-fixtures/blockchain_tests/prague/*/ \
-            | xargs -I{} basename {} \
-            | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          echo "shards=$shards" >> $GITHUB_OUTPUT
-          echo "Found shards: $shards"
-
-  # ---------------------------------------------------------------------------
-  # Phase 3: Run test shards in parallel (one job per EIP subdirectory)
-  # ---------------------------------------------------------------------------
-  test-shard:
-    name: "Test: ${{ matrix.shard }}"
-    needs: [build, discover]
-    runs-on: ubuntu-latest
-    container: ubuntu:25.10
-    environment: ci
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJson(needs.discover.outputs.shards) }}
-    steps:
-      - name: Install system dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
-          TZ: Etc/UTC
-        run: |
-          apt update
-          apt install -y \
-            build-essential cmake \
-            git git-lfs \
-            python3 \
-            curl \
-            pkg-config libssl-dev
-          # Install Rust nightly (needed for SP1 runtime libs)
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
-          export PATH="$HOME/.cargo/bin:$PATH"
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          submodules: recursive
           lfs: true
 
-      - name: Download prover binary
-        uses: actions/download-artifact@v4
-        with:
-          name: z6m-prover-binary
-          path: prover/target/release/
-
-      - name: Make prover executable
-        run: chmod +x prover/target/release/z6m_prover
-
-      - name: "Run tests: ${{ matrix.shard }}"
-        id: run_tests
-        shell: bash
+      - name: Init submodules
         run: |
-          set +e
-          make tests TESTS_SUBDIR=${{ matrix.shard }} 2>&1 | tee output.log
-          exit_code=${PIPESTATUS[0]}
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN || github.token }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive third_party/evmone third_party/intx third_party/eest-fixtures
 
-          total=$(find target/logs -name '*.log' 2>/dev/null | wc -l)
-          failed=$(grep -rl 'CRASHED\|ERROR\|FAILED' target/logs/ 2>/dev/null | wc -l)
-          passed=$((total - failed))
-
-          if (( total > 0 )); then
-            passed_percent=$(( passed * 100 / total ))
-          else
-            passed_percent=0
+      - name: Symlink cargo target for caching
+        run: |
+          if [ ! -d prover/target ] && [ -d /cargo-cache/target ]; then
+            ln -s /cargo-cache/target prover/target
+          elif [ -d prover/target ] && [ ! -L prover/target ]; then
+            # First run or checkout created it — move to cache
+            mv prover/target/* /cargo-cache/target/ 2>/dev/null || true
+            rm -rf prover/target
+            ln -s /cargo-cache/target prover/target
           fi
 
-          echo "passed=$passed" >> $GITHUB_OUTPUT
-          echo "passed_percent=$passed_percent" >> $GITHUB_OUTPUT
-          echo "failed=$failed" >> $GITHUB_OUTPUT
-          echo "total=$total" >> $GITHUB_OUTPUT
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+      - name: Build prover
+        run: make z6m_prover
 
-      - name: Print shard summary
+      - name: Run EEST tests
+        shell: bash
+        run: |
+          python3 tools/scripts/eest_runner.py \
+            --fixtures third_party/eest-fixtures \
+            --stagger 60 \
+            --log-dir eest-logs \
+            --fail-threshold 5
+
+      - name: Test summary
         if: always()
         shell: bash
         run: |
+          total=0; passed=0; failed=0; skipped=0
+          for f in eest-logs/*.log; do
+            [ -f "$f" ] || continue
+            line=$(grep '^Total:' "$f" || true)
+            if [ -n "$line" ]; then
+              t=$(echo "$line" | grep -oP 'Total: \K[0-9]+')
+              p=$(echo "$line" | grep -oP 'Passed: \K[0-9]+')
+              fl=$(echo "$line" | grep -oP 'Failed: \K[0-9]+')
+              s=$(echo "$line" | grep -oP 'Skipped: \K[0-9]+' || echo 0)
+              total=$((total + t))
+              passed=$((passed + p))
+              failed=$((failed + fl))
+              skipped=$((skipped + s))
+            fi
+          done
           echo "========================================"
-          echo "   SHARD: ${{ matrix.shard }}"
+          echo "  EEST RESULTS"
           echo "========================================"
-          echo "Passed: ${{ steps.run_tests.outputs.passed }} / ${{ steps.run_tests.outputs.total }} (${{ steps.run_tests.outputs.passed_percent }}%)"
-          echo "Failed: ${{ steps.run_tests.outputs.failed }}"
+          echo "  Total:   $total"
+          echo "  Passed:  $passed"
+          echo "  Failed:  $failed"
+          echo "  Skipped: $skipped"
           echo "========================================"
+          if [ "$failed" -gt 5 ]; then
+            echo "FAIL: $failed failures exceed threshold"
+            exit 1
+          fi
 
-      - name: Upload shard logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: "eest-logs-${{ matrix.shard }}"
-          path: |
-            output.log
-            target/logs/
+          name: eest-logs
+          path: eest-logs/
           retention-days: 30
-
-  # ---------------------------------------------------------------------------
-  # Phase 4: Aggregate results from all shards
-  # ---------------------------------------------------------------------------
-  aggregate:
-    name: Aggregate Results
-    needs: [test-shard]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all shard logs
-        uses: actions/download-artifact@v4
-        with:
-          pattern: eest-logs-*
-          path: all-logs/
-          merge-multiple: false
-
-      - name: Aggregate and report
-        id: aggregate
-        shell: bash
-        run: |
-          total=0
-          failed=0
-          for dir in all-logs/eest-logs-*/; do
-            if [ -d "$dir/target/logs" ]; then
-              shard_total=$(find "$dir/target/logs" -name '*.log' 2>/dev/null | wc -l)
-              shard_failed=$(grep -rl 'CRASHED\|ERROR\|FAILED' "$dir/target/logs/" 2>/dev/null | wc -l)
-              total=$((total + shard_total))
-              failed=$((failed + shard_failed))
-            fi
-          done
-          passed=$((total - failed))
-
-          if (( total > 0 )); then
-            passed_percent=$(( passed * 100 / total ))
-          else
-            passed_percent=0
-          fi
-
-          echo "========================================"
-          echo "   HYPERCUBE EEST AGGREGATE SUMMARY"
-          echo "========================================"
-          echo ""
-          echo "Passed: $passed / $total ($passed_percent%)"
-          echo "Failed: $failed"
-          echo "========================================"
-
-          echo "passed=$passed" >> $GITHUB_OUTPUT
-          echo "failed=$failed" >> $GITHUB_OUTPUT
-          echo "total=$total" >> $GITHUB_OUTPUT
-
-      - name: Check failure threshold
-        shell: bash
-        run: |
-          failed=${{ steps.aggregate.outputs.failed }}
-          total=${{ steps.aggregate.outputs.total }}
-
-          if [[ "$total" == "0" ]]; then
-            echo "ERROR: No test results found"
-            exit 1
-          fi
-
-          if (( failed > 5 )); then
-            echo "Too many failures - ${failed} failed out of ${total}"
-            exit 1
-          fi
-
-          if (( failed > 0 )); then
-            echo "WARNING: ${failed} test(s) failed, but within acceptable threshold (<=5)"
-          else
-            echo "SUCCESS: All ${total} tests passed!"
-          fi

@@ -2,7 +2,7 @@ TESTS_DIR := third_party/eest-fixtures/blockchain_tests/prague
 
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
-.PHONY: z6m_guest z6m_prover selftest tests
+.PHONY: z6m_guest z6m_prover selftest tests eest-prover-test
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -50,5 +50,5 @@ eest-blockchain-tests:
 	cmake --build build/eest
 	ctest --test-dir build/eest --parallel
 
-rv32im-eest-blockchain-tests:
-	cd qemu_runner && make rv32im-eest-blockchain-tests
+eest-prover-test: z6m_prover
+	prover/target/release/z6m_prover --test-service --test-dir third_party/eest-fixtures/blockchain_tests

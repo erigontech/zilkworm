@@ -444,7 +444,6 @@ uint64_t StateTransition::run() {
     bool any_skipped = false;
     const auto base_json = nlohmann::json::parse(json_str_);
     for (const auto& [name, test] : base_json.items()) {
-        sys_println(std::format("  {}:", name).c_str());
         const auto result = blockchain_test(test);
         if (result.failed != 0) {
             any_failed = true;
