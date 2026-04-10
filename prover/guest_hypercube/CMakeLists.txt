@@ -72,13 +72,14 @@ execute_process(
 get_filename_component(_LIBGCC_DIR "${_LIBGCC_FILE}" DIRECTORY)
 target_link_directories(z6m_guest PRIVATE "${_SYSROOT}/lib/${_MULTIDIR}" "${_LIBGCC_DIR}")
 
-# Link libraries (grouped to handle circular deps in static archives).
-# The group flags MUST be inside target_link_libraries so they wrap the libs.
+# Link libraries wrapped in a group to handle circular deps.
 target_link_libraries(z6m_guest PRIVATE
+    -Wl,--start-group
     silkworm_dev
     silkworm_core
     evmone
     blst::blst
+    -Wl,--end-group
     stdc++ c m gcc nosys
 )
 

@@ -2,6 +2,8 @@ TESTS_DIR := third_party/eest-fixtures/blockchain_tests/prague
 
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
+export PATH := $(CURDIR)/xpacks/.bin:$(PATH)
+
 .PHONY: z6m_guest z6m_prover selftest tests
 
 clean: 
