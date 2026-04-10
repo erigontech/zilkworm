@@ -6,7 +6,10 @@ use clap::{Parser, Subcommand};
 use eyre::{bail, eyre, Result};
 use riscv_transpiler::abstractions::non_determinism::QuasiUARTSource;
 use riscv_transpiler::ir::{preprocess_bytecode, FullMachineDecoderConfig};
-use riscv_transpiler::vm::{DelegationsCounters, RamWithRomRegion, SimpleTape, State, VM};
+use riscv_transpiler::vm::{
+    DelegationsCounters, FlamegraphConfig, RamWithRomRegion, SimpleTape, State,
+    VmFlamegraphProfiler, VM,
+};
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -133,6 +136,10 @@ enum Command {
         /// Input file is an EEST JSON test fixture (not unified RLP)
         #[arg(long, action = clap::ArgAction::SetTrue)]
         is_test: bool,
+
+        /// Generate a flamegraph SVG at this path (uses interpreted mode, slower)
+        #[arg(long)]
+        flamegraph: Option<PathBuf>,
     },
 
     /// Precompute circuit setup (cached to disk for reuse by prove/service)
@@ -287,6 +294,7 @@ fn execute_block(
     block_number: u64,
     max_cycles: usize,
     is_test: bool,
+    flamegraph_path: Option<&Path>,
 ) -> Result<ExecutionLog> {
     if !input_path.exists() {
         bail!(
@@ -301,6 +309,7 @@ fn execute_block(
 
     let bin_path = format!("{}.bin", guest_base.display());
     let text_path = format!("{}.text", guest_base.display());
+    let elf_path = format!("{}.elf", guest_base.display());
 
     let (_, binary_u32) = execution_utils::setups::read_binary(Path::new(&bin_path));
     let (_, text_u32) = execution_utils::setups::read_binary(Path::new(&text_path));
@@ -317,14 +326,36 @@ fn execute_block(
     let mut non_determinism_source = source;
 
     let wall_start = Instant::now();
-    let finished = VM::<DelegationsCounters>::run_basic_unrolled(
-        &mut state,
-        &mut ram,
-        &mut (),
-        &tape,
-        max_cycles,
-        &mut non_determinism_source,
-    );
+    let finished = if let Some(fg_path) = flamegraph_path {
+        let config = FlamegraphConfig::new(PathBuf::from(&elf_path), fg_path.to_path_buf());
+        let mut profiler = VmFlamegraphProfiler::new(config)
+            .map_err(|e| eyre!("flamegraph init: {e}"))?;
+        let result = VM::<DelegationsCounters>::run_basic_unrolled_with_flamegraph(
+            &mut state,
+            &mut ram,
+            &mut (),
+            &tape,
+            max_cycles,
+            &mut non_determinism_source,
+            &mut profiler,
+        )
+        .map_err(|e| eyre!("flamegraph execution: {e}"))?;
+        let stats = profiler.stats();
+        eprintln!(
+            "Flamegraph: {} samples collected / {} total, written to {}",
+            stats.samples_collected, stats.samples_total, fg_path.display()
+        );
+        result
+    } else {
+        VM::<DelegationsCounters>::run_basic_unrolled(
+            &mut state,
+            &mut ram,
+            &mut (),
+            &tape,
+            max_cycles,
+            &mut non_determinism_source,
+        )
+    };
     let wall_elapsed = wall_start.elapsed();
 
     let cycles = (state.timestamp - riscv_transpiler::common_constants::INITIAL_TIMESTAMP)
@@ -425,7 +456,7 @@ fn run_test_service(
             format_timestamp(),
             block_number
         );
-        match execute_block(guest_base, &input_path, block_number, max_cycles, false) {
+        match execute_block(guest_base, &input_path, block_number, max_cycles, false, None) {
             Ok(log) => {
                 println!(
                     "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={}",
@@ -535,6 +566,7 @@ async fn main() -> Result<()> {
             file_name,
             data_dir,
             is_test,
+            flamegraph,
         }) => {
             let data_dir = data_dir.unwrap_or_else(|| args.data_dir.clone());
             let input_path = resolve_input_path(block_number, file_name, &data_dir)?;
@@ -544,7 +576,14 @@ async fn main() -> Result<()> {
                 block_number_from_filename(&input_path)
             };
 
-            let log = execute_block(&guest_base, &input_path, block_num, args.cycles, is_test)?;
+            let log = execute_block(
+                &guest_base,
+                &input_path,
+                block_num,
+                args.cycles,
+                is_test,
+                flamegraph.as_deref(),
+            )?;
 
             println!(
                 "Executed block {} (gas_used={}, cycles={}, time={:.2}s, freq={:.2} GHz, reached_end={})",

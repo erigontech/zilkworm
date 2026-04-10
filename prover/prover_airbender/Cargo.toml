@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Core VM (always needed for execution)
-riscv_transpiler = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", features = ["delegation"] }
+riscv_transpiler = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", features = ["delegation", "flamegraph"] }
 
 # Proving dependencies
 execution_utils = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", default-features = false, features = ["prover", "security_80", "verifier_binaries"] }
