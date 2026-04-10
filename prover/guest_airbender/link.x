@@ -75,17 +75,15 @@ SECTIONS
     _sstack = .;
   } > REGION_STACK
 
-  .rodata : ALIGN(4)
+  .rodata : ALIGN(32)
   {
     _sirodata = LOADADDR(.rodata);
     _srodata = .;
     *(.srodata .srodata.*);
     *(.rodata .rodata.*);
 
-    /* 4-byte align the end (VMA) of this section.
-       This is required by LLD to ensure the LMA of the following
-       section will have the correct alignment. */
-    . = ALIGN(4);
+    /* 32-byte align the end for BigInt CSR compatibility. */
+    . = ALIGN(32);
 
     _erodata = .;
   } > REGION_RODATA AT > REGION_RODATAINIT :rodata
