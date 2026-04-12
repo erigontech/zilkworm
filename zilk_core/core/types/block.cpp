@@ -37,9 +37,13 @@ static intx::uint256 fake_exponential(const intx::uint256& factor,
                                       const intx::uint256& denominator) {
     intx::uint256 output{0};
     intx::uint256 numerator_accum{factor * denominator};
+    // Optimization: denominator fits in uint64_t for known blob gas params.
+    // Using uint64_t divisor avoids expensive uint256 * uint256 multiplication
+    // for (denominator * i) and enables the fast udivrem_by1 division path.
+    const auto denom64 = static_cast<uint64_t>(denominator);
     for (unsigned i{1}; numerator_accum > 0; ++i) {
         output += numerator_accum;
-        numerator_accum = (numerator_accum * numerator) / (denominator * i);
+        numerator_accum = (numerator_accum * numerator) / (denom64 * uint64_t(i));
     }
     return output / denominator;
 }
