@@ -193,6 +193,54 @@ pub fn save_setup(cache: &SetupCache, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Save the unified-layer setup and layouts in the format expected by the
+/// matter-labs/ethereum-prover WASM verifier.
+///
+/// The verifier (proof_verifier_js/wasm/src/lib.rs) expects:
+///   setup.bin  = bincode-2.x(standard) of UnrolledProgramSetup
+///   layout.bin = bincode-2.x(standard) of CompiledCircuitsSet
+///
+/// Both are decoded with `bincode::serde::decode_from_slice(.., bincode::config::standard())`.
+/// Only the unified recursion layer is used by the WASM verifier
+/// (`verify_proof_in_unified_layer(.., input_is_unrolled=false)`).
+#[cfg(feature = "gpu")]
+pub fn save_for_wasm_verifier(cache: &SetupCache, dir: &Path) -> Result<()> {
+    use bincode2::config;
+    use bincode2::serde::encode_to_vec;
+
+    let unified = cache
+        .level_data
+        .get(&UnrolledProverLevel::RecursionUnified)
+        .ok_or_else(|| eyre!("setup cache does not contain unified recursion level"))?;
+
+    std::fs::create_dir_all(dir)
+        .map_err(|e| eyre!("failed to create {}: {}", dir.display(), e))?;
+
+    let setup_path = dir.join("setup.bin");
+    let setup_bytes = encode_to_vec(&unified.setup, config::standard())
+        .map_err(|e| eyre!("failed to encode UnrolledProgramSetup: {}", e))?;
+    std::fs::write(&setup_path, &setup_bytes)
+        .map_err(|e| eyre!("failed to write {}: {}", setup_path.display(), e))?;
+    log::info!(
+        "WASM verifier setup saved to {} ({:.1} MB)",
+        setup_path.display(),
+        setup_bytes.len() as f64 / 1e6
+    );
+
+    let layout_path = dir.join("layout.bin");
+    let layout_bytes = encode_to_vec(&unified.compiled_layouts, config::standard())
+        .map_err(|e| eyre!("failed to encode CompiledCircuitsSet: {}", e))?;
+    std::fs::write(&layout_path, &layout_bytes)
+        .map_err(|e| eyre!("failed to write {}: {}", layout_path.display(), e))?;
+    log::info!(
+        "WASM verifier layout saved to {} ({:.1} MB)",
+        layout_path.display(),
+        layout_bytes.len() as f64 / 1e6
+    );
+
+    Ok(())
+}
+
 /// Load a setup cache from disk.
 #[cfg(feature = "gpu")]
 pub fn load_setup(path: &Path) -> Result<SetupCache> {
@@ -261,13 +309,23 @@ pub fn gpu_prove(
     prover.prove(batch_id, source)
 }
 
-/// Serialize proof to bincode (compact binary format).
-pub fn serialize_proof_to_file<T: serde::Serialize>(el: &T, path: &Path) {
-    let data = bincode::serialize(el).expect("failed to serialize proof");
-    std::fs::write(path, &data).expect("failed to write proof");
+/// Serialize proof in the format expected by the matter-labs WASM verifier:
+/// gzip(bincode 2.x standard config). This is what the
+/// proof_verifier_js WASM verifier's `deserialize_proof_bytes` consumes,
+/// and what ethproofs.org / dApps that use that verifier expect.
+pub fn serialize_proof_to_bytes<T: serde::Serialize>(el: &T) -> Vec<u8> {
+    use std::io::Write;
+    let bin2 = bincode2::serde::encode_to_vec(el, bincode2::config::standard())
+        .expect("failed to encode proof (bincode 2.x)");
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&bin2).expect("failed to gzip proof");
+    enc.finish().expect("failed to finish gzip stream")
 }
 
-/// Serialize proof to bincode bytes (for ethproofs submission).
-pub fn serialize_proof_to_bytes<T: serde::Serialize>(el: &T) -> Vec<u8> {
-    bincode::serialize(el).expect("failed to serialize proof")
+/// Serialize proof to disk in the same gzipped-bincode-2 format as
+/// `serialize_proof_to_bytes` so `proof.bin` files are directly verifiable
+/// by the standard WASM verifier without any conversion step.
+pub fn serialize_proof_to_file<T: serde::Serialize>(el: &T, path: &Path) {
+    let data = serialize_proof_to_bytes(el);
+    std::fs::write(path, &data).expect("failed to write proof");
 }

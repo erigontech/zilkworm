@@ -12,6 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use url::Url;
@@ -19,6 +20,15 @@ use z6m_common::{fetch_block_and_witness, FetchRequest};
 
 #[cfg(feature = "gpu")]
 use execution_utils::unrolled_gpu::UnrolledProver;
+
+/// Capacity of the fetcher → prover-worker work queue.
+///
+/// At most this many pre-fetched blocks can sit on disk (their unified-RLP
+/// files already written) before the fetcher backpressures on
+/// `tx.send().await`. Raising this lets the fetcher get further ahead when
+/// the GPU is the bottleneck; each in-flight item costs one unified-RLP
+/// file under `data_dir`.
+const PROVER_QUEUE_CAPACITY: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct ServiceConfig {
@@ -49,9 +59,22 @@ pub struct ProvingLog {
     pub message: String,
 }
 
+/// One unit of work handed from the fetcher to the prover worker.
+///
+/// The unified RLP is already on disk at `unified_path` when the item is
+/// enqueued; only the path travels through the channel to keep queue
+/// memory bounded.
+#[derive(Debug)]
+struct WorkItem {
+    block_number: u64,
+    unified_path: PathBuf,
+    execute: bool,
+    prove: bool,
+}
+
 pub struct AirbenderService {
     config: ServiceConfig,
-    eth_client: Option<EthproofsClient>,
+    eth_client: Option<Arc<EthproofsClient>>,
     #[cfg(feature = "gpu")]
     gpu_prover: Option<Arc<UnrolledProver>>,
     /// Hex-encoded end_params from the highest recursion level setup.
@@ -67,7 +90,10 @@ impl AirbenderService {
             bail!("Guest binary not found at {}", bin_path);
         }
 
-        let eth_client = config.ethproofs.clone().map(EthproofsClient::new);
+        let eth_client = config
+            .ethproofs
+            .clone()
+            .map(|c| Arc::new(EthproofsClient::new(c)));
 
         // Initialize GPU prover once — reused for all blocks
         #[cfg(feature = "gpu")]
@@ -119,8 +145,47 @@ impl AirbenderService {
             .to_string()
     }
 
-    pub async fn run(&self) -> Result<()> {
-        info!("Starting airbender service");
+    /// Run the service.
+    ///
+    /// Topology:
+    /// - A **fetcher** task walks block numbers, pulls each one off the RPC,
+    ///   writes the unified RLP to disk, and pushes a `WorkItem` into a
+    ///   bounded channel. It fires `ethproofs.queued(block)` as a
+    ///   background `tokio::spawn` so the fetcher never waits on HTTP.
+    /// - A **prover worker** task drains the channel, running execute
+    ///   and/or prove for each item. `ethproofs.proving(block)` and
+    ///   `.proved(..)` are both spawned background tasks so the worker
+    ///   immediately picks up the next item once the GPU returns.
+    ///
+    /// Fetching is therefore independent of the GPU: while a proof is
+    /// running, the fetcher can pre-queue up to `PROVER_QUEUE_CAPACITY`
+    /// blocks. If the fetcher gets ahead, `tx.send().await` backpressures
+    /// naturally.
+    pub async fn run(self) -> Result<()> {
+        info!("Starting airbender service (pipelined fetch / prove)");
+        let me = Arc::new(self);
+        let (tx, rx) = mpsc::channel::<WorkItem>(PROVER_QUEUE_CAPACITY);
+
+        let fetcher = tokio::spawn({
+            let me = Arc::clone(&me);
+            async move { me.fetcher_loop(tx).await }
+        });
+        let worker = tokio::spawn({
+            let me = Arc::clone(&me);
+            async move { me.prover_worker_loop(rx).await }
+        });
+
+        let (fr, wr) = tokio::join!(fetcher, worker);
+        fr.map_err(|e| eyre::eyre!("fetcher task panicked: {e}"))??;
+        wr.map_err(|e| eyre::eyre!("prover worker task panicked: {e}"))??;
+        Ok(())
+    }
+
+    /// Walk blocks forward, fetch each one, and enqueue work items.
+    ///
+    /// Never blocks on proving. Ethproofs `queued` is fired as a detached
+    /// background task so a slow HTTP response can't stall the fetch loop.
+    async fn fetcher_loop(self: Arc<Self>, tx: mpsc::Sender<WorkItem>) -> Result<()> {
         let url = Url::parse(&self.config.rpc_url)?;
         let provider = ProviderBuilder::new().connect_http(url);
 
@@ -135,13 +200,12 @@ impl AirbenderService {
                 }
             }
         };
+        info!("Fetcher starting from block {}", next_block);
 
-        info!("Service starting from block {}", next_block);
-
-        loop {
+        'outer: loop {
             let latest = if let Some(end) = self.config.end_block {
                 if next_block > end {
-                    break Ok(());
+                    break 'outer;
                 }
                 end
             } else {
@@ -156,94 +220,157 @@ impl AirbenderService {
             };
 
             for block_number in next_block..=latest {
-                if let Err(err) = self.process_block(block_number).await {
-                    error!(%block_number, error = %err, "Failed to process block");
+                let should_prove = matches_interval(self.config.prove_every, block_number);
+                let should_execute =
+                    matches_interval(self.config.execute_every, block_number) && !should_prove;
+                let should_anything =
+                    should_prove || should_execute || self.config.save_all_responses;
+
+                if !should_anything {
+                    continue;
+                }
+
+                println!(
+                    "[{}] Fetching block {}",
+                    Self::format_timestamp(),
+                    block_number
+                );
+
+                let outcome = match fetch_block_and_witness(FetchRequest {
+                    rpc_url: &self.config.rpc_url,
+                    block_number: Some(block_number),
+                    data_dir: self.config.data_dir.clone(),
+                    save_all_responses: self.config.save_all_responses,
+                    build_eth_test: false,
+                    geth: false,
+                })
+                .await
+                {
+                    Ok(o) => o,
+                    Err(err) => {
+                        error!(%block_number, error = %err, "Failed to fetch block");
+                        continue;
+                    }
+                };
+
+                // Fire-and-forget "queued" state transition. We fire this at
+                // enqueue time (not at proving start) so it accurately
+                // reflects that the block is now in the prover's queue.
+                if should_prove {
+                    if let Some(c) = &self.eth_client {
+                        let c = Arc::clone(c);
+                        let bn = block_number;
+                        tokio::spawn(async move { c.queued(bn).await; });
+                    }
+                }
+
+                let item = WorkItem {
+                    block_number,
+                    unified_path: outcome.unified_rlp_path,
+                    execute: should_execute,
+                    prove: should_prove,
+                };
+
+                // Backpressure: if the GPU is slower than fetching, the queue
+                // fills and we wait here. An Err means the worker dropped the
+                // receiver (panicked or exited) — stop fetching.
+                if tx.send(item).await.is_err() {
+                    warn!("Prover worker dropped the queue; fetcher exiting");
+                    return Ok(());
                 }
             }
 
             next_block = latest + 1;
             sleep(Duration::from_secs(2)).await;
         }
+
+        // Drop tx so the worker can drain and exit cleanly.
+        drop(tx);
+        info!("Fetcher exiting (end_block reached)");
+        Ok(())
     }
 
-    async fn process_block(&self, block_number: u64) -> Result<()> {
-        let should_prove = matches_interval(self.config.prove_every, block_number);
-        let should_execute =
-            matches_interval(self.config.execute_every, block_number) && !should_prove;
-        let should_anything =
-            should_prove || should_execute || self.config.save_all_responses;
-
-        if !should_anything {
-            return Ok(());
-        }
-
-        println!(
-            "[{}] Fetching block {}",
-            Self::format_timestamp(),
-            block_number
-        );
-
-        let outcome = fetch_block_and_witness(FetchRequest {
-            rpc_url: &self.config.rpc_url,
-            block_number: Some(block_number),
-            data_dir: self.config.data_dir.clone(),
-            save_all_responses: self.config.save_all_responses,
-            build_eth_test: false,
-            geth: false,
-        })
-        .await?;
-
-        let unified_path = outcome.unified_rlp_path;
-
-        if should_execute {
-            println!(
-                "[{}] Executing block {}",
-                Self::format_timestamp(),
-                block_number
-            );
-            if let Err(err) = self.execute_block(block_number, &unified_path) {
-                error!(%block_number, error = %err, "Execution failed");
-            }
-        }
-
-        if should_prove {
-            println!(
-                "[{}] Proving block {}",
-                Self::format_timestamp(),
-                block_number
-            );
-
-            if let Some(client) = &self.eth_client {
-                client.queued(block_number).await;
-            }
-
-            match self.prove_block(block_number, &unified_path).await {
-                Ok(log) => {
-                    println!(
-                        "[{}] Proved block {} gas_used={} cycles={} proofs={} time={}ms",
-                        Self::format_timestamp(),
-                        log.block_number,
-                        log.gas_used,
-                        log.cycle_count,
-                        log.num_proofs,
-                        log.proving_millis,
-                    );
-                }
-                Err(err) => {
-                    error!(%block_number, error = %err, "Proving failed");
-                    let fail_log = ProvingLog {
-                        block_number,
-                        gas_used: 0,
-                        cycle_count: 0,
-                        num_proofs: 0,
-                        proving_millis: 0,
-                        message: format!("FAILED: {}", err),
-                    };
-                    let _ = self.persist_proving_log(&fail_log);
+    /// Drain `WorkItem`s and run them against the shared GPU prover.
+    ///
+    /// Single-consumer by design: there is only one GPU. Ethproofs state
+    /// transitions (`proving`, `proved`) are both spawned as detached tasks
+    /// so the worker returns to `rx.recv()` immediately after the GPU
+    /// yields the proof.
+    async fn prover_worker_loop(
+        self: Arc<Self>,
+        mut rx: mpsc::Receiver<WorkItem>,
+    ) -> Result<()> {
+        while let Some(item) = rx.recv().await {
+            if item.execute {
+                println!(
+                    "[{}] Executing block {}",
+                    Self::format_timestamp(),
+                    item.block_number
+                );
+                if let Err(err) = self.execute_block(item.block_number, &item.unified_path) {
+                    error!(block = item.block_number, error = %err, "Execution failed");
                 }
             }
+
+            if item.prove {
+                println!(
+                    "[{}] Proving block {}",
+                    Self::format_timestamp(),
+                    item.block_number
+                );
+
+                // Fire-and-forget "proving" state transition.
+                if let Some(c) = &self.eth_client {
+                    let c = Arc::clone(c);
+                    let bn = item.block_number;
+                    tokio::spawn(async move { c.proving(bn).await; });
+                }
+
+                match self.prove_inner(item.block_number, &item.unified_path).await {
+                    Ok((proof_bytes, log)) => {
+                        println!(
+                            "[{}] Proved block {} gas_used={} cycles={} proofs={} time={}ms",
+                            Self::format_timestamp(),
+                            log.block_number,
+                            log.gas_used,
+                            log.cycle_count,
+                            log.num_proofs,
+                            log.proving_millis,
+                        );
+
+                        // Fire-and-forget "proved" submission. proof_bytes is
+                        // moved into the task so the worker can immediately
+                        // pick up the next item.
+                        if let Some(c) = &self.eth_client {
+                            let c = Arc::clone(c);
+                            let bn = log.block_number;
+                            let cycles = log.cycle_count;
+                            let ms = log.proving_millis;
+                            let vid = self.verifier_id.clone();
+                            tokio::spawn(async move {
+                                c.proved(&proof_bytes, bn, cycles, ms, &vid).await;
+                            });
+                        }
+
+                        let _ = self.persist_proving_log(&log);
+                    }
+                    Err(err) => {
+                        error!(block = item.block_number, error = %err, "Proving failed");
+                        let fail_log = ProvingLog {
+                            block_number: item.block_number,
+                            gas_used: 0,
+                            cycle_count: 0,
+                            num_proofs: 0,
+                            proving_millis: 0,
+                            message: format!("FAILED: {}", err),
+                        };
+                        let _ = self.persist_proving_log(&fail_log);
+                    }
+                }
+            }
         }
 
+        info!("Prover worker exiting (queue closed)");
         Ok(())
     }
 
@@ -296,22 +423,24 @@ impl AirbenderService {
         Ok(())
     }
 
-    async fn prove_block(
+    /// Run the GPU proof for a single block, write `proof.bin`, and return
+    /// the serialized proof bytes plus a `ProvingLog` ready for persistence.
+    ///
+    /// Does **not** touch ethproofs — the caller is responsible for
+    /// spawning any state-transition HTTP calls in the background.
+    async fn prove_inner(
         &self,
         block_number: u64,
         input_path: &Path,
-    ) -> Result<ProvingLog> {
+    ) -> Result<(Vec<u8>, ProvingLog)> {
         let oracle = crate::build_oracle(input_path, false)?;
-
-        if let Some(client) = &self.eth_client {
-            client.proving(block_number).await;
-        }
-
         let start = Instant::now();
 
         #[cfg(feature = "gpu")]
         {
-            let prover = self.gpu_prover.as_ref()
+            let prover = self
+                .gpu_prover
+                .as_ref()
                 .ok_or_else(|| eyre::eyre!("GPU prover not initialized (--gpu not set?)"))?
                 .clone();
 
@@ -323,7 +452,7 @@ impl AirbenderService {
 
             let proving_millis = start.elapsed().as_millis() as u64;
 
-            // Write proof
+            // Write proof.bin to output_dir/{block}/proof.bin
             let block_dir = self.config.output_dir.join(block_number.to_string());
             fs::create_dir_all(&block_dir)?;
             crate::prove::serialize_proof_to_file(&proof, &block_dir.join("proof.bin"));
@@ -332,20 +461,7 @@ impl AirbenderService {
             let (family_proofs, init_proofs, delegation_proofs) = proof.get_proof_counts();
             let total_proofs = family_proofs + init_proofs + delegation_proofs;
 
-            // Post to ethproofs
-            if let Some(client) = &self.eth_client {
-                let proof_bytes = crate::prove::serialize_proof_to_bytes(&proof);
-                client
-                    .proved(
-                        &proof_bytes,
-                        block_number,
-                        cycles,
-                        proving_millis,
-                        &self.verifier_id,
-                    )
-                    .await;
-            }
-
+            let proof_bytes = crate::prove::serialize_proof_to_bytes(&proof);
             let log = ProvingLog {
                 block_number,
                 gas_used,
@@ -354,11 +470,11 @@ impl AirbenderService {
                 proving_millis,
                 message: String::from("Success"),
             };
-            self.persist_proving_log(&log)?;
-            Ok(log)
+            Ok((proof_bytes, log))
         }
         #[cfg(not(feature = "gpu"))]
         {
+            let _ = (input_path, block_number, start);
             bail!("Compiled without GPU support. Rebuild with --features gpu");
         }
     }

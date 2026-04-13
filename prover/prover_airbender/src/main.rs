@@ -619,6 +619,15 @@ async fn main() -> Result<()> {
                 fs::create_dir_all(&setup_dir)?;
                 let setup_path = setup_dir.join("setup.bin");
                 prove::save_setup(&cache, &setup_path)?;
+
+                // If we computed up to Unified, also dump WASM-verifier-compatible
+                // setup.bin + layout.bin (bincode 2.x standard config, unified layer only).
+                if matches!(until, prove::ProvingLimit::Unified) {
+                    let wasm_dir = setup_dir.join("wasm");
+                    if let Err(e) = prove::save_for_wasm_verifier(&cache, &wasm_dir) {
+                        eprintln!("[warn] WASM verifier files not written: {e}");
+                    }
+                }
             }
             #[cfg(not(feature = "gpu"))]
             {
