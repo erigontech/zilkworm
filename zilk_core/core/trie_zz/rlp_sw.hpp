@@ -42,6 +42,41 @@ inline void clear_static_buffer() {
 inline const Bytes empty{silkworm::rlp::kEmptyStringCode};
 
 
+/// Fast count of top-level RLP items in an already-decoded list payload.
+/// Returns the count, capped at `limit+1` (i.e. stops early once we know
+/// the count exceeds `limit`).  This lets unfold_node_from_rlp cheaply
+/// distinguish a branch (17 items) from an extension/leaf (2 items).
+inline unsigned rlp_item_count(const uint8_t* p, const uint8_t* end, unsigned limit) noexcept {
+    unsigned n = 0;
+    while (p < end && n <= limit) {
+        const uint8_t b = *p;
+        if (b < 0x80) {
+            // Single-byte value.
+            ++p;
+        } else if (b <= 0xB7) {
+            // Short string: 0-55 bytes payload.
+            p += 1 + (b - 0x80);
+        } else if (b <= 0xBF) {
+            // Long string header.
+            unsigned ll = b - 0xB7;
+            size_t pl = 0;
+            for (unsigned j = 0; j < ll; ++j) pl = (pl << 8) | p[1 + j];
+            p += 1 + ll + pl;
+        } else if (b <= 0xF7) {
+            // Short list.
+            p += 1 + (b - 0xC0);
+        } else {
+            // Long list header.
+            unsigned ll = b - 0xF7;
+            size_t pl = 0;
+            for (unsigned j = 0; j < ll; ++j) pl = (pl << 8) | p[1 + j];
+            p += 1 + ll + pl;
+        }
+        ++n;
+    }
+    return n;
+}
+
 inline size_t hp_size(size_t nibbles) noexcept { return 1 + ((nibbles + 1) >> 1); }
 
 inline uint8_t* encode_hp_path(uint8_t* out, const uint8_t* nib, size_t n, bool leaf) noexcept {

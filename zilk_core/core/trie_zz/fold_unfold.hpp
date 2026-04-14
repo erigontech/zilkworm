@@ -40,18 +40,21 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
     }
     auto list{payload.substr(0, hh->payload_length)};
 
-    // Try branch first: 17 concatenated items
-    // To distinguish: we need to attempt decoding as (17 strings). If it fails, try (2 items).
-    // A quick heuristic: count inner elements by walking; but we have a minimal reader—decode each shape directly.
+    // Fast peek: count top-level items (capped at 3) to distinguish branch (17)
+    // from extension/leaf (2).  This avoids constructing a ~540-byte BranchNode
+    // on the stack when the node is an extension or leaf.
+    const unsigned item_count = rlp_item_count(list.data(), list.data() + list.size(), 2);
 
-    // Try as branch:
-    {
+    if (item_count > 2) {
+        // Branch node (17 items).
         BranchNode tmp{};
         if (decode_branch(list, tmp)) {
             return insert_line(parent_slot_index, parent_depth, std::move(tmp));
         }
+        return false;  // malformed branch
     }
-    // Else extension/leaf:
+
+    // Extension or leaf (2 items).
     bool is_leaf = false;
     std::array<uint8_t, 64> path;
     uint8_t plen = 0;
