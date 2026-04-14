@@ -76,6 +76,44 @@ inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, 
     return true;
 }
 
+// Fast skip of a single RLP item.  Returns pointer past the item,
+// or nullptr on malformed/truncated input.  Works for both string
+// and list items (we just need the total envelope size).
+inline const uint8_t* rlp_skip_item(const uint8_t* p, const uint8_t* end) noexcept {
+    if (p >= end) [[unlikely]] return nullptr;
+    const uint8_t b = *p;
+    if (b < 0x80) {           // single byte
+        return p + 1;
+    } else if (b <= 0xb7) {   // short string  (0-55 bytes)
+        size_t len = b - 0x80;
+        return (p + 1 + len <= end) ? p + 1 + len : nullptr;
+    } else if (b <= 0xbf) {   // long string
+        unsigned ll = b - 0xb7;
+        if (p + 1 + ll > end) return nullptr;
+        size_t len = 0;
+        for (unsigned j = 0; j < ll; ++j) len = (len << 8) | p[1 + j];
+        return (p + 1 + ll + len <= end) ? p + 1 + ll + len : nullptr;
+    } else if (b <= 0xf7) {   // short list  (0-55 bytes payload)
+        size_t len = b - 0xc0;
+        return (p + 1 + len <= end) ? p + 1 + len : nullptr;
+    } else {                   // long list
+        unsigned ll = b - 0xf7;
+        if (p + 1 + ll > end) return nullptr;
+        size_t len = 0;
+        for (unsigned j = 0; j < ll; ++j) len = (len << 8) | p[1 + j];
+        return (p + 1 + ll + len <= end) ? p + 1 + ll + len : nullptr;
+    }
+}
+
+// Quick check: does this RLP list payload contain exactly 2 items?
+// If so, it's an extension or leaf node; otherwise assume branch (17).
+inline bool rlp_is_two_item_list(const uint8_t* p, const uint8_t* end) noexcept {
+    const uint8_t* after1 = rlp_skip_item(p, end);
+    if (!after1) return false;
+    const uint8_t* after2 = rlp_skip_item(after1, end);
+    return after2 == end;  // exactly 2 items => ext/leaf
+}
+
 inline const Bytes& encode_branch(const BranchNode& b) {
     if (b.mask == 0) {
         return empty;
