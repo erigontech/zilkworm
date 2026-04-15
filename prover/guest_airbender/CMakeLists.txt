@@ -46,6 +46,13 @@ target_include_directories(z6m_guest SYSTEM PRIVATE
 # ======================================
 
 
+# Prevent GCC/LTO from pattern-matching our custom memcpy/memmove/memset
+# loops back into library calls.  Also compile without LTO so the strong
+# symbol definition survives into the final link and overrides newlib.
+set_source_files_properties(src/mem_builtins.c PROPERTIES
+    COMPILE_OPTIONS "-fno-tree-loop-distribute-patterns;-fno-lto"
+)
+
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
 target_compile_options(z6m_guest PRIVATE
     # -ffreestanding

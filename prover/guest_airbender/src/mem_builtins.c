@@ -1,14 +1,27 @@
 // Optimized memory builtins for rv32im (Airbender zkVM guest).
 //
-// Uses word-aligned (uint32_t) loads/stores for the bulk of copies,
-// with byte-by-byte head/tail handling for alignment.  Compiled with
-// -fno-builtin so GCC will NOT transform these back into library calls.
+// Uses CSR MEMCOPY (0x7CA) for 32-byte aligned chunks when possible,
+// falling back to word-aligned (uint32_t) loads/stores.
+// Compiled with -fno-builtin -fno-tree-loop-distribute-patterns so GCC
+// will NOT transform these back into library calls.
 
 #include "stddef.h"
 #include "stdint.h"
 
+// CSR MEMCOPY: copies 32 bytes from [x11] to [x10] in ~4 instructions.
+// Both src and dst must be 4-byte aligned (32-byte alignment not required
+// for correctness, but gives best performance).
+static inline __attribute__((always_inline))
+void csr_memcopy32(void *dst, const void *src) {
+    register uintptr_t a0 __asm__("x10") = (uintptr_t)dst;
+    register uintptr_t a1 __asm__("x11") = (uintptr_t)src;
+    register uint32_t  a2 __asm__("x12") = 0x80;
+    __asm__ __volatile__("csrrw x0, 0x7CA, x0"
+        : "+r"(a2) : "r"(a0), "r"(a1) : "memory");
+}
+
 // ---------------------------------------------------------------------------
-// memcpy — non-overlapping copy, word-aligned fast path
+// memcpy — non-overlapping copy, CSR MEMCOPY + word-aligned fast path
 // ---------------------------------------------------------------------------
 void *memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dest;
@@ -27,25 +40,21 @@ void *memcpy(void *dest, const void *src, size_t n) {
     while (head--)
         *d++ = *s++;
 
-    // If source is also aligned, use word copies.
+    // If source is also aligned, use word copies (and CSR MEMCOPY when
+    // both src+dst are 32-byte aligned).
     if (((uintptr_t)s & 3) == 0) {
+        // CSR MEMCOPY requires 32-byte alignment on both src and dst.
+        if (n >= 32 && (((uintptr_t)d | (uintptr_t)s) & 31) == 0) {
+            while (n >= 32) {
+                csr_memcopy32(d, s);
+                d += 32;
+                s += 32;
+                n -= 32;
+            }
+        }
+
         uint32_t *dw = (uint32_t *)d;
         const uint32_t *sw = (const uint32_t *)s;
-
-        // Unrolled: 4 words = 16 bytes per iteration.
-        while (n >= 16) {
-            uint32_t w0 = sw[0];
-            uint32_t w1 = sw[1];
-            uint32_t w2 = sw[2];
-            uint32_t w3 = sw[3];
-            dw[0] = w0;
-            dw[1] = w1;
-            dw[2] = w2;
-            dw[3] = w3;
-            dw += 4;
-            sw += 4;
-            n -= 16;
-        }
 
         // Remaining whole words.
         while (n >= 4) {
@@ -161,8 +170,11 @@ void *memmove(void *dest, const void *src, size_t n) {
     return dest;
 }
 
+// 32-byte aligned zero buffer for CSR MEMCOPY-based bulk zeroing.
+static const uint32_t __attribute__((aligned(32))) memset_zeros[8] = {0};
+
 // ---------------------------------------------------------------------------
-// memset — word-at-a-time fill
+// memset — CSR MEMCOPY for zero-fill, word-at-a-time for other fills
 // ---------------------------------------------------------------------------
 void *memset(void *dest, int c, size_t n) {
     unsigned char *d = (unsigned char *)dest;
@@ -175,16 +187,26 @@ void *memset(void *dest, int c, size_t n) {
         return dest;
     }
 
-    // Replicate byte into a 32-bit word: 0xAB -> 0xABABABAB.
-    uint32_t word = (uint32_t)byte;
-    word |= word << 8;
-    word |= word << 16;
-
     // Align destination to 4-byte boundary.
     size_t head = (4 - ((uintptr_t)d & 3)) & 3;
     n -= head;
     while (head--)
         *d++ = byte;
+
+    // Zero-fill fast path: use CSR MEMCOPY from zero buffer (32 bytes/call).
+    // Requires 32-byte alignment on dst (src is static and always aligned).
+    if (byte == 0 && ((uintptr_t)d & 31) == 0) {
+        while (n >= 32) {
+            csr_memcopy32(d, memset_zeros);
+            d += 32;
+            n -= 32;
+        }
+    }
+
+    // Replicate byte into a 32-bit word: 0xAB -> 0xABABABAB.
+    uint32_t word = (uint32_t)byte;
+    word |= word << 8;
+    word |= word << 16;
 
     uint32_t *dw = (uint32_t *)d;
 
