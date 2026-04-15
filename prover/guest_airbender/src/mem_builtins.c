@@ -27,6 +27,25 @@ void *memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
 
+    // Fast path: exactly 32 bytes, both 4-byte aligned (uint256/bytes32 copies).
+    // Avoids all alignment checks — just 8 unrolled word copies.
+    if (n == 32 && (((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
+        uint32_t *dw = (uint32_t *)d;
+        const uint32_t *sw = (const uint32_t *)s;
+        dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
+        dw[4] = sw[4]; dw[5] = sw[5]; dw[6] = sw[6]; dw[7] = sw[7];
+        return dest;
+    }
+
+    // Fast path: exactly 20 bytes, both 4-byte aligned (address copies).
+    if (n == 20 && (((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
+        uint32_t *dw = (uint32_t *)d;
+        const uint32_t *sw = (const uint32_t *)s;
+        dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
+        dw[4] = sw[4];
+        return dest;
+    }
+
     // For tiny copies, just do bytes.
     if (n < 8) {
         while (n--)
@@ -40,21 +59,43 @@ void *memcpy(void *dest, const void *src, size_t n) {
     while (head--)
         *d++ = *s++;
 
-    // If source is also aligned, use word copies (and CSR MEMCOPY when
-    // both src+dst are 32-byte aligned).
+    // If source is also aligned, use word copies (and CSR MEMCOPY when possible).
     if (((uintptr_t)s & 3) == 0) {
-        // CSR MEMCOPY requires 32-byte alignment on both src and dst.
-        if (n >= 32 && (((uintptr_t)d | (uintptr_t)s) & 31) == 0) {
+        uint32_t *dw = (uint32_t *)d;
+        const uint32_t *sw = (const uint32_t *)s;
+
+        // Advance to 32-byte alignment with word copies, then use CSR MEMCOPY.
+        if (n >= 64) {
+            // Align dst to 32-byte boundary with word stores.
+            size_t to_align = (32 - ((uintptr_t)dw & 31)) & 31;
+            if (to_align && ((uintptr_t)sw & 31) == ((uintptr_t)dw & 31)) {
+                // Both have the same misalignment — aligning one aligns both.
+                size_t words = to_align >> 2;
+                for (size_t i = 0; i < words; i++)
+                    dw[i] = sw[i];
+                dw += words;
+                sw += words;
+                n -= to_align;
+            }
+
+            // Now use CSR MEMCOPY if both are 32-byte aligned.
+            if ((((uintptr_t)dw | (uintptr_t)sw) & 31) == 0) {
+                while (n >= 32) {
+                    csr_memcopy32(dw, sw);
+                    dw += 8;
+                    sw += 8;
+                    n -= 32;
+                }
+            }
+        } else if (n >= 32 && (((uintptr_t)dw | (uintptr_t)sw) & 31) == 0) {
+            // Already 32-byte aligned — use CSR MEMCOPY directly.
             while (n >= 32) {
-                csr_memcopy32(d, s);
-                d += 32;
-                s += 32;
+                csr_memcopy32(dw, sw);
+                dw += 8;
+                sw += 8;
                 n -= 32;
             }
         }
-
-        uint32_t *dw = (uint32_t *)d;
-        const uint32_t *sw = (const uint32_t *)s;
 
         // Remaining whole words.
         while (n >= 4) {
@@ -194,13 +235,28 @@ void *memset(void *dest, int c, size_t n) {
         *d++ = byte;
 
     // Zero-fill fast path: use CSR MEMCOPY from zero buffer (32 bytes/call).
-    // Requires 32-byte alignment on dst (src is static and always aligned).
-    if (byte == 0 && ((uintptr_t)d & 31) == 0) {
+    // Advance to 32-byte alignment with word stores, then use CSR MEMCOPY.
+    if (byte == 0) {
+        uint32_t *dw = (uint32_t *)d;
+
+        // Align dst to 32-byte boundary with zero word stores.
+        size_t to_align = (32 - ((uintptr_t)dw & 31)) & 31;
+        size_t align_words = to_align >> 2;
+        if (align_words && n >= to_align) {
+            for (size_t i = 0; i < align_words; i++)
+                dw[i] = 0;
+            dw += align_words;
+            n -= to_align;
+        }
+
+        // Now dst is 32-byte aligned — use CSR MEMCOPY from zero buffer.
         while (n >= 32) {
-            csr_memcopy32(d, memset_zeros);
-            d += 32;
+            csr_memcopy32(dw, memset_zeros);
+            dw += 8;
             n -= 32;
         }
+
+        d = (unsigned char *)dw;
     }
 
     // Replicate byte into a 32-bit word: 0xAB -> 0xABABABAB.
