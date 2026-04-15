@@ -9,14 +9,11 @@
 
 namespace silkworm::mpt {
 
-// Custom hasher: 32-bit FNV-1a over first 8 bytes (native on rv32im)
+// Custom hasher: direct word extraction (bytes32 values are keccak outputs
+// with full entropy, so any 32-bit slice is a high-quality hash).
 struct FastHash {
     size_t operator()(const bytes32& key) const noexcept {
-        const auto* w = reinterpret_cast<const uint32_t*>(key.bytes);
-        uint32_t h = 0x811c9dc5u;
-        h = (h ^ w[0]) * 0x01000193u;
-        h = (h ^ w[1]) * 0x01000193u;
-        return static_cast<size_t>(h);
+        return *reinterpret_cast<const uint32_t*>(key.bytes);
     }
 };
 
