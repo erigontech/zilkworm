@@ -77,6 +77,23 @@ void *memcpy(void *dest, const void *src, size_t n) {
             dw[20] = sw[20]; dw[21] = sw[21]; dw[22] = sw[22]; dw[23] = sw[23];
             return dest;
         }
+        // n==17: 4 words + 1 byte (13 sites, e.g. RLP nibble+prefix).
+        if (n == 17) {
+            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
+            d[16] = s[16];
+            return dest;
+        }
+        // n==12: 3 words (common for 96-bit fields).
+        if (n == 12) {
+            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2];
+            return dest;
+        }
+        // n==24: 6 words.
+        if (n == 24) {
+            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2];
+            dw[3] = sw[3]; dw[4] = sw[4]; dw[5] = sw[5];
+            return dest;
+        }
     }
 
     // For tiny copies, just do bytes.
@@ -112,7 +129,17 @@ void *memcpy(void *dest, const void *src, size_t n) {
             }
 
             // Now use CSR MEMCOPY if both are 32-byte aligned.
+            // Unrolled 4x: 128 bytes per iteration to reduce loop overhead.
             if ((((uintptr_t)dw | (uintptr_t)sw) & 31) == 0) {
+                while (n >= 128) {
+                    csr_memcopy32(dw,      sw);
+                    csr_memcopy32(dw + 8,  sw + 8);
+                    csr_memcopy32(dw + 16, sw + 16);
+                    csr_memcopy32(dw + 24, sw + 24);
+                    dw += 32;
+                    sw += 32;
+                    n -= 128;
+                }
                 while (n >= 32) {
                     csr_memcopy32(dw, sw);
                     dw += 8;
@@ -122,6 +149,16 @@ void *memcpy(void *dest, const void *src, size_t n) {
             }
         } else if (n >= 32 && (((uintptr_t)dw | (uintptr_t)sw) & 31) == 0) {
             // Already 32-byte aligned — use CSR MEMCOPY directly.
+            // Unrolled 4x for reduced loop overhead.
+            while (n >= 128) {
+                csr_memcopy32(dw,      sw);
+                csr_memcopy32(dw + 8,  sw + 8);
+                csr_memcopy32(dw + 16, sw + 16);
+                csr_memcopy32(dw + 24, sw + 24);
+                dw += 32;
+                sw += 32;
+                n -= 128;
+            }
             while (n >= 32) {
                 csr_memcopy32(dw, sw);
                 dw += 8;
@@ -188,22 +225,23 @@ void *memmove(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
 
-    // Non-overlapping or forward-safe: delegate to memcpy (which has fast paths).
-    if (d <= s || d >= s + n)
-        return memcpy(dest, src, n);
-
-    // Overlapping with dest > src: copy backward.
-    // Fast paths for common aligned backward-copy sizes.
+    // Inline fast paths for common aligned sizes — avoids overlap check + memcpy call.
+    // Safe for both overlapping and non-overlapping when using word loads/stores
+    // at non-overlapping offsets (which is the case for same-size small copies).
     if ((((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
         uint32_t *dw = (uint32_t *)d;
         const uint32_t *sw = (const uint32_t *)s;
-        if (n == 32) {
-            dw[7] = sw[7]; dw[6] = sw[6]; dw[5] = sw[5]; dw[4] = sw[4];
-            dw[3] = sw[3]; dw[2] = sw[2]; dw[1] = sw[1]; dw[0] = sw[0];
+        if (__builtin_expect(n == 32, 1)) {
+            // For 32-byte overlap-safe copy: read all first, then write.
+            uint32_t t0=sw[0], t1=sw[1], t2=sw[2], t3=sw[3];
+            uint32_t t4=sw[4], t5=sw[5], t6=sw[6], t7=sw[7];
+            dw[0]=t0; dw[1]=t1; dw[2]=t2; dw[3]=t3;
+            dw[4]=t4; dw[5]=t5; dw[6]=t6; dw[7]=t7;
             return dest;
         }
         if (n == 20) {
-            dw[4] = sw[4]; dw[3] = sw[3]; dw[2] = sw[2]; dw[1] = sw[1]; dw[0] = sw[0];
+            uint32_t t0=sw[0], t1=sw[1], t2=sw[2], t3=sw[3], t4=sw[4];
+            dw[0]=t0; dw[1]=t1; dw[2]=t2; dw[3]=t3; dw[4]=t4;
             return dest;
         }
         if (n == 4) {
@@ -211,11 +249,33 @@ void *memmove(void *dest, const void *src, size_t n) {
             return dest;
         }
         if (n == 8) {
-            dw[1] = sw[1]; dw[0] = sw[0];
+            uint32_t t0=sw[0], t1=sw[1];
+            dw[0]=t0; dw[1]=t1;
+            return dest;
+        }
+        if (n == 16) {
+            uint32_t t0=sw[0], t1=sw[1], t2=sw[2], t3=sw[3];
+            dw[0]=t0; dw[1]=t1; dw[2]=t2; dw[3]=t3;
+            return dest;
+        }
+        if (n == 64) {
+            uint32_t t0=sw[0],  t1=sw[1],  t2=sw[2],  t3=sw[3];
+            uint32_t t4=sw[4],  t5=sw[5],  t6=sw[6],  t7=sw[7];
+            uint32_t t8=sw[8],  t9=sw[9],  ta=sw[10], tb=sw[11];
+            uint32_t tc=sw[12], td=sw[13], te=sw[14], tf=sw[15];
+            dw[0]=t0;  dw[1]=t1;  dw[2]=t2;  dw[3]=t3;
+            dw[4]=t4;  dw[5]=t5;  dw[6]=t6;  dw[7]=t7;
+            dw[8]=t8;  dw[9]=t9;  dw[10]=ta; dw[11]=tb;
+            dw[12]=tc; dw[13]=td; dw[14]=te; dw[15]=tf;
             return dest;
         }
     }
 
+    // Non-overlapping or forward-safe: delegate to memcpy (which has fast paths).
+    if (d <= s || d >= s + n)
+        return memcpy(dest, src, n);
+
+    // Overlapping with dest > src: copy backward.
     d += n;
     s += n;
 
@@ -300,6 +360,38 @@ void *memset(void *dest, int c, size_t n) {
             dw[12] = 0; dw[13] = 0; dw[14] = 0; dw[15] = 0;
             return dest;
         }
+        if (n == 4) {
+            dw[0] = 0;
+            return dest;
+        }
+        if (n == 24) {
+            dw[0] = 0; dw[1] = 0; dw[2] = 0; dw[3] = 0; dw[4] = 0; dw[5] = 0;
+            return dest;
+        }
+        // n==288: 9*32 bytes, 30 call sites (stack-array zeroing).
+        // Use CSR MEMCOPY when 32-byte aligned for maximum throughput.
+        if (n == 288 && (((uintptr_t)dw) & 31) == 0) {
+            csr_memcopy32(dw,      memset_zeros);
+            csr_memcopy32(dw + 8,  memset_zeros);
+            csr_memcopy32(dw + 16, memset_zeros);
+            csr_memcopy32(dw + 24, memset_zeros);
+            csr_memcopy32(dw + 32, memset_zeros);
+            csr_memcopy32(dw + 40, memset_zeros);
+            csr_memcopy32(dw + 48, memset_zeros);
+            csr_memcopy32(dw + 56, memset_zeros);
+            csr_memcopy32(dw + 64, memset_zeros);
+            return dest;
+        }
+        // n==96: 24 words (common for 3x bytes32).
+        if (n == 96) {
+            dw[0]  = 0; dw[1]  = 0; dw[2]  = 0; dw[3]  = 0;
+            dw[4]  = 0; dw[5]  = 0; dw[6]  = 0; dw[7]  = 0;
+            dw[8]  = 0; dw[9]  = 0; dw[10] = 0; dw[11] = 0;
+            dw[12] = 0; dw[13] = 0; dw[14] = 0; dw[15] = 0;
+            dw[16] = 0; dw[17] = 0; dw[18] = 0; dw[19] = 0;
+            dw[20] = 0; dw[21] = 0; dw[22] = 0; dw[23] = 0;
+            return dest;
+        }
     }
 
     // For tiny fills, just do bytes.
@@ -331,6 +423,15 @@ void *memset(void *dest, int c, size_t n) {
         }
 
         // Now dst is 32-byte aligned — use CSR MEMCOPY from zero buffer.
+        // Unrolled 4x: 128 bytes per iteration to reduce loop overhead.
+        while (n >= 128) {
+            csr_memcopy32(dw,      memset_zeros);
+            csr_memcopy32(dw + 8,  memset_zeros);
+            csr_memcopy32(dw + 16, memset_zeros);
+            csr_memcopy32(dw + 24, memset_zeros);
+            dw += 32;
+            n -= 128;
+        }
         while (n >= 32) {
             csr_memcopy32(dw, memset_zeros);
             dw += 8;
