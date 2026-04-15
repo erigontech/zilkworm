@@ -27,23 +27,56 @@ void *memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
 
-    // Fast path: exactly 32 bytes, both 4-byte aligned (uint256/bytes32 copies).
-    // Avoids all alignment checks — just 8 unrolled word copies.
-    if (n == 32 && (((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
+    // Fast-path hub for common aligned sizes.
+    // Ordered by frequency: n==32 (90 sites), n==20 (31), n==64 (9), n==8 (5).
+    if ((((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
         uint32_t *dw = (uint32_t *)d;
         const uint32_t *sw = (const uint32_t *)s;
-        dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
-        dw[4] = sw[4]; dw[5] = sw[5]; dw[6] = sw[6]; dw[7] = sw[7];
-        return dest;
-    }
 
-    // Fast path: exactly 20 bytes, both 4-byte aligned (address copies).
-    if (n == 20 && (((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
-        uint32_t *dw = (uint32_t *)d;
-        const uint32_t *sw = (const uint32_t *)s;
-        dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
-        dw[4] = sw[4];
-        return dest;
+        if (__builtin_expect(n == 32, 1)) {
+            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
+            dw[4] = sw[4]; dw[5] = sw[5]; dw[6] = sw[6]; dw[7] = sw[7];
+            return dest;
+        }
+        if (n == 20) {
+            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
+            dw[4] = sw[4];
+            return dest;
+        }
+        if (n == 64) {
+            dw[0]  = sw[0];  dw[1]  = sw[1];  dw[2]  = sw[2];  dw[3]  = sw[3];
+            dw[4]  = sw[4];  dw[5]  = sw[5];  dw[6]  = sw[6];  dw[7]  = sw[7];
+            dw[8]  = sw[8];  dw[9]  = sw[9];  dw[10] = sw[10]; dw[11] = sw[11];
+            dw[12] = sw[12]; dw[13] = sw[13]; dw[14] = sw[14]; dw[15] = sw[15];
+            return dest;
+        }
+        if (n == 8) {
+            dw[0] = sw[0]; dw[1] = sw[1];
+            return dest;
+        }
+        if (n == 4) {
+            dw[0] = sw[0];
+            return dest;
+        }
+        if (n == 16) {
+            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
+            return dest;
+        }
+        if (n == 48) {
+            dw[0]  = sw[0];  dw[1]  = sw[1];  dw[2]  = sw[2];  dw[3]  = sw[3];
+            dw[4]  = sw[4];  dw[5]  = sw[5];  dw[6]  = sw[6];  dw[7]  = sw[7];
+            dw[8]  = sw[8];  dw[9]  = sw[9];  dw[10] = sw[10]; dw[11] = sw[11];
+            return dest;
+        }
+        if (n == 96) {
+            dw[0]  = sw[0];  dw[1]  = sw[1];  dw[2]  = sw[2];  dw[3]  = sw[3];
+            dw[4]  = sw[4];  dw[5]  = sw[5];  dw[6]  = sw[6];  dw[7]  = sw[7];
+            dw[8]  = sw[8];  dw[9]  = sw[9];  dw[10] = sw[10]; dw[11] = sw[11];
+            dw[12] = sw[12]; dw[13] = sw[13]; dw[14] = sw[14]; dw[15] = sw[15];
+            dw[16] = sw[16]; dw[17] = sw[17]; dw[18] = sw[18]; dw[19] = sw[19];
+            dw[20] = sw[20]; dw[21] = sw[21]; dw[22] = sw[22]; dw[23] = sw[23];
+            return dest;
+        }
     }
 
     // For tiny copies, just do bytes.
@@ -155,11 +188,34 @@ void *memmove(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
 
-    // Non-overlapping or forward-safe: delegate to memcpy.
+    // Non-overlapping or forward-safe: delegate to memcpy (which has fast paths).
     if (d <= s || d >= s + n)
         return memcpy(dest, src, n);
 
     // Overlapping with dest > src: copy backward.
+    // Fast paths for common aligned backward-copy sizes.
+    if ((((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
+        uint32_t *dw = (uint32_t *)d;
+        const uint32_t *sw = (const uint32_t *)s;
+        if (n == 32) {
+            dw[7] = sw[7]; dw[6] = sw[6]; dw[5] = sw[5]; dw[4] = sw[4];
+            dw[3] = sw[3]; dw[2] = sw[2]; dw[1] = sw[1]; dw[0] = sw[0];
+            return dest;
+        }
+        if (n == 20) {
+            dw[4] = sw[4]; dw[3] = sw[3]; dw[2] = sw[2]; dw[1] = sw[1]; dw[0] = sw[0];
+            return dest;
+        }
+        if (n == 4) {
+            dw[0] = sw[0];
+            return dest;
+        }
+        if (n == 8) {
+            dw[1] = sw[1]; dw[0] = sw[0];
+            return dest;
+        }
+    }
+
     d += n;
     s += n;
 
@@ -220,6 +276,31 @@ static const uint32_t __attribute__((aligned(32))) memset_zeros[8] = {0};
 void *memset(void *dest, int c, size_t n) {
     unsigned char *d = (unsigned char *)dest;
     unsigned char byte = (unsigned char)c;
+
+    // Fast zero-fill paths for common aligned sizes (skip alignment overhead).
+    if (byte == 0 && (((uintptr_t)d) & 3) == 0) {
+        uint32_t *dw = (uint32_t *)d;
+        if (n == 8) {
+            dw[0] = 0; dw[1] = 0;
+            return dest;
+        }
+        if (n == 16) {
+            dw[0] = 0; dw[1] = 0; dw[2] = 0; dw[3] = 0;
+            return dest;
+        }
+        if (n == 32) {
+            dw[0] = 0; dw[1] = 0; dw[2] = 0; dw[3] = 0;
+            dw[4] = 0; dw[5] = 0; dw[6] = 0; dw[7] = 0;
+            return dest;
+        }
+        if (n == 64) {
+            dw[0]  = 0; dw[1]  = 0; dw[2]  = 0; dw[3]  = 0;
+            dw[4]  = 0; dw[5]  = 0; dw[6]  = 0; dw[7]  = 0;
+            dw[8]  = 0; dw[9]  = 0; dw[10] = 0; dw[11] = 0;
+            dw[12] = 0; dw[13] = 0; dw[14] = 0; dw[15] = 0;
+            return dest;
+        }
+    }
 
     // For tiny fills, just do bytes.
     if (n < 8) {
@@ -301,6 +382,36 @@ int memcmp(const void *a, const void *b, size_t n) {
     if (n >= 4 && (((uintptr_t)pa | (uintptr_t)pb) & 3) == 0) {
         const uint32_t *wa = (const uint32_t *)pa;
         const uint32_t *wb = (const uint32_t *)pb;
+
+        // Fast path: n==32 (bytes32 comparison) — fully unrolled word compare.
+        if (n == 32) {
+            for (int i = 0; i < 8; i++) {
+                if (wa[i] != wb[i]) {
+                    pa = (const unsigned char *)&wa[i];
+                    pb = (const unsigned char *)&wb[i];
+                    for (int j = 0; j < 4; j++) {
+                        if (pa[j] != pb[j])
+                            return pa[j] - pb[j];
+                    }
+                }
+            }
+            return 0;
+        }
+
+        // Fast path: n==20 (address comparison).
+        if (n == 20) {
+            for (int i = 0; i < 5; i++) {
+                if (wa[i] != wb[i]) {
+                    pa = (const unsigned char *)&wa[i];
+                    pb = (const unsigned char *)&wb[i];
+                    for (int j = 0; j < 4; j++) {
+                        if (pa[j] != pb[j])
+                            return pa[j] - pb[j];
+                    }
+                }
+            }
+            return 0;
+        }
 
         while (n >= 4) {
             if (*wa != *wb) {
