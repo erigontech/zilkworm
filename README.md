@@ -9,10 +9,11 @@
 </p>
 
 <p align="center">
-    A fast, modular, optimized ZKEVM core written in C++
+    <strong>A fast, modular, optimized ZKEVM core written in C++</strong>
 </p>
 
-[ALPHA STAGE: This is in pre-release. Functional for block execution and proof generation, but not yet production-ready.]
+
+🚧 [ALPHA STAGE: This is in pre-release. Functional for block execution and proof generation, but not yet production-ready.] 🚧
 
 
 Zilkworm is a prototype implementation of a ZKEVM (Zero-Knowledge Ethereum Virtual Machine) generating ZK proofs that an        
@@ -22,21 +23,19 @@ Zilkworm is written in C++ (with a Rust orchestration layer) building on past wo
 zkVM provers with native support for RISC-V targets (e.g. rv32im).
 At the moment, the zkVM integrated is Succint's SP1 Hypercube.
                                                                                                                                                                                             
----             
-High-Level Workflow
+## High-Level Workflow
 
-1. Fetch — Retrieve a block + its execution witness from an Ethereum RPC node (Reth/Geth)
-2. Execute (dry-run) — Run the EVM inside the zkVM without proof generation (for testing)
-3. Prove — Generate a full ZK proof of correct block execution
-4. Verify — Verify a previously generated proof
-5. Service mode — Continuously poll a node and prove blocks as they arrive
+1. _Fetch_ — Retrieve a block + its execution witness from an Ethereum RPC node (Reth/Geth)
+2. _Execute_ (dry-run) — Run the EVM inside the zkVM without proof generation (for testing)
+3. _Prove_ — Generate a full ZK proof of correct block execution
+4. _Verify_ — Verify a previously generated proof
+5. _Service_ — Continuously poll a node and prove blocks as they arrive
 
----
-Architecture
+## Architecture
 
 For a high-level overview of the system, see [here](docs/architecture.md).
 
-How ZK Ethereum Provers Work Generally
+### How ZK Ethereum Provers Work Generally
 
 The broader idea: a ZK prover takes an Ethereum block + pre-state witness, re-executes all transactions inside a zkVM
 and produces a cryptographic proof that the execution was done correctly. This proof can be verified cheaply by anyone
@@ -49,7 +48,7 @@ inside the zkVM rather than a Rust one.
 
 ## How to Run
 
-At the moment the building from source requires elaborate setup with conan, linux packages and SP1 Turbo SDK pre-requisites. It's recommended to use the pre-built docker image.
+At the moment building from source requires elaborate setup with conan, linux packages and SP1 Turbo SDK pre-requisites. It's recommended to use the pre-built docker image.
 
 To run with pre-built docker
 
