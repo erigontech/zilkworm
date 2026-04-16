@@ -34,6 +34,11 @@ void *memcpy(void *dest, const void *src, size_t n) {
         const uint32_t *sw = (const uint32_t *)s;
 
         if (__builtin_expect(n == 32, 1)) {
+            // CSR MEMCOPY fast path: 4 insns vs 16 word copies when 32-byte aligned.
+            if ((((uintptr_t)d | (uintptr_t)s) & 31) == 0) {
+                csr_memcopy32(d, s);
+                return dest;
+            }
             dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
             dw[4] = sw[4]; dw[5] = sw[5]; dw[6] = sw[6]; dw[7] = sw[7];
             return dest;
@@ -44,6 +49,12 @@ void *memcpy(void *dest, const void *src, size_t n) {
             return dest;
         }
         if (n == 64) {
+            // CSR MEMCOPY fast path: 8 insns (2 CSR calls) vs 32 word copies.
+            if ((((uintptr_t)d | (uintptr_t)s) & 31) == 0) {
+                csr_memcopy32(d, s);
+                csr_memcopy32(d + 32, s + 32);
+                return dest;
+            }
             dw[0]  = sw[0];  dw[1]  = sw[1];  dw[2]  = sw[2];  dw[3]  = sw[3];
             dw[4]  = sw[4];  dw[5]  = sw[5];  dw[6]  = sw[6];  dw[7]  = sw[7];
             dw[8]  = sw[8];  dw[9]  = sw[9];  dw[10] = sw[10]; dw[11] = sw[11];
