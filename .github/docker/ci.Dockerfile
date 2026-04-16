@@ -16,12 +16,31 @@ RUN apt-get update && \
         python3 \
         python3-pip \
         pipx \
-        ca-certificates && \
+        ca-certificates \
+        curl \
+        nodejs \
+        npm \
+        pkg-config \
+        libssl-dev \
+        protobuf-compiler \
+        libprotobuf-dev && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pipx install conan
 
 ENV PATH=/root/.local/bin:$PATH
+
+# RISC-V bare-metal toolchain
+RUN npm i -g xpm \
+  && xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
+ENV PATH="/root/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:${PATH}"
+
+# Rust nightly
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Verify
+RUN riscv-none-elf-gcc --version && cmake --version && rustc --version && protoc --version
 
 WORKDIR /workspace
 
