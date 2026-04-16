@@ -99,11 +99,25 @@ static DecodingResult from_big_compact(ByteView data, T& out) {
         return std::unexpected{DecodingError::kLeadingZero};
     }
 
-    auto* ptr{reinterpret_cast<uint8_t*>(&out)};
-    std::memcpy(ptr + (sizeof(T) - data.size()), &data[0], data.size());
-
-    out = intx::to_big_endian(out);
-    return {};
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    // Direct BE→native construction avoids memcpy + bswap (~25 insns → ~10 insns).
+    // Most RLP integers are small (1-8 bytes), so the byte loop is fast.
+    if constexpr (sizeof(T) <= 8)
+    {
+        T val = 0;
+        for (size_t i = 0; i < data.size(); ++i)
+            val = (val << 8) | data[i];
+        out = val;
+        return {};
+    }
+    else
+#endif
+    {
+        auto* ptr{reinterpret_cast<uint8_t*>(&out)};
+        std::memcpy(ptr + (sizeof(T) - data.size()), &data[0], data.size());
+        out = intx::to_big_endian(out);
+        return {};
+    }
 }
 
 }  // namespace silkworm::endian
