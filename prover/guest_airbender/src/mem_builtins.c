@@ -328,8 +328,7 @@ void *memmove(void *dest, const void *src, size_t n) {
 }
 
 // 32-byte aligned zero buffer for CSR MEMCOPY-based bulk zeroing.
-// Not const: must be in RAM (.bss), not .rodata (ROM), because CSR requires x11 in RAM.
-static uint32_t __attribute__((aligned(32))) memset_zeros[8] = {0};
+static const uint32_t __attribute__((aligned(32))) memset_zeros[8] = {0};
 
 // ---------------------------------------------------------------------------
 // memset — CSR MEMCOPY for zero-fill, word-at-a-time for other fills
