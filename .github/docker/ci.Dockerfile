@@ -37,7 +37,9 @@ ENV PATH="/root/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.co
 
 # Rust nightly
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV RUSTUP_HOME=/root/.rustup \
+    CARGO_HOME=/root/.cargo \
+    PATH="/root/.cargo/bin:${PATH}"
 
 # Verify
 RUN riscv-none-elf-gcc --version && cmake --version && rustc --version && protoc --version
