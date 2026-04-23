@@ -47,8 +47,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           lfs: true
+
+      - name: Init submodules (sparse eest-fixtures)
+        uses: ./.github/actions/init-submodules
 
       - name: Build for RV32IM
         run: |

@@ -1,0 +1,81 @@
+name: Init submodules
+description: |
+  Initialize third_party submodules. Handles two quirks:
+    1. evmc was inlined into evmone (upstream PR #1499). Self-hosted
+       runners may have stale evmc submodule state from previous runs;
+       deinit and remove internal metadata so the next checkout can
+       populate evmc/ as regular files.
+    2. eest-fixtures is huge (~14 GB with LFS). Sparse-fetch only the
+       blockchain_tests directory (~3 GB) unless the caller asks for
+       the full clone.
+
+inputs:
+  token:
+    description: GitHub token used to authenticate private submodule fetches.
+    required: true
+  sparse-eest-fixtures:
+    description: |
+      "true"  → sparse-fetch only blockchain_tests from eest-fixtures.
+      "false" → full fetch via standard submodule update.
+      "skip"  → do not initialize eest-fixtures at all.
+    required: false
+    default: "true"
+  extra-depth:
+    description: Shallow depth for non-eest-fixtures submodules (empty = full).
+    required: false
+    default: "1"
+
+runs:
+  using: composite
+  steps:
+    - name: Init submodules
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        SPARSE: ${{ inputs.sparse-eest-fixtures }}
+        DEPTH: ${{ inputs.extra-depth }}
+      run: |
+        set -euo pipefail
+        git config --global --add safe.directory '*'
+        git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+
+        # Clean up stale evmone/evmc submodule state (evmc was inlined into evmone).
+        # On self-hosted runners with a cached submodule checkout, git refuses to
+        # transition the submodule gitlink into a regular directory.
+        if [ -d third_party/evmone/.git ] || [ -f third_party/evmone/.git ]; then
+          git -C third_party/evmone submodule deinit -f evmc 2>/dev/null || true
+        fi
+        rm -rf third_party/evmone/evmc
+        rm -rf .git/modules/evmone/modules/evmc
+
+        depth_arg=""
+        if [ -n "$DEPTH" ]; then
+          depth_arg="--depth $DEPTH"
+        fi
+
+        if [ "$SPARSE" = "skip" ] || [ "$SPARSE" = "true" ]; then
+          # eest-fixtures handled below (sparse) or not at all (skip).
+          git -c submodule."third_party/eest-fixtures".update=none \
+              submodule update --init --recursive $depth_arg
+        else
+          git submodule update --init --recursive $depth_arg
+        fi
+
+        # Restore evmc/ from evmone's HEAD. git submodule update is a no-op when
+        # HEAD already matches the target commit, so evmc/ files we deleted would
+        # not be re-materialized without this explicit checkout.
+        git -C third_party/evmone checkout HEAD -- evmc
+
+        if [ "$SPARSE" = "true" ]; then
+          # Sparse partial-clone of eest-fixtures/blockchain_tests only.
+          sha=$(git ls-tree HEAD third_party/eest-fixtures | awk '{print $3}')
+          url=$(git config --file .gitmodules submodule."third_party/eest-fixtures".url)
+          rm -rf third_party/eest-fixtures && mkdir third_party/eest-fixtures
+          cd third_party/eest-fixtures
+          git init -q
+          git remote add origin "$url"
+          git sparse-checkout set --cone blockchain_tests
+          GIT_LFS_SKIP_SMUDGE=1 git fetch --depth=1 --filter=blob:none origin "$sha"
+          GIT_LFS_SKIP_SMUDGE=1 git checkout -q FETCH_HEAD
+          git lfs pull --include 'blockchain_tests/**'
+        fi

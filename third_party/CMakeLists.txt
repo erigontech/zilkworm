@@ -61,6 +61,7 @@ add_library(
   evmone/lib/evmone_precompiles/ripemd160.cpp
   evmone/lib/evmone_precompiles/sha256.cpp
   evmone/lib/evmone_precompiles/modexp.cpp
+  evmone/lib/evmone_precompiles/mulmod.cpp
   evmone/lib/evmone_precompiles/kzg.cpp
   evmone/lib/evmone_precompiles/bn254.cpp
   evmone/lib/evmone_precompiles/pairing/bn254/pairing.cpp

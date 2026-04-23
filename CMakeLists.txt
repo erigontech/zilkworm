@@ -5,10 +5,6 @@
 
 cmake_minimum_required(VERSION 3.28)
 
-if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/evmc/.git)
-  message(FATAL_ERROR "Git submodules not initialized, execute:\n  git submodule update --init --recursive")
-endif()
-
 # reduce the log verbosity of evmone/cmake/cable
 if(NOT CMAKE_MESSAGE_LOG_LEVEL)
   set(CMAKE_MESSAGE_LOG_LEVEL_EMPTY YES)

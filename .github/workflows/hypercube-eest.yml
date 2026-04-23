@@ -39,10 +39,10 @@ jobs:
           lfs: true
 
       - name: Init submodules
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN || github.token }}@github.com/".insteadOf "https://github.com/"
-          git submodule update --init --recursive third_party/evmone third_party/intx third_party/eest-fixtures
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          sparse-eest-fixtures: "false"
 
       - name: Symlink cargo target for caching
         run: |

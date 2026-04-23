@@ -47,8 +47,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           lfs: true
+
+      - name: Init submodules (sparse eest-fixtures)
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build EEST blockchain tests (RV64IM)
         run: |
