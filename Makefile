@@ -5,6 +5,17 @@ TESTS_DIR := third_party/eest-fixtures/blockchain_tests/prague
 
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
+
+# Auto-detect global xPacks riscv-none-elf-gcc if installed
+XPACKS_MAC := $(shell ls -1d $(HOME)/Library/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/*/.content/bin 2>/dev/null | head -n 1)
+XPACKS_LINUX := $(shell ls -1d $(HOME)/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/*/.content/bin 2>/dev/null | head -n 1)
+
+ifneq ($(XPACKS_MAC),)
+export PATH := $(XPACKS_MAC):$(PATH)
+else ifneq ($(XPACKS_LINUX),)
+export PATH := $(XPACKS_LINUX):$(PATH)
+endif
+
 .PHONY: z6m_guest z6m_prover selftest tests
 
 clean: 

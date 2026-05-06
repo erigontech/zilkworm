@@ -8,6 +8,8 @@ set(CMAKE_SYSTEM_PROCESSOR riscv64)
 set(CMAKE_C_COMPILER   riscv-none-elf-gcc)
 set(CMAKE_CXX_COMPILER riscv-none-elf-g++)
 set(CMAKE_ASM_COMPILER riscv-none-elf-gcc)
+set(CMAKE_AR           riscv-none-elf-ar)
+set(CMAKE_RANLIB       riscv-none-elf-ranlib)
 
 set(BUILD_SHARED_LIBS OFF)
 
