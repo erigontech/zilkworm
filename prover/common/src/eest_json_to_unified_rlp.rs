@@ -1,14 +1,14 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Convert EEST JSON blockchain-test fixtures to the unified-RLP v1 format that Zilkworm's `run_rlp` consumes.
+//! Convert EEST JSON blockchain-test fixtures to the unified-RLP v1 bundle format.
 //! See `docs/architecture.md` "Per-subtest unified RLP".
 //!
 //! EEST tests give us a flat pre-state (accounts with balance/nonce/code/slots),
 //! so we build each account's storage trie and the global state trie to derive
 //! the storage roots and to emit the MPT nodes needed by `check_root`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use alloy_primitives::{hex, keccak256, Address, Bytes, B256, U256};
 use alloy_rlp::Encodable;
@@ -18,7 +18,10 @@ use alloy_trie::{
 use eyre::{bail, eyre, Result};
 use serde::Deserialize;
 
-use crate::rlp_methods::{encode_rlp_list, RLP_FALSE, RLP_TRUE, VERSION_V1};
+use z6m_unified_rlp::{
+    encode_pre_state_rlp, encode_pre_trie_rlp_pairs, encode_rlp_list, FlatAccount, RLP_FALSE,
+    RLP_TRUE, VERSION_V1,
+};
 
 
 #[derive(Deserialize, Debug)]
@@ -101,16 +104,6 @@ pub fn eest_json_convert_subtest(json_str: &str, index: usize) -> Result<(String
     bail!("subtest index {} out of range (have {})", index, n);
 }
 
-
-struct FlatAccount {
-    address: Address,
-    nonce: u64,
-    balance: U256,
-    code_hash: B256,
-    storage_root: B256,
-    code: Bytes,
-    storage: BTreeMap<U256, U256>,
-}
 
 fn build_test(test: &EestTest) -> Result<Vec<u8>> {
     let prev_rlp = decode_hex(&test.genesis_rlp)?;
@@ -202,8 +195,8 @@ fn build_test(test: &EestTest) -> Result<Vec<u8>> {
     let pre_state_rlp = encode_pre_state_rlp(&accounts);
 
     // 4) Encode the pre-trie RLP section (flat sequence of (hash, node_bytes)
-    //    pairs, wrapped in an outer RLP list).
-    let pre_trie_rlp = encode_pre_trie_rlp(&all_trie_nodes);
+    //    pairs, wrapped in an outer RLP list). Hashes are precomputed.
+    let pre_trie_rlp = encode_pre_trie_rlp_pairs(&all_trie_nodes);
 
     // 5) Historical headers: empty list for EEST tests.
     let headers_rlp: Vec<u8> = vec![0xc0];
@@ -333,74 +326,6 @@ fn hash_builder_nodes(leaves: &[(Nibbles, Vec<u8>)]) -> Vec<(B256, Bytes)> {
 }
 
 
-fn encode_pre_state_rlp(accounts: &[FlatAccount]) -> Vec<u8> {
-    // accounts section
-    let mut account_entries: Vec<Vec<u8>> = Vec::with_capacity(accounts.len());
-    for a in accounts {
-        let addr_rlp = alloy_rlp::encode(&a.address);
-        let nonce_rlp = alloy_rlp::encode(&a.nonce);
-        let balance_rlp = alloy_rlp::encode(&a.balance);
-        let code_hash_rlp = alloy_rlp::encode(&a.code_hash);
-        let storage_root_rlp = alloy_rlp::encode(&a.storage_root);
-        account_entries.push(encode_rlp_list(&[
-            &addr_rlp,
-            &nonce_rlp,
-            &balance_rlp,
-            &code_hash_rlp,
-            &storage_root_rlp,
-        ]));
-    }
-    let acct_refs: Vec<&Vec<u8>> = account_entries.iter().collect();
-    let accounts_rlp = encode_rlp_list(&acct_refs);
-
-    // storage section: list of [addr, [k, v, k, v, ...]]
-    let mut storage_entries: Vec<Vec<u8>> = Vec::new();
-    for a in accounts {
-        if a.storage.is_empty() {
-            continue;
-        }
-        let mut kvs: Vec<u8> = Vec::new();
-        let mut sorted: Vec<(U256, U256)> = a.storage.iter().map(|(k, v)| (*k, *v)).collect();
-        sorted.sort_by_key(|(k, _)| keccak256(k.to_be_bytes::<32>().as_slice()));
-        for (k, v) in &sorted {
-            k.encode(&mut kvs);
-            v.encode(&mut kvs);
-        }
-        // Wrap the flat k/v sequence as an RLP list.
-        let kvs_list = encode_rlp_list(&[&kvs]);
-
-        let addr_rlp = alloy_rlp::encode(&a.address);
-        storage_entries.push(encode_rlp_list(&[&addr_rlp, &kvs_list]));
-    }
-    let stor_refs: Vec<&Vec<u8>> = storage_entries.iter().collect();
-    let storage_rlp = encode_rlp_list(&stor_refs);
-
-    // codes section: flat sequence of [code_hash, code] pairs wrapped in a list.
-    let mut codes_flat: Vec<u8> = Vec::new();
-    let mut seen_codes: HashSet<B256> = HashSet::new();
-    for a in accounts {
-        if a.code_hash == KECCAK_EMPTY {
-            continue;
-        }
-        if !seen_codes.insert(a.code_hash) {
-            continue;
-        }
-        a.code_hash.encode(&mut codes_flat);
-        a.code.encode(&mut codes_flat);
-    }
-    let codes_rlp = encode_rlp_list(&[&codes_flat]);
-
-    encode_rlp_list(&[&accounts_rlp, &storage_rlp, &codes_rlp])
-}
-
-fn encode_pre_trie_rlp(trie_nodes: &[(B256, Bytes)]) -> Vec<u8> {
-    let mut flat: Vec<u8> = Vec::new();
-    for (hash, node) in trie_nodes {
-        hash.encode(&mut flat);
-        node.encode(&mut flat);
-    }
-    encode_rlp_list(&[&flat])
-}
 
 
 fn decode_hex(s: &str) -> Result<Vec<u8>> {

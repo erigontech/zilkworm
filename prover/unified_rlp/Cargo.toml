@@ -1,0 +1,14 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "z6m_unified_rlp"
+version = "0.1.0"
+edition = "2021"
+description = "Primitives for the Zilkworm zkEVM guest's v1 unified-RLP bundle format."
+repository = "https://github.com/erigontech/zilkworm"
+license = "Apache-2.0"
+
+[dependencies]
+alloy-primitives = { version = "1.0", default-features = false, features = ["rlp"] }
+alloy-rlp = "0.3"

@@ -1,40 +1,13 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! RLP helpers shared across the prover + converter. The lightweight items
-//! are feature-gate-free so the standalone `eest-convert` binary can use them
-//! without pulling unneeded deps. The heavier RPC/state helpers below are
-//! gated on `network`.
+/// RLP helpers for the network/RPC path. Bundle format primitives live in `z6m_unified_rlp` crate
+/// and are re-exported here for backward compatibility with existing call sites.
 
-/// Unified-RLP v1 version byte. See `docs/architecture.md` "Per-subtest unified RLP".
-pub const VERSION_V1: u8 = 0x01;
-
-/// RLP encoding of `false` (the empty string).
-pub const RLP_FALSE: u8 = 0x80;
-
-/// RLP encoding of `true` (single-byte `0x01`).
-pub const RLP_TRUE: u8 = 0x01;
-
-/// Canonical Mainnet fork name used in v1 unified-RLP payloads.
-pub const MAINNET_FORK_NAME: &str = "Mainnet";
-
-/// Concatenates pre-encoded RLP items into an outer RLP list.
-pub fn encode_rlp_list<T: AsRef<[u8]>>(items: &[T]) -> Vec<u8> {
-    let payload_len: usize = items.iter().map(|i| i.as_ref().len()).sum();
-    let mut out = Vec::with_capacity(payload_len + 9);
-    if payload_len < 56 {
-        out.push(0xc0 + payload_len as u8);
-    } else {
-        let len_bytes = payload_len.to_be_bytes();
-        let len_bytes = &len_bytes[len_bytes.iter().position(|&b| b != 0).unwrap_or(7)..];
-        out.push(0xf7 + len_bytes.len() as u8);
-        out.extend_from_slice(len_bytes);
-    }
-    for item in items {
-        out.extend_from_slice(item.as_ref());
-    }
-    out
-}
+pub use z6m_unified_rlp::{
+    encode_pre_state_rlp, encode_pre_trie_rlp, encode_rlp_list, FlatAccount, MAINNET_FORK_NAME,
+    RLP_FALSE, RLP_TRUE, VERSION_V1,
+};
 
 /// Encodes a sequence of RLP blobs into the bundle wire format (see `docs/architecture.md` "Bundle format").
 pub fn encode_rlp_bundle(items: &[&[u8]]) -> Vec<u8> {
@@ -56,7 +29,7 @@ use alloy_consensus::{Block, BlockHeader, Header, TxEnvelope};
 #[cfg(feature = "network")]
 use alloy_eips::eip4895::Withdrawals;
 #[cfg(feature = "network")]
-use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 #[cfg(feature = "network")]
 use alloy_rlp::{Decodable, Encodable};
 #[cfg(feature = "network")]
@@ -109,118 +82,66 @@ pub fn block_to_header_only_rlp(rpc_block: &RpcBlock) -> Result<Bytes> {
     Ok(Bytes::from(buf))
 }
 
-/// Build pre-state as RLP with structure:
-/// [[{address, account}], [{address, storage}], [{codeHash, code}]]
+/// Walks trie in `state` and encodes the v1 `pre_state` RLP section.
 #[cfg(feature = "network")]
 pub fn build_pre_state_rlp(
     state: &EthereumState,
     code_map: &HashMap<B256, Bytes>,
     preimage_map: &HashMap<B256, Bytes>,
 ) -> Result<Bytes> {
-    let mut accounts_list = Vec::new();
-    let mut storage_list = Vec::new();
-    let mut codes_list = Vec::new();
-
-    // Track which code hashes we've already added
-    let mut added_codes = std::collections::HashSet::new();
+    let mut accounts: Vec<FlatAccount> = Vec::new();
 
     state.state_trie.for_each_leaves(|key, value| {
         let hashed_address = B256::from_slice(key);
-        if let Some(address_bytes) = preimage_map.get(&hashed_address) {
-            if address_bytes.len() != Address::len_bytes() {
-                return;
-            }
-            let address = Address::from_slice(address_bytes.as_ref());
-            let mut bytes = value;
-
-            if let Ok(account) = TrieAccount::decode(&mut bytes) {
-                let addr_rlp = alloy_rlp::encode(&address);
-                let nonce_rlp = alloy_rlp::encode(&account.nonce);
-                let balance_rlp = alloy_rlp::encode(&account.balance);
-                let code_hash_rlp = alloy_rlp::encode(&account.code_hash);
-                let storage_root_rlp = alloy_rlp::encode(&account.storage_root);
-
-                accounts_list.push(encode_rlp_list(&[
-                    &addr_rlp,
-                    &nonce_rlp,
-                    &balance_rlp,
-                    &code_hash_rlp,
-                    &storage_root_rlp,
-                ]));
-
-                // Add code to codes list if not empty and not yet added
-                if account.code_hash != KECCAK_EMPTY && !added_codes.contains(&account.code_hash) {
-                    if let Some(code) = code_map.get(&account.code_hash) {
-                        let mut code_entry = Vec::new();
-                        account.code_hash.encode(&mut code_entry);
-                        code.encode(&mut code_entry);
-                        codes_list.push(code_entry);
-                        added_codes.insert(account.code_hash);
-                    }
-                }
-
-                // Process storage for this account
-                if let Some(storage_trie) = state.storage_tries.get(&hashed_address) {
-                    let mut storage_entries = Vec::new();
-
-                    storage_trie.for_each_leaves(|slot_key, slot_value| {
-                        let hashed_slot = B256::from_slice(slot_key);
-                        if let Some(slot_preimage) = preimage_map.get(&hashed_slot) {
-                            if slot_preimage.len() == 32 {
-                                let slot = U256::from_be_slice(slot_preimage.as_ref());
-                                let mut slot_bytes = slot_value;
-                                if let Ok(value) = U256::decode(&mut slot_bytes) {
-                                    if !value.is_zero() {
-                                        let mut kv = Vec::new();
-                                        slot.encode(&mut kv);
-                                        value.encode(&mut kv);
-                                        storage_entries.push(kv);
-                                    }
-                                }
-                            }
-                        }
-                    });
-
-                    if !storage_entries.is_empty() {
-                        // Encode storage entry: [address, [[key, value], ...]]
-                        let addr_rlp = alloy_rlp::encode(address);
-                        let storage_entries_ref: Vec<&Vec<u8>> = storage_entries.iter().collect();
-                        let storage_entries_rlp = encode_rlp_list(&storage_entries_ref);
-                        let storage_rlp = encode_rlp_list(&[&addr_rlp, &storage_entries_rlp]);
-                        storage_list.push(storage_rlp);
-                    }
-                }
-            }
+        let Some(address_bytes) = preimage_map.get(&hashed_address) else { return };
+        if address_bytes.len() != Address::len_bytes() {
+            return;
         }
+        let address = Address::from_slice(address_bytes.as_ref());
+
+        let mut bytes = value;
+        let Ok(account) = TrieAccount::decode(&mut bytes) else { return };
+
+        let code = if account.code_hash != KECCAK_EMPTY {
+            code_map.get(&account.code_hash).cloned().unwrap_or_default()
+        } else {
+            Bytes::new()
+        };
+
+        // Walk the storage trie and convert each slot back to its preimage.
+        let mut storage = std::collections::BTreeMap::new();
+        if let Some(storage_trie) = state.storage_tries.get(&hashed_address) {
+            storage_trie.for_each_leaves(|slot_key, slot_value| {
+                let hashed_slot = B256::from_slice(slot_key);
+                let Some(slot_preimage) = preimage_map.get(&hashed_slot) else { return };
+                if slot_preimage.len() != 32 {
+                    return;
+                }
+                let slot = U256::from_be_slice(slot_preimage.as_ref());
+                let mut slot_bytes = slot_value;
+                if let Ok(v) = U256::decode(&mut slot_bytes) {
+                    if !v.is_zero() {
+                        storage.insert(slot, v);
+                    }
+                }
+            });
+        }
+
+        accounts.push(FlatAccount {
+            address,
+            nonce: account.nonce,
+            balance: account.balance,
+            code_hash: account.code_hash,
+            storage_root: account.storage_root,
+            code,
+            storage,
+        });
     });
 
-    // Encode the mega list: [accounts, storage, codes]
-    let accounts_refs: Vec<&Vec<u8>> = accounts_list.iter().collect();
-    let accounts_rlp = encode_rlp_list(&accounts_refs);
-
-    let storage_refs: Vec<&Vec<u8>> = storage_list.iter().collect();
-    let storage_rlp = encode_rlp_list(&storage_refs);
-
-    let code_refs: Vec<&Vec<u8>> = codes_list.iter().collect();
-    let codes_rlp = encode_rlp_list(&code_refs);
-
-    let output = encode_rlp_list(&[&accounts_rlp, &storage_rlp, &codes_rlp]);
-
-    Ok(Bytes::from(output))
+    Ok(Bytes::from(encode_pre_state_rlp(&accounts)))
 }
 
 #[cfg(feature = "network")]
-pub fn build_pre_trie_rlp(witness_state: &Vec<Bytes>) -> Result<Bytes> {
-    let mut mpt_node_list = Vec::new();
-
-    witness_state.iter().for_each(|encoded_node| {
-        let mut node_entry = Vec::new();
-        let node_hash = keccak256(encoded_node);
-        node_hash.encode(&mut node_entry);
-        encoded_node.encode(&mut node_entry);
-        mpt_node_list.push(node_entry);
-    });
-    let node_refs: Vec<&Vec<u8>> = mpt_node_list.iter().collect();
-    let nodes_rlp_list = encode_rlp_list(&node_refs);
-    Ok(Bytes::from(nodes_rlp_list))
+pub fn build_pre_trie_rlp(witness_state: &[Bytes]) -> Result<Bytes> {
+    Ok(Bytes::from(encode_pre_trie_rlp(witness_state)))
 }

@@ -6,7 +6,7 @@ SHELL = /bin/bash
 .PHONY: z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
         execute-block selftest tests eest-rlp-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
-        release-artifacts
+        release-artifacts derive_vk ere-bin
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -59,16 +59,10 @@ z6m_eest_convert:
 	cd prover && cargo build --release --manifest-path common/Cargo.toml \
 		--no-default-features --features eest-convert --bin z6m_eest_convert
 
-# Batched-RLP fixtures tree, produced by `z6m_eest_convert bulk-convert` from
-# the third_party/eest-fixtures submodule (sparse-checkout in CI). The output
-# is content-addressed by the eest-fixtures sha so different submodule
-# checkouts coexist in third_party/eest-fixtures-rlp/dev-<sha>/. CI overrides
-# EEST_RLP_DIR with a cache-keyed path.
+# Batched-RLP fixtures tree, produced by `z6m_eest_convert bulk-convert` from third_party/eest-fixtures submodule.
 EEST_SHA := $(shell git -C third_party/eest-fixtures rev-parse --short=12 HEAD 2>/dev/null)
 EEST_RLP_DIR ?= $(CURDIR)/third_party/eest-fixtures-rlp/dev-$(EEST_SHA)
 
-# Skip the converter run if the output dir already has a manifest from a
-# previous successful build. To force regeneration: `rm $(EEST_RLP_DIR)/manifest.json`.
 eest-rlp-build: z6m_eest_convert
 	@if [ -f "$(EEST_RLP_DIR)/manifest.json" ]; then \
 	    echo "  $(EEST_RLP_DIR) already populated; skipping bulk-convert"; \
@@ -127,3 +121,21 @@ release-artifacts:
 	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
 	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
 	@cat $(RELEASE_DIR)/SHA256SUMS.txt
+
+# ERE benchmark integration: build the SP1 guest ELF and derive its verifying key as expected by ere-hosts.
+ERE_BIN_DIR ?= $(CURDIR)/build/ere-bin
+ERE_GUEST_NAME ?= stateless-validator-zilkworm-sp1
+ERE_ELF := $(ERE_BIN_DIR)/$(ERE_GUEST_NAME).elf
+ERE_VK := $(ERE_BIN_DIR)/$(ERE_GUEST_NAME).vk
+DERIVE_VK_BIN := prover/target/release/derive_vk
+
+derive_vk:
+	cargo build --release -p z6m_stateless_validator --bin derive_vk --features vk-derive
+
+ere-bin: z6m_guest derive_vk
+	@mkdir -p $(ERE_BIN_DIR)
+	cp prover/guest_hypercube/build/z6m_guest.elf $(ERE_ELF)
+	SP1_PROVER=mock $(DERIVE_VK_BIN) $(ERE_ELF) $(ERE_VK)
+	@echo "ere-bin staged at $(ERE_BIN_DIR):"
+	@ls -la $(ERE_BIN_DIR)
+

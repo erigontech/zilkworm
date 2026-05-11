@@ -1,0 +1,42 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "z6m_stateless_validator"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side adapter that converts an Ethereum stateless-validation input into the Zilkworm unified-RLP format consumed by the zkEVM guest."
+repository = "https://github.com/erigontech/zilkworm"
+license = "Apache-2.0"
+
+[dependencies]
+# Wire-format primitives (constants, helpers, FlatAccount, encoders).
+z6m_unified_rlp = { path = "../unified_rlp" }
+
+alloy-consensus = { version = "2.0", default-features = false }
+alloy-genesis = { version = "2.0", default-features = false }
+alloy-primitives = { version = "1.0", default-features = false }
+alloy-rlp = "0.3"
+alloy-rpc-types-debug = "2.0"
+alloy-trie = "0.9"
+anyhow = "1"
+stateless = { git = "https://github.com/paradigmxyz/stateless", rev = "e5480e71a8031641ff471cad9dc482a7a14b32d5", default-features = false }
+
+# Optional, gated by the `download` feature: fetch the SP1 guest ELF + verifying key from GitHub Releases.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
+
+# Optional, gated by the `vk-derive` feature: derive the SP1 verifying key from the guest ELF.
+sp1-sdk = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.0.2", optional = true }
+bincode = { version = "2.0.1", features = ["serde"], optional = true }
+
+[features]
+default = []
+download = ["dep:reqwest", "dep:serde", "dep:tokio"]
+vk-derive = ["dep:sp1-sdk", "dep:tokio", "dep:bincode"]
+
+[[bin]]
+name = "derive_vk"
+path = "src/bin/derive_vk.rs"
+required-features = ["vk-derive"]

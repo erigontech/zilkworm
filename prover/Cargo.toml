@@ -7,7 +7,9 @@ members = [
     "prover_hypercube",
     "prover_turbo",
     "guest_turbo",
+    "unified_rlp",
 ]
+exclude = ["stateless_validator"]
 resolver = "2"
 
 [workspace.dependencies]

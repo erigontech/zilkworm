@@ -281,6 +281,7 @@ uint64_t StateTransition::run_rlp() {
     // Auto-detect v0 vs v1 by the first byte of the outer-list payload (see `docs/architecture.md` "Per-subtest unified RLP").
     std::string fork_name;
     bool legacy_v0 = false;
+    bool force_witness_root = false;
     if (payload_view[0] >= 0xb8 && payload_view[0] <= 0xbf) {
         legacy_v0 = true;
         fork_name = "Mainnet";
@@ -292,9 +293,18 @@ uint64_t StateTransition::run_rlp() {
             return kRunFailure;
         }
         fork_name.assign(reinterpret_cast<const char*>(fork_name_bytes.data()), fork_name_bytes.size());
+        // ERE-workload inputs carry a partial pre-state from an execution witness and mark the fork with "!witness".
+        if (const auto pos = fork_name.find("!witness"); pos != std::string::npos) {
+            force_witness_root = true;
+            fork_name.erase(pos);
+        }
     } else {
         sys_println(std::format("ERROR: unsupported unified_rlp version byte {:#x}", payload_view[0]).c_str());
         return kRunFailure;
+    }
+    // Mainnet blocks always carry a partial pre-state, so the witness path is the correct root check.
+    if (fork_name == "Mainnet") {
+        force_witness_root = true;
     }
 
     const ChainConfig* chain_config_ptr = nullptr;
@@ -432,10 +442,9 @@ uint64_t StateTransition::run_rlp() {
 
     Blockchain blockchain{state, chain_config, genesis_block};
 
-    // Use in-memory state-root verification for non-Mainnet forks: EEST
-    // payloads ship the full pre-state and `insert_block(true)` checks the
-    // post-state root per block. Mainnet uses witness-based check_root below.
-    const bool use_in_memory_state_root = (fork_name != "Mainnet");
+    // EEST payloads ship the full pre-state, so `insert_block(true)` can verify each post-state root in-memory.
+    // Mainnet and ERE-workload payloads carry a partial witness-derived pre-state, so they fall back to the witness-based check.
+    const bool use_in_memory_state_root = !force_witness_root;
 
     uint64_t cumulative_gas = 0;
     Block* last_applied_block = nullptr;

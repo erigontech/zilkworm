@@ -69,6 +69,17 @@ jobs:
       - name: Build guest ELF and prover
         run: make z6m_prover
 
+      - name: Build derive_vk binary
+        run: cargo build --release -p z6m_stateless_validator --bin derive_vk --features vk-derive
+
+      - name: Derive SP1 verifying key
+        env:
+          SP1_PROVER: mock
+        run: |
+          prover/target/release/derive_vk \
+            prover/guest_hypercube/build/z6m_guest.elf \
+            z6m_guest_hypercube.vk
+
       - name: Build state_transition CLI
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -102,3 +113,4 @@ jobs:
             temp/z6m_prover_hypercube
             temp/state_transition_linux_x86_64
             temp/SHA256SUMS.txt
+            z6m_guest_hypercube.vk
