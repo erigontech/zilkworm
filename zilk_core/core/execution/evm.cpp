@@ -89,7 +89,7 @@ evmc::Result EVM::create(const evmc_message& message) noexcept {
 
     auto value{intx::be::load<intx::uint256>(message.value)};
     const auto owned_funds = state_.get_balance(message.sender);
-    if (!bailout && owned_funds < value) {
+    if (owned_funds < value) {
         res.status_code = EVMC_INSUFFICIENT_BALANCE;
 
         // for (auto tracer : tracers_) {
@@ -138,7 +138,7 @@ evmc::Result EVM::create(const evmc_message& message) noexcept {
         state_.set_nonce(contract_addr, 1);
     }
 
-    transfer(state_, message.sender, contract_addr, value, bailout);
+    transfer(state_, message.sender, contract_addr, value);
 
     const evmc_message deploy_message{
         .kind = message.depth > 0 ? message.kind : EVMC_CALL,
@@ -193,7 +193,7 @@ evmc::Result EVM::call(const evmc_message& message) noexcept {
 
     const auto value{intx::be::load<intx::uint256>(message.value)};
     const auto owned_funds = state_.get_balance(message.sender);
-    if (!bailout && message.kind != EVMC_DELEGATECALL && owned_funds < value) {
+    if (message.kind != EVMC_DELEGATECALL && owned_funds < value) {
         res.status_code = EVMC_INSUFFICIENT_BALANCE;
         return res;
     }
@@ -210,7 +210,7 @@ evmc::Result EVM::call(const evmc_message& message) noexcept {
                 state_.touch(message.recipient);
             }
         } else {
-            transfer(state_, message.sender, message.recipient, value, bailout);
+            transfer(state_, message.sender, message.recipient, value);
         }
     }
 

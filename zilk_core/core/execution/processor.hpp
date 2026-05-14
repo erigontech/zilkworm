@@ -30,7 +30,7 @@ class ExecutionProcessor {
      */
     void execute_transaction(const Transaction& txn, Receipt& receipt) noexcept;
 
-    CallResult call(const Transaction& txn, bool refund) noexcept;
+    CallResult call(const Transaction& txn) noexcept;
 
     //! \brief Execute the block.
     //! \remarks Warning: This method does not verify state root; pre-Byzantium receipt root isn't validated either.

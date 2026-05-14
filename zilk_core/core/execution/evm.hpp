@@ -64,15 +64,12 @@ struct CallResult {
 using AnalysisCache = LruCache<evmc::bytes32, std::shared_ptr<evmone::baseline::CodeAnalysis>>;
 
 using TransferFunc = void(IntraBlockState& state, const evmc::address& sender, const evmc::address& recipient,
-                          const intx::uint256& amount, bool bailout);
+                          const intx::uint256& amount);
 
 // See consensus.Transfer in Erigon
 inline void standard_transfer(IntraBlockState& state, const evmc::address& sender, const evmc::address& recipient,
-                              const intx::uint256& amount, bool bailout) {
-    // TODO(yperbasis) why is the bailout condition different from Erigon?
-    if (!bailout || state.get_balance(sender) >= amount) {
-        state.subtract_from_balance(sender, amount);
-    }
+                              const intx::uint256& amount) {
+    state.subtract_from_balance(sender, amount);
     state.add_to_balance(recipient, amount);
 }
 
@@ -119,8 +116,6 @@ class EVM {
 
     /// The ETH transfer specification. Must not be null.
     TransferFunc* transfer{standard_transfer};
-
-    bool bailout{false};
 
     [[nodiscard]] evmc::bytes32 get_block_hash(int64_t block_num) noexcept;
 

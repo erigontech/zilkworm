@@ -121,14 +121,11 @@ ValidationResult validate_call_precheck(const Transaction& txn, const EVM& evm) 
     }
 
     if (evm.revision() >= EVMC_LONDON) {
-        if (txn.max_fee_per_gas > 0 || txn.max_priority_fee_per_gas > 0) {
-            if (txn.max_fee_per_gas < txn.max_priority_fee_per_gas) {
-                return ValidationResult::kMaxPriorityFeeGreaterThanMax;
-            }
-
-            if (txn.max_fee_per_gas < evm.block().header.base_fee_per_gas) {
-                return ValidationResult::kMaxFeeLessThanBase;
-            }
+        if (txn.max_fee_per_gas < txn.max_priority_fee_per_gas) {
+            return ValidationResult::kMaxPriorityFeeGreaterThanMax;
+        }
+        if (txn.max_fee_per_gas < evm.block().header.base_fee_per_gas) {
+            return ValidationResult::kMaxFeeLessThanBase;
         }
     }
 
@@ -231,7 +228,7 @@ ValidationResult pre_validate_common_forks(const Transaction& txn, const evmc_re
     return ValidationResult::kOk;
 }
 
-ValidationResult validate_call_funds(const Transaction& txn, const EVM& evm, const intx::uint256& owned_funds, bool bailout) noexcept {
+ValidationResult validate_call_funds(const Transaction& txn, const EVM& evm, const intx::uint256& owned_funds) noexcept {
     const intx::uint256 base_fee{evm.block().header.base_fee_per_gas.value_or(0)};
     const intx::uint256 effective_gas_price{txn.max_fee_per_gas >= evm.block().header.base_fee_per_gas ? txn.effective_gas_price(base_fee)
                                                                                                        : txn.max_priority_fee_per_gas};
@@ -243,8 +240,7 @@ ValidationResult validate_call_funds(const Transaction& txn, const EVM& evm, con
         const intx::uint512 gas_limit = std::max(txn.gas_limit, floor_cost);
         required_funds = std::max(required_funds, gas_limit * effective_gas_price);
     }
-    const intx::uint256 value = bailout ? 0 : txn.value;
-    if (owned_funds < required_funds + value) {
+    if (owned_funds < required_funds + txn.value) {
         return ValidationResult::kInsufficientFunds;
     }
     return ValidationResult::kOk;

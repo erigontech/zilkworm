@@ -257,7 +257,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     check_evm1_execution_result(evm1_receipt.state_diff, state_);
 }
 
-CallResult ExecutionProcessor::call(const Transaction& txn, bool refund) noexcept {
+CallResult ExecutionProcessor::call(const Transaction& txn) noexcept {
     const std::optional<evmc::address> sender{txn.sender()};
     // SILKWORM_ASSERT(sender);
 
@@ -271,9 +271,6 @@ CallResult ExecutionProcessor::call(const Transaction& txn, bool refund) noexcep
 
     const intx::uint256 effective_gas_price{txn.max_fee_per_gas >= base_fee_per_gas ? txn.effective_gas_price(base_fee_per_gas)
                                                                                     : txn.max_priority_fee_per_gas};
-    // for (auto& tracer : tracers) {
-    //     evm_.add_tracer(*tracer);
-    // }
 
     const evmc_revision rev{evm_.revision()};
     update_access_lists(*sender, txn, rev);
@@ -283,13 +280,7 @@ CallResult ExecutionProcessor::call(const Transaction& txn, bool refund) noexcep
     }
 
     intx::uint256 required_funds = protocol::compute_call_cost(txn, effective_gas_price, evm_);
-    if (evm().bailout) {
-        // If the bailout option is on, add the required funds to the sender's balance
-        // so that after the transaction costs are deducted, the sender's balance is unchanged.
-        state_.add_to_balance(*txn.sender(), required_funds);
-    }
-
-    validation_result = protocol::validate_call_funds(txn, evm_, state_.get_balance(*txn.sender()), evm().bailout);
+    validation_result = protocol::validate_call_funds(txn, evm_, state_.get_balance(*txn.sender()));
     if (validation_result != ValidationResult::kOk) {
         return {validation_result, EVMC_SUCCESS, 0, {}, {}};
     }
@@ -297,22 +288,18 @@ CallResult ExecutionProcessor::call(const Transaction& txn, bool refund) noexcep
     const intx::uint128 g0{protocol::intrinsic_gas(txn, evm_.revision())};
     const auto result = evm_.execute(txn, txn.gas_limit - static_cast<uint64_t>(g0));
 
-    uint64_t gas_left{result.gas_left};
     uint64_t gas_used{txn.gas_limit - result.gas_left};
 
-    uint64_t gas_refund = 0;
-    if (refund && !evm().bailout) {
-        const uint64_t gas_left_plus_refund = calculate_refund_gas(txn, result.gas_left, result.gas_refund);
-        gas_refund = gas_left_plus_refund - result.gas_left;
-        gas_used = txn.gas_limit - gas_left_plus_refund;
-        //  EIP-7623: Increase calldata cost
-        if (evm().revision() >= EVMC_PRAGUE) {
-            gas_used = std::max(gas_used, protocol::floor_cost(txn));
-            // SILKWORM_ASSERT(gas_used <= txn.gas_limit);
-        }
-        gas_left = txn.gas_limit - gas_used;
-        state_.add_to_balance(*txn.sender(), gas_left * effective_gas_price);
+    const uint64_t gas_left_plus_refund = calculate_refund_gas(txn, result.gas_left, result.gas_refund);
+    uint64_t gas_refund = gas_left_plus_refund - result.gas_left;
+    gas_used = txn.gas_limit - gas_left_plus_refund;
+    //  EIP-7623: Increase calldata cost
+    if (evm().revision() >= EVMC_PRAGUE) {
+        gas_used = std::max(gas_used, protocol::floor_cost(txn));
+        // SILKWORM_ASSERT(gas_used <= txn.gas_limit);
     }
+    uint64_t gas_left = txn.gas_limit - gas_used;
+    state_.add_to_balance(*txn.sender(), gas_left * effective_gas_price);
 
     // Reward the fee recipient
     const intx::uint256 priority_fee_per_gas{txn.max_fee_per_gas >= base_fee_per_gas ? txn.priority_fee_per_gas(base_fee_per_gas)
