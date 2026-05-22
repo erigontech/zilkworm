@@ -1,0 +1,54 @@
+# Airbender GPU prover — uses pre-built guest from ./temp/z6m_guest.{bin,text}
+# Skips the C++ guest cross-compilation step for faster image builds.
+#
+# Usage (from repo root):
+#   docker build --target airbender -t somnergy/z6m_prover:airbender-next \
+#     -f prover/Dockerfile.next .
+#
+# Requires ./temp/z6m_guest.bin and ./temp/z6m_guest.text to exist.
+
+# ═══════════════════════════════════════════════════════════════════════
+# Stage: airbender-builder — build Rust GPU prover only (no guest build)
+# ═══════════════════════════════════════════════════════════════════════
+FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS airbender-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git curl ca-certificates pkg-config \
+    libssl-dev xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust nightly (must match zksync-airbender's rust-toolchain.toml)
+ARG RUST_TOOLCHAIN=nightly-2026-02-10
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --default-toolchain ${RUST_TOOLCHAIN}
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+COPY . .
+
+# Build Rust GPU prover only (gpu is default feature, deps fetched from git)
+WORKDIR /build/prover/prover_airbender
+RUN cargo build --release
+
+# ═══════════════════════════════════════════════════════════════════════
+# Target: airbender — runtime image with prebuilt guest + Rust prover
+# ═══════════════════════════════════════════════════════════════════════
+FROM nvidia/cuda:13.1.0-runtime-ubuntu24.04 AS airbender
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Run as non-root user (uid 1000 = ubuntu in base image, matches typical host user)
+RUN mkdir -p /home/ubuntu && chown 1000:1000 /home/ubuntu
+
+COPY --from=airbender-builder /build/prover/prover_airbender/target/release/z6m_prover_airbender /usr/local/bin/
+# Use prebuilt guest from ./temp (NOT rebuilt from source)
+COPY --chown=1000:1000 temp/z6m_guest.bin /opt/z6m/z6m_guest.bin
+COPY --chown=1000:1000 temp/z6m_guest.text /opt/z6m/z6m_guest.text
+
+USER 1000
+WORKDIR /home/ubuntu
+
+ENTRYPOINT ["z6m_prover_airbender", "--guest-bin", "/opt/z6m/z6m_guest"]

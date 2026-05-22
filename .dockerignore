@@ -21,6 +21,8 @@ third_party/ethereum-tests/
 
 # Session data / logs
 temp/
+!temp/z6m_guest.bin
+!temp/z6m_guest.text
 tools/claude/logs/
 
 # Claude Code worktrees
