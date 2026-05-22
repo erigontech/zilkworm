@@ -444,11 +444,27 @@ impl AirbenderService {
                 .ok_or_else(|| eyre::eyre!("GPU prover not initialized (--gpu not set?)"))?
                 .clone();
 
-            let (proof, cycles) = tokio::task::spawn_blocking(move || {
-                crate::prove::gpu_prove(&prover, oracle, block_number)
+            let result = tokio::task::spawn_blocking(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::prove::gpu_prove(&prover, oracle, block_number)
+                }))
             })
             .await
-            .map_err(|e| eyre::eyre!("Proving task panicked: {}", e))?;
+            .map_err(|e| eyre::eyre!("Proving task join error: {}", e))?;
+
+            let (proof, cycles) = match result {
+                Ok(v) => v,
+                Err(payload) => {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "non-string panic payload".to_string()
+                    };
+                    bail!("gpu_prove panicked: {}", msg);
+                }
+            };
 
             let proving_millis = start.elapsed().as_millis() as u64;
 
