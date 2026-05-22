@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 use eyre::Result;
 use sp1_sdk::SP1Stdin;
 use std::fs;

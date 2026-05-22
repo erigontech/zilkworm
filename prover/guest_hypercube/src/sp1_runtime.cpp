@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 /* SP1 zkVM runtime for pure C++ guest.
  *
  * Provides: entry point (__start), SP1 syscall implementations,

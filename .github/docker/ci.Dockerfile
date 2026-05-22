@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 FROM ubuntu:25.10
 
 LABEL org.opencontainers.image.source=https://github.com/erigontech/z6m

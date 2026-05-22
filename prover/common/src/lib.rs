@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 pub mod eest_json_to_unified_rlp;
 pub mod rlp_methods;
 pub mod types;

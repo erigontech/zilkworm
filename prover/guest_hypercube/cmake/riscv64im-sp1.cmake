@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 # Cross-compilation toolchain for SP1 zkVM guest (rv64im bare-metal).
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR riscv64)

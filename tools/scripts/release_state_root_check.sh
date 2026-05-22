@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 # Builds state_transition in Release mode and runs it against all witness blocks
 # that have a .bin file, counting state root mismatches.
 

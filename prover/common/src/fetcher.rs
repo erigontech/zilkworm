@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::rlp_methods::{block_to_header_only_rlp, build_pre_state_rlp, build_pre_trie_rlp};
 use crate::types::{
     BlockchainTestCase, EthTestAccessListItem, EthTestAccount, EthTestAuthorization,

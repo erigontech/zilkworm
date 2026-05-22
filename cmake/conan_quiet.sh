@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 script_dir=$(dirname "${BASH_SOURCE[0]}")
 project_dir="$script_dir/.."
 build_dir="$1"

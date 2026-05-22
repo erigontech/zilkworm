@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! EEST JSON → unified-RLP converter. Two modes:
 //!   * `emit  --json <PATH> --index <N>` — single subtest → stdout, debug aid
 //!   * `bulk-convert --input-dir <D> --output-dir <D'>` — produce a tree of `.rlp` files

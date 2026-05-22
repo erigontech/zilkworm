@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 FROM ubuntu:24.04 AS builder
 RUN apt update 
 RUN apt install -y --no-install-recommends ca-certificates curl gpg

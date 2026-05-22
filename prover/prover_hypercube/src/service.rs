@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
 use crate::stdin_builders::{build_stdin_from_bundle, build_stdin_from_unified_rlp};
 use alloy_provider::{Provider, ProviderBuilder};

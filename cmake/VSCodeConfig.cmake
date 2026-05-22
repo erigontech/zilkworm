@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 # VS Code C++ Configuration Generator
 # This script generates .vscode/c_cpp_properties.json automatically
 

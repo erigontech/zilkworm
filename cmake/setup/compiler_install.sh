@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 # $1 - compiler ID: gcc or clang
 # $2 - compiler version
 

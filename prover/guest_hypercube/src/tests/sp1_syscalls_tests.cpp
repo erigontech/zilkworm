@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 // sp1_syscalls_tests_simple.cpp
 #include "../include/sp1_syscalls.hpp"
 

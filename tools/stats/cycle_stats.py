@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 import re
 import matplotlib.pyplot as plt
 import numpy as np

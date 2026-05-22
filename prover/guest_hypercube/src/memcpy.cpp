@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 // Optimized memcpy for rv64im (SP1 zkVM).
 //
 // This is musl libc's memcpy.c compiled to rv64im assembly by clang,

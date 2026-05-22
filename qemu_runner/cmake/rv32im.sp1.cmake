@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 # riscv32im-toolchain.cmake
 set(CMAKE_SYSTEM_NAME Generic)        # No OS (bare-metal target)
 set(CMAKE_SYSTEM_PROCESSOR riscv32)   # Target CPU architecture

@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Convert EEST JSON blockchain-test fixtures to the unified-RLP v1 format that Zilkworm's `run_rlp` consumes.
 //! See `docs/architecture.md` "Per-subtest unified RLP".
 //!

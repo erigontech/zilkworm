@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 use base64::{self, Engine};
 use reqwest::Client;
 use std::time::Duration;

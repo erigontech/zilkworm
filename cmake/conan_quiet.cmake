@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 # Reduce verbosity of CMakeDeps conan generator
 # do not edit, regenerate with conan_quiet.sh
 

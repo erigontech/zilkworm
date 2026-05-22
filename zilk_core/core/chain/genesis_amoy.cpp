@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 /* Generated from genesis_amoy.json using silkworm embed_json tool */
 #include "genesis_amoy.hpp"
 constexpr char kGenesisAmoyDataInternal[] = {

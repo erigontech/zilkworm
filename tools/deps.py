@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 import os.path
 import glob
 import argparse

@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! A simple program that takes sample runs zilk_core's state transition
 
 // These two lines are necessary for the program to properly compile.

@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! RLP helpers shared across the prover + converter. The lightweight items
 //! are feature-gate-free so the standalone `eest-convert` binary can use them
 //! without pulling unneeded deps. The heavier RPC/state helpers below are

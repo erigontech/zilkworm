@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::BTreeMap;
 
 use alloy_eips::eip4895::Withdrawals;

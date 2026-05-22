@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """
 SP1 Benchmark Tool for z6m (zilk).
 Usage: python3 sp1_benchmark.py --dir /path/to/witness_data

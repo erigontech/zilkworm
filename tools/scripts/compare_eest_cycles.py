@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Compare SP1-execution cycle / prover-gas counts between two `hypercube-eest`
 runs (typically: this branch vs main).

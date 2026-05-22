@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 // Optimized memmove for SP1 zkVM.
 //
 // In SP1, memmove is called extensively by std::string operations

@@ -1,3 +1,6 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
 #[no_mangle]
 pub extern "C" fn rust_point_evaluation(
     commitment_bytes: &[u8; 48],

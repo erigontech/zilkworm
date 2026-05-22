@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 FROM ubuntu:25.10
 
 ENV DEBIAN_FRONTEND=noninteractive

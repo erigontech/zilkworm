@@ -1,3 +1,6 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
 # Zilkworm v0.1.0-alpha.1 unified build + runtime
 #
 # Builds from source:
