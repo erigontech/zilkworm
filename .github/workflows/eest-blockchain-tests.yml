@@ -37,19 +37,27 @@ jobs:
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
           submodules: false
-          lfs: true
 
-      - name: Init submodules (sparse eest-fixtures)
+      - name: Init submodules
         uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          sparse-eest-fixtures: "skip"
+
+      - name: Prepare EEST RLP fixtures
+        id: eest-rlp
+        uses: ./.github/actions/prepare-eest-rlp
         with:
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Run EEST blockchain tests
         id: run_tests
         shell: bash
+        env:
+          EEST_RLP_DIR: ${{ steps.eest-rlp.outputs.dir }}
         run: |
           set +e
-          make eest-blockchain-tests 2>&1 | tee output.log
+          make eest-blockchain-tests EEST_RLP_DIR=$EEST_RLP_DIR 2>&1 | tee output.log
           exit_code=${PIPESTATUS[0]}
 
           # Parse test results

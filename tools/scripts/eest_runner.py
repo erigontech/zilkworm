@@ -2,13 +2,18 @@
 """
 EEST Test Runner for z6m HyperCube prover.
 
-Discovers test shard directories under eest-fixtures/blockchain_tests,
+Discovers test shard directories under <fixtures>/blockchain_tests,
 launches z6m_prover --test-service --test-dir for each shard in parallel
 (staggered by a configurable delay), and aggregates results.
 
+If --fixtures is omitted, defaults (in order):
+  $EEST_RLP_DIR (CI sets this from the actions/cache step), or
+  third_party/eest-fixtures-rlp/dev-<eest_sha>/ (local build via `make
+  eest-rlp-build`).
+
 Usage:
-    python3 eest_runner.py --fixtures third_party/eest-fixtures
-    python3 eest_runner.py --fixtures third_party/eest-fixtures --stagger 30 --max-parallel 4
+    python3 eest_runner.py
+    python3 eest_runner.py --stagger 30 --max-parallel 4
 """
 
 import argparse
@@ -59,11 +64,21 @@ def get_available_memory_gb() -> float:
     return 16.0
 
 
-def discover_shards(fixtures_dir: str) -> List[str]:
+_FORMAT_EXTS = {
+    "rlp":  (".rlp",),
+    "json": (".json",),
+    "auto": (".rlp", ".json"),
+}
+
+
+def discover_shards(fixtures_dir: str, fmt: str) -> List[str]:
     """Discover test shards under blockchain_tests/.
 
     - blockchain_tests/{fork} (excluding static/, Testing/) -> one shard each
     - blockchain_tests/static/state_tests/{subdir} -> one shard each
+
+    A directory qualifies as a shard if it contains at least one file with
+    an extension allowed by `fmt` ("rlp", "json", or "auto" for either).
     """
     bt = os.path.join(fixtures_dir, "blockchain_tests")
     shards = []
@@ -75,7 +90,7 @@ def discover_shards(fixtures_dir: str) -> List[str]:
         d = os.path.join(bt, name)
         if not os.path.isdir(d):
             continue
-        if not _has_json(d):
+        if not _has_test_files(d, fmt):
             continue
         shards.append(os.path.join("blockchain_tests", name))
 
@@ -86,18 +101,19 @@ def discover_shards(fixtures_dir: str) -> List[str]:
             d = os.path.join(static_st, name)
             if not os.path.isdir(d):
                 continue
-            if not _has_json(d):
+            if not _has_test_files(d, fmt):
                 continue
             shards.append(os.path.join("blockchain_tests", "static", "state_tests", name))
 
     return shards
 
 
-def _has_json(d: str) -> bool:
-    """Check if directory contains at least one .json file (recursive)."""
+def _has_test_files(d: str, fmt: str) -> bool:
+    """Check if directory contains at least one fixture matching `fmt` (recursive)."""
+    exts = _FORMAT_EXTS[fmt]
     for root, _, files in os.walk(d):
         for f in files:
-            if f.endswith(".json"):
+            if f.endswith(exts):
                 return True
     return False
 
@@ -291,10 +307,42 @@ def print_report(results: List[ShardResult]) -> Tuple[int, int, int]:
     return total, passed, failed
 
 
+def default_fixtures_dir(fmt: str) -> Optional[str]:
+    """Resolve the default fixtures path for `fmt`.
+
+    rlp / auto → `$EEST_RLP_DIR` if set (CI sets this via the cache step), or
+                 `<repo>/third_party/eest-fixtures-rlp/dev-<eest_short_sha>/`
+                 (the local default produced by `make eest-rlp-build`).
+    json       → `<repo>/third_party/eest-fixtures` (JSON submodule).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(here, "..", ".."))
+    if fmt == "json":
+        return os.path.join(repo_root, "third_party", "eest-fixtures")
+    env = os.environ.get("EEST_RLP_DIR")
+    if env:
+        return env
+    try:
+        r = subprocess.run(
+            ["git", "-C", os.path.join(repo_root, "third_party", "eest-fixtures"),
+             "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            sha = r.stdout.strip()
+            return os.path.join(repo_root, "third_party",
+                                "eest-fixtures-rlp", f"dev-{sha}")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="EEST Test Runner for z6m")
-    parser.add_argument("--fixtures", required=True,
-                        help="Path to eest-fixtures directory")
+    parser.add_argument("--fixtures", default=None,
+                        help="Path to fixtures dir (default depends on --format)")
+    parser.add_argument("--format", choices=("auto", "rlp", "json"), default="auto",
+                        help="Fixture format to walk; 'auto' accepts both .rlp and .json (default: auto)")
     parser.add_argument("--stagger", type=int, default=60,
                         help="Seconds between shard launches (default: 60)")
     parser.add_argument("--max-parallel", type=int, default=0,
@@ -309,9 +357,17 @@ def main() -> int:
                         help="Only run shards matching this substring")
     args = parser.parse_args()
 
-    fixtures = os.path.abspath(args.fixtures)
+    fixtures_arg = args.fixtures or default_fixtures_dir(args.format)
+    if not fixtures_arg:
+        print(f"ERROR: --fixtures not provided and could not resolve default for format={args.format}",
+              file=sys.stderr)
+        return 1
+    fixtures = os.path.abspath(fixtures_arg)
     if not os.path.isdir(fixtures):
-        print(f"ERROR: fixtures dir not found: {fixtures}", file=sys.stderr)
+        hint = ("Run `make eest-rlp-build` first." if args.format != "json"
+                else "Run `git submodule update --init third_party/eest-fixtures` first.")
+        print(f"ERROR: fixtures dir not found: {fixtures}\n  {hint}",
+              file=sys.stderr)
         return 1
 
     git_root = find_git_root()
@@ -325,7 +381,7 @@ def main() -> int:
         return 1
 
     # Discover
-    shards = discover_shards(fixtures)
+    shards = discover_shards(fixtures, args.format)
     if args.filter:
         shards = [s for s in shards if args.filter in s]
     if not shards:

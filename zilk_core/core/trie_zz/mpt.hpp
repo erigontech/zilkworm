@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <optional>
 #include <vector>

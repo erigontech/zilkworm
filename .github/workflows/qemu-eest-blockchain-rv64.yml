@@ -48,24 +48,33 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: false
-          lfs: true
 
-      - name: Init submodules (sparse eest-fixtures)
+      - name: Init submodules
         uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          sparse-eest-fixtures: "skip"
+
+      - name: Prepare EEST RLP fixtures
+        id: eest-rlp
+        uses: ./.github/actions/prepare-eest-rlp
         with:
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build EEST blockchain tests (RV64IM)
         run: |
-          cd qemu_runner && make ARCH=rv64 xpack-elf-eest
+          cd qemu_runner && make ARCH=rv64 xpack-elf-eest \
+              EEST_RLP_DIR=${{ github.workspace }}/${{ steps.eest-rlp.outputs.dir }}
 
       - name: Run EEST blockchain tests (RV64IM)
         id: run_tests
         shell: bash
+        env:
+          EEST_RLP_DIR: ${{ github.workspace }}/${{ steps.eest-rlp.outputs.dir }}
         run: |
           set +e
           cd qemu_runner
-          make ARCH=rv64 rerun-ctest 2>&1 | tee output.log
+          make ARCH=rv64 rerun-ctest EEST_RLP_DIR=$EEST_RLP_DIR 2>&1 | tee output.log
 
           exit_code=${PIPESTATUS[0]}
 

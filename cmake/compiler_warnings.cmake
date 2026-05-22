@@ -46,6 +46,10 @@ elseif((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR ("${CMAKE_CXX_COMPILER_ID}" MAT
     if((CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang") AND (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15))
       # https://stackoverflow.com/questions/77164140/
       add_link_options(-Wl,-no_warn_duplicate_libraries)
+      # Apple clang 16 doesn't yet know the C++23 [[assume]] attribute or warns on some narrowing conversions that GCC accepts
+      add_compile_options(-Wno-error=unknown-attributes)
+      add_compile_options(-Wno-error=implicit-int-conversion)
+      add_compile_options(-Wno-error=shorten-64-to-32)
     endif()
   endif()
 

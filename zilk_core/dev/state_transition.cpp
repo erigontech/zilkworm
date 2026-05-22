@@ -25,6 +25,8 @@
 
 namespace silkworm::cmd::state_transition {
 
+using namespace silkworm::protocol;
+
 StateTransition::StateTransition(std::string_view json_str, const bool terminate_on_error, const bool show_diagnostics) noexcept
     : json_str_{json_str},
       terminate_on_error_{terminate_on_error},
@@ -60,23 +62,7 @@ std::unique_ptr<evmc::address> StateTransition::sender_to_address(const std::str
     return std::make_unique<evmc::address>(hex_to_address(sender));
 }
 
-/*
-//  * This function is used to clean up the state after a failed block execution.
-//  * Certain post-processing would be a part of the execute_transaction() function,
-//  * but since the validation failed, we need to do it manually.
-//  */
-void cleanup_error_block(Block& block, ExecutionProcessor& processor, const evmc_revision rev) {
-    if (rev >= EVMC_SHANGHAI) {
-        processor.evm().state().access_account(block.header.beneficiary);
-    }
-    processor.evm().state().add_to_balance(block.header.beneficiary, 0);
-    processor.evm().state().finalize_transaction(rev);
-    processor.evm().state().write_to_db(block.header.number);
-}
-
-// From silkworm/cmd/test/ethereum.
 namespace {
-    using namespace silkworm::protocol;
     enum class Status {
         kPassed,
         kFailed,
@@ -250,7 +236,6 @@ namespace {
 
         InMemoryState state{read_genesis_allocation(json_test["pre"])};
         Blockchain blockchain{state, config_it->second, genesis_block};
-        // blockchain.exo_evm = exo_evm;
 
         for (const auto& json_block : json_test["blocks"]) {
             Status status{run_json_block(json_block, blockchain)};
@@ -279,56 +264,146 @@ namespace {
 uint64_t StateTransition::run_rlp() {
     sys_println(std::format("run_rlp: Unified RLP length: {}", unified_rlp_.size()).c_str());
 
-    Block genesisBlock, block;
+    Block genesis_block;
 
     const auto rlp_head{rlp::decode_header(unified_rlp_)};
-    if (!rlp_head) {
-        sys_println("ERROR: Failed to Decode unified_rlp overall header");
-        return 0;
+    if (!rlp_head || !rlp_head->list) {
+        sys_println("ERROR: outer RLP decode failed");
+        return kRunFailure;
     }
-    if (!rlp_head->list) {
-        sys_println(std::format("ERROR: Failed to Decode unified_rlp: Not list. Payload length: {}", rlp_head->payload_length).c_str());
-        return 0;
-    }
-
-    // Decode Genesis Block
     ByteView payload_view = unified_rlp_.substr(0, rlp_head->payload_length);
     if (payload_view.empty()) {
-        sys_println("ERROR: Failed to Decode unified_rlp payload view");
-        return 0;
+        sys_println("ERROR: empty unified_rlp payload");
+        return kRunFailure;
     }
+
+    // Auto-detect v0 vs v1 by the first byte of the outer-list payload (see `docs/architecture.md` "Per-subtest unified RLP").
+    std::string fork_name;
+    bool legacy_v0 = false;
+    if (payload_view[0] >= 0xb8 && payload_view[0] <= 0xbf) {
+        legacy_v0 = true;
+        fork_name = "Mainnet";
+    } else if (payload_view[0] == 0x01) {
+        payload_view.remove_prefix(1);
+        Bytes fork_name_bytes;
+        if (!rlp::decode(payload_view, fork_name_bytes, rlp::Leftover::kAllow)) {
+            sys_println("ERROR: Failed to Decode fork_name");
+            return kRunFailure;
+        }
+        fork_name.assign(reinterpret_cast<const char*>(fork_name_bytes.data()), fork_name_bytes.size());
+    } else {
+        sys_println(std::format("ERROR: unsupported unified_rlp version byte {:#x}", payload_view[0]).c_str());
+        return kRunFailure;
+    }
+
+    const ChainConfig* chain_config_ptr = nullptr;
+    if (fork_name == "Mainnet") {
+        chain_config_ptr = &kMainnetConfig;
+    } else {
+        const auto it = test::kNetworkConfig.find(fork_name);
+        if (it == test::kNetworkConfig.end()) {
+            sys_println(std::format("ERROR: run_rlp: unknown fork '{}'", fork_name).c_str());
+            return kRunFailure;
+        }
+        chain_config_ptr = &it->second;
+    }
+    const ChainConfig& chain_config = *chain_config_ptr;
+
     auto genesis_header = rlp::decode_header(payload_view);
     if (!genesis_header) {
-        sys_println("ERROR: Failed to Decode Genesis Block RLP");
-        return 0;
+        sys_println("ERROR: Failed to Decode Genesis Block RLP header");
+        return kRunFailure;
     }
     ByteView genesis_payload = payload_view.substr(0, genesis_header->payload_length);
-    if (!rlp::decode(genesis_payload, genesisBlock)) {
-        sys_println("ERROR: Failed to Decode Genesis Block RLP");
-        return 0;
+    if (!rlp::decode(genesis_payload, genesis_block)) {
+        sys_println("ERROR: Failed to Decode Genesis Block RLP body");
+        return kRunFailure;
     }
     payload_view.remove_prefix(genesis_header->payload_length);
 
-    if (payload_view.empty()) {
-        sys_println("ERROR: Failed to Decode Block RLP");
-        return 0;
+    constexpr size_t kMaxBlockSize = 10 * 1024 * 1024;
+    constexpr size_t kBlockSafetyMargin = 2 * 1024 * 1024;
+    constexpr size_t kMaxRlpBlockSize = kMaxBlockSize - kBlockSafetyMargin;
+
+    // Decode blocks: v0 has just one block_rlp, v1 has a list of [block_rlp, expect_invalid_byte] tuples.
+    enum class EntryStatus { Ok, Oversized, DecodeFailed };
+    struct BlockEntry { Block block; EntryStatus status; bool expect_invalid; };
+    std::vector<BlockEntry> entries;
+
+    if (legacy_v0) {
+        BlockEntry e{};
+        auto bh = rlp::decode_header(payload_view);
+        if (!bh) {
+            sys_println("ERROR: Failed to Decode Block RLP header");
+            return kRunFailure;
+        }
+        ByteView bp = payload_view.substr(0, bh->payload_length);
+        payload_view.remove_prefix(bh->payload_length);
+        if (bh->payload_length > kMaxRlpBlockSize) {
+            e.status = EntryStatus::Oversized;
+        } else if (!rlp::decode(bp, e.block)) {
+            e.status = EntryStatus::DecodeFailed;
+        }
+        entries.push_back(std::move(e));
+    } else {
+        // v1: blocks_list slot is RLP string-wrapped. Unwrap, then decode the inner list of `[block, ei]` tuples.
+        auto bl_outer = rlp::decode_header(payload_view);
+        if (!bl_outer) {
+            sys_println("ERROR: blocks_list outer header decode failed");
+            return kRunFailure;
+        }
+        ByteView bl_payload = payload_view.substr(0, bl_outer->payload_length);
+        payload_view.remove_prefix(bl_outer->payload_length);
+
+        auto bl_inner = rlp::decode_header(bl_payload);
+        if (!bl_inner || !bl_inner->list) {
+            sys_println("ERROR: blocks_list inner is not a list");
+            return kRunFailure;
+        }
+        ByteView entries_view = bl_payload.substr(0, bl_inner->payload_length);
+
+        while (!entries_view.empty()) {
+            auto entry_hdr = rlp::decode_header(entries_view);
+            if (!entry_hdr || !entry_hdr->list) {
+                sys_println("ERROR: blocks_list entry is not a list");
+                return kRunFailure;
+            }
+            ByteView ev = entries_view.substr(0, entry_hdr->payload_length);
+            entries_view.remove_prefix(entry_hdr->payload_length);
+
+            // Split entry into [block_view, ei_view] up front so a malformed
+            // block doesn't desync the cursor used to read the ei byte.
+            ByteView ev_after_header = ev;
+            auto bh = rlp::decode_header(ev_after_header);
+            if (!bh) {
+                sys_println("ERROR: blocks_list entry: failed to decode block header");
+                return kRunFailure;
+            }
+            const size_t header_bytes = ev.size() - ev_after_header.size();
+            const size_t block_total = header_bytes + bh->payload_length;
+            ByteView block_view = ev.substr(0, block_total);
+            ev.remove_prefix(block_total);
+
+            BlockEntry e{};
+            // EIP-7934 limit applies to the total block RLP (header + payload).
+            if (block_total > kMaxRlpBlockSize) {
+                e.status = EntryStatus::Oversized;
+            } else if (!rlp::decode(block_view, e.block, rlp::Leftover::kAllow)) {
+                e.status = EntryStatus::DecodeFailed;
+            }
+
+            Bytes ei_bytes;
+            if (rlp::decode(ev, ei_bytes, rlp::Leftover::kAllow)) {
+                e.expect_invalid = !ei_bytes.empty() && ei_bytes[0] != 0;
+            }
+            entries.push_back(std::move(e));
+        }
     }
-    auto block_header = rlp::decode_header(payload_view);
-    if (!block_header) {
-        sys_println("ERROR: Failed to Decode Block RLP");
-        return 0;
-    }
-    ByteView block_payload = payload_view.substr(0, block_header->payload_length);
-    if (!rlp::decode(block_payload, block)) {
-        sys_println("ERROR: Failed to Decode Genesis Block RLP");
-        return 0;
-    }
-    payload_view.remove_prefix(block_header->payload_length);
 
     auto pre_rlp_head = rlp::decode_header(payload_view);
     if (!pre_rlp_head) {
         sys_println("ERROR: Failed to Decode Pre-State RLP");
-        return 0;
+        return kRunFailure;
     }
     ByteView pre_rlp_payload = payload_view.substr(0, pre_rlp_head->payload_length);
     InMemoryState state{read_pre_state_from_rlp(pre_rlp_payload)};
@@ -336,7 +411,7 @@ uint64_t StateTransition::run_rlp() {
 
     auto headers_overall_rlp_header = rlp::decode_header(payload_view);
     ByteView headers_overall_view = payload_view.substr(0, headers_overall_rlp_header->payload_length);
-    if (headers_overall_rlp_header) {  // Skip invalid headers list rlp
+    if (headers_overall_rlp_header) {
         auto headers_list_header = rlp::decode_header(headers_overall_view);
         if (!headers_list_header || !headers_list_header->list) {
             sys_println("Invalid headers list entry");
@@ -354,27 +429,79 @@ uint64_t StateTransition::run_rlp() {
     }
     payload_view.remove_prefix(headers_overall_rlp_header->payload_length);
 
-    // Use Mainnet config.
-    // This can be latter extended to public testnets by providing chain id
-    // and selecting the appropriate config from kKnownChainConfigs.
-    Blockchain blockchain{state, kMainnetConfig, genesisBlock};
+    Blockchain blockchain{state, chain_config, genesis_block};
 
-    if (ValidationResult err{blockchain.insert_block(block, false)}; err != ValidationResult::kOk) {
-        sys_println(std::format("Validation error {}", magic_enum::enum_name<ValidationResult>(err)).c_str());
-        return 0;
+    // Use in-memory state-root verification for non-Mainnet forks: EEST
+    // payloads ship the full pre-state and `insert_block(true)` checks the
+    // post-state root per block. Mainnet uses witness-based check_root below.
+    const bool use_in_memory_state_root = (fork_name != "Mainnet");
+
+    uint64_t cumulative_gas = 0;
+    Block* last_applied_block = nullptr;
+
+    for (auto& entry : entries) {
+        switch (entry.status) {
+            case EntryStatus::Oversized:
+                if (entry.expect_invalid) continue;
+                return kRunSkipped;
+            case EntryStatus::DecodeFailed:
+                if (entry.expect_invalid) continue;
+                sys_println("ERROR: Failed to Decode Block RLP body");
+                return kRunFailure;
+            case EntryStatus::Ok:
+                break;
+        }
+        const ValidationResult err = blockchain.insert_block(entry.block, use_in_memory_state_root);
+        if (entry.expect_invalid) {
+            if (err == ValidationResult::kOk) {
+                sys_println("ERROR: block expected to be invalid but executed successfully");
+                return kRunFailure;
+            }
+            continue;
+        }
+        if (err != ValidationResult::kOk) {
+            sys_println(std::format("Validation error {}", magic_enum::enum_name<ValidationResult>(err)).c_str());
+            return kRunFailure;
+        }
+        cumulative_gas += entry.block.header.gas_used;
+        last_applied_block = &entry.block;
     }
+
     auto pre_trie_head = rlp::decode_header(payload_view);
     if (!pre_trie_head) {
         sys_println("ERROR: Failed to Decode Pre-Trie List RLP");
-        return 0;
+        return kRunFailure;
     }
     ByteView pre_trie_payload = payload_view.substr(0, pre_trie_head->payload_length);
     payload_view.remove_prefix(pre_trie_head->payload_length);
-    if (!check_root(pre_trie_payload, state, block.header)) {
+    if (!use_in_memory_state_root && last_applied_block != nullptr &&
+        !check_root(pre_trie_payload, state, last_applied_block->header)) {
         sys_println("ERROR: State Root Mismatch");
+        return kRunFailure;
     }
 
-    return block.header.gas_used;
+    // Check the post-state root from the in-memory state against the expected root hash in the payload.
+    // If the payload doesn't have post-state info, skip the check (legacy v0 format or empty payload in v1 or zero hash).
+    if (!legacy_v0 && !payload_view.empty()) {
+        Bytes post_state_hash_bytes;
+        if (!rlp::decode(payload_view, post_state_hash_bytes, rlp::Leftover::kAllow)) {
+            sys_println("ERROR: Failed to Decode post_state_hash");
+            return kRunFailure;
+        }
+        if (post_state_hash_bytes.size() == 32) {
+            evmc::bytes32 expected = to_bytes32(post_state_hash_bytes);
+            if (expected != evmc::bytes32{}) {
+                evmc::bytes32 actual = state.state_root_hash();
+                if (actual != expected) {
+                    sys_println(std::format("ERROR: postStateHash mismatch: expected {} got {}",
+                                            to_hex(expected), to_hex(actual)).c_str());
+                    return kRunFailure;
+                }
+            }
+        }
+    }
+
+    return cumulative_gas;
 }
 
 bool StateTransition::check_root(ByteView pre_trie_payload, InMemoryState& state, BlockHeader& header) {
@@ -456,9 +583,9 @@ uint64_t StateTransition::run() {
         }
     }
     if (any_failed)
-        return 1;
+        return kRunFailure;
     if (any_skipped)
-        return 2;
+        return kRunSkipped;
     return 0;
 }
 

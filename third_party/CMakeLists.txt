@@ -121,3 +121,6 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/evmone/lib/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING PATTERN "*.h"
 )
+
+# EEST batched-RLP fixtures root. Populated by `make eest-rlp-build` or by CI's cache + bulk-convert step.
+set(EEST_RLP_DIR "" CACHE PATH "EEST batched-RLP fixtures root")

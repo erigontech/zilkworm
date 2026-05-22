@@ -513,10 +513,18 @@ fn build_unified_rlp_map(
 
     let pre_trie_map = build_pre_trie_rlp(&witness.state)?;
 
+    // Wrap the single block as a one-element v1 blocks-list.
+    use crate::rlp_methods::{encode_rlp_list, MAINNET_FORK_NAME, RLP_FALSE, VERSION_V1};
+    let ei = [RLP_FALSE];
+    let block_entry: Vec<u8> = encode_rlp_list(&[block_rlp.as_ref(), &ei[..]]);
+    let blocks_list_rlp: Vec<u8> = encode_rlp_list(&[block_entry.as_slice()]);
 
-    let items = vec![
+    let version = [VERSION_V1];
+    let items: Vec<&[u8]> = vec![
+        &version,
+        MAINNET_FORK_NAME.as_bytes(),
         prev_block_rlp.as_ref(),
-        block_rlp.as_ref(),
+        blocks_list_rlp.as_ref(),
         pre_state_rlp.as_ref(),
         headers_rlp_list.as_ref(),
         pre_trie_map.as_ref(),

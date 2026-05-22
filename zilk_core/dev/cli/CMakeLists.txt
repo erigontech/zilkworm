@@ -5,28 +5,28 @@
 
 add_executable(state_transition "runner.cpp")
 target_link_libraries(state_transition PRIVATE silkworm_dev)
-# file(GLOB STATE_TRANSITION_TESTS CONFIGURE_DEPENDS "state_transition_sample*.json")
-# add_custom_command(
-#   TARGET state_transition
-#   POST_BUILD
-#   COMMAND ${CMAKE_COMMAND} ARGS -E copy_if_different ${STATE_TRANSITION_TESTS} "${CMAKE_CURRENT_BINARY_DIR}"
-# )
 
-set(TESTS_DIR "" CACHE PATH "Directory containing external Execution Spec tests (JSON)")
-if(TESTS_DIR)
+set(EEST_RLP_DIR  "" CACHE PATH "Directory of pre-converted batched-RLP EEST fixtures")
+set(EEST_JSON_DIR "" CACHE PATH "Directory of raw EEST JSON fixtures")
+if(EEST_RLP_DIR OR EEST_JSON_DIR)
     if(NOT BUILD_TESTING)
         message(FATAL_ERROR "To enable state transition tests, please enable testing (e.g., -DBUILD_TESTING=ON)")
     endif()
+endif()
 
-    file(GLOB_RECURSE STATE_TRANSITION_TESTS CONFIGURE_DEPENDS "${TESTS_DIR}/*.json")
-
-    foreach(TEST_JSON ${STATE_TRANSITION_TESTS})
-        file(RELATIVE_PATH TEST_REL_PATH ${TESTS_DIR} ${TEST_JSON})
-        set(TEST_NAME "state_transition/${TEST_REL_PATH}")
-        add_test(
-            NAME ${TEST_NAME}
-            COMMAND state_transition ${TEST_JSON}
-        )
-        set_tests_properties(${TEST_NAME} PROPERTIES SKIP_RETURN_CODE 2)
+function(_register_eest_tests label ext fixtures_dir)
+    file(GLOB_RECURSE files CONFIGURE_DEPENDS "${fixtures_dir}/*.${ext}")
+    foreach(path ${files})
+        file(RELATIVE_PATH rel "${fixtures_dir}" "${path}")
+        set(test_name "state_transition/${label}/${rel}")
+        add_test(NAME "${test_name}" COMMAND $<TARGET_FILE:state_transition> "${path}")
+        set_tests_properties("${test_name}" PROPERTIES SKIP_RETURN_CODE 2)
     endforeach()
+endfunction()
+
+if(EEST_RLP_DIR)
+    _register_eest_tests(rlp  rlp  "${EEST_RLP_DIR}")
+endif()
+if(EEST_JSON_DIR)
+    _register_eest_tests(json json "${EEST_JSON_DIR}")
 endif()

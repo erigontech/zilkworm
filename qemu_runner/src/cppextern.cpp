@@ -1,54 +1,37 @@
 #include <zilk_core/dev/state_transition.hpp>
-// bn254_add.hpp
 #include <cstdint>
-#include <array>
 #include <string>
+#include "include/cppextern.hpp"
 #include "include/semihosting.hpp"
 
-/* These magic symbols are provided by the linker.  */
 extern void (*__preinit_array_start[])(void);
 extern void (*__preinit_array_end[])(void);
 extern void (*__init_array_start[])(void);
 extern void (*__init_array_end[])(void);
-extern void (*__fini_array_start[])(void);
-extern void (*__fini_array_end[])(void);
 
-namespace {
-    uint64_t run_json_test(const std::string& json_str) {
-        const auto terminate_on_error = false;
-        const auto show_diagnostics = true;
-        auto state_transition = silkworm::cmd::state_transition::StateTransition(json_str, terminate_on_error, show_diagnostics);
-        return state_transition.run();
+extern "C" uint64_t sample_run_wrapped(bool is_json, std::string input_str) {
+    // SP1's `_start` doesn't run global ctors; do it on first entry.
+    static bool inited = false;
+    if (!inited) {
+        for (auto p = __preinit_array_start; p != __preinit_array_end; ++p) (*p)();
+        for (auto p = __init_array_start; p != __init_array_end; ++p) (*p)();
+        sys_println("\nZilkworm guest initialized");
+        inited = true;
     }
 
-    uint64_t run_unified_rlp(const std::string& unified_rlp_str) {
-        auto state_transition = silkworm::cmd::state_transition::StateTransition(unified_rlp_str);
-            // Run the state transition function of silkworm - EVMONE - silkworm_validate_transition and back
-            auto res = state_transition.run_rlp();
+    using silkworm::cmd::state_transition::StateTransition;
+    uint64_t res;
+    if (is_json) {
+        auto state_transition = StateTransition(input_str, /*terminate_on_error=*/false, /*show_diagnostics=*/true);
+        res = state_transition.run();
+    } else {
+        auto state_transition = StateTransition(std::move(input_str));
+        res = state_transition.run_rlp();
         std::string msg = "[state_transition] run successful, gas used: " + std::to_string(res);
         sys_println(msg.c_str());
-        return res;
-    }
-}
-
-extern "C" uint64_t sample_run_wrapped(bool is_test, std::string input_str) {
-
-    // Call global constructors because SP1's _start function doesn't.
-    for (auto p = __preinit_array_start; p != __preinit_array_end; ++p) {
-        (*p)();
-    }
-    for (auto p = __init_array_start; p != __init_array_end; ++p) {
-        (*p)();
     }
 
-    sys_println("\nZilkworm guest initialized");
-    if (is_test) {
-        sys_println("\nRunning test input");
-        return run_json_test(input_str);
-    }
-    else {
-        return run_unified_rlp(input_str);
-    }
-
-    // Initialize a state_transition object with one Shanghai Transaction - within silkworm
+    if (res == StateTransition::kRunFailure) return 1;
+    if (res == StateTransition::kRunSkipped) return 2;
+    return 0;
 }

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 #include <evmc/evmc.hpp>
@@ -16,13 +17,17 @@ namespace silkworm::cmd::state_transition {
 class StateTransition {
   private:
     std::string_view json_str_;
-    std::string unified_rlp_data_;  // Owns the RLP data
+    std::string unified_rlp_data_;   // Owns the RLP data
     ByteView unified_rlp_;           // View into unified_rlp_data_
     bool terminate_on_error_{false};
     bool show_diagnostics_{false};
     silkworm::mpt::FlatNodeStore node_store_;
 
   public:
+    /// Sentinel values returned by `run_rlp`. Any other value is the gas_used.
+    static constexpr uint64_t kRunFailure = UINT64_MAX;
+    static constexpr uint64_t kRunSkipped = UINT64_MAX - 1;
+
     explicit StateTransition(std::string_view json_str, bool terminate_on_error, bool show_diagnostics) noexcept;
     explicit StateTransition(const std::string& unified_rlp_str) noexcept;
     explicit StateTransition(std::string&& unified_rlp_str) noexcept;  // Move constructor

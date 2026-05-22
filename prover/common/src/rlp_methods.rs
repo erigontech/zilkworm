@@ -1,15 +1,72 @@
+//! RLP helpers shared across the prover + converter. The lightweight items
+//! are feature-gate-free so the standalone `eest-convert` binary can use them
+//! without pulling unneeded deps. The heavier RPC/state helpers below are
+//! gated on `network`.
+
+/// Unified-RLP v1 version byte. See `docs/architecture.md` "Per-subtest unified RLP".
+pub const VERSION_V1: u8 = 0x01;
+
+/// RLP encoding of `false` (the empty string).
+pub const RLP_FALSE: u8 = 0x80;
+
+/// RLP encoding of `true` (single-byte `0x01`).
+pub const RLP_TRUE: u8 = 0x01;
+
+/// Canonical Mainnet fork name used in v1 unified-RLP payloads.
+pub const MAINNET_FORK_NAME: &str = "Mainnet";
+
+/// Concatenates pre-encoded RLP items into an outer RLP list.
+pub fn encode_rlp_list<T: AsRef<[u8]>>(items: &[T]) -> Vec<u8> {
+    let payload_len: usize = items.iter().map(|i| i.as_ref().len()).sum();
+    let mut out = Vec::with_capacity(payload_len + 9);
+    if payload_len < 56 {
+        out.push(0xc0 + payload_len as u8);
+    } else {
+        let len_bytes = payload_len.to_be_bytes();
+        let len_bytes = &len_bytes[len_bytes.iter().position(|&b| b != 0).unwrap_or(7)..];
+        out.push(0xf7 + len_bytes.len() as u8);
+        out.extend_from_slice(len_bytes);
+    }
+    for item in items {
+        out.extend_from_slice(item.as_ref());
+    }
+    out
+}
+
+/// Encodes a sequence of RLP blobs into the bundle wire format (see `docs/architecture.md` "Bundle format").
+pub fn encode_rlp_bundle(items: &[&[u8]]) -> Vec<u8> {
+    let payload_len = 4 + items.iter().map(|b| 4 + b.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(payload_len);
+    out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+    for item in items {
+        out.extend_from_slice(&(item.len() as u32).to_le_bytes());
+        out.extend_from_slice(item);
+    }
+    out
+}
+
+#[cfg(feature = "network")]
 use std::collections::HashMap;
 
+#[cfg(feature = "network")]
 use alloy_consensus::{Block, BlockHeader, Header, TxEnvelope};
+#[cfg(feature = "network")]
 use alloy_eips::eip4895::Withdrawals;
+#[cfg(feature = "network")]
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
+#[cfg(feature = "network")]
 use alloy_rlp::{Decodable, Encodable};
+#[cfg(feature = "network")]
 use alloy_rpc_types::Block as RpcBlock;
+#[cfg(feature = "network")]
 use alloy_trie::{TrieAccount, KECCAK_EMPTY};
+#[cfg(feature = "network")]
 use eyre::Result;
+#[cfg(feature = "network")]
 use rsp_mpt::EthereumState;
 
 /// Convert RPC block to RLP bytes with header only (empty transactions, uncles, withdrawals)
+#[cfg(feature = "network")]
 pub fn block_to_header_only_rlp(rpc_block: &RpcBlock) -> Result<Bytes> {
     let header = Header {
         parent_hash: rpc_block.header.parent_hash,
@@ -51,6 +108,7 @@ pub fn block_to_header_only_rlp(rpc_block: &RpcBlock) -> Result<Bytes> {
 
 /// Build pre-state as RLP with structure:
 /// [[{address, account}], [{address, storage}], [{codeHash, code}]]
+#[cfg(feature = "network")]
 pub fn build_pre_state_rlp(
     state: &EthereumState,
     code_map: &HashMap<B256, Bytes>,
@@ -148,6 +206,7 @@ pub fn build_pre_state_rlp(
     Ok(Bytes::from(output))
 }
 
+#[cfg(feature = "network")]
 pub fn build_pre_trie_rlp(witness_state: &Vec<Bytes>) -> Result<Bytes> {
     let mut mpt_node_list = Vec::new();
 
@@ -161,26 +220,4 @@ pub fn build_pre_trie_rlp(witness_state: &Vec<Bytes>) -> Result<Bytes> {
     let node_refs: Vec<&Vec<u8>> = mpt_node_list.iter().collect();
     let nodes_rlp_list = encode_rlp_list(&node_refs);
     Ok(Bytes::from(nodes_rlp_list))
-}
-
-
-pub fn encode_rlp_list(items: &[&Vec<u8>]) -> Vec<u8> {
-    let mut output = Vec::new();
-
-    let total_payload: usize = items.iter().map(|item| item.len()).sum();
-
-    if total_payload < 56 {
-        output.push(0xc0 + total_payload as u8);
-    } else {
-        let len_bytes = total_payload.to_be_bytes();
-        let len_bytes = &len_bytes[len_bytes.iter().position(|&b| b != 0).unwrap_or(7)..];
-        output.push(0xf7 + len_bytes.len() as u8);
-        output.extend_from_slice(len_bytes);
-    }
-
-    for item in items {
-        output.extend_from_slice(item);
-    }
-
-    output
 }

@@ -36,13 +36,12 @@ jobs:
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
           submodules: false
-          lfs: true
 
       - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
-          sparse-eest-fixtures: "false"
+          sparse-eest-fixtures: "skip"
 
       - name: Symlink cargo target for caching
         run: |
@@ -58,12 +57,19 @@ jobs:
       - name: Build prover
         run: make z6m_prover
 
+      - name: Prepare EEST RLP fixtures
+        id: eest-rlp
+        uses: ./.github/actions/prepare-eest-rlp
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
       - name: Run EEST tests
         shell: bash
+        env:
+          EEST_RLP_DIR: ${{ steps.eest-rlp.outputs.dir }}
         run: |
           python3 tools/scripts/eest_runner.py \
-            --fixtures third_party/eest-fixtures \
-            --stagger 60 \
+            --stagger 15 \
             --log-dir eest-logs \
             --fail-threshold 5
 

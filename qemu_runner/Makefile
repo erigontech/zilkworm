@@ -18,6 +18,9 @@ endif
 
 ELF := $(BUILD_DIR)/z6m_debug
 
+EEST_SHA := $(shell git -C $(CURDIR)/../third_party/eest-fixtures rev-parse --short=12 HEAD 2>/dev/null)
+EEST_RLP_DIR ?= $(CURDIR)/../third_party/eest-fixtures-rlp/dev-$(EEST_SHA)
+
 CMAKE_FLAGS := \
 	-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
 	-DCMAKE_EXE_LINKER_FLAGS="-T$(LINKER_SCRIPT) -z norelro" \
@@ -27,24 +30,43 @@ CMAKE_FLAGS := \
 	-G "Unix Makefiles" \
 	-Wno-dev
 
-.PHONY: xpack-elf xpack-elf-eest eest-blockchain-tests rerun-ctest \
+.PHONY: xpack-elf xpack-elf-eest xpack-elf-eest-json \
+	eest-blockchain-tests eest-blockchain-tests-json \
+	eest-rlp-build rerun-ctest rerun-ctest-json \
 	gdb rlp-qemu qemu-eest-stdio qemu-eest-fileio \
 	eest-rv32 eest-rv64 clean clean-all clean-temp
+
+eest-rlp-build:
+	$(MAKE) -C $(CURDIR)/.. eest-rlp-build EEST_RLP_DIR=$(EEST_RLP_DIR)
 
 xpack-elf:
 	cmake -B$(BUILD_DIR) -S. $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=Debug
 	cmake --build $(BUILD_DIR) -j$$(nproc) --verbose
 
-xpack-elf-eest:
+xpack-elf-eest: eest-rlp-build
 	cmake -B$(BUILD_DIR) -S. $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_TESTING=ON \
-		-DTESTS_DIR=$(CURDIR)/../third_party/eest-fixtures/blockchain_tests
+		-DEEST_RLP_DIR=$(EEST_RLP_DIR)
 	cmake --build $(BUILD_DIR) -j$$(nproc) --verbose
 
 eest-blockchain-tests: xpack-elf-eest
 	ctest --test-dir $(BUILD_DIR) --parallel --output-on-failure
 
 rerun-ctest: xpack-elf-eest
+	ctest --test-dir $(BUILD_DIR) --parallel --output-on-failure -V --timeout 7200
+
+EEST_JSON_DIR ?= $(CURDIR)/../third_party/eest-fixtures
+
+xpack-elf-eest-json:
+	cmake -B$(BUILD_DIR) -S. $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_TESTING=ON \
+		-DEEST_JSON_DIR=$(EEST_JSON_DIR)
+	cmake --build $(BUILD_DIR) -j$$(nproc) --verbose
+
+eest-blockchain-tests-json: xpack-elf-eest-json
+	ctest --test-dir $(BUILD_DIR) --parallel --output-on-failure
+
+rerun-ctest-json: xpack-elf-eest-json
 	ctest --test-dir $(BUILD_DIR) --parallel --output-on-failure -V --timeout 7200
 
 # ========== Convenience targets ==========
@@ -60,11 +82,12 @@ gdb:
 
 ## make rlp-qemu file-name=../prover/temp/blocks/2347866/uni...bin
 rlp-qemu: xpack-elf
-	@if [ -z "$(file-name)" ]; then echo "Usage: make rlp-qemu file-name=path/to.json (ARCH=$(ARCH))"; exit 1; fi
-	@echo "QEMU waiting for GDB on :1234..."
+	@if [ -z "$(file-name)" ]; then echo "Usage: make rlp-qemu file-name=path/to.bin (ARCH=$(ARCH))"; exit 1; fi
+	@mkdir -p $(CURDIR)/temp
 	@N=$$(wc -c <"$(file-name)"); \
-	{ printf "123456789_123456789_123456789_123"; printf "%u\n" $$N; cat "$(file-name)"; } | \
-	$(QEMU_SYSTEM) -M virt -m 2G -nographic \
+	{ printf "%u\n" $$N; cat "$(file-name)"; } > $(CURDIR)/temp/stdin_payload.bin
+	@echo "QEMU waiting for GDB on :1234..."
+	cd $(CURDIR)/temp && $(QEMU_SYSTEM) -M virt -m 2G -nographic \
 		-bios $(ELF) -S -gdb tcp::1234 \
 		-chardev stdio,mux=on,id=stdio0 \
 		-serial chardev:stdio0 \
@@ -72,10 +95,11 @@ rlp-qemu: xpack-elf
 		-mon chardev=stdio0,mode=readline
 
 qemu-eest-stdio: xpack-elf-eest
-	@if [ -z "$(file-name)" ]; then echo "Usage: make qemu-eest-stdio file-name=path/to.json (ARCH=$(ARCH))"; exit 1; fi
+	@if [ -z "$(file-name)" ]; then echo "Usage: make qemu-eest-stdio file-name=path/to.bin (ARCH=$(ARCH))"; exit 1; fi
+	@mkdir -p $(CURDIR)/temp
 	@N=$$(wc -c <"$(file-name)"); \
-	{ printf "123456789_123456789_123456789_123"; printf "1 %u\n" $$N; cat "$(file-name)"; } | \
-	$(QEMU_SYSTEM) -M virt -m 2G -nographic \
+	{ printf "%u\n" $$N; cat "$(file-name)"; } > $(CURDIR)/temp/stdin_payload.bin
+	cd $(CURDIR)/temp && $(QEMU_SYSTEM) -M virt -m 2G -nographic \
 		-bios $(ELF) \
 		-chardev stdio,mux=on,id=stdio0 \
 		-serial chardev:stdio0 \
@@ -83,16 +107,16 @@ qemu-eest-stdio: xpack-elf-eest
 		-mon chardev=stdio0,mode=readline
 
 qemu-eest-fileio: xpack-elf-eest
-	@if [ -z "$(file-name)" ]; then echo "Usage: make qemu-eest-fileio file-name=path/to.json (ARCH=$(ARCH))"; exit 1; fi
+	@if [ -z "$(file-name)" ]; then echo "Usage: make qemu-eest-fileio file-name=path/to.bin (ARCH=$(ARCH))"; exit 1; fi
 	@mkdir -p $(CURDIR)/temp
+	@rm -f $(CURDIR)/temp/semihost.log $(CURDIR)/temp/serial.log
 	@N=$$(wc -c <"$(file-name)"); \
-	rm -f $(CURDIR)/temp/semihost.log $(CURDIR)/temp/serial.log; \
-	{ printf "1 %u\n" $$N; cat "$(file-name)"; } > $(CURDIR)/temp/stdin_payload.bin; \
-	$(QEMU_SYSTEM) -M virt -m 2G -display none \
+	{ printf "%u\n" $$N; cat "$(file-name)"; } > $(CURDIR)/temp/stdin_payload.bin
+	cd $(CURDIR)/temp && $(QEMU_SYSTEM) -M virt -m 2G -display none \
 		-bios $(ELF) \
 		-monitor none \
 		-serial none \
-		-chardev file,id=shlog,path=$(CURDIR)/temp/semihost.log \
+		-chardev file,id=shlog,path=semihost.log \
 		-semihosting-config enable=on,target=native,chardev=shlog
 
 clean:

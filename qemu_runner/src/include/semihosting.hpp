@@ -30,6 +30,7 @@ namespace sh
     constexpr int SYS_READ = 0x06;
     constexpr int SYS_READC = 0x07;
     constexpr int SYS_OPEN = 0x01;
+    constexpr int SYS_FLEN = 0x0C;
     // constexpr int SYS_EXIT = 0x18;      // Not used as it always returns code 1 on exit
     constexpr int SYS_EXIT_EXTENDED = 0x20;
 
@@ -169,6 +170,13 @@ namespace sh
         } a{ static_cast<std::size_t>(handle), buf, len };
         long not_read = call(SYS_READ, &a); // returns bytes NOT read
         return len - static_cast<std::size_t>(not_read);
+    }
+
+    // SYS_FLEN: total length in bytes of the open file handle.
+    inline long flen(int handle)
+    {
+        long h = static_cast<long>(handle);
+        return call(SYS_FLEN, &h);
     }
 
     // Read EXACTLY n bytes from :tt

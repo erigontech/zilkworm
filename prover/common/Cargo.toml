@@ -3,21 +3,43 @@ name = "z6m_common"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "z6m_eest_convert"
+path = "src/bin/z6m_eest_convert.rs"
+required-features = ["eest-convert"]
+
+[features]
+default = ["network"]
+# Everything needed by the prover.
+network = ["dep:alloy-consensus", "dep:alloy-provider", "dep:alloy-rpc-types",
+           "dep:alloy-rpc-types-debug", "dep:reqwest", "dep:tokio", "dep:url",
+           "dep:base64", "dep:tracing", "dep:rsp-mpt"]
+# Just the bits needed for EEST JSON → unified RLP converter.
+eest-convert = ["alloy-trie/serde", "alloy-trie/ethereum",
+                "dep:clap", "dep:walkdir", "dep:rayon"]
+
 [dependencies]
-alloy-consensus = "1.0"
-alloy-eips = "1.0"
-alloy-primitives = "1.0"
-alloy-provider = { version = "1.0", features = ["debug-api"] }
+alloy-eips = { version = "1.0", features = ["serde"] }
+alloy-primitives = { version = "1.0", features = ["serde"] }
 alloy-rlp = "0.3"
-alloy-rpc-types = "1.0"
-alloy-rpc-types-debug = "1.0"
 alloy-trie = "0.9"
 eyre = "0.6"
-rsp-mpt = { git = "https://github.com/succinctlabs/rsp" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-url = "2.5"
-reqwest = { version = "0.12", features = ["json"] }
-base64 = "0.22"
+
+# Heavy / optional deps
+alloy-consensus = { version = "1.0", optional = true }
+alloy-provider = { version = "1.0", features = ["debug-api"], optional = true }
+alloy-rpc-types = { version = "1.0", optional = true }
+alloy-rpc-types-debug = { version = "1.0", optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+rsp-mpt = { git = "https://github.com/succinctlabs/rsp", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+tracing = { version = "0.1", optional = true }
+url = { version = "2.5", optional = true }
+base64 = { version = "0.22", optional = true }
+
+# For the standalone eest-convert binary only.
+clap = { version = "4.0", features = ["derive"], optional = true }
+walkdir = { version = "2", optional = true }
+rayon = { version = "1", optional = true }

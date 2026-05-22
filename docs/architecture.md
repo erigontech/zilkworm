@@ -74,3 +74,72 @@ A fork of Silkworm's core, compiled both natively (for testing) and cross-compil
 3. **Execute**: The SP1 executor runs the guest ELF. The guest decodes the input, calls into zilk_core via FFI, and the C++ EVM executes every transaction in the block.
 4. **Prove**: The SP1 prover converts the execution trace into a succinct proof.
 5. **Verify**: The proof can be verified on-chain or off-chain using the SP1 verifying key.
+
+## Input Format
+
+Canonical byte layout fed as input to every Zilkworm STF runner (native, QEMU rv32/rv64,
+SP1 hypercube, ...).
+
+All multi-byte integers expressing encoded lengths are **little-endian**, except RLP uses its own
+length encoding (big-endian per the Ethereum spec).
+
+### Per-subtest unified RLP
+
+One subtest = one outer RLP list. Version is auto-detected by the first byte of the outer-list payload:
+
+| First byte    | Version | Layout |
+|---------------|---------|--------|
+| `0x01`        | v1      | `[VERSION_V1, fork_name, prev_block, blocks_list, pre_state, headers, pre_trie, post_state_hash]` |
+| `0xb8..0xbf`  | v0 legacy | `[prev_block, block, pre_state, headers, pre_trie]` — Mainnet only, single block. |
+
+Fork-name short strings encode as `0x80..0xb7`, so the ranges never collide.
+
+**v1 fields:**
+- `blocks_list` = `[[block_rlp, ei], ...]` where `ei` is `0x01` (expect-invalid) or `0x80` (expect-valid).
+- `post_state_hash` = 32 bytes; zero hash means "skip the check".
+
+**`pre_state` sub-layout:** `[accounts, storage, codes]`
+- `accounts`: `[[addr, nonce, balance, code_hash, storage_root], ...]`
+- `storage`:  `[[addr, [k, v, k, v, ...]], ...]`
+- `codes`:    flat sequence of `[code_hash, code]` pairs (no per-pair wrapper).
+
+### Bundle format
+
+N per-subtest blobs concatenated, length-prefixed. Used even for N=1.
+
+```
+<u32 N> <u32 len_0> <rlp_0> ... <u32 len_{N-1}> <rlp_{N-1}>
+```
+
+Produced by `encode_rlp_bundle` and `z6m_eest_convert bulk-convert`.
+
+### Transport variants
+
+The bundle bytes are identical across runners; only the surrounding transport differs.
+
+| Runner             | Transport |
+|--------------------|-----------|
+| SP1 hypercube      | Bundle on SP1 stdin. |
+| Native `.rlp`      | Bundle in the file. |
+| Native `.json`     | EEST JSON, parsed in-process; bundle never materialised. |
+| QEMU               | `stdin_payload.bin`: `<1 byte tag><payload>`. Tag `'R'` = bundle, `'J'` = raw JSON. |
+
+The QEMU tag is prepended by `qemu_run_rlp.sh` / `qemu_run_json.sh`.
+
+### Public output
+
+SP1 guest writes to public values:
+
+```
+<u32 N> <u64 result_0> ... <u64 result_{N-1}>
+```
+
+Each `result_i` is `cumulative_gas_used`, or a sentinel:
+
+| Sentinel       | Value          | Meaning |
+|----------------|----------------|---------|
+| `kRunFailure`  | `UINT64_MAX`   | Failed. |
+| `kRunSkipped`  | `UINT64_MAX-1` | Skipped. |
+
+Native + QEMU translate the same sentinels into ctest exit codes:
+**1** = any failure, **2** = all skipped (ctest `SKIP_RETURN_CODE`), **0** = otherwise.
