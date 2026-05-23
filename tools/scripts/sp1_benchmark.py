@@ -89,32 +89,16 @@ def get_git_info() -> Tuple[str, str, str]:
 # -- Discovery ----------------------------------------------------------------
 
 def discover_blocks(data_dir: str) -> Tuple[str, List[int]]:
-    """Discover blocks. Returns (effective_data_dir, sorted_block_numbers).
+    """Discover blocks in data_dir (which directly contains numbered block dirs).
 
-    The prover expects --data-dir to be the parent of a blocks/ subdirectory.
-    If data_dir already contains blocks/, use it directly.  Otherwise, if it
-    directly contains numbered block folders, create a temporary wrapper with
-    a blocks -> data_dir symlink so the prover can find them.
+    Returns (prover_data_dir, sorted_block_numbers).  The prover expects
+    --data-dir to be the parent of a blocks/ subdirectory, so we create a
+    temporary directory with a ``blocks`` symlink pointing at data_dir.
     """
-    blocks_sub = os.path.join(data_dir, "blocks")
-    if os.path.isdir(blocks_sub):
-        scan_dir = blocks_sub
-        effective = data_dir
-    else:
-        # Check if data_dir itself contains numbered block dirs
-        scan_dir = data_dir
-        # Create a temp wrapper: <data_dir>/.prover_wrapper/blocks -> <data_dir>
-        wrapper = os.path.join(data_dir, ".prover_wrapper")
-        link = os.path.join(wrapper, "blocks")
-        os.makedirs(wrapper, exist_ok=True)
-        if not os.path.exists(link):
-            os.symlink(data_dir, link)
-        effective = wrapper
-
     blocks = []
     try:
-        for entry in os.listdir(scan_dir):
-            if os.path.isdir(os.path.join(scan_dir, entry)):
+        for entry in os.listdir(data_dir):
+            if os.path.isdir(os.path.join(data_dir, entry)):
                 try:
                     blocks.append(int(entry))
                 except ValueError:
@@ -123,7 +107,12 @@ def discover_blocks(data_dir: str) -> Tuple[str, List[int]]:
         print(f"ERROR: Cannot read blocks directory: {e}", file=sys.stderr)
         sys.exit(1)
     blocks.sort()
-    return effective, blocks
+
+    import tempfile
+    wrapper = tempfile.mkdtemp(prefix="z6m_bench_")
+    os.symlink(os.path.abspath(data_dir), os.path.join(wrapper, "blocks"))
+
+    return wrapper, blocks
 
 
 def get_available_memory_gb() -> float:
@@ -161,6 +150,13 @@ def compute_parallelism(total_blocks: int) -> int:
 
 def split_into_chunks(block_list: List[int], n_chunks: int,
                       output_dir: str) -> List[ChunkInfo]:
+    """Split block_list into n_chunks groups.
+
+    Each chunk uses --start-block/--end-block markers from its first and
+    last block.  The prover skips missing blocks in the range automatically.
+    """
+    if not block_list:
+        return []
     n_chunks = max(1, min(n_chunks, len(block_list)))
     chunk_size = len(block_list) // n_chunks
     remainder = len(block_list) % n_chunks
@@ -183,13 +179,16 @@ def split_into_chunks(block_list: List[int], n_chunks: int,
 
 RAM_PER_INSTANCE_GB = 8
 RAM_WAIT_INTERVAL = 30
-STAGGER_SECONDS = 30
 
 
 def run_prover_chunks(prover: str, data_dir: str,
                       chunks: List[ChunkInfo]) -> bool:
-    """Launch prover processes with memory-aware scheduling."""
-    processes: List[Tuple[ChunkInfo, subprocess.Popen]] = []
+    """Launch prover processes with memory-aware scheduling.
+
+    Each chunk is a single prover invocation with --start-block/--end-block.
+    The prover skips missing blocks in the range automatically.
+    """
+    processes: List[Tuple[ChunkInfo, subprocess.Popen, str]] = []
     all_ok = True
 
     print(f"\n{'='*60}")
@@ -197,12 +196,15 @@ def run_prover_chunks(prover: str, data_dir: str,
     print(f"{'='*60}")
 
     for i, chunk in enumerate(chunks):
-        while True:
-            avail_gb = get_available_memory_gb()
-            if avail_gb >= RAM_PER_INSTANCE_GB:
-                break
-            print(f"  Waiting for memory: {avail_gb:.1f} GB available, "
-                  f"need {RAM_PER_INSTANCE_GB} GB. Retrying in {RAM_WAIT_INTERVAL}s...")
+        # Let the previous process settle its memory before checking
+        if i > 0:
+            print(f"  Waiting {RAM_WAIT_INTERVAL}s for last instance of z6m_prover to init...")
+            time.sleep(RAM_WAIT_INTERVAL)
+
+        while get_available_memory_gb() < RAM_PER_INSTANCE_GB:
+            print(f"  Waiting for memory: {get_available_memory_gb():.1f} GB "
+                  f"available, need {RAM_PER_INSTANCE_GB} GB. "
+                  f"Retrying in {RAM_WAIT_INTERVAL}s...")
             time.sleep(RAM_WAIT_INTERVAL)
 
         cmd = [prover, "--test-service",
@@ -210,30 +212,28 @@ def run_prover_chunks(prover: str, data_dir: str,
                "--end-block", str(chunk.end_block),
                "--data-dir", data_dir,
                "--execution-log-file", chunk.log_file]
-        avail_gb = get_available_memory_gb()
         print(f"  Launching chunk {chunk.index}: "
               f"blocks {chunk.start_block}..{chunk.end_block} "
-              f"({chunk.block_count} blocks) [{avail_gb:.1f} GB free]")
+              f"({chunk.block_count} blocks)")
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True)
-            processes.append((chunk, proc))
+            stdout_path = chunk.log_file + ".stdout"
+            stdout_fh = open(stdout_path, "w")
+            proc = subprocess.Popen(cmd, stdout=stdout_fh,
+                                    stderr=subprocess.STDOUT)
+            stdout_fh.close()
+            processes.append((chunk, proc, stdout_path))
         except (FileNotFoundError, PermissionError) as e:
             print(f"  ERROR: {e}", file=sys.stderr)
             for _, p in processes:
                 p.kill()
             return False
 
-        if i < len(chunks) - 1 and STAGGER_SECONDS > 0:
-            print(f"  Staggering {STAGGER_SECONDS}s before next chunk...")
-            time.sleep(STAGGER_SECONDS)
-
     # Monitor
     print(f"\n  Monitoring {len(processes)} processes...")
     completed = set()
     start_time = time.time()
     while len(completed) < len(processes):
-        for idx, (chunk, proc) in enumerate(processes):
+        for idx, (chunk, proc, stdout_path) in enumerate(processes):
             if idx in completed:
                 continue
             ret = proc.poll()
@@ -246,14 +246,13 @@ def run_prover_chunks(prover: str, data_dir: str,
                       f"{len(completed)}/{len(processes)} done]")
                 if ret != 0:
                     all_ok = False
-                    if proc.stdout:
-                        try:
-                            tail = proc.stdout.read()
-                            if tail:
-                                for line in tail.strip().split("\n")[-20:]:
-                                    print(f"    {line}")
-                        except Exception:
-                            pass
+                    try:
+                        with open(stdout_path) as f:
+                            lines = f.readlines()
+                        for line in lines[-20:]:
+                            print(f"    {line.rstrip()}")
+                    except Exception:
+                        pass
         if len(completed) < len(processes):
             time.sleep(2)
     return all_ok
@@ -372,7 +371,7 @@ def generate_report(records: List[BlockRecord], block_range: Tuple[int, int],
 def main() -> int:
     parser = argparse.ArgumentParser(description="SP1 Benchmark Tool for z6m")
     parser.add_argument("--dir", required=True,
-                        help="Path to witness data directory (parent of blocks/)")
+                        help="Path to directory containing numbered block dirs")
     parser.add_argument("--start", type=int, default=None,
                         help="First block number (default: first available)")
     parser.add_argument("--count", type=int, default=None,
@@ -400,8 +399,6 @@ def main() -> int:
     print(f"  Data directory: {data_dir}")
     print(f"  Prover: {prover}")
     prover_data_dir, block_list = discover_blocks(data_dir)
-    if prover_data_dir != data_dir:
-        print(f"  Prover data-dir (wrapper): {prover_data_dir}")
     if not block_list:
         print("ERROR: No blocks found.", file=sys.stderr)
         return 1

@@ -1,0 +1,117 @@
+name: Hypercube 200-block Bench
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  sp1-benchmark:
+    name: Run SP1 Benchmark
+    runs-on: ubuntu-latest
+    environment: ci
+    container: ubuntu:25.10
+    steps:
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          TZ: Etc/UTC
+        run: |
+          apt update
+          apt install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            git \
+            git-lfs \
+            curl \
+            python3 \
+            nodejs \
+            npm \
+            protobuf-compiler \
+            pkg-config \
+            libssl-dev
+
+      - name: Install RISC-V toolchain
+        run: |
+          npm i -g xpm
+          xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
+          RISCV_GCC_BIN=$(find $HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc -name 'riscv-none-elf-gcc' -type f 2>/dev/null | head -1 | xargs dirname)
+          echo "Found riscv-gcc at: $RISCV_GCC_BIN"
+          echo "$RISCV_GCC_BIN" >> $GITHUB_PATH
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          submodules: false
+          lfs: true
+
+      - name: Init submodules (skip eest-fixtures)
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN || github.token }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive third_party/evmone third_party/intx
+
+      - name: Restore cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            prover/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('prover/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Build z6m_prover
+        run: make z6m_prover
+
+      - name: Cache benchmark blocks
+        id: blocks-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/200_benchmark_blocks
+          key: benchmark-blocks-200-spread
+
+      - name: Download benchmark blocks
+        if: steps.blocks-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -L -o /tmp/200_benchmark_blocks.tar.gz \
+            "https://github.com/erigontech/zilkworm-testdata/releases/download/benchmark-200-spread/200_benchmark_blocks.tar.gz"
+          tar xzf /tmp/200_benchmark_blocks.tar.gz -C /tmp
+          rm -f /tmp/200_benchmark_blocks.tar.gz
+          ls /tmp/200_benchmark_blocks/ | head -5
+          echo "Total blocks: $(ls -d /tmp/200_benchmark_blocks/*/ | wc -l)"
+
+      - name: Run sp1-benchmkar.py on all blocks
+        id: benchmark
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python3 tools/scripts/sp1_benchmark.py --dir /tmp/200_benchmark_blocks
+      - name: Check results
+        run: |
+          failed=${{ steps.benchmark.outputs.failed }}
+          total=${{ steps.benchmark.outputs.total }}
+
+          if [ "$total" -eq 0 ]; then
+            echo "ERROR: No blocks were tested"
+            exit 1
+          fi
+
+          if [ "$failed" -gt 0 ]; then
+            echo "FAIL: $failed / $total blocks failed"
+            echo "Failed blocks: ${{ steps.benchmark.outputs.failed_blocks }}"
+            exit 1
+          fi
+
+          echo "SUCCESS: All $total blocks passed"
