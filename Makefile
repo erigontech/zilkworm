@@ -5,7 +5,8 @@ SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
 .PHONY: z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
         execute-block selftest tests eest-rlp-build \
-        eest-blockchain-tests-json eest-prover-test-json tests-json
+        eest-blockchain-tests-json eest-prover-test-json tests-json \
+        release-artifacts
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -104,3 +105,25 @@ tests-json: z6m_prover
 	prover/target/release/z6m_prover --test-service \
 		--test-dir $(EEST_JSON_DIR)/$(TESTS_SUBDIR) \
 		--execution-log-dir $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
+
+# Stage release artifacts into ./temp/
+RELEASE_DIR := temp
+RELEASE_BINS := \
+	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
+	prover/target/release/z6m_prover:z6m_prover_hypercube \
+	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
+
+release-artifacts:
+	@mkdir -p $(RELEASE_DIR)
+	@names=""; \
+	for pair in $(RELEASE_BINS); do \
+	    src=$${pair%%:*}; dst=$${pair##*:}; \
+	    if [ ! -f "$$src" ]; then echo "missing: $$src" >&2; exit 1; fi; \
+	    cp "$$src" "$(RELEASE_DIR)/$$dst"; \
+	    names="$$names $$dst"; \
+	done; \
+	(cd $(RELEASE_DIR) && sha256sum $$names > SHA256SUMS.txt)
+	@echo "release artifacts staged in $(RELEASE_DIR)/:"
+	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
+	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
+	@cat $(RELEASE_DIR)/SHA256SUMS.txt
