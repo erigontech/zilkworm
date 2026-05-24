@@ -1,5 +1,73 @@
 # Changelog
 
+## v0.1.0-alpha.2 - More performance more testing and more stability
+
+### Highlights
+
+Many tests, benchmakrs and performance related improvments introduced in this release.
+
+#### Tests and Benchmarks: 
+- Now introduces SP1 Hypercube EEST run workflow, and a 200-block benchmark. This ensures the whole EEST suite can be run inside of the prover and any problems tracked down. It is a stronger check for proving blocks as running EESTs on native hardware uses a different code-path and build.
+- EEST JSONs are now converted to the unifiedRLP input format used for running blocks inside the provers. This means EESTs now share the same code-path as actual blocks, resulting in stronger checks.
+
+#### Improvments and Fixes
+- Close to 10% improved proving time, notable improvements:
+  - MPT optimizations for post state root calculation
+  - Faster ECC with MSM (Gauss-Shamir)
+- Fixes introduced for prover build
+
+#### ZVM1/EVMone changes
+
+ZVM1 (now corresponds to evmone v0.21.0)
+- EVMC merge: All of EVMC is now in a sub-directory of ZVM1 repository (history retained) making code easier to maintian and ship
+- Many Amsterdam and Instruction related changes in upstream, please check the changelog and upstream EVMOne for more context
+
+### Contributors
+
+| Author | Commits |
+|---|---|
+| Somnath Banerjee | 11 |
+| Paweł Bylica | 4 |
+| canepat | 2 |
+
+### Commit Log by Category (17 non-merge commits since v0.1.0-alpha.1)
+
+#### Core EVM & Execution
+
+- `d26a0b61` drop call-path bailout and refund options (#92) (Paweł Bylica)
+- `f3defa53` Merge EVMC submodule into evmone (upstream PR #1499) (#85) (Paweł Bylica)
+- `9ac3838a` Use --wrap for memcpy and memmove implementations (#72) (Paweł Bylica)
+
+#### Merkle Patricia Trie
+
+- `54d85257` core/trie_zz: Use first 8 bytes hash for FlatNodeStore and fast rlp (#76) (Somnath Banerjee)
+
+#### Tests, Benchmarks & EESTs
+
+- `929c7d7d` Convert EEST JSON fixtures to unified RLP (#88) (canepat)
+- `65d5bb37` prover, workflows: Concurrent EEST runner and CI workflow for SP1 Hypercube (#84) (Somnath Banerjee)
+- `e8dd6edb` Add SP1 200-block benchmark CI (#81) (Somnath Banerjee)
+- `dee84782` Add SP1 benchmark script (#79) (Somnath Banerjee)
+- `258b4cbf` Add HyperCube EEST CI workflow (Somnath Banerjee)
+
+#### CI/CD & Workflows
+
+- `5f8079d0` workflows: add RISC-V and Rust to CI image, use it in SP1 benchmark (#87) (Somnath Banerjee)
+- `8184fc40` workflows: Use pre-built image at ghcr, necessary files only from eest-fixtures (#86) (Somnath Banerjee)
+- `def81782` ci: set RUSTUP_HOME/CARGO_HOME in CI image (Somnath Banerjee)
+
+#### Build System & Toolchain
+
+- `56856115` Don't use Cable buildinfo (#67) (Paweł Bylica)
+- `246a6425` Unify CMakeLists for qemu_runner (#78) (Somnath Banerjee)
+- `16200fc5` Fix build (Somnath Banerjee)
+
+#### Documentation & Tooling
+
+- `6d5aa9c8` Improve README formatting and and clarity (#74) (canepat)
+- `5dbe3db0` Add Copyright to files in bulk (Somnath Banerjee)
+
+
 ## v0.1.0-alpha.1 - First Public Alpha
 
 > A native C++ EVM that runs inside a zkVM and generates cryptographic proofs of Ethereum block execution.
