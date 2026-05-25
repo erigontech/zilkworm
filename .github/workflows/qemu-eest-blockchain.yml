@@ -9,28 +9,28 @@ on:
 
 jobs:
   build-and-run-rv32im:
-    name: Build and Run EEST Tests RV32IM (Ubuntu 25.10)
+    name: Build and Run EEST Tests RV32IM
     runs-on: ubuntu-latest
-    container: ubuntu:25.10
+    environment: ci
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/erigontech/zilkworm-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install system dependencies
+      - name: Install qemu
         env:
           DEBIAN_FRONTEND: noninteractive
           TZ: Etc/UTC
+        # The CI image ships build-essential, cmake, ninja, git/git-lfs,
+        # python3, conan, riscv-none-elf-gcc and rustup. Only qemu-system-misc
+        # has to be added here.
         run: |
-          apt update
-          apt install -y \
-            build-essential cmake ninja-build \
-            git git-lfs \
-            python3 python3-pip pipx \
-            nodejs npm \
-            qemu-system-misc
-          pipx install conan
-          pipx ensurepath
-          npm i -g xpm
-          xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
-          echo 'export PATH=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:$PATH' >> ~/.bashrc
-          echo "PATH=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:$PATH" >> $GITHUB_ENV
+          apt-get update
+          apt-get install -y --no-install-recommends qemu-system-misc
 
       - name: Verify tool versions
         run: |
@@ -42,6 +42,7 @@ jobs:
           git lfs version
           python3 --version
           ctest --version
+          cargo --version
           qemu-system-riscv32 --version
 
       - name: Checkout repository

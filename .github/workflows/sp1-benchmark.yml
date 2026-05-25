@@ -2,9 +2,9 @@ name: Hypercube 200-block Bench
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, release/*]
   pull_request:
-    branches: [master, main]
+    branches: [master, main, release/*]
   workflow_dispatch:
 
 jobs:
@@ -16,7 +16,7 @@ jobs:
       contents: read
       packages: read
     container:
-      image: ghcr.io/erigontech/z6m-ci:latest
+      image: ghcr.io/erigontech/zilkworm-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

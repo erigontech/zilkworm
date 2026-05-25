@@ -47,7 +47,7 @@ runs:
         echo "dir=${dir}" >> "$GITHUB_OUTPUT"
 
     - name: Restore RLP cache
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       id: rlp-cache
       with:
         path: ${{ steps.cache-key.outputs.dir }}
@@ -64,3 +64,14 @@ runs:
       if: steps.rlp-cache.outputs.cache-hit != 'true'
       shell: bash
       run: make eest-rlp-build EEST_RLP_DIR=${{ steps.cache-key.outputs.dir }}
+
+    # Save immediately after the converter so the cache survives even when a
+    # downstream test step fails. `actions/cache@v4`'s default post-step save
+    # only runs on full job success, which masked the cache as permanently
+    # missing while the eest pipeline was failing for other reasons.
+    - name: Save RLP cache
+      if: steps.rlp-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.cache-key.outputs.dir }}
+        key: ${{ steps.cache-key.outputs.key }}

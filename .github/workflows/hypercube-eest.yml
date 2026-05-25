@@ -2,7 +2,7 @@ name: HyperCube EEST Blockchain Tests
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, release/*]
     paths:
       - '.github/workflows/hypercube-eest.yml'
       - 'tools/scripts/eest_runner.py'
