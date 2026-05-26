@@ -27,6 +27,9 @@ jobs:
       - name: Prepare local cargo cache
         run: |
           mkdir -p /cargo-cache/cargo /cargo-cache/target
+          # Wipe extracted crate sources:
+          # this only forces re-extraction, not re-download.
+          rm -rf /cargo-cache/cargo/registry/src
           cat > /cargo-cache/cargo/config.toml <<'TOML'
           [net]
           git-fetch-with-cli = true
