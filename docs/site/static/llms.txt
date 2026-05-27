@@ -1,0 +1,26 @@
+# Zilkworm Documentation
+
+> A native, lightweight, performant ZKEVM core written in C++. Generates ZK proofs that an Ethereum block was executed correctly without re-executing the block itself.
+
+## Basics
+
+- [Background](https://zilkworm.erigon.tech/documentation/basics/background) — Why Zilkworm exists — Ethereum scaling, ZK proofs, and the case for a native C++ ZKEVM core.
+- [FAQs](https://zilkworm.erigon.tech/documentation/basics/faqs) — Frequently asked questions about Zilkworm — benchmarks, team, timeline, integration plans, and prover backends.
+- [Getting Started](https://zilkworm.erigon.tech/documentation/basics/getting-started) — Run the Zilkworm prover via the pre-built Docker image — setup, block fetch, dry-run execute, prove, and CUDA acceleration.
+- [How it works](https://zilkworm.erigon.tech/documentation/basics/how-it-works) — Technical details of the Zilkworm prover.
+- [Introduction](https://zilkworm.erigon.tech/documentation/basics/introduction) — The Zilkworm project at a glance.
+
+## Home
+
+- [Welcome](https://zilkworm.erigon.tech/documentation) — Documentation for Zilkworm, a native, lightweight, performant ZKEVM core written in C++.
+
+## Testing
+
+- [Ethereum Execution Tests (EESTs)](https://zilkworm.erigon.tech/documentation/testing/ethereum-execution-tests-eests) — Run the Ethereum Execution Spec Tests (EELS-derived fixtures) against Zilkworm to verify EVM correctness across forks.
+- [RISCV Testing: EESTs on rv32im via QEMU](https://zilkworm.erigon.tech/documentation/testing/riscv-testing-eests-on-rv32im-via-qemu) — Full guide to running and understanding EESTs for the RISCV target architecture with QEMU.
+
+## Use Cases
+
+- [Ethereum Block Proofs](https://zilkworm.erigon.tech/documentation/use-cases/ethereum-block-proofs) — Generate verifiable ZK proofs of full Ethereum mainnet block execution with Zilkworm — the foundational use case.
+- [Private Enterprise EVM Chain](https://zilkworm.erigon.tech/documentation/use-cases/private-enterprise-evm-chain) — Use Zilkworm's privacy-preserving proofs to run a permissioned EVM chain for banks, asset managers, and regulated workflows.
+- [Write Your Own Rollups Using Zilkworm](https://zilkworm.erigon.tech/documentation/use-cases/write-your-own-rollups-using-zilkworm) — How Zilkworm could power L2/rollup proofs (projection — L2 execution and proving are not yet supported).
