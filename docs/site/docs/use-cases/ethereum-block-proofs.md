@@ -5,17 +5,17 @@ sidebar_position: 1
 ---
 
 
-Generating full state transition proofs for Ethereum mainnet was one of the first motivations for Zilkworm. This article explores the Ethereum's ZK perspective and Zilkworm's contributions.
+Generating full state transition proofs for Ethereum mainnet was one of the first motivations for Zilkworm. This article explores Ethereum's ZK perspective and Zilkworm's contributions.
 
 ### Scale through ZK Proofs
 
 The ongoing narrative is that once you have a STARK proof for a full block state transition, you can just verify and apply state root changes without having to download blocks and re-execute all transactions. As of today, network and hardware restrictions limit the block size to less than 100M gas (so, typically 60M gas is safe). And the limit can't be raised too high without affecting decentralization of validators.\
 \
-ZKVMs have now ramped up performance and parallelization enough to have now been able to prove a whole block in less than 15 seconds. This means a relatively low-end hardware could run as a validator for massive blocks!
+zkVMs have now ramped up performance and parallelization enough to have now been able to prove a whole block in less than 15 seconds. This means a relatively low-end hardware could run as a validator for massive blocks!
 
 ### How the Validator now looks
 
-Post-merge Etheruem block progression would happen through a Consensus Layer and an Execution Layer client, together with a validator software that signs off on new blocks. The driver of the is the Consensus Layer that requests the EL to check if a new block is valid by asking it to download it or by providing the "payload" of a new block obtained from the p2p network. The EL upon receiving the payload/new block would execute the state transition function by running protocol checks and processing the transactions through the EVM
+Post-merge Ethereum block progression would happen through a Consensus Layer (CL) and an Execution Layer (EL) client, together with a validator software that signs off on new blocks. The driver of this is the Consensus Layer that requests the EL to check if a new block is valid by asking it to download it or by providing the "payload" of a new block obtained from the p2p network. The EL upon receiving the payload/new block would execute the state transition function by running protocol checks and processing the transactions through the EVM.
 
 In the post ZKalyptic times the validator can simply attest new blocks "as they come" with proofs without needing either the CL or the EL. The CL still needs to find its way through any malicious blocks to find the canonical block and the EL is simply replaced by a database. That holds, if it is not a block-builder.
 

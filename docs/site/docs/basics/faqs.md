@@ -34,7 +34,7 @@ We have plans for this integration in two ways
 
 We will publish such plans in a later iteration of Zilkworm
 
-### Can I use Zilkworm with another EL client like Nethermind or Besu?
+### Can I use Zilkworm with another Execution Layer (EL) client like Nethermind or Besu?
 
 Yes, the integration into other clients for prover would be the same way - over RPC. But in order to use the core directly as an executor, it would need closer collaboration with these other EL clients.
 
@@ -42,6 +42,6 @@ Yes, the integration into other clients for prover would be the same way - over 
 
 For the proof generation itself the performance of intensive crypto operation would be dictated by the underlying prover backend (for instance SP1 or RISC0 or something else). We will publish more results on it in future.
 
-### Plans for integration with other ZKVMs/Prover backends
+### Plans for integration with other zkVMs/Prover backends
 
 The first rollout will have SP1 as the prover. We will rollout with others in due course of time.

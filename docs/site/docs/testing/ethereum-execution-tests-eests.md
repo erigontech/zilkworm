@@ -6,7 +6,7 @@ sidebar_position: 1
 
 
 :::tip
-zilkworm is up-to-date with Osaka implementation and passes 100% of EESTs till Osaka
+Zilkworm is up-to-date with Osaka implementation and passes 100% of EESTs till Osaka
 :::
 
 ### What are EESTs (Ethereum Execution Spec Tests)
@@ -32,16 +32,16 @@ Zilkworm provides a Makefile target to run the EEST **blockchain tests** suite. 
 Before running the tests, make sure the following tools are installed:
 
 * `gcc/g++` (**15+)**
-* `cmake,ninja` &#x20;
+* `cmake,ninja`
 * `git,git-lfs`
-* `python3,python3-pip,pipx` &#x20;
+* `python3,python3-pip,pipx`
 * `ctest` (usually shipped with CMake, but ensure it’s available on your PATH)
 
 > `git-lfs` is required because some test fixtures have very large files.
 
 #### Clone the repository
 
-Get the latest source for zilkworm
+Get the latest source for Zilkworm
 
 ```bash
 git clone https://github.com/erigontech/zilkworm

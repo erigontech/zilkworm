@@ -1,6 +1,6 @@
 ---
-title: "RISCV Testing: EESTs on rv32im via QEMU"
-description: Full guide to running and understanding EESTs for the RISCV target architecture with QEMU.
+title: "RISC-V Testing: EESTs on rv32im via QEMU"
+description: Full guide to running and understanding EESTs for the RISC-V target architecture with QEMU.
 sidebar_position: 2
 ---
 
@@ -22,7 +22,7 @@ Before running the tests, make sure the following tools are installed:
 * `git,git-lfs`
 * `python3,python3-pip,pipx`
 * `ctest` (usually shipped with CMake, but ensure it’s available on your PATH)
-* `qemu-system-riscv`&#x20;
+* `qemu-system-riscv`
 * `nodejs, npm`
 
 > `git-lfs` is required because some test fixtures have very large files.
@@ -41,7 +41,7 @@ This guide involves cross-compiling, so you can expect some hassle as it's not a
 
 **Clone the repository**
 
-Get the latest source for zilkworm and the submodules. Also get all the lfs hosted files:
+Get the latest source for Zilkworm and the submodules. Also get all the lfs hosted files:
 
 ```bash
 git clone https://github.com/erigontech/zilkworm
@@ -74,7 +74,7 @@ So as a rule of thumb, if a test
 
 ### Thinking deeper around targets
 
-Usually when not cross-compiling we rely on our habits and age-old customs and libraries for writing code. But the language doesn’t matter (but you should use C++ when you can). It’s the final machine code binary that the language compiles to is&#x20;
+Usually when not cross-compiling we rely on our habits and age-old customs and libraries for writing code. But the language doesn’t matter (but you should use C++ when you can). It’s the final machine code binary that the language compiles to that matters.
 
 #### The cross-bugs being hunted for here
 
@@ -118,4 +118,4 @@ If you’re doing performance-oriented execution work (as most clients do), this
 
 **5) Expensive code-paths on rv32im specifically**
 
-This is not a functional correctness bug, but it’s a practical consequence: RV32IM runs can expose instruction-count blowups where a path is acceptable on x86\_64 but becomes a performance cliff on a proving target.That matters because in ZK, slow execution often translates into quite expensive proving.
+This is not a functional correctness bug, but it’s a practical consequence: RV32IM runs can expose instruction-count blowups where a path is acceptable on x86\_64 but becomes a performance cliff on a proving target. That matters because in ZK, slow execution often translates into quite expensive proving.

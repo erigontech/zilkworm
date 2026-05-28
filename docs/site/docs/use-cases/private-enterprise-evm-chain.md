@@ -25,7 +25,7 @@ Looked at another way, this also means if I can mathematically prove to you that
 
 ### A swift Example!
 
-Let's say you, Alice, have a 100 units of an asset with ZBank and now want to transfer it to your account in FBank.&#x20;
+Let's say you, Alice, have a 100 units of an asset with ZBank and now want to transfer it to your account in FBank.
 
 Traditionally, this uses a fancy version of "trust-me-bro" consensus between the two banks like SWIFT. Meaning, you may not be allowed this transfer or a 100 other things. An easier path would be not having that asset in the first place, but let's say ZBank and YBank have both decided to be cypherpunks now and they run their own private blockchains and would settle interbank on Ethereum!
 
@@ -50,7 +50,7 @@ Now for the settlement process, two ways can work
 
 The previous example was somewhat cliche but in general proofs are just hidden EVM smart contract execution. So the way to enable such functionality would be to write good smart contracts that can do these things already - such as existing bridge contracts. Then it is a simple matter of submitting full block proofs and/or proofs on certain transactions.
 
-One great feature of the ZK proofs generated with ZKVMs these days is "public outputs" that embed certain values that come out after processing. The public outputs, for instance, can be the values of "settlement" between ZBank and YBank in the previous example.
+One great feature of the ZK proofs generated with zkVMs these days is "public outputs" that embed certain values that come out after processing. The public outputs, for instance, can be the values of "settlement" between ZBank and YBank in the previous example.
 
 From the block proof alone it can't be inferred if an extraneous settlement is pending. So, an interbank settlement would need to see a certain transaction trace and the public output. This is where Zilkworm's transaction prover comes in that can be configured to output public outputs on re-running certain transactions.
 

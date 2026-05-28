@@ -11,11 +11,11 @@ At the moment the building from source requires elaborate setup with Conan, Linu
 
 To run with pre-built Docker
 
-```
+```bash
 $ docker run somnergy/z6m_prover --help
 ```
 
-```
+```text
 Usage: z6m_prover [OPTIONS] [COMMAND]
 
 Commands:
@@ -46,7 +46,7 @@ Options:
 
 #### First Fetch the block
 
-```
+```text
 Usage: z6m_prover fetch [OPTIONS]
 
 Options:
@@ -61,7 +61,7 @@ Options:
 
 #### Dry run execute - just use --block-number for this
 
-```
+```text
 Usage: z6m_prover execute [OPTIONS]
 
 Options:
@@ -75,7 +75,7 @@ Options:
 
 #### Fire up the prover
 
-```
+```text
 Usage: z6m_prover prove [OPTIONS]
 Options:
       --block-number <BLOCK_NUMBER>  JSON file to load ethereum/tests format test from [default: 0]
@@ -93,7 +93,7 @@ Options:
 
 First make sure to install NVIDIA drivers and the NVIDIA Container Toolkit https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 
-```
+```bash
 $ user@machine-with-gpu
 docker run --gpus all --rm --network host -v "$PWD:/work:rw" -v /var/run/docker.sock:/var/run/docker.sock  -w /work -it --entrypoint bash somnergy/z6m_prover
 

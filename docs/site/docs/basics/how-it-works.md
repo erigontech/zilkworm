@@ -5,7 +5,7 @@ sidebar_position: 4
 ---
 
 
-The actual code of zilkworm acts as the guest program for a zkVM. In reality though, it's optimized for one or more provers and the minimal riscv32im ISA. The thing about integrating with a certain zkVM prover backend though is that one needs to be careful about it's memory boundaries, hardware and environment limitations and provisions.
+The actual code of Zilkworm acts as the guest program for a zkVM. In reality though, it's optimized for one or more provers and the minimal riscv32im ISA. The thing about integrating with a certain zkVM prover backend though is that one needs to be careful about its memory boundaries, hardware and environment limitations and provisions.
 
 The zkVM internally generates an execution trace of the underlying riscv32im simulated machine and stitches the lines of execution, memory mutations and storage maps into a proof using the fabric of the constraints of each machine operation.
 
@@ -44,7 +44,7 @@ CMake invokes cargo and links the resulting library into the Zilkworm binary. Ow
 
 ### EVMone core
 
-Rather than reinvent EVM semantics, Zilkworm embeds EVMone The tracing code does not introspect EVMone internals; it observes inputs and outputs at opcode boundaries and normalizes them into records with stable layouts. This matters when you later compare traces across compilers or machines: the format is always the same, and there is no hidden bookkeeping. When precompiles are involved, Zilkworm treats them as explicit events rather than a black box. The trace records the precompile id, inputs, and outputs so the witness either contains enough to re-derive the result or delegates to a host primitive through a well-defined channel.
+Rather than reinvent EVM semantics, Zilkworm embeds EVMone. The tracing code does not introspect EVMone internals; it observes inputs and outputs at opcode boundaries and normalizes them into records with stable layouts. This matters when you later compare traces across compilers or machines: the format is always the same, and there is no hidden bookkeeping. When precompiles are involved, Zilkworm treats them as explicit events rather than a black box. The trace records the precompile id, inputs, and outputs so the witness either contains enough to re-derive the result or delegates to a host primitive through a well-defined channel.
 
 ### Precompiles provided by The Prover SDK via ECALL
 
