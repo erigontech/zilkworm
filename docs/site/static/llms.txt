@@ -17,7 +17,7 @@
 ## Testing
 
 - [Ethereum Execution Tests (EESTs)](https://zilkworm.erigon.tech/documentation/testing/ethereum-execution-tests-eests) — Run the Ethereum Execution Spec Tests (EELS-derived fixtures) against Zilkworm to verify EVM correctness across forks.
-- [RISCV Testing: EESTs on rv32im via QEMU](https://zilkworm.erigon.tech/documentation/testing/riscv-testing-eests-on-rv32im-via-qemu) — Full guide to running and understanding EESTs for the RISCV target architecture with QEMU.
+- [RISC-V Testing: EESTs on rv32im via QEMU](https://zilkworm.erigon.tech/documentation/testing/riscv-testing-eests-on-rv32im-via-qemu) — Full guide to running and understanding EESTs for the RISC-V target architecture with QEMU.
 
 ## Use Cases
 

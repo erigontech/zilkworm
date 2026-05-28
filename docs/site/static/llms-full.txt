@@ -49,7 +49,7 @@ At the moment the work is being led by Erigon developers. This is a short term "
 
 ### What are the timelines?
 
-We'll be the first team to deliver real-time Ethereum Block proofs on 2 GPUs by 31 March 2026 - bet us on that.
+We're actively working to deliver real-time Ethereum block proofs on 2 GPUs - follow progress on [EthProofs](https://ethproofs.org/).
 
 ### Challenges of C++ work in a Rust world?
 
@@ -65,7 +65,7 @@ We have plans for this integration in two ways
 
 We will publish such plans in a later iteration of Zilkworm
 
-### Can I use Zilkworm with another EL client like Nethermind or Besu?
+### Can I use Zilkworm with another Execution Layer (EL) client like Nethermind or Besu?
 
 Yes, the integration into other clients for prover would be the same way - over RPC. But in order to use the core directly as an executor, it would need closer collaboration with these other EL clients.
 
@@ -73,7 +73,7 @@ Yes, the integration into other clients for prover would be the same way - over 
 
 For the proof generation itself the performance of intensive crypto operation would be dictated by the underlying prover backend (for instance SP1 or RISC0 or something else). We will publish more results on it in future.
 
-### Plans for integration with other ZKVMs/Prover backends
+### Plans for integration with other zkVMs/Prover backends
 
 The first rollout will have SP1 as the prover. We will rollout with others in due course of time.
 
@@ -90,11 +90,11 @@ At the moment the building from source requires elaborate setup with Conan, Linu
 
 To run with pre-built Docker
 
-```
+```bash
 $ docker run somnergy/z6m_prover --help
 ```
 
-```
+```text
 Usage: z6m_prover [OPTIONS] [COMMAND]
 
 Commands:
@@ -125,7 +125,7 @@ Options:
 
 #### First Fetch the block
 
-```
+```text
 Usage: z6m_prover fetch [OPTIONS]
 
 Options:
@@ -140,7 +140,7 @@ Options:
 
 #### Dry run execute - just use --block-number for this
 
-```
+```text
 Usage: z6m_prover execute [OPTIONS]
 
 Options:
@@ -154,7 +154,7 @@ Options:
 
 #### Fire up the prover
 
-```
+```text
 Usage: z6m_prover prove [OPTIONS]
 Options:
       --block-number <BLOCK_NUMBER>  JSON file to load ethereum/tests format test from [default: 0]
@@ -172,7 +172,7 @@ Options:
 
 First make sure to install NVIDIA drivers and the NVIDIA Container Toolkit https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 
-```
+```bash
 $ user@machine-with-gpu
 docker run --gpus all --rm --network host -v "$PWD:/work:rw" -v /var/run/docker.sock:/var/run/docker.sock  -w /work -it --entrypoint bash somnergy/z6m_prover
 
@@ -187,7 +187,7 @@ Source: https://zilkworm.erigon.tech/documentation/basics/how-it-works
 
 _Technical details of the Zilkworm prover._
 
-The actual code of zilkworm acts as the guest program for a zkVM. In reality though, it's optimized for one or more provers and the minimal riscv32im ISA. The thing about integrating with a certain zkVM prover backend though is that one needs to be careful about it's memory boundaries, hardware and environment limitations and provisions.
+The actual code of Zilkworm acts as the guest program for a zkVM. In reality though, it's optimized for one or more provers and the minimal riscv32im ISA. The thing about integrating with a certain zkVM prover backend though is that one needs to be careful about its memory boundaries, hardware and environment limitations and provisions.
 
 The zkVM internally generates an execution trace of the underlying riscv32im simulated machine and stitches the lines of execution, memory mutations and storage maps into a proof using the fabric of the constraints of each machine operation.
 
@@ -226,7 +226,7 @@ CMake invokes cargo and links the resulting library into the Zilkworm binary. Ow
 
 ### EVMone core
 
-Rather than reinvent EVM semantics, Zilkworm embeds EVMone The tracing code does not introspect EVMone internals; it observes inputs and outputs at opcode boundaries and normalizes them into records with stable layouts. This matters when you later compare traces across compilers or machines: the format is always the same, and there is no hidden bookkeeping. When precompiles are involved, Zilkworm treats them as explicit events rather than a black box. The trace records the precompile id, inputs, and outputs so the witness either contains enough to re-derive the result or delegates to a host primitive through a well-defined channel.
+Rather than reinvent EVM semantics, Zilkworm embeds EVMone. The tracing code does not introspect EVMone internals; it observes inputs and outputs at opcode boundaries and normalizes them into records with stable layouts. This matters when you later compare traces across compilers or machines: the format is always the same, and there is no hidden bookkeeping. When precompiles are involved, Zilkworm treats them as explicit events rather than a black box. The trace records the precompile id, inputs, and outputs so the witness either contains enough to re-derive the result or delegates to a host primitive through a well-defined channel.
 
 ### Precompiles provided by The Prover SDK via ECALL
 
@@ -241,19 +241,19 @@ _The Zilkworm project at a glance._
 
 ### The Naming
 
-Zilkworm is an evolution of Silkworm Ethereum Client implementation by Erigon team in C++. This is one focussed on zero-knowledge proof systems that use RISCV backend. The existing EVMOne implementation is re-used, with tweaks targeted towards the prover SDK (such as Succinct SP1). While Silkworm was more focussed on RPC's, full scale integration with Erigon and features of full database layer, Zilkworm is more focussed on the core that runs state\_transition of blocks, such as the EVM, signature validation and Merkle Patricia Trie.
+Zilkworm is an evolution of Silkworm Ethereum Client implementation by Erigon team in C++. This is one focused on zero-knowledge proof systems that use a RISC-V backend. The existing EVMone implementation is re-used, with tweaks targeted towards the prover SDK (such as Succinct SP1). While Silkworm was more focused on RPCs, full scale integration with Erigon and features of full database layer, Zilkworm is more focused on the core that runs state\_transition of blocks, such as the EVM, signature validation and Merkle Patricia Trie.
 
 ### The Driver
 
-The driving inspiration for ZK proofs of full block state transition is align with the Ethereum's overall vision to scale the L1, focus on privacy and embrace a new RISC-V paradigm.&#x20;
+The driving inspiration for ZK proofs of full block state transition is aligned with Ethereum's overall vision to scale the L1, focus on privacy and embrace a new RISC-V paradigm.
 
-Of course, fulfilling these objectives together is a massive engineering challenge. It's a great time right now to be targetting RISC-V based provers which have shown promise in the recent years. Now it needs much push and optimization from the protocol side of things, including well thought out client core implementation itself
+Of course, fulfilling these objectives together is a massive engineering challenge. It's a great time right now to be targeting RISC-V based provers which have shown promise in the recent years. Now it needs much push and optimization from the protocol side of things, including a well thought out client core implementation itself.
 
 Full Ethereum block proofs further open innovations for Layer-2 chains with possibilities of faster finality and fast 2-way interactions. Typically this was not thought to be possible earlier because of the economics of the proving itself.
 
 ### The Objective
 
-After initial successes in being able to prove full Ethereum blocks, we aim to further investigate opportunites of tuning the system to achieve close to real time proving from a home computer with one or two GPUs.
+After initial successes in being able to prove full Ethereum blocks, we aim to further investigate opportunities of tuning the system to achieve close to real time proving from a home computer with one or two GPUs.
 
 To that end Zilkworm's objective would be to enhance and optimize its core and provide an end to end solution for creating economic full type-1 EVM chain block proofs.
 
@@ -276,7 +276,7 @@ Source: https://zilkworm.erigon.tech/documentation/testing/ethereum-execution-te
 _Run the Ethereum Execution Spec Tests (EELS-derived fixtures) against Zilkworm to verify EVM correctness across forks._
 
 :::tip
-zilkworm is up-to-date with Osaka implementation and passes 100% of EESTs till Osaka
+Zilkworm is up-to-date with Osaka implementation and passes 100% of EESTs till Osaka
 :::
 
 ### What are EESTs (Ethereum Execution Spec Tests)
@@ -302,16 +302,16 @@ Zilkworm provides a Makefile target to run the EEST **blockchain tests** suite. 
 Before running the tests, make sure the following tools are installed:
 
 * `gcc/g++` (**15+)**
-* `cmake,ninja` &#x20;
+* `cmake,ninja`
 * `git,git-lfs`
-* `python3,python3-pip,pipx` &#x20;
+* `python3,python3-pip,pipx`
 * `ctest` (usually shipped with CMake, but ensure it’s available on your PATH)
 
 > `git-lfs` is required because some test fixtures have very large files.
 
 #### Clone the repository
 
-Get the latest source for zilkworm
+Get the latest source for Zilkworm
 
 ```bash
 git clone https://github.com/erigontech/zilkworm
@@ -332,11 +332,11 @@ make eest-blockchain-tests
 ```
 
 ---
-# RISCV Testing: EESTs on rv32im via QEMU
+# RISC-V Testing: EESTs on rv32im via QEMU
 
 Source: https://zilkworm.erigon.tech/documentation/testing/riscv-testing-eests-on-rv32im-via-qemu
 
-_Full guide to running and understanding EESTs for the RISCV target architecture with QEMU._
+_Full guide to running and understanding EESTs for the RISC-V target architecture with QEMU._
 
 When running something Ethereum-adjacent, it’s more important to have testing as close to the actual environment as possible. “It works mostly” is far worse than “It needs some work still”.\
 For the Ethereum Execution Layer, that test suite is the Ethereum Execution Spec Tests (EEST): a Python framework and collection of test cases that generate fixtures (JSON) used by execution clients to verify correctness across forks, edge cases, and consensus-critical behaviour - as also mentioned in [Ethereum Execution Tests (EESTs)](https://zilkworm.erigon.tech/documentation/testing/ethereum-execution-tests-eests) article\
@@ -355,7 +355,7 @@ Before running the tests, make sure the following tools are installed:
 * `git,git-lfs`
 * `python3,python3-pip,pipx`
 * `ctest` (usually shipped with CMake, but ensure it’s available on your PATH)
-* `qemu-system-riscv`&#x20;
+* `qemu-system-riscv`
 * `nodejs, npm`
 
 > `git-lfs` is required because some test fixtures have very large files.
@@ -374,7 +374,7 @@ This guide involves cross-compiling, so you can expect some hassle as it's not a
 
 **Clone the repository**
 
-Get the latest source for zilkworm and the submodules. Also get all the lfs hosted files:
+Get the latest source for Zilkworm and the submodules. Also get all the lfs hosted files:
 
 ```bash
 git clone https://github.com/erigontech/zilkworm
@@ -407,7 +407,7 @@ So as a rule of thumb, if a test
 
 ### Thinking deeper around targets
 
-Usually when not cross-compiling we rely on our habits and age-old customs and libraries for writing code. But the language doesn’t matter (but you should use C++ when you can). It’s the final machine code binary that the language compiles to is&#x20;
+Usually when not cross-compiling we rely on our habits and age-old customs and libraries for writing code. But the language doesn’t matter (but you should use C++ when you can). It’s the final machine code binary that the language compiles to that matters.
 
 #### The cross-bugs being hunted for here
 
@@ -451,7 +451,7 @@ If you’re doing performance-oriented execution work (as most clients do), this
 
 **5) Expensive code-paths on rv32im specifically**
 
-This is not a functional correctness bug, but it’s a practical consequence: RV32IM runs can expose instruction-count blowups where a path is acceptable on x86\_64 but becomes a performance cliff on a proving target.That matters because in ZK, slow execution often translates into quite expensive proving.
+This is not a functional correctness bug, but it’s a practical consequence: RV32IM runs can expose instruction-count blowups where a path is acceptable on x86\_64 but becomes a performance cliff on a proving target. That matters because in ZK, slow execution often translates into quite expensive proving.
 
 ---
 # Ethereum Block Proofs
@@ -460,17 +460,17 @@ Source: https://zilkworm.erigon.tech/documentation/use-cases/ethereum-block-proo
 
 _Generate verifiable ZK proofs of full Ethereum mainnet block execution with Zilkworm — the foundational use case._
 
-Generating full state transition proofs for Ethereum mainnet was one of the first motivations for Zilkworm. This article explores the Ethereum's ZK perspective and Zilkworm's contributions.
+Generating full state transition proofs for Ethereum mainnet was one of the first motivations for Zilkworm. This article explores Ethereum's ZK perspective and Zilkworm's contributions.
 
 ### Scale through ZK Proofs
 
 The ongoing narrative is that once you have a STARK proof for a full block state transition, you can just verify and apply state root changes without having to download blocks and re-execute all transactions. As of today, network and hardware restrictions limit the block size to less than 100M gas (so, typically 60M gas is safe). And the limit can't be raised too high without affecting decentralization of validators.\
 \
-ZKVMs have now ramped up performance and parallelization enough to have now been able to prove a whole block in less than 15 seconds. This means a relatively low-end hardware could run as a validator for massive blocks!
+zkVMs have now ramped up performance and parallelization enough to have now been able to prove a whole block in less than 15 seconds. This means a relatively low-end hardware could run as a validator for massive blocks!
 
 ### How the Validator now looks
 
-Post-merge Etheruem block progression would happen through a Consensus Layer and an Execution Layer client, together with a validator software that signs off on new blocks. The driver of the is the Consensus Layer that requests the EL to check if a new block is valid by asking it to download it or by providing the "payload" of a new block obtained from the p2p network. The EL upon receiving the payload/new block would execute the state transition function by running protocol checks and processing the transactions through the EVM
+Post-merge Ethereum block progression would happen through a Consensus Layer (CL) and an Execution Layer (EL) client, together with a validator software that signs off on new blocks. The driver of this is the Consensus Layer that requests the EL to check if a new block is valid by asking it to download it or by providing the "payload" of a new block obtained from the p2p network. The EL upon receiving the payload/new block would execute the state transition function by running protocol checks and processing the transactions through the EVM.
 
 In the post ZKalyptic times the validator can simply attest new blocks "as they come" with proofs without needing either the CL or the EL. The CL still needs to find its way through any malicious blocks to find the canonical block and the EL is simply replaced by a database. That holds, if it is not a block-builder.
 
@@ -511,7 +511,7 @@ Looked at another way, this also means if I can mathematically prove to you that
 
 ### A swift Example!
 
-Let's say you, Alice, have a 100 units of an asset with ZBank and now want to transfer it to your account in FBank.&#x20;
+Let's say you, Alice, have a 100 units of an asset with ZBank and now want to transfer it to your account in FBank.
 
 Traditionally, this uses a fancy version of "trust-me-bro" consensus between the two banks like SWIFT. Meaning, you may not be allowed this transfer or a 100 other things. An easier path would be not having that asset in the first place, but let's say ZBank and YBank have both decided to be cypherpunks now and they run their own private blockchains and would settle interbank on Ethereum!
 
@@ -536,7 +536,7 @@ Now for the settlement process, two ways can work
 
 The previous example was somewhat cliche but in general proofs are just hidden EVM smart contract execution. So the way to enable such functionality would be to write good smart contracts that can do these things already - such as existing bridge contracts. Then it is a simple matter of submitting full block proofs and/or proofs on certain transactions.
 
-One great feature of the ZK proofs generated with ZKVMs these days is "public outputs" that embed certain values that come out after processing. The public outputs, for instance, can be the values of "settlement" between ZBank and YBank in the previous example.
+One great feature of the ZK proofs generated with zkVMs these days is "public outputs" that embed certain values that come out after processing. The public outputs, for instance, can be the values of "settlement" between ZBank and YBank in the previous example.
 
 From the block proof alone it can't be inferred if an extraneous settlement is pending. So, an interbank settlement would need to see a certain transaction trace and the public output. This is where Zilkworm's transaction prover comes in that can be configured to output public outputs on re-running certain transactions.
 
@@ -553,13 +553,31 @@ _How Zilkworm could power L2/rollup proofs (projection — L2 execution and prov
 
 ## Introduction
 
-This article explores how zilkworm can be used to generate proofs for an L2 rollup. This is made possible by the fact that most popular L2s and blockchain networks out there use EVMs under the hood.
+This article explores how Zilkworm can be used to generate proofs for an L2 rollup. This is made possible by the fact that most popular L2s and blockchain networks out there use EVMs under the hood.
 
-We give a brief introduction to rollups and their validity mechanisms before diving deeper into the technical bits and other considerations for a an existing or new chain project.
+We give a brief introduction to rollups and their validity mechanisms before diving deeper into the technical bits and other considerations for an existing or new chain project.
 
 ### Why a rollup?
 
 It’s a known fact that Ethereum L1 has issues scaling transaction throughput and that’s why rollups can batch transactions, thereby lowering the costs and scaling the ecosystem.
+
+```mermaid
+flowchart LR
+    USERS["Users"]
+    subgraph L2["L2 rollup"]
+        SEQ["Sequencer"]
+        EXEC["Execute<br/>batch"]
+    end
+    subgraph L1["Ethereum L1"]
+        ROLLUP["Rollup<br/>contract"]
+    end
+
+    USERS -->|tx| SEQ
+    SEQ --> EXEC
+    EXEC -->|"batch + validity"| ROLLUP
+
+    style ROLLUP stroke-dasharray: 5 5
+```
 
 In principle the validation of the raw batch of transactions happens on a “side-chain” by a process outside of L1 transaction validation itself. But the proof of validity of these L2 transactions are then put back into L1 in batches using two popular methods:
 
@@ -580,20 +598,35 @@ If, however, sequencers don’t submit bad blocks, then fraud proofs are a rare 
 
 ### How would a z(il)k-Rollup work here
 
-The core of Arbitrum is almost the same as that of Ethereum - they both use EVM! That means the same Zilkworm core we discuss can be used to process Arbitrum transactions as well, with minor changes to the logic.Essentially, an Arbitrum sequencer (can be decentralized) will submit a batch of transactions on a previous block or L1 checkpoint. This gets “optimistically” included right away to subvert bad UX. But soon enough another “prover-validator” runs the batch of transactions to generate a succinct proof with Zilkworm and submits it to an L1 SNARK-verifier contract.\
+```mermaid
+flowchart LR
+    SEQ["Sequencer<br/>(Arbitrum)"]
+    PV["Prover-validator<br/>+ Zilkworm"]
+    subgraph L1["Ethereum L1"]
+        OPT["Optimistic<br/>inclusion"]
+        VER["SNARK-verifier<br/>contract"]
+    end
+
+    SEQ -->|batch| OPT
+    SEQ -->|transactions| PV
+    PV -->|"SNARK proof"| VER
+    VER -.->|"finalize / reject"| OPT
+
+    style OPT stroke-dasharray: 2 3
+```
+
+The core of Arbitrum is almost the same as that of Ethereum - they both use EVM! That means the same Zilkworm core we discuss can be used to process Arbitrum transactions as well, with minor changes to the logic. Essentially, an Arbitrum sequencer (can be decentralized) will submit a batch of transactions on a previous block or L1 checkpoint. This gets “optimistically” included right away to subvert bad UX. But soon enough another “prover-validator” runs the batch of transactions to generate a succinct proof with Zilkworm and submits it to an L1 SNARK-verifier contract.\
 \
-Since a bad transaction could not be generated by the zilkworm prover, or a bad proof would refuse to verify, the L1 verification would not go through, and L2 would then mark it as a bad block.\
-On the up side,the security now is truly L1-level once the proof verification is done - no wait for the challenge period!\
-\
-On the up side,the security now is truly L1-level once the proof verification is done - no wait for the challenge period!
+Since a bad transaction could not be generated by the Zilkworm prover, or a bad proof would refuse to verify, the L1 verification would not go through, and L2 would then mark it as a bad block.\
+On the up side, the security now is truly L1-level once the proof verification is done - no wait for the challenge period!
 
 ### The tech checklist
 
-With a team of capable C++ engineers, one could easily adapt zilkworm for a specific use case (or contact us to get it done). The following would typically be in this journey to the final deliverable:
+With a team of capable C++ engineers, one could easily adapt Zilkworm for a specific use case (or contact us to get it done). The following would typically be in this journey to the final deliverable:
 
 * Identify compatibility variance with Ethereum mainnet
-* Identify performance requirements and run zilkworm benchmarks to know the numbers and hardware resources required for proving
-* Fork the zilkworm repo for unofficial variant adapted to the specific changes. The EVM and the state transition bits may need to be changed to fit in a chain such as, say, Arbitrum
+* Identify performance requirements and run Zilkworm benchmarks to know the numbers and hardware resources required for proving
+* Fork the Zilkworm repo for unofficial variant adapted to the specific changes. The EVM and the state transition bits may need to be changed to fit in a chain such as, say, Arbitrum
 * Run protocol execution tests for that protocol - similar to Ethereum/tests or EESTs to check correctness and performance for individual opcodes/contracts etc.
 * Prove the chain!
 
@@ -603,9 +636,9 @@ With a team of capable C++ engineers, one could easily adapt zilkworm for a spec
 
 A big disadvantage of zero-knowledge proofs is their computational intensity. Even until a few years ago, mainstream ZK proofs were thought to be outside of consumer hardware, but that's not the case anymore. In fact Zilkworm can typically generate an Ethereum block proof with 30M gas in under 3 minutes with a standard consumer GPU.\
 \
-This is thanks to a lot of performance optimizations and parallelization of the ZKVM provers. At the time of writing this Zilkworm mainly uses SP1 Prover that is capable of accelerating proofs with GPU. Some alternatives like Brevis Pico can even prove a typical mainnet block in under 10 seconds thanks to massive parallelization over say a dozen Nvidia RTX 5090s.
+This is thanks to a lot of performance optimizations and parallelization of the zkVM provers. At the time of writing this Zilkworm mainly uses SP1 Prover that is capable of accelerating proofs with GPU. Some alternatives like Brevis Pico can even prove a typical mainnet block in under 10 seconds thanks to massive parallelization over say a dozen NVIDIA RTX 5090s.
 
-Another consideration is the long release iteration cycle and developer time it used to take a few years ago to hand-craft circuits. Thanks to most ZKVMs now turning to general purpose minimalistic ISAs like RISC-V, any generic C++ or Rust program could be proved.\
+Another consideration is the long release iteration cycle and developer time it used to take a few years ago to hand-craft circuits. Thanks to most zkVMs now turning to general purpose minimalistic ISAs like RISC-V, any generic C++ or Rust program could be proved.\
 \
 This allows Zilkworm to take advantage of the C++ compilers and Rust tooling integration around RISC-V to deliver a robust end-to-end block and transaction prover.
 
@@ -617,7 +650,7 @@ Essentially, a proof can be a direct replacement of the re-execution or dependen
 
 The other argument against decentralization like this is that an apex org or foundation-controlled sequencer makes money on the transactions that help secure that L2, if the sequencers don't have to compete with external players. This, however, can still be maintained with a zk-proofs-based validity mode, if the provers are only the ones that are designated to organise the flow of fees. E.g. a prover could make 1000x the "fees" money than a permissionless set of validators.
 
-&#x20;The risks due to censorships and network downtime far outweigh the arguments against zk-proofs based decentralized consensus
+The risks due to censorships and network downtime far outweigh the arguments against zk-proofs based decentralized consensus
 
 ### The potential L3 "fraud" amplification
 
@@ -633,4 +666,4 @@ The ecosystem would be in a mayhem in this "worst-case" scenario. But, on averag
 
 ### Conclusion
 
-The gap for security in rollups can be filled by an easy to use proving mechanism for full block state transition. Although optimistic rollups have leg up in performance, ZKVM implementations have caught up and Zilkworm can deliver the missing piece for an EVM-based L2/L3 chain to enable a zk-based rollup.
+The gap for security in rollups can be filled by an easy to use proving mechanism for full block state transition. Although optimistic rollups have leg up in performance, zkVM implementations have caught up and Zilkworm can deliver the missing piece for an EVM-based L2/L3 chain to enable a zk-based rollup.
