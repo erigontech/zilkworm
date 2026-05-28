@@ -160,6 +160,15 @@
   box-shadow: 0 6px 20px rgba(239, 119, 22, 0.12);
 }
 
+.cardIcon {
+  display: block;
+  width: 2rem;
+  height: 2rem;
+  margin-bottom: 1rem;
+  color: #EF7716;
+  flex-shrink: 0;
+}
+
 .card h3 {
   font-family: 'Montserrat', sans-serif;
   font-weight: 800;
