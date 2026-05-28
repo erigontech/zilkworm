@@ -42,7 +42,7 @@ const config: Config = {
       tagName: 'script',
       attributes: {
         async: 'true',
-        src: 'https://plausible.io/js/pa-f0yBJLAhWL8OM7MYgPYd4.js',
+        src: 'https://plausible.io/js/pa-SNWheUhdX9Y0L2NJG8KzE.js',
       },
     },
     {
