@@ -107,6 +107,11 @@ const config: Config = {
           label: 'Documentation',
         },
         {
+          to: '/collaborations',
+          label: 'Collaborations',
+          position: 'left',
+        },
+        {
           type: 'html',
           position: 'right',
           value: '<a href="https://erigon.tech/blog/" target="_blank" rel="noopener noreferrer" class="navbar-blog-btn" aria-label="Blog">Blog</a>',
