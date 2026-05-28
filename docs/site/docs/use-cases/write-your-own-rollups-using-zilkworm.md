@@ -15,7 +15,23 @@ We give a brief introduction to rollups and their validity mechanisms before div
 
 It’s a known fact that Ethereum L1 has issues scaling transaction throughput and that’s why rollups can batch transactions, thereby lowering the costs and scaling the ecosystem.
 
-{/* TODO: re-import image from GitBook (was /files/c5G2nm0Ij1RaQ1BW7Agt) */}
+```mermaid
+flowchart LR
+    USERS["Users"]
+    subgraph L2["L2 rollup"]
+        SEQ["Sequencer"]
+        EXEC["Execute<br/>batch"]
+    end
+    subgraph L1["Ethereum L1"]
+        ROLLUP["Rollup<br/>contract"]
+    end
+
+    USERS -->|tx| SEQ
+    SEQ --> EXEC
+    EXEC -->|"batch + validity"| ROLLUP
+
+    style ROLLUP stroke-dasharray: 5 5
+```
 
 In principle the validation of the raw batch of transactions happens on a “side-chain” by a process outside of L1 transaction validation itself. But the proof of validity of these L2 transactions are then put back into L1 in batches using two popular methods:
 
@@ -36,7 +52,22 @@ If, however, sequencers don’t submit bad blocks, then fraud proofs are a rare 
 
 ### How would a z(il)k-Rollup work here
 
-{/* TODO: re-import image from GitBook (was /files/qRV3o9KFoBn8X8C3lN6r) */}
+```mermaid
+flowchart LR
+    SEQ["Sequencer<br/>(Arbitrum)"]
+    PV["Prover-validator<br/>+ Zilkworm"]
+    subgraph L1["Ethereum L1"]
+        OPT["Optimistic<br/>inclusion"]
+        VER["SNARK-verifier<br/>contract"]
+    end
+
+    SEQ -->|batch| OPT
+    SEQ -->|transactions| PV
+    PV -->|"SNARK proof"| VER
+    VER -.->|"finalize / reject"| OPT
+
+    style OPT stroke-dasharray: 2 3
+```
 
 The core of Arbitrum is almost the same as that of Ethereum - they both use EVM! That means the same Zilkworm core we discuss can be used to process Arbitrum transactions as well, with minor changes to the logic. Essentially, an Arbitrum sequencer (can be decentralized) will submit a batch of transactions on a previous block or L1 checkpoint. This gets “optimistically” included right away to subvert bad UX. But soon enough another “prover-validator” runs the batch of transactions to generate a succinct proof with Zilkworm and submits it to an L1 SNARK-verifier contract.\
 \
