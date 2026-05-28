@@ -18,7 +18,7 @@ At the moment the work is being led by Erigon developers. This is a short term "
 
 ### What are the timelines?
 
-We'll be the first team to deliver real-time Ethereum Block proofs on 2 GPUs by 31 March 2026 - bet us on that.
+We're actively working to deliver real-time Ethereum block proofs on 2 GPUs - follow progress on [EthProofs](https://ethproofs.org/).
 
 ### Challenges of C++ work in a Rust world?
 
