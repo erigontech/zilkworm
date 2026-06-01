@@ -88,12 +88,13 @@ jobs:
           if [[ ! -s RELEASE_NOTES.md ]]; then
             echo "No CHANGELOG.md section found for $TAG." > RELEASE_NOTES.md
           fi
+          printf '\n---\nReleased by @%s\n' "$GITHUB_ACTOR" >> RELEASE_NOTES.md
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
-          name: ${{ env.TAG }}
+          name: Zilkworm ${{ env.TAG }}
           body_path: RELEASE_NOTES.md
           prerelease: ${{ steps.ver.outputs.prerelease }}
           fail_on_unmatched_files: true
