@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.0-alpha.2-ere - ERE zkEVM benchmark integration
+
+Pre-release equivalent to v0.1.0-alpha.2 plus integration into the ERE zkEVM benchmark workload.
+
 ## v0.1.0-alpha.2 - More performance more testing and more stability
 
 ### Highlights
