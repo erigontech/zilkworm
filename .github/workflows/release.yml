@@ -1,0 +1,104 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build a release for, e.g. v0.1.0-alpha.2
+        required: true
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build artifacts and publish release
+    runs-on: ubuntu-latest
+    environment: ci
+    permissions:
+      contents: write
+      packages: read
+    container:
+      image: ghcr.io/erigontech/zilkworm-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # alpha/beta/rc tags carry a '-' suffix -> mark as pre-release.
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          submodules: false
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          sparse-eest-fixtures: "skip"
+
+      - name: Verify tag matches PROJECT_VERSION
+        shell: bash
+        run: |
+          cmake_ver=$(grep -oP 'set\(PROJECT_VERSION \K[^)]+' CMakeLists.txt)
+          if [[ "$cmake_ver" != "${{ steps.ver.outputs.version }}" ]]; then
+            echo "Tag $TAG implies version ${{ steps.ver.outputs.version }}, but CMakeLists.txt PROJECT_VERSION is $cmake_ver" >&2
+            exit 1
+          fi
+
+      - name: Build guest ELF and prover
+        run: make z6m_prover
+
+      - name: Build state_transition CLI
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target state_transition -j"$(nproc)"
+
+      - name: Stage release artifacts
+        run: make release-artifacts
+
+      - name: Extract changelog section
+        shell: bash
+        run: |
+          awk -v tag="$TAG" '
+            $0 ~ "^## " tag "([ ]|$)" { f=1; print; next }
+            f && /^## / { f=0 }
+            f { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [[ ! -s RELEASE_NOTES.md ]]; then
+            echo "No CHANGELOG.md section found for $TAG." > RELEASE_NOTES.md
+          fi
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ steps.ver.outputs.prerelease }}
+          fail_on_unmatched_files: true
+          files: |
+            temp/z6m_guest_hypercube.elf
+            temp/z6m_prover_hypercube
+            temp/state_transition_linux_x86_64
+            temp/SHA256SUMS.txt
