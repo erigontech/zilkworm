@@ -130,7 +130,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 FROM ubuntu:24.04 AS runtime
 
 ARG ZILKWORM_VERSION
-LABEL maintainer="erigontech/z6m" \
+LABEL maintainer="erigontech/zilkworm" \
       description="Zilkworm ZKEVM prover" \
       version="${ZILKWORM_VERSION}"
 
