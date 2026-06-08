@@ -63,6 +63,7 @@ add_library(
   evmone/lib/evmone_precompiles/modexp.cpp
   evmone/lib/evmone_precompiles/mulmod.cpp
   evmone/lib/evmone_precompiles/kzg.cpp
+  evmone/lib/evmone_precompiles/kzg_setup_g2_1_lines.cpp
   evmone/lib/evmone_precompiles/bn254.cpp
   evmone/lib/evmone_precompiles/pairing/bn254/pairing.cpp
   evmone/lib/evmone_precompiles/secp256k1.cpp
