@@ -42,7 +42,6 @@ file(
   "cmd/*.?pp" "examples/*.?pp" "silkworm/*.?pp"
 )
 list(FILTER SRC EXCLUDE REGEX [[zilk_core/core/chain/genesis_[a-z_]+\.cpp$]])
-list(FILTER SRC EXCLUDE REGEX [[zilk_core/core/common/lru_cache(_test)?\..pp$]])
 list(FILTER SRC EXCLUDE REGEX [[zilk_core/core/crypto/kzg\.cpp$]])
 list(FILTER SRC EXCLUDE REGEX [[silkworm/infra/concurrency/thread_pool\.hpp$]])
 list(FILTER SRC EXCLUDE REGEX [[silkworm/interfaces/]])

@@ -8,19 +8,22 @@
 #include <memory>
 
 #include <evmc/evmc.hpp>
+#include <evmone/lru_cache.hpp>
 #include <zilk_core/core/common/base.hpp>
-#include <zilk_core/core/common/lru_cache.hpp>
 #include <zilk_core/core/types/block.hpp>
 
 namespace silkworm {
 
 class BlockCache {
   public:
-    explicit BlockCache(size_t capacity = 1024, bool shared_cache = true)
-        : block_cache_(capacity, shared_cache) {}
+    // The second argument (formerly a thread-safety flag) is retained for
+    // source compatibility but is now inert: evmone::LRUCache is not internally
+    // synchronized, matching the previous behavior where locking was disabled.
+    explicit BlockCache(size_t capacity = 1024, bool = true)
+        : block_cache_(capacity) {}
 
     std::shared_ptr<BlockWithHash> get(const evmc::bytes32& key) {
-        auto result = block_cache_.get_as_copy(key);
+        auto result = block_cache_.get(key);
         if (result) {
             return *result;
         }
@@ -32,7 +35,7 @@ class BlockCache {
     }
 
   private:
-    LruCache<evmc::bytes32, std::shared_ptr<BlockWithHash>> block_cache_;
+    evmone::LRUCache<evmc::bytes32, std::shared_ptr<BlockWithHash>> block_cache_;
 };
 
 }  // namespace silkworm
