@@ -9,7 +9,6 @@
 
 #include <evmc/evmc.hpp>
 #include <zilk_core/core/common/bytes.hpp>
-#include <zilk_core/core/execution/execution.hpp>
 #include <zilk_core/core/state/in_memory_state.hpp>
 #include <zilk_core/core/trie_zz/flat_store.hpp>
 

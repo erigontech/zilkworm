@@ -13,12 +13,12 @@
 #include <vector>
 
 #include <evmc/evmc.h>
+#include <evmc/evmc.hpp>
 #include <intx/intx.hpp>
 #include <nlohmann/json.hpp>
 #include <zilk_core/core/common/base.hpp>
 #include <zilk_core/core/common/small_map.hpp>
 #include <zilk_core/core/common/util.hpp>
-#include <zilk_core/core/protocol/bor/config.hpp>
 #include <zilk_core/core/protocol/ethash_config.hpp>
 
 namespace silkworm {
@@ -31,7 +31,7 @@ namespace protocol {
     };
 
     //! \see IRuleSet
-    using PreMergeRuleSetConfig = std::variant<NoPreMergeConfig, EthashConfig, bor::Config>;
+    using PreMergeRuleSetConfig = std::variant<NoPreMergeConfig, EthashConfig>;
 
 }  // namespace protocol
 
@@ -146,16 +146,8 @@ constinit extern const ChainConfig kHoleskyConfig;
 inline constexpr evmc::bytes32 kSepoliaGenesisHash{0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9_bytes32};
 constinit extern const ChainConfig kSepoliaConfig;
 
-inline constexpr evmc::bytes32 kBorMainnetGenesisHash{0xa9c28ce2141b56c474f1dc504bee9b01eb1bd7d1a507580d5519d4437a97de1b_bytes32};
-constinit extern const ChainConfig kBorMainnetConfig;
-
-inline constexpr evmc::bytes32 kAmoyGenesisHash{0x7202b2b53c5a0836e773e319d18922cc756dd67432f9a1f65352b61f4406c697_bytes32};
-constinit extern const ChainConfig kAmoyConfig;
-
 //! \brief Known chain names mapped to their respective chain IDs
 inline constexpr SmallMap<std::string_view, ChainId> kKnownChainNameToId{
-    {"amoy", 80002},
-    {"bor-mainnet", 137},
     {"holesky", 17000},
     {"mainnet", 1},
     {"sepolia", 11155111},
@@ -164,8 +156,6 @@ inline constexpr SmallMap<std::string_view, ChainId> kKnownChainNameToId{
 //! \brief Known chain IDs mapped to their respective chain configs
 inline constexpr SmallMap<ChainId, const ChainConfig*> kKnownChainConfigs{
     {*kKnownChainNameToId.find("mainnet"), &kMainnetConfig},
-    {*kKnownChainNameToId.find("amoy"), &kAmoyConfig},
-    {*kKnownChainNameToId.find("bor-mainnet"), &kBorMainnetConfig},
     {*kKnownChainNameToId.find("holesky"), &kHoleskyConfig},
     {*kKnownChainNameToId.find("sepolia"), &kSepoliaConfig},
 };

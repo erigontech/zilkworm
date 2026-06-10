@@ -38,11 +38,10 @@ ValidationResult MergeRuleSet::validate_difficulty_and_seal(const BlockHeader& h
     return header.nonce == BlockHeader::NonceType{} ? ValidationResult::kOk : ValidationResult::kInvalidNonce;
 }
 
-void MergeRuleSet::initialize(EVM& evm) {
-    const BlockHeader& header{evm.block().header};
-    if (header.difficulty != 0) {
+void MergeRuleSet::initialize(IntraBlockState& state, const Block& block) {
+    if (block.header.difficulty != 0) {
         if (pre_merge_rule_set_) {
-            pre_merge_rule_set_->initialize(evm);
+            pre_merge_rule_set_->initialize(state, block);
         }
         return;
     }
@@ -50,10 +49,10 @@ void MergeRuleSet::initialize(EVM& evm) {
     // using evmone's system_call_block_start().
 }
 
-ValidationResult MergeRuleSet::finalize(IntraBlockState& state, const Block& block, EVM& evm, const std::vector<Log>& logs) {
+ValidationResult MergeRuleSet::finalize(IntraBlockState& state, const Block& block, const std::vector<Log>& logs) {
     if (block.header.difficulty != 0) {
         if (pre_merge_rule_set_) {
-            return pre_merge_rule_set_->finalize(state, block, evm, logs);
+            return pre_merge_rule_set_->finalize(state, block, logs);
         }
     }
 

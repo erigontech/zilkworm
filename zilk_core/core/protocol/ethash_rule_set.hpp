@@ -15,12 +15,12 @@ class EthashRuleSet : public RuleSet {
   public:
     explicit EthashRuleSet(const ChainConfig& chain_config) : RuleSet(chain_config, /*prohibit_ommers=*/false) {}
 
-    void initialize(EVM& evm) override;
+    void initialize(IntraBlockState& state, const Block& block) override;
 
     //! \brief See [YP] Section 11.3 "Reward Application".
     //! \param [in] state: current state.
     //! \param [in] block: current block to apply rewards for.
-    ValidationResult finalize(IntraBlockState& state, const Block& block, EVM& evm, const std::vector<Log>& logs) override;
+    ValidationResult finalize(IntraBlockState& state, const Block& block, const std::vector<Log>& logs) override;
 
     BlockReward compute_reward(const Block& block) override;
 
