@@ -95,30 +95,4 @@
 //     CHECK(to_hex(computed_hash) == to_hex(kSepoliaGenesisHash));
 // }
 
-// TEST_CASE("Polygon PoS genesis") {
-//     test_genesis_config(kBorMainnetConfig);
-//     nlohmann::json genesis_json = sanity_checked_json(kBorMainnetConfig.chain_id);
-
-//     auto expected_state_root{0x654f28d19b44239d1012f27038f1f71b3d4465dc415a382fb2b7009cba1527c8_bytes32};
-//     auto actual_state_root{state_root(genesis_json)};
-//     CHECK(to_hex(expected_state_root) == to_hex(actual_state_root));
-
-//     BlockHeader header{read_genesis_header(genesis_json, actual_state_root)};
-//     auto computed_hash{header.hash()};
-//     CHECK(to_hex(computed_hash) == to_hex(kBorMainnetGenesisHash));
-// }
-
-// TEST_CASE("Amoy genesis") {
-//     test_genesis_config(kAmoyConfig);
-//     nlohmann::json genesis_json = sanity_checked_json(kAmoyConfig.chain_id);
-
-//     auto expected_state_root{0x3cfe247720ff1d26dfc97de26f6be0047b93d6fe47f77f4f36beff9fabe68cce_bytes32};
-//     auto actual_state_root{state_root(genesis_json)};
-//     CHECK(to_hex(expected_state_root) == to_hex(actual_state_root));
-
-//     BlockHeader header{read_genesis_header(genesis_json, actual_state_root)};
-//     auto computed_hash{header.hash()};
-//     CHECK(to_hex(computed_hash) == to_hex(kAmoyGenesisHash));
-// }
-
 // }  // namespace silkworm

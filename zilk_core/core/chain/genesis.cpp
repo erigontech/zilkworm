@@ -7,8 +7,6 @@
 #include <bit>
 
 #include <zilk_core/core/chain/config.hpp>
-#include <zilk_core/core/chain/genesis_amoy.hpp>
-#include <zilk_core/core/chain/genesis_bor_mainnet.hpp>
 #include <zilk_core/core/chain/genesis_holesky.hpp>
 #include <zilk_core/core/chain/genesis_mainnet.hpp>
 #include <zilk_core/core/chain/genesis_sepolia.hpp>
@@ -31,10 +29,6 @@ std::string_view read_genesis_data(ChainId chain_id) {
             return kGenesisHoleskyJson;
         case *kKnownChainNameToId.find("sepolia"):
             return kGenesisSepoliaJson;
-        case *kKnownChainNameToId.find("bor-mainnet"):
-            return kGenesisBorMainnetJson;
-        case *kKnownChainNameToId.find("amoy"):
-            return kGenesisAmoyJson;
         default:
             return "{";  // <- Won't be lately parsed as valid json value
     }

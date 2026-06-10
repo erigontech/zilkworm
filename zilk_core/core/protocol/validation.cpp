@@ -8,7 +8,6 @@
 
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/crypto/secp256k1n.hpp>
-#include <zilk_core/core/execution/evm.hpp>
 #include <zilk_core/core/rlp/encode_vector.hpp>
 #include <zilk_core/core/trie/vector_root.hpp>
 
@@ -111,32 +110,6 @@ ValidationResult pre_validate_transactions(const Block& block, const ChainConfig
     return ValidationResult::kOk;
 }
 
-ValidationResult validate_call_precheck(const Transaction& txn, const EVM& evm) noexcept {
-    const std::optional sender{txn.sender()};
-    if (!sender) {
-        return ValidationResult::kInvalidSignature;
-    }
-
-    if (const auto common_check = pre_validate_common_base(txn, evm.revision(), evm.config().chain_id); common_check != ValidationResult::kOk) {
-        return common_check;
-    }
-
-    if (evm.revision() >= EVMC_LONDON) {
-        if (txn.max_fee_per_gas < txn.max_priority_fee_per_gas) {
-            return ValidationResult::kMaxPriorityFeeGreaterThanMax;
-        }
-        if (txn.max_fee_per_gas < evm.block().header.base_fee_per_gas) {
-            return ValidationResult::kMaxFeeLessThanBase;
-        }
-    }
-
-    if (const auto forks_check = pre_validate_common_forks(txn, evm.revision(), evm.block().header.blob_gas_price(evm.config())); forks_check != ValidationResult::kOk) {
-        return forks_check;
-    }
-
-    return ValidationResult::kOk;
-}
-
 ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision revision, uint64_t chain_id) noexcept {
     if (txn.chain_id.has_value()) {
         if (revision < EVMC_SPURIOUS_DRAGON) {
@@ -227,44 +200,6 @@ ValidationResult pre_validate_common_forks(const Transaction& txn, const evmc_re
     }
 
     return ValidationResult::kOk;
-}
-
-ValidationResult validate_call_funds(const Transaction& txn, const EVM& evm, const intx::uint256& owned_funds) noexcept {
-    const intx::uint256 base_fee{evm.block().header.base_fee_per_gas.value_or(0)};
-    const intx::uint256 effective_gas_price{txn.max_fee_per_gas >= evm.block().header.base_fee_per_gas ? txn.effective_gas_price(base_fee)
-                                                                                                       : txn.max_priority_fee_per_gas};
-
-    intx::uint512 required_funds = compute_call_cost(txn, effective_gas_price, evm);
-    // EIP-7623 Increase calldata cost
-    if (evm.revision() >= EVMC_PRAGUE) {
-        const auto floor_cost = protocol::floor_cost(txn);
-        const intx::uint512 gas_limit = std::max(txn.gas_limit, floor_cost);
-        required_funds = std::max(required_funds, gas_limit * effective_gas_price);
-    }
-    if (owned_funds < required_funds + txn.value) {
-        return ValidationResult::kInsufficientFunds;
-    }
-    return ValidationResult::kOk;
-}
-
-intx::uint256 compute_call_cost(const Transaction& txn, const intx::uint256& effective_gas_price, const EVM& evm) {
-    // EIP-1559 normal gas cost
-    intx::uint256 required_funds;
-    if (txn.max_fee_per_gas > 0 || txn.max_priority_fee_per_gas > 0) {
-        // This method should be called after check (max_fee and base_fee) present in pre_check() method
-        required_funds = txn.gas_limit * effective_gas_price;
-    } else {
-        required_funds = 0;
-    }
-
-    // EIP-4844 blob gas cost (calc_data_fee)
-    if (evm.block().header.blob_gas_used && evm.revision() >= EVMC_CANCUN) {
-        // compute blob fee for eip-4844 data blobs if any
-        const intx::uint256 blob_gas_price{evm.block().header.blob_gas_price(evm.config()).value_or(0)};
-        required_funds += txn.total_blob_gas() * blob_gas_price;
-    }
-
-    return required_funds;
 }
 
 intx::uint256 expected_base_fee_per_gas(const BlockHeader& parent) {

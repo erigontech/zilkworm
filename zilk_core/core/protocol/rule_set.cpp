@@ -10,7 +10,6 @@
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/overloaded.hpp>
 
-#include "bor_rule_set.hpp"
 #include "ethash_rule_set.hpp"
 #include "merge_rule_set.hpp"
 #include "param.hpp"
@@ -248,21 +247,6 @@ evmc::address RuleSet::get_beneficiary(const BlockHeader& header) { return heade
 BlockReward RuleSet::compute_reward(const Block&) {
     return {0, {}};
 }
-
-void RuleSet::add_fee_transfer_log(IntraBlockState&, const intx::uint256&, const evmc::address&,
-                                   const intx::uint256&, const evmc::address&, const intx::uint256&) {
-    // do nothing by default
-}
-
-// static RuleSetPtr pre_merge_rule_set(const ChainConfig& chain_config) {
-//     return std::visit<RuleSetPtr>(
-//         Overloaded{
-//             [&](const NoPreMergeConfig&) { return nullptr; },
-//             [&](const EthashConfig&) { return std::make_unique<EthashRuleSet>(chain_config); },
-//             [&](const bor::Config&) { return std::make_unique<BorRuleSet>(chain_config); },
-//         },
-//         chain_config.rule_set_config);
-// }
 
 RuleSetPtr rule_set_factory(const ChainConfig& chain_config) {
     // SILKWORM_ASSERT(chain_config.valid_pre_merge_config());

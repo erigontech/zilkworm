@@ -12,7 +12,6 @@
 #include <zilk_core/core/chain/genesis.hpp>
 #include <zilk_core/core/common/test_util.hpp>
 #include <zilk_core/core/common/util.hpp>
-#include <zilk_core/core/execution/execution.hpp>
 #include <zilk_core/core/protocol/blockchain.hpp>
 #include <zilk_core/core/protocol/param.hpp>
 #include <zilk_core/core/protocol/rule_set.hpp>

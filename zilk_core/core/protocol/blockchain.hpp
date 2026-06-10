@@ -8,7 +8,6 @@
 #include <vector>
 
 #include <evmc/evmc.h>
-#include <zilk_core/core/execution/evm.hpp>
 #include <zilk_core/core/protocol/rule_set.hpp>
 #include <zilk_core/core/state/state.hpp>
 #include <zilk_core/core/types/receipt.hpp>
@@ -34,8 +33,6 @@ class Blockchain {
     Blockchain& operator=(const Blockchain&) = delete;
 
     ValidationResult insert_block(Block& block, bool check_state_root);
-
-    evmc_vm* exo_evm{nullptr};
 
   private:
     ValidationResult execute_block(const Block& block, bool check_state_root);

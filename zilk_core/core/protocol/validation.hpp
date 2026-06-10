@@ -13,8 +13,6 @@
 
 namespace silkworm {
 
-class EVM;
-
 // Classification of invalid transactions and blocks.
 enum class [[nodiscard]] ValidationResult {
     kOk,  // All checks passed
@@ -137,15 +135,9 @@ namespace protocol {
     ValidationResult validate_transaction(const Transaction& txn, const IntraBlockState& state,
                                           uint64_t available_gas) noexcept;
 
-    ValidationResult validate_call_precheck(const Transaction& txn, const EVM& evm) noexcept;
-
     ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision revision, uint64_t chain_id) noexcept;
 
     ValidationResult pre_validate_common_forks(const Transaction& txn, evmc_revision rev, const std::optional<intx::uint256>& blob_gas_price) noexcept;
-
-    ValidationResult validate_call_funds(const Transaction& txn, const EVM& evm, const intx::uint256& owned_funds) noexcept;
-
-    intx::uint256 compute_call_cost(const Transaction& txn, const intx::uint256& effective_gas_price, const EVM& evm);
 
     //! \see EIP-1559: Fee market change for ETH 1.0 chain
     intx::uint256 expected_base_fee_per_gas(const BlockHeader& parent);
