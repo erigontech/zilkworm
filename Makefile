@@ -4,9 +4,9 @@
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
 .PHONY: z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
-        execute-block selftest tests eest-rlp-build \
+        execute-block selftest tests eest-mfbd-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
-        release-artifacts
+        sp1-benchmark-corpus sp1-benchmark release-artifacts
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -35,59 +35,65 @@ execute-block: z6m_prover
 	prover/target/release/z6m_prover execute --file-name prover/temp/blocks/23519000/unifiedBlockAndStateRlp23519000.bin
 
 SELFTEST_JSON := third_party/eest-fixtures/blockchain_tests/static/state_tests/stExample/add11.json
-SELFTEST_RLP  := build/selftest.rlp
+SELFTEST_MFBD := build/selftest.mfbd
 
 selftest: z6m_prover z6m_eest_convert
-	@mkdir -p $(dir $(SELFTEST_RLP))
-	$(EEST_CONVERT_BIN) emit --json $(SELFTEST_JSON) --index 0 > $(SELFTEST_RLP)
-	prover/target/release/z6m_prover execute --file-name $(SELFTEST_RLP)
+	@mkdir -p $(dir $(SELFTEST_MFBD))
+	$(EEST_CONVERT_BIN) emit --json $(SELFTEST_JSON) --index 0 > $(SELFTEST_MFBD)
+	prover/target/release/z6m_prover execute --file-name $(SELFTEST_MFBD)
 
 TESTS_LOG_DIR := target/logs
 
-tests: z6m_prover eest-rlp-build
+tests: z6m_prover eest-mfbd-build
 	@mkdir -p $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
 	prover/target/release/z6m_prover --test-service \
-		--test-dir $(EEST_RLP_DIR)/$(TESTS_SUBDIR) \
+		--test-dir $(EEST_MFBD_DIR)/$(TESTS_SUBDIR) \
 		--execution-log-dir $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
 
 .DELETE_ON_ERROR:
 
-EEST_CONVERT_BIN := prover/target/release/z6m_eest_convert
+EEST_CONVERT_BIN := build/zilk_core/dev/cli/eest_to_flat_bundle
 
-# Phony: delegate freshness to cargo's own incremental build (~ms when up-to-date).
+# Build the C++ eest_to_flat_bundle binary (emit / bulk-convert). Phony — cmake handles freshness.
 z6m_eest_convert:
-	cd prover && cargo build --release --manifest-path common/Cargo.toml \
-		--no-default-features --features eest-convert --bin z6m_eest_convert
+	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S .
+	cmake --build build --target eest_to_flat_bundle -j$$(nproc)
 
-# Batched-RLP fixtures tree, produced by `z6m_eest_convert bulk-convert` from
-# the third_party/eest-fixtures submodule (sparse-checkout in CI). The output
-# is content-addressed by the eest-fixtures sha so different submodule
-# checkouts coexist in third_party/eest-fixtures-rlp/dev-<sha>/. CI overrides
-# EEST_RLP_DIR with a cache-keyed path.
+# MFBD fixtures tree, produced by the C++ `eest_to_flat_bundle bulk-convert`.
+# Content-addressed by the eest-fixtures sha so different submodule
+# checkouts coexist in third_party/eest-fixtures-mfbd/dev-<sha>/. CI
+# overrides EEST_MFBD_DIR with a cache-keyed path.
 EEST_SHA := $(shell git -C third_party/eest-fixtures rev-parse --short=12 HEAD 2>/dev/null)
-EEST_RLP_DIR ?= $(CURDIR)/third_party/eest-fixtures-rlp/dev-$(EEST_SHA)
+EEST_MFBD_DIR ?= $(CURDIR)/third_party/eest-fixtures-mfbd/dev-$(EEST_SHA)
 
-# Skip the converter run if the output dir already has a manifest from a
-# previous successful build. To force regeneration: `rm $(EEST_RLP_DIR)/manifest.json`.
-eest-rlp-build: z6m_eest_convert
-	@if [ -f "$(EEST_RLP_DIR)/manifest.json" ]; then \
-	    echo "  $(EEST_RLP_DIR) already populated; skipping bulk-convert"; \
+# Regenerate the MFBD corpus whenever it is missing OR the converter binary
+# changed. The binary hash covers every transitive source that affects the
+# output bytes (eest_to_flat_bundle.cpp, direct_state_builder.cpp, flat_bundle.*,
+# account.hpp, ...); ninja only relinks it when those change, so the hash is
+# stable across no-op runs and self-heals a stale corpus automatically.
+eest-mfbd-build: z6m_eest_convert
+	@conv_sha=$$(sha256sum "$(EEST_CONVERT_BIN)" | cut -c1-16); \
+	if [ -f "$(EEST_MFBD_DIR)/manifest.json" ] && \
+	   grep -q "\"converter_sha\": *\"$$conv_sha\"" "$(EEST_MFBD_DIR)/manifest.json"; then \
+	    echo "  $(EEST_MFBD_DIR) up to date (converter $$conv_sha); skipping bulk-convert"; \
 	else \
-	    mkdir -p "$(EEST_RLP_DIR)"; \
+	    echo "  Regenerating MFBD corpus (converter $$conv_sha)"; \
+	    rm -rf "$(EEST_MFBD_DIR)/blockchain_tests" "$(EEST_MFBD_DIR)/manifest.json"; \
+	    mkdir -p "$(EEST_MFBD_DIR)"; \
 	    $(EEST_CONVERT_BIN) bulk-convert \
 	        --input-dir $(CURDIR)/third_party/eest-fixtures/blockchain_tests \
-	        --output-dir "$(EEST_RLP_DIR)/blockchain_tests"; \
-	    printf '{"eest_sha":"%s"}\n' "$(EEST_SHA)" > "$(EEST_RLP_DIR)/manifest.json"; \
+	        --output-dir "$(EEST_MFBD_DIR)/blockchain_tests"; \
+	    printf '{"eest_sha":"%s","converter_sha":"%s"}\n' "$(EEST_SHA)" "$$conv_sha" > "$(EEST_MFBD_DIR)/manifest.json"; \
 	fi
 
-eest-blockchain-tests: eest-rlp-build
+eest-blockchain-tests: eest-mfbd-build
 	cmake -B build/eest -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-		-DEEST_RLP_DIR=$(EEST_RLP_DIR)
+		-DEEST_MFBD_DIR=$(EEST_MFBD_DIR)
 	cmake --build build/eest
 	ctest --test-dir build/eest --parallel
 
-eest-prover-test: z6m_prover eest-rlp-build
-	prover/target/release/z6m_prover --test-service --test-dir $(EEST_RLP_DIR)
+eest-prover-test: z6m_prover eest-mfbd-build
+	prover/target/release/z6m_prover --test-service --test-dir $(EEST_MFBD_DIR)
 
 EEST_JSON_DIR ?= $(CURDIR)/third_party/eest-fixtures
 
@@ -105,6 +111,30 @@ tests-json: z6m_prover
 	prover/target/release/z6m_prover --test-service \
 		--test-dir $(EEST_JSON_DIR)/$(TESTS_SUBDIR) \
 		--execution-log-dir $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
+
+# SP1 benchmark corpus: flat MFBD bundles converted from the raw mainnet
+# witness blocks under $(BENCH_SRC_DIR)/<N>/unifiedBlockAndStateRlp<N>.bin.
+BENCH_CORPUS_DIR ?= temp/200_benchmark_blocks_mfbd_v2
+BENCH_SRC_DIR    ?= temp/200_benchmark_blocks
+
+# Rebuild the benchmark corpus by converting each raw witness block to MFBD
+# with the C++ legacy_to_flat_bundle CLI.
+sp1-benchmark-corpus:
+	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S .
+	cmake --build build --target legacy_to_flat_bundle -j$$(nproc)
+	@echo "  Regenerating SP1 benchmark corpus into $(BENCH_CORPUS_DIR)"
+	@for d in $(BENCH_SRC_DIR)/*/; do \
+		N=$$(basename $$d); \
+		src=$$d/unifiedBlockAndStateRlp$$N.bin; \
+		[ -f $$src ] || { echo "  skip $$N (no $$src)"; continue; }; \
+		mkdir -p $(BENCH_CORPUS_DIR)/$$N; \
+		build/zilk_core/dev/cli/legacy_to_flat_bundle $$src $(BENCH_CORPUS_DIR)/$$N/flatWitnessBundle$$N.mfbd; \
+	done
+	@echo "  SP1 benchmark corpus ready in $(BENCH_CORPUS_DIR)"
+
+# Run the SP1 benchmark. Regenerate the corpus and rebuild the prover first.
+sp1-benchmark: z6m_prover sp1-benchmark-corpus
+	python3 tools/scripts/sp1_benchmark.py --dir $(BENCH_CORPUS_DIR)
 
 # Stage release artifacts into ./temp/
 RELEASE_DIR := temp

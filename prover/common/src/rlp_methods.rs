@@ -1,24 +1,11 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! RLP helpers shared across the prover + converter. The lightweight items
-//! are feature-gate-free so the standalone `eest-convert` binary can use them
-//! without pulling unneeded deps. The heavier RPC/state helpers below are
-//! gated on `network`.
-
-/// Unified-RLP v1 version byte. See `docs/architecture.md` "Per-subtest unified RLP".
-pub const VERSION_V1: u8 = 0x01;
-
-/// RLP encoding of `false` (the empty string).
-pub const RLP_FALSE: u8 = 0x80;
-
-/// RLP encoding of `true` (single-byte `0x01`).
-pub const RLP_TRUE: u8 = 0x01;
-
-/// Canonical Mainnet fork name used in v1 unified-RLP payloads.
-pub const MAINNET_FORK_NAME: &str = "Mainnet";
+//! RLP helpers used by the network-feature prover paths (block/state encoding
+//! for fetched witnesses).
 
 /// Concatenates pre-encoded RLP items into an outer RLP list.
+#[cfg(feature = "network")]
 pub fn encode_rlp_list<T: AsRef<[u8]>>(items: &[T]) -> Vec<u8> {
     let payload_len: usize = items.iter().map(|i| i.as_ref().len()).sum();
     let mut out = Vec::with_capacity(payload_len + 9);
@@ -32,18 +19,6 @@ pub fn encode_rlp_list<T: AsRef<[u8]>>(items: &[T]) -> Vec<u8> {
     }
     for item in items {
         out.extend_from_slice(item.as_ref());
-    }
-    out
-}
-
-/// Encodes a sequence of RLP blobs into the bundle wire format (see `docs/architecture.md` "Bundle format").
-pub fn encode_rlp_bundle(items: &[&[u8]]) -> Vec<u8> {
-    let payload_len = 4 + items.iter().map(|b| 4 + b.len()).sum::<usize>();
-    let mut out = Vec::with_capacity(payload_len);
-    out.extend_from_slice(&(items.len() as u32).to_le_bytes());
-    for item in items {
-        out.extend_from_slice(&(item.len() as u32).to_le_bytes());
-        out.extend_from_slice(item);
     }
     out
 }

@@ -19,7 +19,11 @@
 
 #include "mpt.hpp"
 
-namespace silkworm::mpt {
+namespace zilkworm {
+
+// rlp helpers live in silkworm::rlp; alias for local readability.
+namespace rlp = ::silkworm::rlp;
+
 #if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG)
 inline thread_local Bytes static_buffer = []() {
     Bytes buf;
@@ -189,6 +193,7 @@ inline bool decode_branch(ByteView payload, BranchNode& out) {
     for (size_t i = 0; i < 16; ++i) {
         // Save position before decode_header consumes the header
 
+        if (remaining.empty()) return false;
         const uint8_t child_start = *remaining.data();
         auto hdr = rlp::decode_header(remaining);
         if (!hdr) return false;
@@ -198,10 +203,13 @@ inline bool decode_branch(ByteView payload, BranchNode& out) {
             out.child_len[i] = 0;
         } else {
             if (child_start != 0xa0) {
+                // embedded child keeps header byte; dest has 31 bytes after [0]
+                if (hdr->payload_length > 31) return false;
                 out.child_len[i] = hdr->payload_length + 1;
                 out.child[i].bytes[0] = child_start;  // Keep the header byte for embedded child
                 std::copy_n(remaining.data(), hdr->payload_length, &out.child[i].bytes[1]);
             } else {
+                if (hdr->payload_length > 32) return false;
                 out.child_len[i] = hdr->payload_length;
                 std::copy_n(remaining.data(), hdr->payload_length, &out.child[i].bytes[0]);
             }
@@ -294,4 +302,4 @@ inline const Bytes& encode_line(const GridLine& line) {
     }
 }
 
-}  // namespace silkworm::mpt
+}  // namespace zilkworm

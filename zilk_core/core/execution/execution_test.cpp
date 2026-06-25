@@ -11,7 +11,7 @@
 // #include <zilk_core/core/protocol/param.hpp>
 // #include <zilk_core/core/state/in_memory_state.hpp>
 // #include <zilk_core/core/trie/vector_root.hpp>
-// #include <zilk_core/core/types/account.hpp>
+// #include <zilk_core/core/types_zz/account.hpp>
 // #include <zilk_core/core/types/address.hpp>
 // #include <zilk_core/core/types/block.hpp>
 // #include <zilk_core/core/types/evmc_bytes32.hpp>

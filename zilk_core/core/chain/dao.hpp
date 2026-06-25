@@ -4,11 +4,13 @@
 
 #pragma once
 
-#include <zilk_core/core/state/intra_block_state.hpp>
+#include <zilk_core/core/state_zz/direct_state.hpp>
+
+using ::zilkworm::DirectState;
 
 namespace silkworm {
 
 // EIP-779: Hardfork Meta: DAO Fork
-void transfer_dao_balances(IntraBlockState& state);
+void transfer_dao_balances(DirectState& direct);
 
 }  // namespace silkworm

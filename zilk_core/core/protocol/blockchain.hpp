@@ -9,8 +9,10 @@
 
 #include <evmc/evmc.h>
 #include <zilk_core/core/protocol/rule_set.hpp>
-#include <zilk_core/core/state/state.hpp>
+#include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/types/receipt.hpp>
+
+using ::zilkworm::DirectState;
 
 namespace silkworm::protocol {
 
@@ -26,34 +28,23 @@ class Blockchain {
      * In the beginning the state must have the genesis allocation.
      * Later on the state may only be modified by the created instance of Blockchain.
      */
-    explicit Blockchain(State& state, const ChainConfig& config, const Block& genesis_block);
+    Blockchain(DirectState& direct, const ChainConfig& config, const Block& genesis_block);
 
     // Not copyable nor movable
     Blockchain(const Blockchain&) = delete;
     Blockchain& operator=(const Blockchain&) = delete;
 
     ValidationResult insert_block(Block& block, bool check_state_root);
+    inline const ChainConfig& config() { return config_;}
 
   private:
     ValidationResult execute_block(const Block& block, bool check_state_root);
 
     void prime_state_with_genesis(const Block& genesis_block);
 
-    void re_execute_canonical_chain(uint64_t ancestor, uint64_t tip);
-
-    void unwind_last_changes(uint64_t ancestor, uint64_t tip);
-
-    std::vector<BlockWithHash> intermediate_chain(
-        uint64_t block_num,
-        evmc::bytes32 hash,
-        uint64_t canonical_ancestor) const;
-
-    uint64_t canonical_ancestor(const BlockHeader& header, const evmc::bytes32& hash) const;
-
-    State& state_;
+    DirectState& direct_;
     const ChainConfig& config_;
     RuleSetPtr rule_set_;
-    std::unordered_map<evmc::bytes32, ValidationResult> bad_blocks_;
     std::vector<Receipt> receipts_;
 };
 

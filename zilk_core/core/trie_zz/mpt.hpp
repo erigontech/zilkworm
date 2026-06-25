@@ -8,16 +8,22 @@
 #include <format>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <evmc/evmc.hpp>
+#include <evmone_precompiles/keccak.hpp>
 #include <zilk_core/core/common/bytes.hpp>
+#include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
 
-#include "node_store_i.hpp"
+namespace zilkworm {
+using ::silkworm::kEmptyRoot;
+using ::silkworm::ByteView;
+using ::silkworm::Bytes;
 
-namespace silkworm {
+class DirectState;  // node-store lookups go through DirectState::find_node_rlp
 using bytes32 = evmc::bytes32;
 inline bytes32 keccak_bytes(const ByteView x) noexcept {
     return std::bit_cast<bytes32>(ethash_keccak256(x.data(), x.size()).bytes);
@@ -25,19 +31,22 @@ inline bytes32 keccak_bytes(const ByteView x) noexcept {
 inline bytes32 keccak_bytes32(const bytes32& x) noexcept {
     return std::bit_cast<bytes32>(ethash_keccak256_32(x.bytes));
 }
+}  // namespace zilkworm
+
+namespace silkworm {
+using ::zilkworm::bytes32;
+using ::zilkworm::keccak_bytes;
+using ::zilkworm::keccak_bytes32;
 }  // namespace silkworm
 
-namespace silkworm::mpt {
-
+namespace zilkworm {
 struct nibbles64 {
-    uint8_t len{};                  // Upto what point it holds the path, could be a sub-path
-    std::array<uint8_t, 64> nib{};  // each 0..15   // Maximum path a TrieNode can have is 64 nibbles
+    uint8_t len{};
+    std::array<uint8_t, 64> nib{};  // max trie path is 64 nibbles
 
-    // Operator overloads for direct array access
     uint8_t& operator[](size_t index) { return nib[index]; }
     const uint8_t& operator[](size_t index) const { return nib[index]; }
 
-    // Convert a 32-byte key into 64 hex nibbles (0..15 per entry).
     static nibbles64 from_bytes32(const bytes32& k) {
         nibbles64 out;
         out.len = 64;
@@ -49,7 +58,6 @@ struct nibbles64 {
         return out;
     }
 
-    // Append another nibbles64 object to this one
     void append(const nibbles64& other) {
         [[assume(len + other.len <= 64)]];
         std::memcpy(nib.data() + len, other.nib.data(), other.len);
@@ -61,9 +69,8 @@ struct BranchNode {
     std::array<bytes32, 16> child{};
     std::array<uint8_t, 16> child_len{};
     uint16_t mask{};
-    ByteView value{};  // RLP "value" payload view (empty if none)
+    ByteView value{};
 
-    // Bit operations on mask
     inline uint8_t child_count() const noexcept {
         return static_cast<uint8_t>(std::popcount(mask));
     }
@@ -78,7 +85,6 @@ struct BranchNode {
 
     BranchNode() : child_len{}, mask{}, value{} {}
 
-    // sets the branch's child at the slot with b.size() <= 32
     inline void set_child(unsigned slot, ByteView b) noexcept {
         [[assume(slot < 16)]];
         mask |= 1 << slot;
@@ -134,11 +140,23 @@ enum Kind : uint8_t {
     kLeaf = 2
 };
 
+// Result of an unfold attempt against a branch slot. Distinguishes a legitimate
+// empty slot (insert-here is correct) from a 32-byte hash ref whose RLP is
+// missing from the node store (witness incomplete — must hard-fail rather than
+// silently insert a phantom leaf).
+enum class UnfoldResult : uint8_t {
+    kSuccess,
+    kEmpty,
+    kMissing,
+    kUndefined
+};
+
 struct GridLine {
     uint8_t kind;          // Kind
     uint8_t parent_slot;   // parent child index (0..15) or 16 = branch value
     uint8_t parent_depth;  // Depth in the stack the current line's parent is at
     uint8_t consumed;      // path nibbles consumed till this node (cumulative)
+    bool modified;
     std::array<uint8_t, 16> child_depth{};
 
     union {
@@ -147,17 +165,33 @@ struct GridLine {
         LeafNode leaf;
     };
 
-    GridLine() : kind(kBranch), parent_slot(0), parent_depth(0), consumed(0), branch{} {}
-    GridLine(unsigned k, unsigned pslot, unsigned pdepth, unsigned c) : kind{static_cast<uint8_t>(k)}, parent_slot{static_cast<uint8_t>(pslot)}, parent_depth{static_cast<uint8_t>(pdepth)}, consumed{static_cast<uint8_t>(c)}, child_depth{} {}
+    GridLine() : kind(kBranch), parent_slot(0), parent_depth(0), consumed(0), modified(false), branch{} {}
+    GridLine(unsigned k, unsigned pslot, unsigned pdepth, unsigned c) : kind{static_cast<uint8_t>(k)}, parent_slot{static_cast<uint8_t>(pslot)}, parent_depth{static_cast<uint8_t>(pdepth)}, consumed{static_cast<uint8_t>(c)}, modified{false}, child_depth{} {}
 };
 
 struct TrieNodeFlat {
     bytes32 key;
-    Bytes value_rlp;
+    // self_initial_len > 0 means initial RLP lives in buf[0..]; else use ext_initial.
+    ByteView ext_initial{};
+    uint8_t self_initial_len{0};
+    uint8_t current_off{0};
+    uint8_t current_len{0};
 
-    // Lexicographic comparison for sorting
+    TrieNodeFlat() = default;
+    // buf[] left uninit; callers must write before reading.
+    [[gnu::always_inline]] explicit TrieNodeFlat(const bytes32& k) noexcept : key{k} {}
+    // Sized to match silkworm::kAccRlpBufSize; smaller variants violate the bound.
+    uint8_t buf[112];
+
+    ByteView initial_value() const noexcept {
+        return self_initial_len > 0 ? ByteView{buf, self_initial_len} : ext_initial;
+    }
+    ByteView current_value() const noexcept {
+        return {buf + current_off, current_len};
+    }
+
     bool operator<(const TrieNodeFlat& other) const {
-        return key < other.key;
+        return std::memcmp(key.bytes, other.key.bytes, 32) < 0;
     }
 };
 
@@ -181,27 +215,50 @@ class GridMPT {
 
     bool last_was_delete_{false};
 
-    // A store containing the set of keys to be inserted
-    NodeStore& node_store_;
+    // Node-store lookups go through DirectState::find_node_rlp, which owns
+    // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload
+    // slice directly, and lets us drop the bundle blob span from GridMPT.
+    const DirectState* state_{nullptr};
     std::vector<bytes32> embedded_rlp_copies_;  // To store owned copies of embedded node RLPs to survive next loop
+
+    // Diagnostic — incremented every time unfold_slot or the ext-child path
+    // hits a 32-byte hash ref absent from the node store (witness incomplete).
+    unsigned missing_count_{0};
 
     LeafNode make_cur_leaf(ByteView value_rlp);
 
+    // Shared by the constructor and reset(): if previous_root_hash is
+    // non-empty, look it up via DirectState::find_node_rlp and unfold onto
+    // grid_[0]. Defined in grid_mpt.cpp to keep the DirectState include out
+    // of mpt.hpp.
+    void init_from_root(bytes32 previous_root_hash);
+
   public:
-    GridMPT(NodeStore& node_store, bytes32 previous_root_hash)
+    GridMPT(const DirectState& state, bytes32 previous_root_hash)
         : prev_root_{previous_root_hash},
           grid_{},
-          node_store_{node_store} {
+          state_{&state} {
         grid_.reserve(66);  // Reserve max depth to avoid reallocations - 66 is a good compromise for average-bad cases
-        if (previous_root_hash != kEmptyRoot) {
-            // Load root on to first line
-            auto rlp = node_store.get_rlp(previous_root_hash);
-            if (!rlp) [[unlikely]] {
-                sys_println(std::format("{{\"err\":\"no_rlp\",\"hash\":\"{}\"}}", hex(previous_root_hash)));
-                return;
-            }
-            unfold_node_from_rlp(*rlp, 0, 0);
-        }
+        init_from_root(previous_root_hash);
+    }
+
+    // Re-initialise this instance for a new previous-root, reusing the
+    // already-allocated grid_/embedded_rlp_copies_ capacity. Used to hoist a
+    // single GridMPT<true> out of the per-account merge-walk loop in
+    // check_root: ~100-300 modified accounts/block × ~38 KB grid_ buffer adds
+    // up to a lot of malloc+free that this avoids.
+    void reset(bytes32 new_prev_root) {
+        depth_ = 0;
+        search_nib_cursor_ = 0;
+        last_was_delete_ = false;
+        missing_count_ = 0;
+        prev_root_ = new_prev_root;
+        grid_.clear();                  
+        embedded_rlp_copies_.clear();   // keeps capacity
+        // search_nibbles_ is overwritten on each insert by the main algorithm
+        // (calc_root_from_updates seeds it from the first update); no need to
+        // zero it here.
+        init_from_root(new_prev_root);
     }
 
     // Helper methods
@@ -210,11 +267,11 @@ class GridMPT {
     void fold_line(unsigned depth);
     void pop_back();
     unsigned move_line(unsigned from_depth);
-    bool unfold_slot(unsigned slot);
+    UnfoldResult unfold_slot(unsigned slot);
     void seek_with_last_insert(nibbles64& new_nibbles);
 
     // Main algorithm
-    bytes32 calc_root_from_updates(const std::vector<TrieNodeFlat>& updates_sorted);
+    bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
 
     template <typename NodeType>
     bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node);
@@ -229,6 +286,29 @@ class GridMPT {
 
     // Compile-time check for deletion support
     static constexpr bool supports_deletion() noexcept { return DeletionEnabled; }
+
+    unsigned missing_count() const noexcept { return missing_count_; }
 };
 
-}  // namespace silkworm::mpt
+}  // namespace zilkworm
+
+// Backward-compat bridge for silkworm::mpt:: callers (witness_trie.cpp etc.)
+// and unqualified uses inside `namespace silkworm { ... }` consumer TUs.
+namespace silkworm {
+namespace mpt {
+    using ::zilkworm::nibbles64;
+    using ::zilkworm::BranchNode;
+    using ::zilkworm::ExtensionNode;
+    using ::zilkworm::LeafNode;
+    using ::zilkworm::Kind;
+    using ::zilkworm::kBranch;
+    using ::zilkworm::kExt;
+    using ::zilkworm::kLeaf;
+    using ::zilkworm::UnfoldResult;
+    using ::zilkworm::GridLine;
+    using ::zilkworm::TrieNodeFlat;
+    template <bool DeletionEnabled> using GridMPT = ::zilkworm::GridMPT<DeletionEnabled>;
+    using ::zilkworm::is_zero_quick;
+    using ::zilkworm::zero;
+}  // namespace mpt
+}  // namespace silkworm

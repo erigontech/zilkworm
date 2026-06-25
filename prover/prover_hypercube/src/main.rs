@@ -54,12 +54,7 @@ struct Args {
     #[arg(long)]
     execution_log_file: Option<PathBuf>,
 
-    /// If set, write one log file per input fixture under this directory (mirrors --test-dir layout).
-    /// Mutually exclusive with --execution-log-file.
-    #[arg(long, conflicts_with = "execution_log_file")]
-    execution_log_dir: Option<PathBuf>,
-
-    /// Directory of pre-converted batched-RLP EEST fixtures to run in test-service mode.
+    /// Directory of EEST JSON test files to run in test-service mode
     #[arg(long)]
     test_dir: Option<PathBuf>,
 
@@ -114,10 +109,6 @@ enum Command {
         #[arg(long, action = clap::ArgAction::SetTrue)]
         save_all_responses: bool,
 
-        /// Whether to create an ethereum/tests format json file too
-        #[arg(long, action = clap::ArgAction::SetTrue)]
-        build_eth_test: bool,
-
         /// Use geth's debug_executionWitness format instead of reth/alloy format
         #[arg(long, action = clap::ArgAction::SetTrue)]
         geth: bool,
@@ -128,9 +119,12 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Path to the unified RLP input file (overrides --block-number lookup)
+        /// Whether the input file is an Ethereum/tests file
         #[arg(long)]
         file_name: Option<PathBuf>,
+
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        is_test: bool,
 
         /// Data directory
         #[arg(long)]
@@ -138,13 +132,16 @@ enum Command {
     },
     /// Generate a proof for a block
     Prove {
-        /// Block number to prove
+        /// JSON file to load ethereum/tests format test from
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Path to the unified RLP input file (overrides --block-number lookup)
+        /// Whether the input file is an Ethereum/tests file
         #[arg(long)]
         file_name: Option<PathBuf>,
+
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        is_test: bool,
 
         /// Data directory
         #[arg(long)]
@@ -189,7 +186,6 @@ async fn main() -> Result<()> {
             Z6mProverService::run_test_service_eest(
                 test_dir,
                 args.execution_log_file.clone(),
-                args.execution_log_dir.clone(),
                 args.max_file_size,
             )
             .await?;
@@ -255,6 +251,7 @@ async fn main() -> Result<()> {
         } else if let Some(Command::Prove {
             block_number,
             file_name,
+            is_test,
             data_dir,
             pk_path: _,
             proof_path,
@@ -265,6 +262,7 @@ async fn main() -> Result<()> {
                 .prove_block(&ProveOptions {
                     block_number,
                     file_name,
+                    is_test,
                     data_dir: data_dir.unwrap_or_else(|| args.data_dir.clone()),
                     proof_path,
                     proof_type,
@@ -289,7 +287,6 @@ async fn main() -> Result<()> {
             block_number,
             data_dir,
             save_all_responses,
-            build_eth_test,
             geth,
         }) => {
             let rpc = rpc_url
@@ -300,8 +297,8 @@ async fn main() -> Result<()> {
                 rpc_url: &rpc,
                 save_all_responses: save_all_responses || args.save_all_responses,
                 data_dir: data_dir.unwrap_or_else(|| args.data_dir.clone()),
-                build_eth_test,
                 geth,
+                force_rebuild: false,
             })
             .await?;
             println!(
@@ -313,15 +310,21 @@ async fn main() -> Result<()> {
         Some(Command::Execute {
             block_number,
             file_name,
+            is_test,
             data_dir,
         }) => {
             let opts = ExecuteOptions {
                 block_number,
                 file_name,
+                is_test,
                 data_dir: data_dir.unwrap_or_else(|| args.data_dir.clone()),
             };
             let log = Z6mProverService::execute_block_static(opts).await.unwrap();
 
+            if log.gas_used == 0 {
+                // execute_block_static already emitted the FAILED block + error! line.
+                std::process::exit(1);
+            }
             println!(
                 "Executed block {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
                 log.block_number, log.gas_used, log.cycle_count, log.prover_gas, log.syscall_count

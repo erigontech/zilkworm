@@ -10,43 +10,11 @@
 #include <evmone/test/state/system_contracts.hpp>
 #include <zilk_core/core/protocol/intrinsic_gas.hpp>
 #include <zilk_core/core/protocol/param.hpp>
+#include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/trie/vector_root.hpp>
 #include <zilk_core/core/types/eip_7685_requests.hpp>
 
 namespace silkworm {
-class StateView final : public evmone::state::StateView {
-    IntraBlockState& state_;
-
-  public:
-    explicit StateView(IntraBlockState& state) noexcept : state_{state} {}
-
-    std::optional<Account> get_account(const evmc::address& addr) const noexcept override {
-        const auto* obj = state_.get_object(addr);
-        if (obj == nullptr || !obj->current.has_value())
-        return std::nullopt;
-        
-        const auto& cur = *obj->current;
-        bool has_storage = state_.db().storage_size(addr) > 0;
-        return Account{
-            .nonce = cur.nonce,
-            .balance = cur.balance,
-            .code_hash = cur.code_hash,
-
-            // The change to include the storage size 
-            // as an indication of storage presence works with EESTs, but haven't investigated ALL
-            // edge cases (TODO)
-            .has_storage = has_storage
-        };
-    }
-
-    evmone::bytes get_account_code(const evmc::address& addr) const noexcept override {
-        return evmone::bytes{state_.get_code(addr)};
-    }
-
-    evmc::bytes32 get_storage(const evmc::address& addr, const evmc::bytes32& key) const noexcept override {
-        return state_.get_original_storage(addr, key);
-    }
-};
 
 namespace {
     class BlockHashes final : public evmone::state::BlockHashes {
@@ -55,14 +23,14 @@ namespace {
       public:
         explicit BlockHashes(ExecutionProcessor& ep) noexcept : execution_processor_{ep} {}
         evmc::bytes32 get_block_hash(int64_t block_number) const noexcept override {
-            return execution_processor_.get_block_hash(block_number);
+            return execution_processor_.get_block_hash_for_evm(block_number);
         }
     };
 }  // namespace
 
-ExecutionProcessor::ExecutionProcessor(const Block& block, protocol::RuleSet& rule_set, State& state,
-                                       const ChainConfig& config)
-    : state_{state},
+ExecutionProcessor::ExecutionProcessor(const Block& block, protocol::RuleSet& rule_set,
+                                       DirectState& direct, const ChainConfig& config)
+    : direct_{direct},
       rule_set_{rule_set},
       block_{block},
       config_{config},
@@ -83,42 +51,25 @@ ExecutionProcessor::ExecutionProcessor(const Block& block, protocol::RuleSet& ru
     for (const auto& o : block.ommers)
         evm1_block_.ommers.emplace_back(evmone::state::Ommer{o.beneficiary, static_cast<uint32_t>(block.header.number - o.number)});
     if (block.withdrawals) {
+        evm1_block_.withdrawals.reserve(block.withdrawals->size());
         for (const auto& w : *block.withdrawals)
-            evm1_block_.withdrawals.emplace_back(evmone::state::Withdrawal{w.index, w.validator_index, w.address, w.amount});
+            evm1_block_.withdrawals.emplace_back(
+                evmone::state::Withdrawal{w.index, w.validator_index, w.address, w.amount});
     }
 }
+
+ExecutionProcessor::~ExecutionProcessor() = default;
 
 evmc_revision ExecutionProcessor::revision() const noexcept {
     return config_.revision(block_.header.number, block_.header.timestamp);
 }
 
-evmc::bytes32 ExecutionProcessor::get_block_hash(int64_t block_num) noexcept {
-    const uint64_t current_block_num{block_.header.number};
-    const uint64_t new_size_u64{current_block_num - static_cast<uint64_t>(block_num)};
-    const size_t new_size{static_cast<size_t>(new_size_u64)};
-
-    if (block_hashes_.empty()) {
-        block_hashes_.push_back(block_.header.parent_hash);
-    }
-
-    const size_t old_size{block_hashes_.size()};
-    if (old_size < new_size) {
-        block_hashes_.resize(new_size);
-    }
-
-    for (size_t i{old_size}; i < new_size; ++i) {
-        std::optional<BlockHeader> header{state_.db().read_header(current_block_num - i, block_hashes_[i - 1])};
-        if (!header) {
-            break;
-        }
-        block_hashes_[i] = header->parent_hash;
-    }
-
-    return block_hashes_[new_size - 1];
+evmc::bytes32 ExecutionProcessor::get_block_hash_for_evm(int64_t block_num) const noexcept {
+    return direct_.get_block_hash(static_cast<uint64_t>(block_num));
 }
 
 void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& receipt) noexcept {
-    StateView evm1_state_view{state_};
+    DirectStateView evm1_state_view{direct_};
     BlockHashes evm1_block_hashes{*this};
 
     evmone::state::Transaction evm1_txn{
@@ -152,14 +103,8 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     const auto g0 = protocol::intrinsic_gas(txn, rev);
     const auto execution_gas_limit = txn.gas_limit - static_cast<uint64_t>(g0);
 
-    // // Execute transaction with evmone APIv2.
-    // // This must be done before the Silkworm execution so that the state is unmodified.
-    // // evmone will not modify the state itself: state is read-only and the state modifications
-    // // are provided as the state diff in the returned receipt.
-
-    // // EIP-7623: Increase calldata cost
+    // EIP-7623: Increase calldata cost
     const int64_t floor_cost = rev >= EVMC_PRAGUE ? static_cast<int64_t>(protocol::floor_cost(txn)) : 0;
-
     auto evm1_receipt = evmone::state::transition(
         evm1_state_view, evm1_block_, evm1_block_hashes, evm1_txn, rev, vm_,
         {.execution_gas_limit = static_cast<int64_t>(execution_gas_limit), .min_gas_cost = floor_cost});
@@ -180,64 +125,30 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     apply_state_diff(evm1_receipt.state_diff);
 }
 
-void ExecutionProcessor::reset() {
-    state_.clear_journal_and_substate();
-}
-
 uint64_t ExecutionProcessor::available_gas() const noexcept {
     return block_.header.gas_limit - cumulative_gas_used_;
 }
 
 void ExecutionProcessor::apply_state_diff(const evmone::state::StateDiff& diff) {
-    for (const auto& m : diff.modified_accounts) {
-        // Ensure the object exists with a current account, bypassing the journal.
-        auto* obj = state_.get_object(m.addr);
-        if (obj == nullptr) {
-            obj = &state_.objects_[m.addr];
-            obj->current = Account{};
-        } else if (!obj->current) {
-            obj->current = Account{};
-        }
-
-        if (m.code) {
-            const bool is_delegated = eip7702::is_code_delegated(*m.code);
-            // Wipe storage for contract creation (non-journaled).
-            if (!is_delegated && !state_.delegated_designations_.contains(m.addr)) {
-                state_.storage_.erase(m.addr);
-            }
-            obj->current->code_hash = std::bit_cast<evmc_bytes32>(keccak256(*m.code));
-            if (is_delegated) {
-                state_.delegated_designations_.insert(m.addr);
-            }
-            state_.new_code_.try_emplace(obj->current->code_hash, m.code->begin(), m.code->end());
-        }
-
-        obj->current->nonce = m.nonce;
-        obj->current->balance = m.balance;
-        auto& storage = state_.storage_[m.addr];
-        for (const auto& [k, v] : m.modified_storage) {
-            storage.committed[k].original = v;
-        }
-    }
-    for (const auto& a : diff.deleted_accounts) {
-        state_.destruct(a);
-    }
+    direct_.apply_state_diff(diff);
 }
 
-ValidationResult ExecutionProcessor::execute_block_no_post_validation(std::vector<Receipt>& receipts) noexcept {
+ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipts) noexcept {
     const evmc_revision rev{revision()};
-    rule_set_.initialize(state_, block_);
+    rule_set_.initialize(block_, direct_);
 
     // Block-start system calls (EIP-4788 beacon roots, EIP-2935 history storage)
     {
-        StateView state_view{state_};
+        DirectStateView state_view{direct_};
         BlockHashes block_hashes{*this};
         auto diff = evmone::state::system_call_block_start(
             state_view, evm1_block_, block_hashes, rev, vm_);
         apply_state_diff(diff);
     }
 
-    state_.finalize_transaction(rev);
+    if (rev >= EVMC_SPURIOUS_DRAGON) {
+        direct_.destruct_dead_among(direct_.touched());
+    }
 
     cumulative_gas_used_ = 0;
 
@@ -245,7 +156,7 @@ ValidationResult ExecutionProcessor::execute_block_no_post_validation(std::vecto
     auto receipt_it{receipts.begin()};
 
     for (const auto& txn : block_.transactions) {
-        const ValidationResult err{protocol::validate_transaction(txn, state_, available_gas())};
+        const ValidationResult err{protocol::validate_transaction(txn, direct_, available_gas())};
         if (err != ValidationResult::kOk) {
             return err;
         }
@@ -258,7 +169,7 @@ ValidationResult ExecutionProcessor::execute_block_no_post_validation(std::vecto
     for (const auto& receipt : receipts) {
         std::ranges::copy(receipt.logs, std::back_inserter(logs));
     }
-    state_.clear_journal_and_substate();
+    direct_.clear_touched();
 
     // Block-end system calls (EIP-7002 withdrawals, EIP-7251 consolidations) + requests hash validation
     if (rev >= EVMC_PRAGUE && block_.header.requests_hash) {
@@ -267,8 +178,8 @@ ValidationResult ExecutionProcessor::execute_block_no_post_validation(std::vecto
         if (!flat_requests.extract_deposits_from_logs(logs))
             return ValidationResult::kRequestsProcessingFailure;
 
-        StateView state_view{state_};
-        BlockHashes block_hashes{*this};    // Blockhash is handled by this ExecutionProcessor class
+        DirectStateView state_view{direct_};
+        BlockHashes block_hashes{*this};
         auto requests_result = evmone::state::system_call_block_end(
             state_view, evm1_block_, block_hashes, rev, vm_);
         if (!requests_result.has_value())
@@ -288,15 +199,13 @@ ValidationResult ExecutionProcessor::execute_block_no_post_validation(std::vecto
             return ValidationResult::kRequestsRootMismatch;
     }
 
-    const auto finalization_result = rule_set_.finalize(state_, block_, logs);
-    state_.finalize_transaction(rev);
+    const auto finalization_result = rule_set_.finalize(direct_, block_, logs);
+    if (rev >= EVMC_SPURIOUS_DRAGON) {
+        direct_.destruct_dead_among(direct_.touched());
+    }
 
-    return finalization_result;
-}
-
-ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipts) noexcept {
-    if (const ValidationResult res{execute_block_no_post_validation(receipts)}; res != ValidationResult::kOk) {
-        return res;
+    if (finalization_result != ValidationResult::kOk) {
+        return finalization_result;
     }
 
     const auto& header{block_.header};
@@ -305,7 +214,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         return ValidationResult::kWrongBlockGas;
     }
 
-    if (revision() >= EVMC_BYZANTIUM) {
+    if (rev >= EVMC_BYZANTIUM) {
         // Prior to Byzantium (EIP-658), receipts contained the root of the state after each individual transaction.
         // We don't calculate such intermediate state roots and thus can't verify the receipt root before Byzantium.
         static constexpr auto kEncoder = [](Bytes& to, const Receipt& r) { rlp::encode(to, r); };
@@ -324,10 +233,6 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
     }
 
     return ValidationResult::kOk;
-}
-
-void ExecutionProcessor::flush_state() {
-    state_.write_to_db(block_.header.number);
 }
 
 }  // namespace silkworm

@@ -7,24 +7,27 @@
 #include <zilk_core/core/common/assert.hpp>
 #include <zilk_core/core/execution/processor.hpp>
 
-#include "zilk_core/core/state/in_memory_state.hpp"
-
 namespace silkworm::protocol {
 
-Blockchain::Blockchain(State& state, const ChainConfig& config, const Block& genesis_block)
-    : state_{state}, config_{config}, rule_set_{rule_set_factory(config)} {
+Blockchain::Blockchain(DirectState& direct, const ChainConfig& config, const Block& genesis_block)
+    : direct_{direct}, config_{config}, rule_set_{rule_set_factory(config)} {
     prime_state_with_genesis(genesis_block);
 }
 
 ValidationResult Blockchain::insert_block(Block& block, bool check_state_root) {
-    ValidationResult err{rule_set_->validate_block_header(block.header, state_, /*with_future_timestamp_check=*/false)};
+    ValidationResult err{rule_set_->validate_block_header(block.header, direct_, /*with_future_timestamp_check=*/false)};
     if (err != ValidationResult::kOk) {
         return err;
     }
-    err = rule_set_->pre_validate_block_body(block, state_);
+    err = rule_set_->pre_validate_block_body(block, direct_);
     if (err != ValidationResult::kOk) {
         return err;
     }
+    // Single-block witness flow: no fork resolution / canonical-chain
+    // bookkeeping. Just execute the block.
+    return execute_block(block, check_state_root);
+
+    /* --------------------------
 
     evmc::bytes32 hash{block.header.hash()};
     if (auto it{bad_blocks_.find(hash)}; it != bad_blocks_.end()) {
@@ -76,21 +79,21 @@ ValidationResult Blockchain::insert_block(Block& block, bool check_state_root) {
     }
 
     return ValidationResult::kOk;
+
+     ---------------------------- */
 }
 
 ValidationResult Blockchain::execute_block(const Block& block, bool check_state_root) {
-    ExecutionProcessor processor{block, *rule_set_, state_, config_};
+    ExecutionProcessor processor{block, *rule_set_, direct_, config_};
 
     if (const ValidationResult res = processor.execute_block(receipts_); res != ValidationResult::kOk) {
         return res;
     }
 
-    processor.flush_state();
-
     if (check_state_root) {
-        evmc::bytes32 state_root{state_.state_root_hash()};
-        if (state_root != block.header.state_root) {
-            state_.unwind_state_changes(block.header.number);
+        // DirectState-backed Yellow-Paper state root.
+        const auto state_root = direct_.state_root_hash();
+        if (!state_root || *state_root != block.header.state_root) {
             return ValidationResult::kWrongStateRoot;
         }
     }
@@ -99,75 +102,7 @@ ValidationResult Blockchain::execute_block(const Block& block, bool check_state_
 }
 
 void Blockchain::prime_state_with_genesis(const Block& genesis_block) {
-    evmc::bytes32 hash{genesis_block.header.hash()};
-    state_.insert_block(genesis_block, hash);
-    state_.canonize_block(genesis_block.header.number, hash);
-}
-
-void Blockchain::re_execute_canonical_chain(uint64_t ancestor, uint64_t tip) {
-    // SILKWORM_ASSERT(ancestor <= tip);
-    for (uint64_t block_num = ancestor + 1; block_num <= tip; ++block_num) {
-        std::optional<evmc::bytes32> hash{state_.canonical_hash(block_num)};
-        // SILKWORM_ASSERT(hash != std::nullopt);
-        BlockBody body;
-        // SILKWORM_ASSERT(state_.read_body(block_num, *hash, body));
-        std::optional<BlockHeader> header{state_.read_header(block_num, *hash)};
-        // SILKWORM_ASSERT(header != std::nullopt);
-
-        Block block;
-        block.header = header.value();
-        block.transactions = std::move(body.transactions);
-        block.ommers = std::move(body.ommers);
-
-        [[maybe_unused]] ValidationResult err{execute_block(block, /*check_state_root=*/false)};
-        // SILKWORM_ASSERT(err == ValidationResult::kOk);
-    }
-}
-
-void Blockchain::unwind_last_changes(uint64_t ancestor, uint64_t tip) {
-    // SILKWORM_ASSERT(ancestor <= tip);
-    for (uint64_t block_num{tip}; block_num > ancestor; --block_num) {
-        state_.unwind_state_changes(block_num);
-    }
-}
-
-std::vector<BlockWithHash> Blockchain::intermediate_chain(
-    uint64_t block_num,
-    evmc::bytes32 hash,
-    uint64_t canonical_ancestor) const {
-    // SILKWORM_ASSERT(block_num >= canonical_ancestor);
-    std::vector<BlockWithHash> chain(static_cast<size_t>(block_num - canonical_ancestor));
-
-    for (; block_num > canonical_ancestor; --block_num) {
-        BlockWithHash& x{chain[static_cast<size_t>(block_num - canonical_ancestor - 1)]};
-
-        BlockBody body;
-        // SILKWORM_ASSERT(state_.read_body(block_num, hash, body));
-        std::optional<BlockHeader> header{state_.read_header(block_num, hash)};
-        // SILKWORM_ASSERT(header != std::nullopt);
-
-        x.block.header = *header;
-        x.block.transactions = std::move(body.transactions);
-        x.block.ommers = std::move(body.ommers);
-        x.hash = hash;
-
-        hash = header->parent_hash;
-    }
-
-    return chain;
-}
-
-uint64_t Blockchain::canonical_ancestor(const BlockHeader& header, const evmc::bytes32& hash) const {
-    if (state_.canonical_hash(header.number) == hash) {
-        return header.number;
-    }
-    std::optional<BlockHeader> parent{state_.read_header(header.number - 1, header.parent_hash)};
-
-    // Blockchain::insert_block fails for blocks whose parent is not in the state,
-    // so all ancestors should be in the state.
-    // SILKWORM_ASSERT(parent != std::nullopt);
-
-    return canonical_ancestor(*parent, header.parent_hash);
+    direct_.insert_header(genesis_block.header);
 }
 
 }  // namespace silkworm::protocol

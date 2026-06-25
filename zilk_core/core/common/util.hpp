@@ -34,7 +34,12 @@ namespace silkworm {
 //! \brief Strips leftmost zeroed bytes from byte sequence
 //! \param [in] data : The view to process
 //! \return A new view of the sequence
-ByteView zeroless_view(ByteView data);
+[[gnu::always_inline]] inline ByteView zeroless_view(ByteView data) noexcept {
+    const uint8_t* p = data.data();
+    const uint8_t* const end = p + data.size();
+    while (p != end && *p == 0) ++p;
+    return ByteView{p, static_cast<size_t>(end - p)};
+}
 
 inline bool has_hex_prefix(std::string_view s) {
     return s.length() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X');

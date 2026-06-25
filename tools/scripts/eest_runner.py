@@ -11,9 +11,9 @@ launches z6m_prover --test-service --test-dir for each shard in parallel
 (staggered by a configurable delay), and aggregates results.
 
 If --fixtures is omitted, defaults (in order):
-  $EEST_RLP_DIR (CI sets this from the actions/cache step), or
-  third_party/eest-fixtures-rlp/dev-<eest_sha>/ (local build via `make
-  eest-rlp-build`).
+  $EEST_MFBD_DIR (CI sets this from the actions/cache step), or
+  third_party/eest-fixtures-mfbd/dev-<eest_sha>/ (local build via `make
+  eest-mfbd-build`).
 
 Usage:
     python3 eest_runner.py
@@ -69,9 +69,9 @@ def get_available_memory_gb() -> float:
 
 
 _FORMAT_EXTS = {
-    "rlp":  (".rlp",),
+    "mfbd": (".mfbd",),
     "json": (".json",),
-    "auto": (".rlp", ".json"),
+    "auto": (".mfbd", ".json"),
 }
 
 
@@ -82,7 +82,7 @@ def discover_shards(fixtures_dir: str, fmt: str) -> List[str]:
     - blockchain_tests/static/state_tests/{subdir} -> one shard each
 
     A directory qualifies as a shard if it contains at least one file with
-    an extension allowed by `fmt` ("rlp", "json", or "auto" for either).
+    an extension allowed by `fmt` ("mfbd", "json", or "auto" for either).
     """
     bt = os.path.join(fixtures_dir, "blockchain_tests")
     shards = []
@@ -314,16 +314,16 @@ def print_report(results: List[ShardResult]) -> Tuple[int, int, int]:
 def default_fixtures_dir(fmt: str) -> Optional[str]:
     """Resolve the default fixtures path for `fmt`.
 
-    rlp / auto → `$EEST_RLP_DIR` if set (CI sets this via the cache step), or
-                 `<repo>/third_party/eest-fixtures-rlp/dev-<eest_short_sha>/`
-                 (the local default produced by `make eest-rlp-build`).
-    json       → `<repo>/third_party/eest-fixtures` (JSON submodule).
+    mfbd / auto → `$EEST_MFBD_DIR` if set (CI sets this via the cache step), or
+                  `<repo>/third_party/eest-fixtures-mfbd/dev-<eest_short_sha>/`
+                  (the local default produced by `make eest-mfbd-build`).
+    json        → `<repo>/third_party/eest-fixtures` (JSON submodule).
     """
     here = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(here, "..", ".."))
     if fmt == "json":
         return os.path.join(repo_root, "third_party", "eest-fixtures")
-    env = os.environ.get("EEST_RLP_DIR")
+    env = os.environ.get("EEST_MFBD_DIR")
     if env:
         return env
     try:
@@ -335,7 +335,7 @@ def default_fixtures_dir(fmt: str) -> Optional[str]:
         if r.returncode == 0:
             sha = r.stdout.strip()
             return os.path.join(repo_root, "third_party",
-                                "eest-fixtures-rlp", f"dev-{sha}")
+                                "eest-fixtures-mfbd", f"dev-{sha}")
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
     return None
@@ -345,8 +345,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="EEST Test Runner for z6m")
     parser.add_argument("--fixtures", default=None,
                         help="Path to fixtures dir (default depends on --format)")
-    parser.add_argument("--format", choices=("auto", "rlp", "json"), default="auto",
-                        help="Fixture format to walk; 'auto' accepts both .rlp and .json (default: auto)")
+    parser.add_argument("--format", choices=("auto", "mfbd", "json"), default="auto",
+                        help="Fixture format to walk; 'auto' accepts both .mfbd and .json (default: auto)")
     parser.add_argument("--stagger", type=int, default=60,
                         help="Seconds between shard launches (default: 60)")
     parser.add_argument("--max-parallel", type=int, default=0,
@@ -368,7 +368,7 @@ def main() -> int:
         return 1
     fixtures = os.path.abspath(fixtures_arg)
     if not os.path.isdir(fixtures):
-        hint = ("Run `make eest-rlp-build` first." if args.format != "json"
+        hint = ("Run `make eest-mfbd-build` first." if args.format != "json"
                 else "Run `git submodule update --init third_party/eest-fixtures` first.")
         print(f"ERROR: fixtures dir not found: {fixtures}\n  {hint}",
               file=sys.stderr)

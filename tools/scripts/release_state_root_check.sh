@@ -3,10 +3,8 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Builds state_transition in Release mode and runs it against all witness blocks
-# that have a .bin file, counting state root mismatches.
-
-set -euo pipefail
+# Builds state_transition and flat_bundle_builder in Release mode and runs
+# state_transition against every flat-bundle block in the given directory
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -106,7 +104,7 @@ echo "" | tee -a "$SUMMARY_LOG"
 BLOCK_LIST=()
 mapfile -t ALL_BLOCKS < <(ls "$BLOCKS_DIR" | sort -n)
 for block_num in "${ALL_BLOCKS[@]}"; do
-    bin_file="$BLOCKS_DIR/$block_num/unifiedBlockAndStateRlp${block_num}.bin"
+    bin_file="$BLOCKS_DIR/$block_num/flatWitnessBundle${block_num}.mfbd"
     [[ ! -f "$bin_file" ]] && continue
     if [[ -n "${START:-}" && "$block_num" -lt "$START" ]]; then continue; fi
     if [[ -n "${END:-}"   && "$block_num" -gt "$END"   ]]; then continue; fi
@@ -135,6 +133,8 @@ run_block() {
         echo "TIMEOUT: $bin_file" >&2
     elif echo "$output" | grep -q "ERROR: State Root Mismatch"; then
         echo "$bin_file"
+    elif [[ $rc -ne 0 ]]; then
+        echo "$bin_file (rc=$rc)"
     fi
 }
 

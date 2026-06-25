@@ -22,7 +22,7 @@ endif
 ELF := $(BUILD_DIR)/z6m_debug
 
 EEST_SHA := $(shell git -C $(CURDIR)/../third_party/eest-fixtures rev-parse --short=12 HEAD 2>/dev/null)
-EEST_RLP_DIR ?= $(CURDIR)/../third_party/eest-fixtures-rlp/dev-$(EEST_SHA)
+EEST_MFBD_DIR ?= $(CURDIR)/../third_party/eest-fixtures-mfbd/dev-$(EEST_SHA)
 
 CMAKE_FLAGS := \
 	-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
@@ -35,21 +35,21 @@ CMAKE_FLAGS := \
 
 .PHONY: xpack-elf xpack-elf-eest xpack-elf-eest-json \
 	eest-blockchain-tests eest-blockchain-tests-json \
-	eest-rlp-build rerun-ctest rerun-ctest-json \
+	eest-mfbd-build rerun-ctest rerun-ctest-json \
 	gdb rlp-qemu qemu-eest-stdio qemu-eest-fileio \
 	eest-rv32 eest-rv64 clean clean-all clean-temp
 
-eest-rlp-build:
-	$(MAKE) -C $(CURDIR)/.. eest-rlp-build EEST_RLP_DIR=$(EEST_RLP_DIR)
+eest-mfbd-build:
+	$(MAKE) -C $(CURDIR)/.. eest-mfbd-build EEST_MFBD_DIR=$(EEST_MFBD_DIR)
 
 xpack-elf:
 	cmake -B$(BUILD_DIR) -S. $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=Debug
 	cmake --build $(BUILD_DIR) -j$$(nproc) --verbose
 
-xpack-elf-eest: eest-rlp-build
+xpack-elf-eest: eest-mfbd-build
 	cmake -B$(BUILD_DIR) -S. $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_TESTING=ON \
-		-DEEST_RLP_DIR=$(EEST_RLP_DIR)
+		-DEEST_MFBD_DIR=$(EEST_MFBD_DIR)
 	cmake --build $(BUILD_DIR) -j$$(nproc) --verbose
 
 eest-blockchain-tests: xpack-elf-eest

@@ -155,7 +155,11 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
         const ByteView short_node_key{current.substr(from)};
         if (!build_extensions) {
             if (const Bytes* leaf_value{std::get_if<Bytes>(&value_)}) {
-                stack_.push_back(node_ref(leaf_node_rlp(short_node_key, *leaf_value)));
+                const ByteView leaf_rlp{leaf_node_rlp(short_node_key, *leaf_value)};
+                if (rlp_collector && leaf_rlp.size() >= kHashLength) [[unlikely]] {
+                    rlp_collector(leaf_rlp);
+                }
+                stack_.push_back(node_ref(leaf_rlp));
             } else {
                 stack_.push_back(wrap_hash(std::get<evmc::bytes32>(value_).bytes));
                 if (node_collector) {
@@ -184,7 +188,11 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
                 }
             }
 
-            stack_.back() = node_ref(extension_node_rlp(short_node_key, stack_.back()));
+            const ByteView ext_rlp{extension_node_rlp(short_node_key, stack_.back())};
+            if (rlp_collector && ext_rlp.size() >= kHashLength) [[unlikely]] {
+                rlp_collector(ext_rlp);
+            }
+            stack_.back() = node_ref(ext_rlp);
 
             hash_masks_.resize(from);
             tree_masks_.resize(from);
@@ -279,6 +287,9 @@ std::vector<Bytes> HashBuilder::branch_ref(uint16_t state_mask, uint16_t hash_ma
     rlp_buffer_.push_back(rlp::kEmptyStringCode);
 
     stack_.resize(first_child_idx + 1);
+    if (rlp_collector && rlp_buffer_.size() >= kHashLength) [[unlikely]] {
+        rlp_collector(rlp_buffer_);
+    }
     stack_.back() = node_ref(rlp_buffer_);
 
     return child_hashes;

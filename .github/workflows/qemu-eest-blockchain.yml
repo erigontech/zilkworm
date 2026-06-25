@@ -55,24 +55,24 @@ jobs:
         with:
           sparse-eest-fixtures: "skip"
 
-      - name: Prepare EEST RLP fixtures
-        id: eest-rlp
-        uses: ./.github/actions/prepare-eest-rlp
+      - name: Prepare EEST MFBD fixtures
+        id: eest-mfbd
+        uses: ./.github/actions/prepare-eest-mfbd
 
       - name: Build for RV32IM
         run: |
           cd qemu_runner && make xpack-elf-eest \
-              EEST_RLP_DIR=${{ github.workspace }}/${{ steps.eest-rlp.outputs.dir }}
+              EEST_MFBD_DIR=${{ github.workspace }}/${{ steps.eest-mfbd.outputs.dir }}
 
       - name: Run EESTs on qemu-riscv32
         id: run_tests
         shell: bash
         env:
-          EEST_RLP_DIR: ${{ github.workspace }}/${{ steps.eest-rlp.outputs.dir }}
+          EEST_MFBD_DIR: ${{ github.workspace }}/${{ steps.eest-mfbd.outputs.dir }}
         run: |
           set +e
           cd qemu_runner
-          make rerun-ctest EEST_RLP_DIR=$EEST_RLP_DIR 2>&1 | tee output.log
+          make rerun-ctest EEST_MFBD_DIR=$EEST_MFBD_DIR 2>&1 | tee output.log
 
           exit_code=${PIPESTATUS[0]}
 

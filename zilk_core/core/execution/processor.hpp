@@ -10,12 +10,16 @@
 #include <evmc/evmc.hpp>
 #include <evmone/test/state/block.hpp>
 #include <evmone/test/state/state_diff.hpp>
+#include <zilk_core/core/chain/config.hpp>
 #include <zilk_core/core/protocol/rule_set.hpp>
-#include <zilk_core/core/state/intra_block_state.hpp>
-#include <zilk_core/core/state/state.hpp>
+#include <zilk_core/core/protocol/validation.hpp>
+#include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/types/block.hpp>
 #include <zilk_core/core/types/receipt.hpp>
 #include <zilk_core/core/types/transaction.hpp>
+
+using ::zilkworm::DirectState;
+using ::zilkworm::DirectStateView;
 
 namespace silkworm {
 
@@ -24,7 +28,10 @@ class ExecutionProcessor {
     ExecutionProcessor(const ExecutionProcessor&) = delete;
     ExecutionProcessor& operator=(const ExecutionProcessor&) = delete;
 
-    ExecutionProcessor(const Block& block, protocol::RuleSet& rule_set, State& state, const ChainConfig& config);
+    ExecutionProcessor(const Block& block, protocol::RuleSet& rule_set,
+                       DirectState& direct, const ChainConfig& config);
+
+    ~ExecutionProcessor();
 
     /**
      * Execute a transaction, but do not write to the DB yet.
@@ -37,35 +44,29 @@ class ExecutionProcessor {
     //! \pre RuleSet's validate_block_header & pre_validate_block_body must return kOk.
     ValidationResult execute_block(std::vector<Receipt>& receipts) noexcept;
 
-    //! \brief Flush IntraBlockState into cumulative State.
-    void flush_state();
-
     uint64_t available_gas() const noexcept;
 
-    IntraBlockState& intra_block_state() { return state_; }
-    const IntraBlockState& intra_block_state() const { return state_; }
-
-    evmc_revision revision() const noexcept;
-
-    evmc::bytes32 get_block_hash(int64_t block_num) noexcept;
-
-    void reset();
+  public:
+    //! Look up an ancestor block hash via the witness-side header store.
+    //! Public so the file-local BlockHashes adapter (evmone callback) can forward.
+    evmc::bytes32 get_block_hash_for_evm(int64_t block_num) const noexcept;
 
   private:
+    //! Evaluate the chain's revision at the current block's number/timestamp.
+    evmc_revision revision() const noexcept;
+
+    /// Apply an evmone StateDiff to DirectState.
+    void apply_state_diff(const evmone::state::StateDiff& diff);
     ValidationResult execute_block_no_post_validation(std::vector<Receipt>& receipts) noexcept;
 
-    /// Apply an evmone StateDiff to state_.
-    void apply_state_diff(const evmone::state::StateDiff& diff);
-
     uint64_t cumulative_gas_used_{0};
-    IntraBlockState state_;
+    DirectState& direct_;
     protocol::RuleSet& rule_set_;
     const Block& block_;
     const ChainConfig& config_;
     evmc::address beneficiary_;
     evmc::VM vm_;
     evmone::state::BlockInfo evm1_block_;
-    std::vector<evmc::bytes32> block_hashes_{};
 };
 
 }  // namespace silkworm

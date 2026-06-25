@@ -18,18 +18,14 @@ sp1_zkvm::entrypoint!(main);
 mod ffi {
     unsafe extern "C++" {
         include!("wrapper.hpp");
-        fn sample_run_wrapped(is_test: bool, input_str: Vec<u8>) -> u64;
+        fn sample_run_wrapped(envelope: Vec<u8>) -> u64;
     }
 }
 
 pub fn main() {
-    let is_test: bool = sp1_zkvm::io::read();
-    let input_str = sp1_zkvm::io::read_vec();
-    let result: u64;
-    if is_test {
-        result = ffi::sample_run_wrapped(is_test, input_str);
-    } else {
-        result = ffi::sample_run_wrapped(is_test, input_str);
-    }
+    // Single read: SP1Stdin carries one envelope Vec<u8> (MFBD- or
+    // EJSN-prefixed). StateTransition::run() dispatches on the leading magic.
+    let envelope = sp1_zkvm::io::read_vec();
+    let result = ffi::sample_run_wrapped(envelope);
     sp1_zkvm::io::commit(&result);
 }

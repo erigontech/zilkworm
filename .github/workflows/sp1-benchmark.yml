@@ -65,13 +65,18 @@ jobs:
             ln -s /cargo-cache/target prover/target
           fi
 
+      - name: Drop stale build-script artifacts
+        # Stale .fingerprint marks build scripts fresh but their OUT_DIR is evicted; force re-run.
+        run: rm -rf prover/target/release/build prover/target/release/.fingerprint
+
       - name: Build z6m_prover
         run: make z6m_prover
 
-      - name: Download benchmark blocks
+      - name: Download raw benchmark blocks
         run: |
+          # Cache RAW blocks, not a pinned .mfbd corpus (goes stale on version bumps).
           if [ -d /benchmark-blocks/200_benchmark_blocks ] && [ "$(ls -d /benchmark-blocks/200_benchmark_blocks/*/ 2>/dev/null | wc -l)" -gt 0 ]; then
-            echo "Using cached blocks from local volume"
+            echo "Using cached raw blocks from local volume"
           else
             mkdir -p /benchmark-blocks
             curl -L -o /tmp/200_benchmark_blocks.tar.gz \
@@ -80,15 +85,23 @@ jobs:
             rm -f /tmp/200_benchmark_blocks.tar.gz
           fi
           ls /benchmark-blocks/200_benchmark_blocks/ | head -5
-          echo "Total blocks: $(ls -d /benchmark-blocks/200_benchmark_blocks/*/ | wc -l)"
+          echo "Total raw blocks: $(ls -d /benchmark-blocks/200_benchmark_blocks/*/ | wc -l)"
 
-      - name: Run sp1-benchmkar.py on all blocks
+      - name: Regenerate benchmark corpus with current converter
+        run: |
+          # Regenerate corpus with the just-built converter (matches current wire format).
+          make sp1-benchmark-corpus \
+            BENCH_SRC_DIR=/benchmark-blocks/200_benchmark_blocks \
+            BENCH_CORPUS_DIR=/benchmark-blocks/200_benchmark_blocks_corpus
+          echo "Corpus blocks: $(ls -d /benchmark-blocks/200_benchmark_blocks_corpus/*/ | wc -l)"
+
+      - name: Run sp1_benchmark.py on all blocks
         id: benchmark
         shell: bash
         env:
           PYTHONUNBUFFERED: "1"
         run: |
-          python3 tools/scripts/sp1_benchmark.py --dir /benchmark-blocks/200_benchmark_blocks
+          python3 tools/scripts/sp1_benchmark.py --dir /benchmark-blocks/200_benchmark_blocks_corpus
       - name: Check results
         run: |
           failed=${{ steps.benchmark.outputs.failed }}

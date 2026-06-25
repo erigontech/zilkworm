@@ -1,4 +1,4 @@
-// Copyright The Zilkworm Authors
+// Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 #ifdef SP1
