@@ -7,7 +7,7 @@
 #include <optional>
 
 #include <evmc/evmc.h>
-#include <zilk_core/core/state/intra_block_state.hpp>
+#include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/types/block.hpp>
 #include <zilk_core/core/types/transaction.hpp>
 
@@ -132,7 +132,7 @@ namespace protocol {
     //!
     //! Precondition:
     //! pre_validate_transaction(txn) must return kOk
-    ValidationResult validate_transaction(const Transaction& txn, const IntraBlockState& state,
+    ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::DirectState& state,
                                           uint64_t available_gas) noexcept;
 
     ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision revision, uint64_t chain_id) noexcept;

@@ -39,9 +39,10 @@ cmake-build-*
 **conan2/
 **build/
 **deps/
-# Cache populated by `make eest-rlp-build` (or CI's actions/cache step).
-third_party/eest-fixtures-rlp/
+# Cache populated by `make eest-mfbd-build` (or CI's actions/cache step).
+third_party/eest-fixtures-*
 third_party/*/*/build/
 third_party/*/*/deps/
 .editorconfig
 .claude/worktrees
+.claude/INTENTIONS.md

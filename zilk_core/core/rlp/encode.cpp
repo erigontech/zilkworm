@@ -36,6 +36,27 @@ void encode(Bytes& to, ByteView s) {
     to.append(s);
 }
 
+// Encode RLP of s into dst - a given pointer to a buffer
+size_t encode_into(uint8_t* dst, ByteView s) noexcept {
+    uint8_t* p = dst;
+    // Mirrors encode(Bytes&, ByteView): single byte < 0x80 needs no header.
+    if (s.size() != 1 || s[0] >= kEmptyStringCode) {
+        if (s.size() < 56) {
+            *p++ = static_cast<uint8_t>(kEmptyStringCode + s.size());
+        } else {
+            const auto len_be = endian::to_big_compact(s.size());
+            *p++ = static_cast<uint8_t>(0xB7u + len_be.size());
+            std::memcpy(p, len_be.data(), len_be.size());
+            p += len_be.size();
+        }
+    }
+    if (!s.empty()) {
+        std::memcpy(p, s.data(), s.size());
+        p += s.size();
+    }
+    return static_cast<size_t>(p - dst);
+}
+
 size_t length(ByteView s) noexcept {
     size_t len{s.size()};
     if (s.size() != 1 || s[0] >= kEmptyStringCode) {

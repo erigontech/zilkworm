@@ -5,6 +5,7 @@
 #include "validation.hpp"
 
 #include <bit>
+#include <cstring>
 
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/crypto/secp256k1n.hpp>
@@ -59,22 +60,23 @@ ValidationResult pre_validate_transaction(const Transaction& txn, const evmc_rev
     return ValidationResult::kOk;
 }
 
-ValidationResult validate_transaction(const Transaction& txn, const IntraBlockState& state,
+ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::DirectState& state,
                                       uint64_t available_gas) noexcept {
     const std::optional<evmc::address> sender{txn.sender()};
     if (!sender) {
         return ValidationResult::kInvalidSignature;
     }
 
-    if (state.get_code_hash(*sender) != kEmptyHash) {
-        const auto code = state.get_code(*sender);
+    const auto* acc = state.read_account(*sender);
+    const bool has_code = acc && std::memcmp(acc->code_hash, kEmptyHash.bytes, 32) != 0;
+    if (has_code) {
+        const auto code = state.read_code(*sender);
         if (!eip7702::is_code_delegated(code)) {
-            return ValidationResult::kSenderNoEOA;  // EIP-3607
+            return ValidationResult::kSenderNoEOA;
         }
     }
 
-    const uint64_t nonce{state.get_nonce(*sender)};
-    if (nonce != txn.nonce) {
+    if (state.get_nonce(*sender) != txn.nonce) {
         return ValidationResult::kWrongNonce;
     }
 

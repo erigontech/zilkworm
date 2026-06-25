@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use z6m_common::{EthProofsConfig, EthproofsClient};
+use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
 use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_unified_rlp};
 use alloy_provider::{Provider, ProviderBuilder};
 use eyre::{bail, Context, Result};
@@ -19,7 +19,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::env;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -27,6 +27,18 @@ use tracing::{error, info, warn};
 use url::Url;
 
 pub const Z6M_ELF: Elf = include_elf!("z6m_guest");
+
+/// Wall-clock ms since the Unix epoch. Used by the inline phase-boundary
+/// markers (BEGIN_FETCH / BEGIN_EXEC / END_EXEC) emitted from the live
+/// service loop, all of which tag a `now_ms=` field. fetcher.rs emits its
+/// own BEGIN_BUNDLE marker with an equivalent SystemTime capture.
+#[inline]
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 // Dynamic prover enum to handle both CPU and CUDA provers
 enum DynamicProver {
@@ -111,6 +123,25 @@ impl DynamicProver {
                 .map_err(|e| eyre::eyre!("Verification failed: {}", e)),
         }
     }
+
+    /// Execute the guest ELF for a single block and return public values plus
+    /// execution report. Mirrors `Prover::execute` for both backends so the
+    /// service can race a CPU and CUDA client without branching at call sites.
+    async fn execute(
+        &self,
+        stdin: SP1Stdin,
+    ) -> Result<(sp1_sdk::SP1PublicValues, sp1_sdk::ExecutionReport)> {
+        match self {
+            DynamicProver::Env(prover) => prover
+                .execute(Z6M_ELF, stdin)
+                .await
+                .map_err(|e| eyre::eyre!("Execution failed: {}", e)),
+            DynamicProver::Cuda(prover) => prover
+                .execute(Z6M_ELF, stdin)
+                .await
+                .map_err(|e| eyre::eyre!("Execution failed: {}", e)),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -151,7 +182,6 @@ pub struct FetchOptions {
     pub rpc_url: String,
     pub save_all_responses: bool,
     pub data_dir: PathBuf,
-    pub build_eth_test: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -202,7 +232,12 @@ pub struct ProvingLog {
 }
 
 pub struct Z6mProverService {
-    client: Arc<Mutex<DynamicProver>>,
+    /// Respects the `SP1_PROVER` env var (CUDA when set, CPU otherwise). Used
+    /// for proving and as one half of the execute fallback race.
+    client1: Arc<Mutex<DynamicProver>>,
+    /// Always a `CpuProver`. Used as the second contender for execution work
+    /// so executes never wait for the (possibly busy) primary client.
+    client2: Arc<Mutex<DynamicProver>>,
     proving_key: DynProvingKey,
     verifying_key: SP1VerifyingKey,
     config: AppConfig,
@@ -224,12 +259,15 @@ impl Z6mProverService {
             DynProvingKey::Cuda(cuda_pk) => cuda_pk.verifying_key().clone(),
         };
         let eth_client = config.ethproofs.clone().map(EthproofsClient::new);
-        let client: Arc<Mutex<DynamicProver>> = Arc::new(Mutex::new(prover_client));
+        let client1: Arc<Mutex<DynamicProver>> = Arc::new(Mutex::new(prover_client));
+        // Always-CPU sibling client. Used so executes can run on a free client
+        // while client1 is busy proving (or vice versa).
+        let cpu_for_exec = ProverClient::builder().cpu().build().await;
+        let client2: Arc<Mutex<DynamicProver>> =
+            Arc::new(Mutex::new(DynamicProver::Env(cpu_for_exec)));
         Ok(Self {
-            // client: None,
-            // config: None,
-            // eth_client: None
-            client,
+            client1,
+            client2,
             proving_key,
             verifying_key,
             config,
@@ -239,7 +277,7 @@ impl Z6mProverService {
 
     #[allow(dead_code)]
     pub async fn setup_keys(&self, opts: SetupOptions) -> Result<()> {
-        let client = self.client.lock().await;
+        let client = self.client1.lock().await;
         let pk = client.setup(Z6M_ELF).await;
 
         let vk = match &pk {
@@ -269,8 +307,8 @@ impl Z6mProverService {
             block_number: opts.block_number,
             data_dir: opts.data_dir,
             save_all_responses: opts.save_all_responses,
-            build_eth_test: opts.build_eth_test,
             geth: false,
+            force_rebuild: false,
         })
         .await?;
         Ok(outcome)
@@ -304,7 +342,7 @@ impl Z6mProverService {
         // };
 
         // Lock the client for exclusive proving access
-        // let client = self.client.lock().await;
+        // let client = self.client1.lock().await;
 
         // let start = Instant::now();
         // let proof_mode = match opts.proof_type.as_str() {
@@ -359,10 +397,12 @@ impl Z6mProverService {
         Ok(log)
     }
 
-    // Static version of prove_block that takes client as parameter for concurrent use
+    // Per-block proving driver. The caller owns the prover lock guard and
+    // hands it in so dispatch logic stays in `run_service`. The guard is
+    // dropped before any file I/O so another block can grab the prover ASAP.
     async fn prove_block_with_client(
         opts: &ProveOptions,
-        client_arc: Arc<Mutex<DynamicProver>>,
+        guard: tokio::sync::OwnedMutexGuard<DynamicProver>,
         eth_client: Option<&EthproofsClient>,
         proving_key: DynProvingKey,
         verifying_key: SP1VerifyingKey,
@@ -373,7 +413,7 @@ impl Z6mProverService {
             let file_path = if opts.is_test {
                 format!("ethTests{}.json", opts.block_number)
             } else {
-                format!("unifiedBlockAndStateRlp{}.bin", opts.block_number)
+                format!("flatWitnessBundle{}.mfbd", opts.block_number)
             };
             opts.data_dir
                 .join(opts.block_number.to_string())
@@ -410,8 +450,6 @@ impl Z6mProverService {
             client.proving(opts.block_number).await;
         }
 
-        // Lock the client for exclusive proving access
-        let client = client_arc.lock().await;
         let proof_mode = match opts.proof_type.as_str() {
             "core" => SP1ProofMode::Core,
             "groth16" => SP1ProofMode::Groth16,
@@ -421,15 +459,17 @@ impl Z6mProverService {
 
         let start = Instant::now();
 
-        // Apply timeout only to the prove operation
+        // Apply timeout only to the prove operation. The caller-owned guard
+        // is what serialises prover access; we don't re-lock here.
         let proof_result = tokio::time::timeout(
             Duration::from_secs(1800), // 30 minutes timeout
-            client.prove(&proving_key.clone(), &stdin, proof_mode),
+            guard.prove(&proving_key.clone(), &stdin, proof_mode),
         )
         .await;
 
-        // Explicitly drop the lock before processing results
-        drop(client);
+        // Explicitly drop the guard before processing results so the next
+        // block can take the lock while we persist artifacts.
+        drop(guard);
 
         let proving_millis = start.elapsed().as_millis() as u64;
 
@@ -455,14 +495,13 @@ impl Z6mProverService {
                     // Read proof bytes back from file
                     let proof_bytes = std::fs::read(&proof_path)?;
 
-                    let verifier_id = sp1_sdk::HashableKey::bytes32(&verifying_key);
                     client
                         .proved(
                             &proof_bytes,
                             opts.block_number,
                             cycle_count,
                             proving_millis,
-                            &verifier_id,
+                            &verifying_key.clone(),
                         )
                         .await;
                 }
@@ -527,7 +566,7 @@ impl Z6mProverService {
             bincode::serde::decode_from_std_read(&mut r, cfg)?
         };
 
-        let client = self.client.lock().await;
+        let client = self.client1.lock().await;
         client
             .verify(&proof, &vk)
             .wrap_err("failed to verify proof")?;
@@ -556,89 +595,238 @@ impl Z6mProverService {
 
         info!("Service starting from block: {}", next_block);
 
+        // Handles for tasks dispatched per block. We only join them when the
+        // loop is about to exit (end_block reached) so each iteration advances
+        // as soon as a prover lock is acquired, not when the work finishes.
+        let mut in_flight: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
         loop {
-            let mut latest = next_block;
-            if service.end_block.is_some() {
-                let end = service.end_block.unwrap();
+            // Bounds: in end_block mode, stop once we're past it. In live mode
+            // (no end_block) we wait for the RPC to expose the next block.
+            if let Some(end) = service.end_block {
                 if next_block > end {
-                    break Ok(());
-                }
-                if latest > end {
-                    latest = end;
+                    break;
                 }
             } else {
-                latest = match Self::get_block_number_with_retry(&provider, 6).await {
-                    Ok(latest) => latest,
+                match Self::get_block_number_with_retry(&provider, 6).await {
+                    Ok(latest) => {
+                        if next_block > latest {
+                            sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    }
                     Err(err) => {
                         error!(error = %err, "Failed to get latest block number after retries, will retry in 30 seconds");
                         sleep(Duration::from_secs(30)).await;
                         continue;
                     }
-                };
-            }
-
-            // Collect blocks to process
-            let blocks_to_process: Vec<u64> = (next_block..=latest).collect();
-
-            // Process all blocks concurrently
-            let data_dir = self.config.data_dir.clone();
-            let client_arc = self.client.clone(); // Clone the Arc<Mutex<DynamicProver>>
-            let eth_client = self.eth_client.clone();
-            // Clone owned copies of the proving/verifying keys so the spawned tasks
-            // don't capture a short-lived reference to `self`.
-
-            let tasks: Vec<_> = blocks_to_process
-                .into_iter()
-                .map(|block_num| {
-                    let service_clone = service.clone();
-                    let data_dir_clone = data_dir.clone();
-                    let client_clone = client_arc.clone();
-                    let eth_client_clone = eth_client.clone();
-                    tokio::spawn({
-                        let proving_key = self.proving_key.clone();
-                        let verifying_key = self.verifying_key.clone();
-
-                        async move {
-                            if let Err(err) = Self::process_block_static(
-                                block_num,
-                                &service_clone,
-                                &data_dir_clone,
-                                client_clone,
-                                eth_client_clone.as_ref(),
-                                proving_key.clone(),
-                                verifying_key.clone(),
-                            )
-                            .await
-                            {
-                                error!(%block_num, error = %err, "failed to process block");
-                            }
-                        }
-                    })
-                })
-                .collect();
-
-            if !tasks.is_empty() {
-                // Wait for all spawned tasks to complete
-                for task in tasks {
-                    let res = task.await;
-                    if let Err(err) = res {
-                        // Reset the connection with the GPU prover
-                        let prover_client = DynamicProver::new().await?;
-                        let proving_key = prover_client.setup(Z6M_ELF).await;
-                        let _verifying_key = match &proving_key {
-                            DynProvingKey::Env(env_pk) => env_pk.verifying_key().clone(),
-                            DynProvingKey::Cuda(cuda_pk) => cuda_pk.verifying_key().clone(),
-                        };
-                        self.client = Arc::new(Mutex::new(prover_client));
-                        error!("Task failed: {}", err);
-                        break;
-                    }
                 }
-                next_block = latest + 1;
             }
 
-            sleep(Duration::from_secs(2)).await;
+            let block_number = next_block;
+
+            println!(
+                "[{}] Received block number from RPC {}",
+                Self::format_timestamp(),
+                block_number
+            );
+
+            let should_prove = matches_interval(service.prove_every, block_number);
+            let should_execute =
+                matches_interval(service.execute_every, block_number) && !should_prove;
+            let _should_post =
+                matches_interval(service.post_every, block_number) || should_prove;
+
+            let should_anything =
+                should_prove || should_execute || service.save_all_responses;
+            if !should_anything {
+                println!(
+                    "[{}] Nothing to do for block {}",
+                    Self::format_timestamp(),
+                    block_number
+                );
+                next_block += 1;
+                continue;
+            }
+
+            // Live service: regenerate the flat bundle on every block so that
+            // a stale `flatWitnessBundle<N>.mfbd` from a prior run never sneaks
+            // past the freshly-fetched RPC data.
+            let data_dir = self.config.data_dir.clone();
+
+            // BEGIN_FETCH: just before the RPC fetch starts. block_ts_ms is
+            // unknown at this point (header hasn't been fetched) — it's
+            // attached to BEGIN_BUNDLE inside fetcher.rs once the header is in
+            // hand.
+            println!(
+                "BEGIN_FETCH block={} now_ms={}",
+                block_number,
+                now_ms()
+            );
+
+            let outcome = match fetch_block_and_witness(FetchRequest {
+                rpc_url: &service.rpc_url,
+                block_number: Some(block_number),
+                data_dir: data_dir.clone(),
+                save_all_responses: service.save_all_responses,
+                geth: false,
+                force_rebuild: true,
+            })
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    error!(%block_number, error = %err, "fetch_block_and_witness failed");
+                    next_block += 1;
+                    continue;
+                }
+            };
+            let unified_path = outcome.flat_bundle_path.clone();
+
+            if should_prove {
+                println!(
+                    "[{}] Proving block {}",
+                    Self::format_timestamp(),
+                    block_number
+                );
+
+                // Call queued hook before we even wait for the lock.
+                if let Some(client) = &self.eth_client {
+                    client.queued(block_number).await;
+                }
+
+                // Backpressure: wait until client1 is free, then advance.
+                let guard = self.client1.clone().lock_owned().await;
+
+                let prove_opts = ProveOptions {
+                    block_number,
+                    file_name: Some(unified_path.clone()),
+                    is_test: false,
+                    data_dir: data_dir.clone(),
+                    proof_path: None,
+                    proof_type: service.proof_type.clone(),
+                };
+                let proving_key = self.proving_key.clone();
+                let verifying_key = self.verifying_key.clone();
+                let eth_client = self.eth_client.clone();
+
+                let handle = tokio::spawn(async move {
+                    match Self::prove_block_with_client(
+                        &prove_opts,
+                        guard,
+                        eth_client.as_ref(),
+                        proving_key,
+                        verifying_key,
+                    )
+                    .await
+                    {
+                        Ok(_log) => {}
+                        Err(err) => {
+                            error!(
+                                block_number = prove_opts.block_number,
+                                error = %err,
+                                "proving failed"
+                            );
+                        }
+                    }
+                });
+                in_flight.push(handle);
+            } else if should_execute {
+                println!(
+                    "[{}] Executing only block {}",
+                    Self::format_timestamp(),
+                    block_number
+                );
+
+                // Race the two clients: whichever lock resolves first owns
+                // this block's execution. tokio Mutex::lock_owned is
+                // cancel-safe — dropping the loser's future cleanly aborts.
+                let c1 = self.client1.clone();
+                let c2 = self.client2.clone();
+                let guard = tokio::select! {
+                    g = c1.lock_owned() => g,
+                    g = c2.lock_owned() => g,
+                };
+
+                let input_path = unified_path.clone();
+                let log_path = data_dir.join("executionLogs.log");
+
+                let handle = tokio::spawn(async move {
+                    let stdin = match build_stdin_from_unified_rlp(&input_path) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!(
+                                %block_number,
+                                error = %e,
+                                "failed to build stdin"
+                            );
+                            return;
+                        }
+                    };
+                    // BEGIN_EXEC: stdin built, guard acquired, just before the
+                    // prover execute. END_EXEC fires the moment execute returns.
+                    println!(
+                        "BEGIN_EXEC block={} now_ms={}",
+                        block_number,
+                        now_ms()
+                    );
+                    let (mut output, report) = match guard.execute(stdin).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            error!(%block_number, error = %e, "execution failed");
+                            return;
+                        }
+                    };
+                    println!(
+                        "END_EXEC block={} now_ms={}",
+                        block_number,
+                        now_ms()
+                    );
+                    let gas_used = output.read::<u64>();
+                    let cycle_count = report.total_instruction_count();
+                    let prover_gas = report.gas().unwrap_or_default();
+                    let syscall_count = report.total_syscall_count();
+                    // Release the prover lock before file I/O.
+                    drop(guard);
+
+                    if gas_used == 0 {
+                        error!(%block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used=0)");
+                        println!(
+                            "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
+                            block_number, cycle_count, prover_gas, syscall_count
+                        );
+                    } else {
+                        println!(
+                            "Executed block {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
+                            block_number, gas_used, cycle_count, prover_gas, syscall_count
+                        );
+                    }
+
+                    let log = ExecutionLog {
+                        block_number,
+                        gas_used,
+                        cycle_count,
+                        prover_gas,
+                        syscall_count,
+                        input_path: input_path.clone(),
+                    };
+                    if let Err(err) = Self::persist_execution_logs_static(&log_path, &log) {
+                        error!(%block_number, error = %err, "failed to persist execution log");
+                    }
+                });
+                in_flight.push(handle);
+            }
+
+            next_block += 1;
         }
+
+        // Drain in-flight task handles so the process doesn't drop unfinished
+        // proves/executes when end_block is reached.
+        for h in in_flight.drain(..) {
+            let _ = h.await;
+        }
+
+        Ok(())
     }
 
     // Helper method to get block number with retry logic
@@ -669,112 +857,6 @@ impl Z6mProverService {
                 }
             }
         }
-    }
-
-    // Process block using shared client for proper synchronization
-    async fn process_block_static(
-        block_number: u64,
-        service: &ServiceConfig,
-        data_dir: &PathBuf,
-        client: Arc<Mutex<DynamicProver>>,
-        eth_client: Option<&EthproofsClient>,
-        proving_key: DynProvingKey,
-        verifying_key: SP1VerifyingKey,
-    ) -> Result<()> {
-        println!(
-            "[{}] Received block number from RPC {}",
-            Self::format_timestamp(),
-            block_number
-        );
-        let should_prove = matches_interval(service.prove_every, block_number);
-        let should_execute = matches_interval(service.execute_every, block_number) && !should_prove;
-        let _should_post = matches_interval(service.post_every, block_number) || should_prove;
-
-        let should_anything = should_prove || should_execute || service.save_all_responses;
-        if !should_anything {
-            println!(
-                "[{}] Nothing to do for block {}",
-                Self::format_timestamp(),
-                block_number
-            );
-            return Ok(());
-        }
-
-        let outcome = fetch_block_and_witness(FetchRequest {
-            rpc_url: &service.rpc_url,
-            block_number: Some(block_number),
-            data_dir: data_dir.clone(),
-            save_all_responses: service.save_all_responses,
-            build_eth_test: false,
-            geth: false,
-        })
-        .await?;
-        let unified_path = outcome.unified_rlp_path.clone();
-
-        if should_execute {
-            println!(
-                "[{}] Executing only block {}",
-                Self::format_timestamp(),
-                block_number
-            );
-            let exec_opts = ExecuteOptions {
-                block_number,
-                file_name: Some(unified_path.clone()),
-                is_test: false,
-                data_dir: data_dir.clone(),
-            };
-            if let Err(err) = Self::execute_block_static(exec_opts).await {
-                error!(%block_number, error = %err, "execution failed");
-            }
-        }
-
-        let mut _proof_log: Option<ProvingLog> = None;
-        if should_prove {
-            println!(
-                "[{}] Proving block {}",
-                Self::format_timestamp(),
-                block_number
-            );
-
-            // Call queued hook
-            if let Some(client) = eth_client {
-                client.queued(block_number).await;
-            }
-
-            let prove_opts = ProveOptions {
-                block_number,
-                file_name: Some(unified_path.clone()),
-                is_test: false,
-                data_dir: data_dir.clone(),
-                proof_path: None, // Will be generated by prove_block method
-                proof_type: service.proof_type.clone(),
-            };
-
-            match tokio::time::timeout(
-                Duration::from_secs(1800), // 30 minutes timeout
-                Self::prove_block_with_client(
-                    &prove_opts,
-                    client.clone(),
-                    eth_client,
-                    proving_key,
-                    verifying_key,
-                ),
-            )
-            .await
-            {
-                Ok(Ok(log)) => {
-                    _proof_log = Some(log);
-                }
-                Ok(Err(err)) => {
-                    error!(%block_number, error = %err, "proving failed");
-                }
-                Err(_) => {
-                    error!(%block_number, "proving timed out after 30 minutes");
-                }
-            }
-        }
-
-        Ok(())
     }
 
     pub async fn run_test_service(
@@ -834,10 +916,18 @@ impl Z6mProverService {
             let prover_gas = report.gas().unwrap_or_default();
             let syscall_count = report.total_syscall_count();
 
-            println!(
-                "Executed block {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
-                block_number, gas_used, cycle_count, prover_gas, syscall_count
-            );
+            if gas_used == 0 {
+                error!(%block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used=0)");
+                println!(
+                    "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
+                    block_number, cycle_count, prover_gas, syscall_count
+                );
+            } else {
+                println!(
+                    "Executed block {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
+                    block_number, gas_used, cycle_count, prover_gas, syscall_count
+                );
+            }
 
             let log = ExecutionLog {
                 block_number,
@@ -848,6 +938,125 @@ impl Z6mProverService {
                 input_path: input_path.clone(),
             };
             Self::persist_execution_logs_static(&log_path, &log)?;
+        }
+        Ok(())
+    }
+
+    pub async fn run_test_service_eest(
+        test_dir: PathBuf,
+        execution_log_file: Option<PathBuf>,
+        max_file_size: u64,
+    ) -> Result<()> {
+        if !test_dir.is_dir() {
+            bail!("--test-dir {} is not a directory", test_dir.display());
+        }
+
+        // Collect all JSON files recursively
+        let mut test_files: Vec<PathBuf> = Vec::new();
+        Self::collect_json_files(&test_dir, &mut test_files)?;
+        test_files.sort();
+
+        if test_files.is_empty() {
+            bail!("no .json test files found in {}", test_dir.display());
+        }
+
+        info!("starting EEST test-service mode, {} test files from {}", test_files.len(), test_dir.display());
+
+        // Create ONE CpuProver upfront and reuse for all tests
+        let client = ProverClient::builder().cpu().build().await;
+
+        let log_path = execution_log_file
+            .unwrap_or_else(|| test_dir.join("executionLogs.log"));
+
+        let mut passed = 0u64;
+        let mut failed = 0u64;
+        let mut skipped = 0u64;
+        let total = test_files.len();
+
+        for (i, test_file) in test_files.iter().enumerate() {
+            let file_name = test_file.file_name().unwrap_or_default().to_string_lossy();
+
+            // Skip files exceeding size limit
+            if max_file_size > 0 {
+                if let Ok(meta) = std::fs::metadata(test_file) {
+                    if meta.len() > max_file_size {
+                        println!(
+                            "[{}/{}] SKIP {} (file_size={}MB > limit={}MB)",
+                            i + 1, total, file_name,
+                            meta.len() / (1024 * 1024),
+                            max_file_size / (1024 * 1024)
+                        );
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            }
+
+            info!("[{}/{}] executing {}", i + 1, total, test_file.display());
+
+            let stdin = match build_stdin_from_eth_tests(test_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("test {} failed to build stdin: {}, skipping", file_name, e);
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            let (mut output, report) = match client.execute(Z6M_ELF, stdin).await {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!("test {} execution failed: {}", file_name, e);
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            let gas_used = output.read::<u64>();
+            let cycle_count = report.total_instruction_count();
+            let prover_gas = report.gas().unwrap_or_default();
+            let syscall_count = report.total_syscall_count();
+
+            if gas_used == 0 {
+                error!(test = %file_name, cycles = cycle_count, prover_gas, "test execution FAILED (gas_used=0)");
+                println!(
+                    "[{}/{}] FAILED {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
+                    i + 1, total, file_name, cycle_count, prover_gas, syscall_count
+                );
+                failed += 1;
+            } else {
+                println!(
+                    "[{}/{}] PASS {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
+                    i + 1, total, file_name, gas_used, cycle_count, prover_gas, syscall_count
+                );
+                passed += 1;
+            }
+
+            let log = ExecutionLog {
+                block_number: 0,
+                gas_used,
+                cycle_count,
+                prover_gas,
+                syscall_count,
+                input_path: test_file.clone(),
+            };
+            Self::persist_execution_logs_static(&log_path, &log)?;
+        }
+
+        println!("\n=== EEST Test Service Summary ===");
+        println!("Total: {}, Passed: {}, Failed: {}, Skipped: {}", total, passed, failed, skipped);
+        Ok(())
+    }
+
+    fn collect_json_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                Self::collect_json_files(&path, files)?;
+            } else if path.extension().map_or(false, |ext| ext == "json") {
+                files.push(path);
+            }
         }
         Ok(())
     }
@@ -882,10 +1091,18 @@ impl Z6mProverService {
         let cycle_count = report.total_instruction_count();
         let prover_gas = report.gas().unwrap_or_default();
         let syscall_count = report.total_syscall_count();
-        info!(
-            "execution complete, block={} gas_used={}, cycle_count={}, prover_gas={}, syscall_count={}",
-            opts.block_number, gas_used, cycle_count, prover_gas, syscall_count
-        );
+        if gas_used == 0 {
+            error!(block_number = opts.block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used=0)");
+            println!(
+                "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
+                opts.block_number, cycle_count, prover_gas, syscall_count
+            );
+        } else {
+            info!(
+                "execution complete, block={} gas_used={}, cycle_count={}, prover_gas={}, syscall_count={}",
+                opts.block_number, gas_used, cycle_count, prover_gas, syscall_count
+            );
+        }
 
         let log = ExecutionLog {
             block_number: opts.block_number,
@@ -962,7 +1179,7 @@ impl Z6mProverService {
         let file_name = if is_test {
             format!("ethTests{}.json", block_number)
         } else {
-            format!("unifiedBlockAndStateRlp{}.bin", block_number)
+            format!("flatWitnessBundle{}.mfbd", block_number)
         };
         Ok(dir.join(file_name))
     }

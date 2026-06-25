@@ -56,17 +56,19 @@ ValidationResult EthashRuleSet::validate_extra_data(const BlockHeader& header) c
     return RuleSet::validate_extra_data(header);
 }
 
-void EthashRuleSet::initialize(IntraBlockState& state, const Block& block) {
+void EthashRuleSet::initialize(const Block& block, DirectState& direct) {
     if (block.header.number == chain_config_.dao_block) {
-        transfer_dao_balances(state);
+        transfer_dao_balances(direct);
     }
 }
 
-ValidationResult EthashRuleSet::finalize(IntraBlockState& state, const Block& block, const std::vector<Log>&) {
+ValidationResult EthashRuleSet::finalize(DirectState& direct, const Block& block,
+                                         const std::vector<Log>&) {
     const BlockReward reward{compute_reward(block)};
-    state.add_to_balance(get_beneficiary(block.header), reward.miner);
+    const auto miner = get_beneficiary(block.header);
+    direct.add_to_balance(miner, reward.miner);
     for (size_t i{0}; i < block.ommers.size(); ++i) {
-        state.add_to_balance(block.ommers[i].beneficiary, reward.ommers[i]);
+        direct.add_to_balance(block.ommers[i].beneficiary, reward.ommers[i]);
     }
     return ValidationResult::kOk;
 }

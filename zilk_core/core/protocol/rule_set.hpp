@@ -9,10 +9,12 @@
 
 #include <zilk_core/core/chain/config.hpp>
 #include <zilk_core/core/protocol/validation.hpp>
-#include <zilk_core/core/state/intra_block_state.hpp>
-#include <zilk_core/core/state/state.hpp>
+#include <zilk_core/core/state/block_state.hpp>
+#include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/types/block.hpp>
 #include <zilk_core/core/types/receipt.hpp>
+
+using ::zilkworm::DirectState;
 
 namespace silkworm::protocol {
 
@@ -57,18 +59,15 @@ class RuleSet {
     virtual ValidationResult validate_ommers(const Block& block, const BlockState& state);
 
     //! \brief Initializes block execution by applying changes stipulated by the protocol
-    //! (e.g. storing parent beacon root)
-    virtual void initialize(IntraBlockState& state, const Block& block) = 0;
+    //! (e.g. DAO transfer, storing parent beacon root)
+    virtual void initialize(const Block& block, DirectState& direct) = 0;
 
     //! \brief Finalizes block execution by applying changes stipulated by the protocol
     //! (e.g. block rewards, withdrawals)
-    //! \param [in] state: current state.
-    //! \param [in] block: current block to apply rewards for.
-    //! \remarks For Ethash See [YP] Section 11.3 "Reward Application".
-    virtual ValidationResult finalize(IntraBlockState& state, const Block& block, const std::vector<Log>& logs) = 0;
+    virtual ValidationResult finalize(DirectState& direct, const Block& block,
+                                      const std::vector<Log>& logs) = 0;
 
     //! \brief See [YP] Section 11.3 "Reward Application".
-    //! \param [in] header: Current block to get beneficiary from
     virtual evmc::address get_beneficiary(const BlockHeader& header);
 
     virtual BlockReward compute_reward(const Block& block);

@@ -67,6 +67,7 @@ inline constexpr ChainConfig kPragueConfig{
 };
 
 inline const std::map<std::string, ChainConfig> kNetworkConfig{
+    {"Mainnet", kMainnetConfig},
     {"Frontier", test::kFrontierConfig},
     {"Homestead",
      {

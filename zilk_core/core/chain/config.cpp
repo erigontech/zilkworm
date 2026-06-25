@@ -124,9 +124,17 @@ std::optional<ChainConfig> ChainConfig::from_json(const nlohmann::json& json) no
     if (json.contains("burntContract")) {
         const auto items = json["burntContract"].items();
         auto it = items.begin();
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+// GCC 15 false-positive on inlined std::sort inside SmallMap::emplace_back
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
         for (size_t i{0}; i < SmallMap<BlockNum, evmc::address>::max_size() && it != items.end(); ++i, ++it) {
             config.burnt_contract.emplace_back(std::stoull(it.key(), nullptr, 0), hex_to_address(it.value().get<std::string>()));
         }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
     }
 
     read_json_config_member(json, "arrowGlacierBlock", config.arrow_glacier_block);

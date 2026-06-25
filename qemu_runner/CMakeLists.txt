@@ -85,22 +85,24 @@ target_compile_options(z6m_debug PRIVATE
 )
 
 # ========== CTest / EEST test generation ==========
-# `EEST_RLP_DIR` and `EEST_JSON_DIR` are independent; either / both / neither may be set.
-set(EEST_RLP_DIR  "" CACHE PATH "Directory of pre-converted batched-RLP EEST fixtures")
+# `EEST_MFBD_DIR` and `EEST_JSON_DIR` are independent; either / both / neither may be set.
+set(EEST_MFBD_DIR "" CACHE PATH "Directory of pre-converted MFBD EEST fixtures")
 set(EEST_JSON_DIR "" CACHE PATH "Directory of raw EEST JSON fixtures")
-if(EEST_RLP_DIR OR EEST_JSON_DIR)
+if(EEST_MFBD_DIR OR EEST_JSON_DIR)
     if(NOT BUILD_TESTING)
         message(FATAL_ERROR "To enable state transition tests, please enable testing (e.g., -DBUILD_TESTING=ON)")
     endif()
     include(CTest)
 endif()
 
-# Generate a driver script prepending a 1-byte format tag and register one ctest per fixture file.
-function(_register_eest_tests label fmt_byte ext fixtures_dir)
+# Generate a driver script that pipes the fixture as-is into the QEMU payload
+# (the runner auto-dispatches on the leading 4-byte magic — MFBD or EJSN —
+# so no extra tag byte is needed) and register one ctest per fixture file.
+function(_register_eest_tests label ext fixtures_dir)
     set(script "${CMAKE_CURRENT_BINARY_DIR}/qemu_run_${label}.sh")
     file(WRITE  "${script}" "#!/bin/bash\n")
     file(APPEND "${script}" "set -eo pipefail\n")
-    file(APPEND "${script}" "{ printf '${fmt_byte}'; cat \"$1\"; } > stdin_payload.bin\n")
+    file(APPEND "${script}" "cat \"$1\" > stdin_payload.bin\n")
     file(APPEND "${script}" "rm -f semihost.log\n")
     file(APPEND "${script}" "exec ${QEMU_SYSTEM} -M virt -m 2G -display none -bios '${CMAKE_CURRENT_BINARY_DIR}/z6m_debug' -monitor none -serial none -chardev file,id=shlog,path=semihost.log -semihosting-config enable=on,target=native,chardev=shlog\n")
     file(CHMOD "${script}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
@@ -118,9 +120,9 @@ function(_register_eest_tests label fmt_byte ext fixtures_dir)
     endforeach()
 endfunction()
 
-if(EEST_RLP_DIR)
-    _register_eest_tests(rlp  "R" rlp  "${EEST_RLP_DIR}")
+if(EEST_MFBD_DIR)
+    _register_eest_tests(mfbd mfbd "${EEST_MFBD_DIR}")
 endif()
 if(EEST_JSON_DIR)
-    _register_eest_tests(json "J" json "${EEST_JSON_DIR}")
+    _register_eest_tests(json json "${EEST_JSON_DIR}")
 endif()

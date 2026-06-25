@@ -40,6 +40,13 @@ inline constexpr uint64_t kMaxGasLimit{INT64_MAX};  // 2^63-1
 inline constexpr size_t kMaxCodeSize{0x6000};                // EIP-170
 inline constexpr size_t kMaxInitCodeSize{2 * kMaxCodeSize};  // EIP-3860
 
+// EIP-7934: maximum block size constraints. kMaxBeaconBlockSize is the CL
+// gossip protocol cap; kBeaconBlockSafetyMargin reserves space for beacon
+// block content; kMaxRlpBlockSize is the resulting EL block RLP cap.
+inline constexpr size_t kMaxBeaconBlockSize      = 10 * 1024 * 1024;  // EIP-7934
+inline constexpr size_t kBeaconBlockSafetyMargin =  2 * 1024 * 1024;  // EIP-7934
+inline constexpr size_t kMaxRlpBlockSize         = kMaxBeaconBlockSize - kBeaconBlockSafetyMargin;
+
 inline constexpr uint64_t kMaxExtraDataBytes{32};
 
 inline constexpr uint64_t kBlockRewardFrontier{5 * kEther};

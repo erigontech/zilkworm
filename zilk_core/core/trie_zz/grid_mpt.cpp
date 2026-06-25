@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <functional>
 #include <optional>
 #include <utility>
@@ -18,6 +19,7 @@
 #include <zilk_core/core/rlp/encode.hpp>
 #include <zilk_core/print.hpp>
 
+#include <zilk_core/core/state_zz/direct_state.hpp>
 #include "fold_unfold.hpp"
 
 //------------------------- GRID_MPT -----------------------------
@@ -28,7 +30,24 @@
 // left sub-tree at any height of any branch once you are done processing that.
 //
 // ---------------------------------------------------------------
-namespace silkworm::mpt {
+namespace zilkworm {
+
+// LCP byte length; assumes little-endian host for ctzll byte index.
+[[gnu::always_inline]] inline size_t lcp_nibbles(const uint8_t* a, const uint8_t* b, size_t max) noexcept {
+    size_t i = 0;
+    while (i + 8 <= max) {
+        uint64_t wa, wb;
+        std::memcpy(&wa, a + i, sizeof(wa));
+        std::memcpy(&wb, b + i, sizeof(wb));
+        const uint64_t diff = wa ^ wb;
+        if (diff != 0) {
+            return i + static_cast<size_t>(__builtin_ctzll(diff)) / 8u;
+        }
+        i += 8;
+    }
+    while (i < max && a[i] == b[i]) ++i;
+    return i;
+}
 // Find the least common path of current key from the top, with the last key as reference
 template <bool DeletionEnabled>
 inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbles) {
@@ -68,8 +87,7 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
         return;
     }
     unsigned parent_consumed = parent.consumed;
-    size_t lcp = 0;
-    while (lcp < parent_consumed && new_nibbles[lcp] == search_nibbles_[lcp]) ++lcp;
+    size_t lcp = lcp_nibbles(new_nibbles.nib.data(), search_nibbles_.nib.data(), parent_consumed);
 
     if (lcp >= parent_consumed) {
         if constexpr (DeletionEnabled) {
@@ -120,23 +138,16 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     }
 }
 
-// Unfold from root as we traverse through the list of account updates
-// Finally return the root
 template <bool DeletionEnabled>
-bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieNodeFlat>& updates_sorted) {
-    // Main Loop for updates
-    for (auto updates_it = updates_sorted.cbegin(); updates_it != updates_sorted.cend(); ++updates_it) {
-        // Handle empty grid case before accessing grid_[depth_]
-        // Note: grid_ would only be empty for fresh insertion
+bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
+    for (auto updates_it = updates_sorted.begin(); updates_it != updates_sorted.end(); ++updates_it) {
         if (grid_.empty()) {
             search_nibbles_ = nibbles64::from_bytes32(updates_it->key);
-            LeafNode l{search_nibbles_, 0, updates_it->value_rlp};
+            LeafNode l{search_nibbles_, 0, updates_it->current_value()};
             insert_line(0, 0, std::move(l));
-            // ++updates_it;
             continue;
         }
         const auto& trie_upd = *updates_it;
-        const ByteView value_view{trie_upd.value_rlp};
 
         auto new_nibbles = nibbles64::from_bytes32(trie_upd.key);
         search_nib_cursor_ = 0;
@@ -155,11 +166,17 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieN
             auto& grid_line = grid_[depth_];
             if (grid_line.kind == kBranch) {
                 unsigned nib = search_nibbles_[search_nib_cursor_];
-                if (!unfold_slot(nib)) {
+                auto unfold_res = unfold_slot(nib);
+                if (unfold_res == UnfoldResult::kEmpty) {
                     // Child is empty - insert here
-                    auto l = make_cur_leaf(value_view);
+                    auto l = make_cur_leaf(trie_upd.current_value());
                     insert_line(l.parent_slot, depth_, std::move(l));
+                    grid_[depth_].modified = true;
                     break;
+                }
+                if (unfold_res == UnfoldResult::kMissing) {
+                    sys_println("ERROR: missing hash ref in node store (witness incomplete)");
+                    return {};
                 }
 
                 search_nib_cursor_++;
@@ -180,7 +197,13 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieN
                             embedded_rlp_copies_.emplace_back(grid_line.ext.child);
                             rlp = ByteView{embedded_rlp_copies_.back().bytes, grid_line.ext.child_len};
                         } else {
-                            rlp = node_store_.get_rlp(grid_line.ext.child).value();
+                            auto rlp_opt = state_->find_node_rlp(grid_line.ext.child);
+                            if (!rlp_opt) [[unlikely]] {
+                                ++missing_count_;
+                                sys_println("ERROR: missing ext child rlp in node store (witness incomplete)");
+                                return {};
+                            }
+                            rlp = *rlp_opt;
                         }
                         unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_);
                     }
@@ -215,9 +238,11 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieN
                     grid_line.ext.child_len = 1;
                     grid_line.ext.path.len = m;
                     insert_line_at(d1, grid_line.ext.path[m - 1], depth_, BranchNode{});
+                    grid_[d1].modified = true;
                     d1 = 0;  // Used up
                 } else {     // new_br -> (new_ext) -> old_child
                     transform_line(grid_line, BranchNode{});
+                    grid_line.modified = true;
                 }
                 grid_line.child_depth[last_nib] = 0;  // Reset unfolded child
 
@@ -233,6 +258,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieN
                         d1 = d2;
                     }
                     insert_line_at(d1, old_ext_line.ext.path[m], depth_, std::move(ext_mplus1));
+                    grid_[d1].modified = true;
                 } else {  // () -> new_br -> old_child
                     grid_[depth_].branch.set_child(last_nib, ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
                 }
@@ -241,27 +267,40 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieN
                     grid_[old_child_depth].parent_depth = depth_;
                     grid_[depth_].child_depth[grid_[old_child_depth].parent_slot] = old_child_depth;
                 }
-                auto l = make_cur_leaf(value_view);
+                auto l = make_cur_leaf(trie_upd.current_value());
                 insert_line(l.parent_slot, br_depth, std::move(l));
-
+                grid_[depth_].modified = true;
                 break;  // insertion complete
             } else {
                 // It's a leaf:
                 // Find common path and create extension and push
 
-                size_t cp = 0;
-                while (cp < grid_line.leaf.path.len && grid_line.leaf.path[cp] == search_nibbles_[search_nib_cursor_ + cp]) ++cp;
+                size_t cp = lcp_nibbles(grid_line.leaf.path.nib.data(),
+                                        search_nibbles_.nib.data() + search_nib_cursor_,
+                                        grid_line.leaf.path.len);
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
+                    // check pre-value matches
+                    if (grid_line.leaf.value != trie_upd.initial_value()) {
+                        sys_println("Pre value mismatch in existing leaf");
+                        return {};
+                    }
+                    if (trie_upd.current_value().size() == 0) {
+                        break;  // read-only check
+                    }
                     if constexpr (DeletionEnabled) {
-                        if (value_view == ByteView{{0x80}}) {
+                        if (trie_upd.current_value() == ByteView{{0x80}}) {
                             auto parent_depth = grid_line.parent_depth;
                             delete_leaf(depth_);
                             last_was_delete_ = true;
                             depth_ = parent_depth;
+                            grid_[depth_].modified = true;
                             break;  // delete complete
                         }
                     }
-                    grid_line.leaf.value = value_view;
+                    if (grid_line.leaf.value != trie_upd.current_value()){
+                        grid_line.leaf.value = trie_upd.current_value();
+                        grid_line.modified = true;
+                    }
                     break;  // update complete
                 }
 
@@ -293,9 +332,11 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieN
                 }
                 // Insert the leaves to the branch (which is at depth_ now) as parent
                 auto parent_depth = depth_;
-                auto l = make_cur_leaf(value_view);  // sets parent_slot too at l, with first nib
+                auto l = make_cur_leaf(trie_upd.current_value());  // sets parent_slot too at l, with first nib
                 insert_line(old_leaf.parent_slot, parent_depth, std::move(old_leaf));
+                grid_[depth_].modified = true;
                 insert_line(l.parent_slot, parent_depth, std::move(l));
+                grid_[depth_].modified = true;
                 break;  // insertion complete
             }
         }
@@ -307,10 +348,24 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieN
 
     if (grid_.size() == 0) {
         return kEmptyRoot;
-    } else {
-        fold_line(0);
-        auto encoded = encode_line(grid_[0]);
-        return keccak_bytes(encoded);
+    }
+    fold_line(0);
+    if (grid_.empty()) {
+        return kEmptyRoot;
+    }
+    auto encoded = encode_line(grid_[0]);
+    return keccak_bytes(encoded);
+}
+
+template <bool DeletionEnabled>
+void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
+    if (previous_root_hash != kEmptyRoot) {
+        auto rlp = state_->find_node_rlp(previous_root_hash);
+        if (!rlp) [[unlikely]] {
+            sys_println("{\"err\":\"no_rlp\"}");
+            return;
+        }
+        unfold_node_from_rlp(*rlp, 0, 0);
     }
 }
 
@@ -318,4 +373,4 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(const std::vector<TrieN
 template class GridMPT<false>;
 template class GridMPT<true>;
 
-}  // namespace silkworm::mpt
+}  // namespace zilkworm

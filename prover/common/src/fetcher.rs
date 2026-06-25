@@ -1,27 +1,17 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::rlp_methods::{block_to_header_only_rlp, build_pre_state_rlp, build_pre_trie_rlp};
-use crate::types::{
-    BlockchainTestCase, EthTestAccessListItem, EthTestAccount, EthTestAuthorization,
-    EthTestTransaction, SealEngine, TestBlock, TestHeader,
-};
-use alloy_consensus::transaction::SignerRecoverable;
-use alloy_consensus::{BlockHeader, Header as ConsensusHeader, Transaction};
-use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
+use alloy_consensus::Header as ConsensusHeader;
 use alloy_provider::{ext::DebugApi, Provider, ProviderBuilder};
-use alloy_rlp::Decodable;
-use alloy_rpc_types::{Block as RpcBlock, BlockTransactions, Transaction as RPCTransaction};
+use alloy_primitives::Bytes;
+use alloy_rpc_types::Block as RpcBlock;
 use alloy_rpc_types_debug::ExecutionWitness;
-use alloy_trie::{TrieAccount, KECCAK_EMPTY};
 use eyre::{bail, eyre, Context, Result};
-use serde::Deserialize;
-use rsp_mpt::EthereumState;
-use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, warn};
@@ -179,14 +169,19 @@ pub struct FetchRequest<'a> {
     pub block_number: Option<u64>,
     pub data_dir: PathBuf,
     pub save_all_responses: bool,
-    pub build_eth_test: bool,
     pub geth: bool,
+    /// When true, regenerate the flat bundle even if a cached
+    /// `flatWitnessBundle<N>.mfbd` already exists on disk. Also drops the
+    /// cached block / block-RLP / witness JSON intermediates so the bundle
+    /// is rebuilt from a fresh RPC fetch. Used by the live prover service so
+    /// `--execute-every 1` always operates on a freshly-built bundle.
+    pub force_rebuild: bool,
 }
 
 pub struct FetchOutcome {
     pub block_number: u64,
     pub block_directory: PathBuf,
-    pub unified_rlp_path: PathBuf,
+    pub flat_bundle_path: PathBuf,
 }
 
 pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchOutcome> {
@@ -212,20 +207,26 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
 
     let block_path = block_dir.join(format!("block{}.json", block_number));
     let block_rlp_path = block_dir.join(format!("blockRlp{}.json", block_number));
-    let prev_number = block_number
-        .checked_sub(1)
-        .ok_or_else(|| eyre!("block {} has no parent", block_number))?;
-    let prev_block_path = block_dir.join(format!("block{}.json", prev_number));
     let witness_path = block_dir.join(format!("executionWitness{}.json", block_number));
-    let tests_path = block_dir.join(format!("ethTests{}.json", block_number));
-    // let unified_map_path = block_dir.join(format!("inputRlpUnified{}.json", block_number));
-    let unified_rlp_only_path =
-        block_dir.join(format!("unifiedBlockAndStateRlp{}.bin", block_number));
-    if unified_rlp_only_path.exists() {
+    let flat_bundle_path =
+        block_dir.join(format!("flatWitnessBundle{}.mfbd", block_number));
+    if request.force_rebuild {
+        for stale in [&flat_bundle_path, &block_path, &block_rlp_path, &witness_path] {
+            if stale.exists() {
+                if let Err(err) = fs::remove_file(stale) {
+                    warn!(
+                        path = %stale.display(),
+                        error = %err,
+                        "force_rebuild: failed to remove stale cache file"
+                    );
+                }
+            }
+        }
+    } else if flat_bundle_path.exists() {
         return Ok(FetchOutcome {
             block_number,
             block_directory: block_dir,
-            unified_rlp_path: unified_rlp_only_path,
+            flat_bundle_path,
         });
     }
 
@@ -241,6 +242,7 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
         }
         fetched
     };
+    let block_ts_ms: u64 = u64::from(current_block.header.timestamp) * 1000;
 
     let current_block_rlp: Bytes = if block_rlp_path.exists() {
         let block_rlp_json = fs::read_to_string(&block_rlp_path)?;
@@ -252,21 +254,6 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
         }
         rlp
     };
-
-    let prev_block: RpcBlock = if prev_block_path.exists() {
-        let block_json = fs::read_to_string(&prev_block_path)?;
-        serde_json::from_str(&block_json)?
-    } else {
-        let fetched = get_block_by_number_with_retry(&provider, prev_number, 3)
-            .await?
-            .ok_or_else(|| eyre!("block {} not found", prev_number))?;
-        if request.save_all_responses {
-            write_json(&prev_block_path, &fetched)?;
-        }
-        fetched
-    };
-
-    let prev_block_rlp = block_to_header_only_rlp(&prev_block)?;
 
     let execution_witness: ExecutionWitness = if witness_path.exists() {
         let witness_json = fs::read_to_string(&witness_path)?;
@@ -302,47 +289,39 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
         witness
     };
 
-    if request.save_all_responses && !tests_path.exists() && request.build_eth_test {
-        let eth_tests = build_eth_tests_case(
-            block_number,
-            &current_block,
-            &current_block_rlp,
-            &prev_block,
-            &prev_block_rlp,
-            &execution_witness,
-        )?;
-        write_json(&tests_path, &eth_tests)?;
+    let payload = serde_json::json!({
+        "block":   alloy_primitives::hex::encode_prefixed(&current_block_rlp),
+        "headers": execution_witness.headers,
+        "state":   execution_witness.state,
+        "codes":   execution_witness.codes,
+        "keys":    execution_witness.keys,
+    });
+    let witness_input = serde_json::to_vec(&payload)
+        .wrap_err("failed to serialize witness JSON")?;
+    {
+        let now_ms: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        println!(
+            "BEGIN_BUNDLE block={} block_ts_ms={} now_ms={}",
+            block_number, block_ts_ms, now_ms
+        );
     }
-
-    let unified_rlp_map = build_unified_rlp_map(
-        block_number,
-        &current_block,
-        &current_block_rlp,
-        &prev_block,
-        &prev_block_rlp,
-        &execution_witness,
-    )?;
-
-    // if request.save_all_responses {
-    //     write_json(&unified_map_path, &unified_rlp_map)?;
-    // }
-
-    if let Some(unified_rlp_bytes) = unified_rlp_map.get("unifiedBlockAndStateRlp") {
-        fs::write(&unified_rlp_only_path, unified_rlp_bytes)?;
-    } else {
-        bail!("missing unifiedBlockAndStateRlp entry");
-    }
+    let bundle_bytes = run_json_witness_to_flat_bundle(&witness_input)
+        .wrap_err("json_witness_to_flat_bundle subprocess failed")?;
+    fs::write(&flat_bundle_path, &bundle_bytes)?;
 
     debug!(
         %block_number,
-        "fetched block data and wrote unified rlp to {:?}",
-        unified_rlp_only_path
+        "fetched block data and wrote flat bundle to {:?}",
+        flat_bundle_path,
     );
 
     Ok(FetchOutcome {
         block_number,
         block_directory: block_dir,
-        unified_rlp_path: unified_rlp_only_path,
+        flat_bundle_path,
     })
 }
 
@@ -485,283 +464,37 @@ pub fn write_json<T: ?Sized + Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
-fn build_unified_rlp_map(
-    _block_number: u64,
-    _current_block: &RpcBlock,
-    block_rlp: &Bytes,
-    previous_block: &RpcBlock,
-    prev_block_rlp: &Bytes,
-    witness: &ExecutionWitness,
-) -> Result<BTreeMap<String, Bytes>> {
-    let pre_state_root = previous_block.header.state_root;
-    let state = EthereumState::from_execution_witness(witness, pre_state_root);
+/// Path to the C++ json_witness_to_flat_bundle binary built by the top-level
+/// Makefile (`make json_witness_to_flat_bundle`).
+const BUILDER_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../build/zilk_core/dev/cli/json_witness_to_flat_bundle"
+);
 
-    let code_map: HashMap<B256, Bytes> = witness
-        .codes
-        .iter()
-        .cloned()
-        .map(|code| (keccak256(&code), code))
-        .collect();
-
-    let preimage_map: HashMap<B256, Bytes> = witness
-        .keys
-        .iter()
-        .cloned()
-        .map(|preimage| (keccak256(&preimage), preimage))
-        .collect();
-
-    let pre_state_rlp = build_pre_state_rlp(&state, &code_map, &preimage_map)?;
-
-    let headers_rlp_list = alloy_rlp::encode(witness.headers.clone());
-
-    let pre_trie_map = build_pre_trie_rlp(&witness.state)?;
-
-    // Wrap the single block as a one-element v1 blocks-list.
-    use crate::rlp_methods::{encode_rlp_list, MAINNET_FORK_NAME, RLP_FALSE, VERSION_V1};
-    let ei = [RLP_FALSE];
-    let block_entry: Vec<u8> = encode_rlp_list(&[block_rlp.as_ref(), &ei[..]]);
-    let blocks_list_rlp: Vec<u8> = encode_rlp_list(&[block_entry.as_slice()]);
-
-    let version = [VERSION_V1];
-    let items: Vec<&[u8]> = vec![
-        &version,
-        MAINNET_FORK_NAME.as_bytes(),
-        prev_block_rlp.as_ref(),
-        blocks_list_rlp.as_ref(),
-        pre_state_rlp.as_ref(),
-        headers_rlp_list.as_ref(),
-        pre_trie_map.as_ref(),
-    ];
-    let unified_rlp = alloy_rlp::encode(&items);
-
-    let mut input_map = BTreeMap::<String, Bytes>::new();
-    input_map.insert(
-        "unifiedBlockAndStateRlp".to_string(),
-        Bytes::from(unified_rlp),
-    );
-
-    Ok(input_map)
-}
-
-fn build_eth_tests_case(
-    block_number: u64,
-    current_block: &RpcBlock,
-    block_rlp: &Bytes,
-    previous_block: &RpcBlock,
-    prev_block_rlp: &Bytes,
-    witness: &ExecutionWitness,
-) -> Result<BTreeMap<String, BlockchainTestCase>> {
-    let pre_state_root = previous_block.header.state_root;
-    let state = EthereumState::from_execution_witness(witness, pre_state_root);
-
-    let code_map: HashMap<B256, Bytes> = witness
-        .codes
-        .iter()
-        .cloned()
-        .map(|code| (keccak256(&code), code))
-        .collect();
-
-    let preimage_map: HashMap<B256, Bytes> = witness
-        .keys
-        .iter()
-        .cloned()
-        .map(|preimage| (keccak256(&preimage), preimage))
-        .collect();
-
-    let pre = build_pre_state(&state, &code_map, &preimage_map);
-
-    let transactions = match &current_block.transactions {
-        BlockTransactions::Full(txs) => {
-            let mut converted = Vec::with_capacity(txs.len());
-            for tx in txs.iter() {
-                converted.push(convert_transaction(tx)?);
-            }
-            Some(converted)
-        }
-        _ => None,
-    };
-
-    let block_case = TestBlock {
-        block_header: Some(convert_header(&current_block.header)),
-        rlp: block_rlp.clone(),
-        expect_exception: None,
-        transactions,
-        uncle_headers: None,
-        transaction_sequence: None,
-        withdrawals: current_block.withdrawals.clone(),
-    };
-
-    let mut cases = BTreeMap::new();
-    cases.insert(
-        format!("block_{block_number}"),
-        BlockchainTestCase {
-            genesis_block_header: convert_header(&previous_block.header),
-            genesis_rlp: Some(prev_block_rlp.clone()),
-            blocks: vec![block_case],
-            post_state: None,
-            pre,
-            lastblockhash: current_block.header.hash,
-            network: "Cancun".to_string(),
-            seal_engine: SealEngine::NoProof,
-        },
-    );
-
-    Ok(cases)
-}
-
-fn build_pre_state(
-    state: &EthereumState,
-    code_map: &HashMap<B256, Bytes>,
-    preimage_map: &HashMap<B256, Bytes>,
-) -> BTreeMap<Address, EthTestAccount> {
-    let mut accounts = BTreeMap::new();
-
-    state.state_trie.for_each_leaves(|key, value| {
-        let hashed_address = B256::from_slice(key);
-        if let Some(address_bytes) = preimage_map.get(&hashed_address) {
-            if address_bytes.len() != Address::len_bytes() {
-                return;
-            }
-            let address = Address::from_slice(address_bytes.as_ref());
-            let mut bytes = value;
-            if let Ok(account) = TrieAccount::decode(&mut bytes) {
-                let code = if account.code_hash == KECCAK_EMPTY {
-                    Bytes::default()
-                } else {
-                    code_map
-                        .get(&account.code_hash)
-                        .cloned()
-                        .unwrap_or_default()
-                };
-
-                let mut storage = BTreeMap::new();
-                if let Some(storage_trie) = state.storage_tries.get(&hashed_address) {
-                    storage_trie.for_each_leaves(|slot_key, slot_value| {
-                        let hashed_slot = B256::from_slice(slot_key);
-                        if let Some(slot_preimage) = preimage_map.get(&hashed_slot) {
-                            if slot_preimage.len() == 32 {
-                                let slot = U256::from_be_slice(slot_preimage.as_ref());
-                                let mut slot_bytes = slot_value;
-                                if let Ok(value) = U256::decode(&mut slot_bytes) {
-                                    if !value.is_zero() {
-                                        storage.insert(slot, value);
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-
-                accounts.insert(
-                    address,
-                    EthTestAccount {
-                        balance: account.balance,
-                        code,
-                        nonce: U256::from(account.nonce),
-                        storage,
-                    },
-                );
-            }
-        }
-    });
-
-    accounts
-}
-
-fn convert_transaction(tx: &RPCTransaction) -> Result<EthTestTransaction> {
-    let from = tx.inner.recover_signer()?;
-    let hash = Some(*tx.inner.hash());
-    let ty = match tx.inner.tx_type() {
-        alloy_consensus::TxType::Legacy => 0,
-        alloy_consensus::TxType::Eip2930 => 1,
-        alloy_consensus::TxType::Eip1559 => 2,
-        alloy_consensus::TxType::Eip4844 => 3,
-        alloy_consensus::TxType::Eip7702 => 4,
-    };
-    let transaction_type = if ty == 0 { None } else { Some(U256::from(ty)) };
-    let gas_price = tx.gas_price().map(U256::from);
-    let max_fee_per_gas = Some(U256::from(tx.max_fee_per_gas()));
-    let max_priority_fee_per_gas = tx.max_priority_fee_per_gas().map(U256::from);
-    let max_fee_per_blob_gas = tx.max_fee_per_blob_gas().map(U256::from);
-
-    let access_list: Option<Vec<EthTestAccessListItem>> = tx.access_list().as_ref().map(|list| {
-        list.0
-            .iter()
-            .map(|item| EthTestAccessListItem {
-                address: item.address,
-                storage_keys: item.storage_keys.clone(),
-            })
-            .collect()
-    });
-
-    let authorization_list: Option<Vec<EthTestAuthorization>> =
-        tx.authorization_list().as_ref().map(|list| {
-            list.iter()
-                .map(|auth| EthTestAuthorization {
-                    chain_id: U256::from(auth.chain_id),
-                    address: auth.address,
-                    nonce: U256::from(auth.nonce),
-                    y_parity: U256::from(if auth.y_parity() != 0 { 1u64 } else { 0u64 }),
-                    r: auth.r(),
-                    s: auth.s(),
-                })
-                .collect()
-        });
-
-    let blob_versioned_hashes = tx.blob_versioned_hashes().map(|hashes| hashes.to_vec());
-
-    let (r, s, v) = {
-        let sig = tx.inner.signature();
-        (sig.r(), sig.s(), U256::from(sig.v()))
-    };
-
-    Ok(EthTestTransaction {
-        transaction_type,
-        data: tx.input().clone(),
-        gas_limit: U256::from(tx.gas_limit()),
-        gas_price,
-        nonce: U256::from(tx.nonce()),
-        r,
-        s,
-        v,
-        value: tx.value(),
-        chain_id: tx.chain_id().map(U256::from),
-        access_list,
-        max_fee_per_gas,
-        max_priority_fee_per_gas,
-        max_fee_per_blob_gas,
-        blob_versioned_hashes,
-        authorization_list,
-        to: tx.to(),
-        from: Some(from),
-        hash,
-    })
-}
-
-fn convert_header(header: &alloy_rpc_types::Header) -> TestHeader {
-    TestHeader {
-        bloom: header.logs_bloom,
-        coinbase: header.beneficiary,
-        difficulty: header.difficulty,
-        extra_data: header.extra_data.clone(),
-        gas_limit: U256::from(header.gas_limit),
-        gas_used: U256::from(header.gas_used),
-        hash: header.hash,
-        mix_hash: header.mix_hash().unwrap_or_default(),
-        nonce: header.nonce,
-        number: U256::from(header.number),
-        parent_hash: header.parent_hash,
-        receipt_trie: header.receipts_root,
-        state_root: header.state_root,
-        timestamp: U256::from(header.timestamp),
-        transactions_trie: header.transactions_root,
-        uncle_hash: header.ommers_hash,
-        base_fee_per_gas: header.base_fee_per_gas.map(U256::from),
-        withdrawals_root: header.withdrawals_root,
-        blob_gas_used: header.blob_gas_used.map(U256::from),
-        excess_blob_gas: header.excess_blob_gas.map(U256::from),
-        parent_beacon_block_root: header.parent_beacon_block_root,
-        requests_hash: header.requests_hash,
-        target_blobs_per_block: None,
+/// Spawn json_witness_to_flat_bundle, pipe `input` to its stdin, and return
+/// the stdout bytes.
+fn run_json_witness_to_flat_bundle(input: &[u8]) -> Result<Vec<u8>> {
+    let mut child = Command::new(BUILDER_PATH)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .wrap_err_with(|| {
+            format!(
+                "spawn {} (run `make json_witness_to_flat_bundle` to build it)",
+                BUILDER_PATH
+            )
+        })?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| eyre!("subprocess stdin not piped"))?;
+        stdin.write_all(input)?;
     }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("json_witness_to_flat_bundle exited with {:?}", out.status);
+    }
+    Ok(out.stdout)
 }

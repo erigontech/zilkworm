@@ -182,7 +182,7 @@ def split_into_chunks(block_list: List[int], n_chunks: int,
 # -- Execution ----------------------------------------------------------------
 
 RAM_PER_INSTANCE_GB = 8
-RAM_WAIT_INTERVAL = 30
+RAM_WAIT_INTERVAL = 15
 
 
 def run_prover_chunks(prover: str, data_dir: str,

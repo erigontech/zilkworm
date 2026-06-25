@@ -1,10 +1,11 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
+mod ethproofs_client;
 mod service;
 mod stdin_builders;
 
-use z6m_common::EthProofsConfig;
+use crate::ethproofs_client::EthProofsConfig;
 use z6m_common::{fetch_block_and_witness, FetchRequest};
 use crate::service::{
     AppConfig, ExecuteOptions, ProveOptions, ServiceConfig,
@@ -53,6 +54,14 @@ struct Args {
     #[arg(long)]
     execution_log_file: Option<PathBuf>,
 
+    /// Directory of EEST JSON test files to run in test-service mode
+    #[arg(long)]
+    test_dir: Option<PathBuf>,
+
+    /// Max test file size in bytes (default 20MB, 0 = no limit)
+    #[arg(long, default_value = "20971520")]
+    max_file_size: u64,
+
     #[arg(long, default_value = "pk.bin")]
     pk_path: PathBuf,
 
@@ -99,10 +108,6 @@ enum Command {
         /// Whether to save all the json files to disk after download
         #[arg(long, action = clap::ArgAction::SetTrue)]
         save_all_responses: bool,
-
-        /// Whether to create an ethereum/tests format json file too
-        #[arg(long, action = clap::ArgAction::SetTrue)]
-        build_eth_test: bool,
 
         /// Use geth's debug_executionWitness format instead of reth/alloy format
         #[arg(long, action = clap::ArgAction::SetTrue)]
@@ -177,16 +182,25 @@ async fn main() -> Result<()> {
         if args.command.is_some() {
             bail!("--test-service cannot be combined with a subcommand");
         }
-        let start = args.start_block.ok_or_else(|| eyre!("--test-service requires --start-block"))?;
-        let end = args.end_block.ok_or_else(|| eyre!("--test-service requires --end-block"))?;
-        Z6mProverService::run_test_service(
-            start,
-            end,
-            args.execute_every,
-            args.data_dir.clone(),
-            args.execution_log_file.clone(),
-        )
-        .await?;
+        if let Some(test_dir) = args.test_dir {
+            Z6mProverService::run_test_service_eest(
+                test_dir,
+                args.execution_log_file.clone(),
+                args.max_file_size,
+            )
+            .await?;
+        } else {
+            let start = args.start_block.ok_or_else(|| eyre!("--test-service requires --start-block (or --test-dir for EEST tests)"))?;
+            let end = args.end_block.ok_or_else(|| eyre!("--test-service requires --end-block (or --test-dir for EEST tests)"))?;
+            Z6mProverService::run_test_service(
+                start,
+                end,
+                args.execute_every,
+                args.data_dir.clone(),
+                args.execution_log_file.clone(),
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -273,7 +287,6 @@ async fn main() -> Result<()> {
             block_number,
             data_dir,
             save_all_responses,
-            build_eth_test,
             geth,
         }) => {
             let rpc = rpc_url
@@ -284,8 +297,8 @@ async fn main() -> Result<()> {
                 rpc_url: &rpc,
                 save_all_responses: save_all_responses || args.save_all_responses,
                 data_dir: data_dir.unwrap_or_else(|| args.data_dir.clone()),
-                build_eth_test,
                 geth,
+                force_rebuild: false,
             })
             .await?;
             println!(
@@ -308,6 +321,10 @@ async fn main() -> Result<()> {
             };
             let log = Z6mProverService::execute_block_static(opts).await.unwrap();
 
+            if log.gas_used == 0 {
+                // execute_block_static already emitted the FAILED block + error! line.
+                std::process::exit(1);
+            }
             println!(
                 "Executed block {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
                 log.block_number, log.gas_used, log.cycle_count, log.prover_gas, log.syscall_count

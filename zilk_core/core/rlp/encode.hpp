@@ -26,6 +26,27 @@ void encode_header(Bytes& to, Header header);
 
 void encode(Bytes& to, ByteView str);
 
+// In-place variant of `encode(Bytes&, ByteView)` — writes the RLP encoding
+// of `str` directly into `dst` and returns the number of bytes written.
+// Caller is responsible for ensuring the buffer is large enough
+// (header + str.size(); ≤ 1 + str.size() for str.size() < 56). Tried
+// inline; cycles dropped but trace-area grew → +0.01% prover_gas. Kept OOL.
+size_t encode_into(uint8_t* dst, ByteView str) noexcept;
+
+// Header-inline short-string variant. ASSUMES str.size() < 56 — caller's
+// responsibility (e.g. storage slot values after zeroless_view, which fit in
+// 0..32 bytes). Avoids the OOL call hop on the storage-trie hot path
+// (called twice per slot in check_root, hundreds of times per block).
+[[gnu::always_inline]] inline size_t encode_into_small(uint8_t* dst, ByteView s) noexcept {
+    if (s.size() == 1 && s[0] < kEmptyStringCode) {
+        dst[0] = s[0];
+        return 1;
+    }
+    dst[0] = static_cast<uint8_t>(kEmptyStringCode + s.size());
+    if (!s.empty()) std::memcpy(dst + 1, s.data(), s.size());
+    return 1 + s.size();
+}
+
 template <UnsignedIntegral T>
 void encode(Bytes& to, const T& n) {
     if (n == 0) {
@@ -37,6 +58,22 @@ void encode(Bytes& to, const T& n) {
         encode_header(to, {.list = false, .payload_length = be.size()});
         to.append(be);
     }
+}
+
+template <UnsignedIntegral T>
+[[gnu::always_inline]] inline size_t encode_uint_into(uint8_t* dst, const T& n) noexcept {
+    if (n == 0) {
+        dst[0] = kEmptyStringCode;
+        return 1;
+    }
+    if (n < kEmptyStringCode) {
+        dst[0] = static_cast<uint8_t>(n);
+        return 1;
+    }
+    const auto be = endian::to_big_compact(n);
+    dst[0] = static_cast<uint8_t>(kEmptyStringCode + be.size());
+    std::memcpy(dst + 1, be.data(), be.size());
+    return 1 + be.size();
 }
 
 void encode(Bytes& to, bool);

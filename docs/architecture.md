@@ -6,6 +6,8 @@ Instruction Set Architecture (ISA) based on RISC principles, standardized by [RI
 The architecture has three main layers: a **Rust prover host** that orchestrates proof generation, a **RISC-V guest program**
 that runs inside the zkVM, and a **C++ EVM core** that performs the actual block execution.
 
+(NOTE:  MULTI-BLOCK ONLY SUPPORTS EEST FULL-STATE MPT re-calculation with `silkworm::Hashbuildier` at the moment)
+
 ![Z6M Architecture Diagram](architecture.svg)
 
 ## Components
@@ -78,53 +80,27 @@ A fork of Silkworm's core, compiled both natively (for testing) and cross-compil
 ## Input Format
 
 Canonical byte layout fed as input to every Zilkworm STF runner (native, QEMU rv32/rv64,
-SP1 hypercube, ...).
+SP1 hypercube, and others). The first 4 bytes provide the magic identifier as follows
 
-All multi-byte integers expressing encoded lengths are **little-endian**, except RLP uses its own
-length encoding (big-endian per the Ethereum spec).
+| Magic    | Meaning |
+|----------|---------|
+| `MFBD`   | FlatBundle envelope: `<u32 "MFBD"><u32 ver><u64 N>` followed by N FlatBundle blobs (each 8-aligned). |
+| `EJSN`   | EEST JSON envelope: `<u32 "EJSN"><u32 ver>` followed by raw EEST `blockchain_test` JSON. |
+| `URLP`, `SFBD`, `STBD` | Reserved for UnifiedRLP, SingleFlatBundle, SingleTransactionBundle (no code path yet). |
 
-### Per-subtest unified RLP
-
-One subtest = one outer RLP list. Version is auto-detected by the first byte of the outer-list payload:
-
-| First byte    | Version | Layout |
-|---------------|---------|--------|
-| `0x01`        | v1      | `[VERSION_V1, fork_name, prev_block, blocks_list, pre_state, headers, pre_trie, post_state_hash]` |
-| `0xb8..0xbf`  | v0 legacy | `[prev_block, block, pre_state, headers, pre_trie]` — Mainnet only, single block. |
-
-Fork-name short strings encode as `0x80..0xb7`, so the ranges never collide.
-
-**v1 fields:**
-- `blocks_list` = `[[block_rlp, ei], ...]` where `ei` is `0x01` (expect-invalid) or `0x80` (expect-valid).
-- `post_state_hash` = 32 bytes; zero hash means "skip the check".
-
-**`pre_state` sub-layout:** `[accounts, storage, codes]`
-- `accounts`: `[[addr, nonce, balance, code_hash, storage_root], ...]`
-- `storage`:  `[[addr, [k, v, k, v, ...]], ...]`
-- `codes`:    flat sequence of `[code_hash, code]` pairs (no per-pair wrapper).
-
-### Bundle format
-
-N per-subtest blobs concatenated, length-prefixed. Used even for N=1.
-
-```
-<u32 N> <u32 len_0> <rlp_0> ... <u32 len_{N-1}> <rlp_{N-1}>
-```
-
-Produced by `encode_rlp_bundle` and `z6m_eest_convert bulk-convert`.
+For the full FlatBundle / MFBD byte layout, see
+[`docs/flat_witness_bundle.md`](flat_witness_bundle.md)
 
 ### Transport variants
 
-The bundle bytes are identical across runners; only the surrounding transport differs.
+The envelope bytes are identical across runners; only the surrounding transport differs.
 
 | Runner             | Transport |
 |--------------------|-----------|
-| SP1 hypercube      | Bundle on SP1 stdin. |
-| Native `.rlp`      | Bundle in the file. |
-| Native `.json`     | EEST JSON, parsed in-process; bundle never materialised. |
-| QEMU               | `stdin_payload.bin`: `<1 byte tag><payload>`. Tag `'R'` = bundle, `'J'` = raw JSON. |
-
-The QEMU tag is prepended by `qemu_run_rlp.sh` / `qemu_run_json.sh`.
+| SP1 hypercube      | Envelope on SP1 stdin. |
+| Native `.mfbd`     | MFBD envelope in the file. |
+| Native `.json`     | EEST JSON file; the native runner wraps it with an `EJSN` header before invoking StateTransition. |
+| QEMU               | Envelope passed verbatim through the `stdin_payload.bin` file input |
 
 ### Public output
 

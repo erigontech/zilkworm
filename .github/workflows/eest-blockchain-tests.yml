@@ -42,9 +42,9 @@ jobs:
         with:
           sparse-eest-fixtures: "skip"
 
-      - name: Prepare EEST RLP fixtures
-        id: eest-rlp
-        uses: ./.github/actions/prepare-eest-rlp
+      - name: Prepare EEST MFBD fixtures
+        id: eest-mfbd
+        uses: ./.github/actions/prepare-eest-mfbd
         with:
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -52,10 +52,10 @@ jobs:
         id: run_tests
         shell: bash
         env:
-          EEST_RLP_DIR: ${{ steps.eest-rlp.outputs.dir }}
+          EEST_MFBD_DIR: ${{ steps.eest-mfbd.outputs.dir }}
         run: |
           set +e
-          make eest-blockchain-tests EEST_RLP_DIR=$EEST_RLP_DIR 2>&1 | tee output.log
+          make eest-blockchain-tests EEST_MFBD_DIR=$EEST_MFBD_DIR 2>&1 | tee output.log
           exit_code=${PIPESTATUS[0]}
 
           # Parse test results

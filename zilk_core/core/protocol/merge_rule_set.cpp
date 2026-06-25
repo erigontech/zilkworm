@@ -38,10 +38,11 @@ ValidationResult MergeRuleSet::validate_difficulty_and_seal(const BlockHeader& h
     return header.nonce == BlockHeader::NonceType{} ? ValidationResult::kOk : ValidationResult::kInvalidNonce;
 }
 
-void MergeRuleSet::initialize(IntraBlockState& state, const Block& block) {
-    if (block.header.difficulty != 0) {
+void MergeRuleSet::initialize(const Block& block, DirectState& direct) {
+    const BlockHeader& header{block.header};
+    if (header.difficulty != 0) {
         if (pre_merge_rule_set_) {
-            pre_merge_rule_set_->initialize(state, block);
+            pre_merge_rule_set_->initialize(block, direct);
         }
         return;
     }
@@ -49,10 +50,11 @@ void MergeRuleSet::initialize(IntraBlockState& state, const Block& block) {
     // using evmone's system_call_block_start().
 }
 
-ValidationResult MergeRuleSet::finalize(IntraBlockState& state, const Block& block, const std::vector<Log>& logs) {
+ValidationResult MergeRuleSet::finalize(DirectState& direct, const Block& block,
+                                        const std::vector<Log>& logs) {
     if (block.header.difficulty != 0) {
         if (pre_merge_rule_set_) {
-            return pre_merge_rule_set_->finalize(state, block, logs);
+            return pre_merge_rule_set_->finalize(direct, block, logs);
         }
     }
 
@@ -60,8 +62,8 @@ ValidationResult MergeRuleSet::finalize(IntraBlockState& state, const Block& blo
         // See EIP-4895: Beacon chain push withdrawals as operations
         for (const Withdrawal& w : *block.withdrawals) {
             const auto amount_in_wei{intx::uint256{w.amount} * intx::uint256{kGiga}};
-            state.add_to_balance(w.address, amount_in_wei);
-            state.destruct_touched_dead();
+            direct.add_to_balance(w.address, amount_in_wei);
+            direct.destruct_dead_among(direct.touched());
         }
     }
 

@@ -5,8 +5,11 @@
 #include "genesis.hpp"
 
 #include <bit>
+#include <unordered_map>
 
 #include <zilk_core/core/chain/config.hpp>
+#include <zilk_core/core/common_zz/mphf_builder.hpp>
+#include <zilk_core/core/common_zz/mphf_map.hpp>
 #include <zilk_core/core/chain/genesis_holesky.hpp>
 #include <zilk_core/core/chain/genesis_mainnet.hpp>
 #include <zilk_core/core/chain/genesis_sepolia.hpp>
@@ -15,10 +18,14 @@
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/protocol/param.hpp>
 #include <zilk_core/core/rlp/decode.hpp>
+#include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/types/address.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 
 #include <zilk_core/print.hpp>
+
+using ::zilkworm::DirectState;
+
 namespace silkworm {
 
 std::string_view read_genesis_data(ChainId chain_id) {
@@ -77,134 +84,61 @@ BlockHeader read_genesis_header(const nlohmann::json& genesis, const evmc::bytes
     return header;
 }
 
-InMemoryState read_genesis_allocation(const nlohmann::json& alloc) {
-    InMemoryState state;
+std::vector<uint8_t> read_genesis_allocation(const nlohmann::json& alloc) {
+    std::vector<DirectState::AccountInfo> infos;
+    infos.reserve(alloc.size());
+    std::unordered_map<evmc::bytes32, Bytes> code_map;
     for (const auto& item : alloc.items()) {
         const evmc::address address{hex_to_address(item.key())};
         const nlohmann::json& account_json{item.value()};
 
-        Account account;
-        account.balance = intx::from_string<intx::uint256>(account_json.at("balance"));
+        DirectState::AccountInfo info{};
+        info.addr = address;
+        const auto balance_v = intx::from_string<intx::uint256>(account_json.at("balance"));
+        std::memcpy(info.account.balance, &balance_v, 32);
         if (account_json.contains("nonce")) {
-            account.nonce = std::stoull(account_json["nonce"].get<std::string>(), nullptr, /*base=*/16);
+            info.account.nonce = std::stoull(account_json["nonce"].get<std::string>(), nullptr, /*base=*/16);
         }
+        // Default code_hash = kEmptyHash so absent-code matches the trie leaf.
+        std::memcpy(info.account.code_hash, kEmptyHash.bytes, 32);
         if (account_json.contains("code")) {
-            const Bytes code{*from_hex(account_json["code"].get<std::string>())};
+            Bytes code{*from_hex(account_json["code"].get<std::string>())};
             if (!code.empty()) {
-                account.code_hash = std::bit_cast<evmc_bytes32>(keccak256(code));
-                state.update_account_code(address, account.code_hash, code);
+                const auto code_hash_v = keccak256(code);
+                std::memcpy(info.account.code_hash, code_hash_v.bytes, 32);
+                info.account.code_store_len = static_cast<uint32_t>(code.size());
+                evmc::bytes32 ch{};
+                std::memcpy(ch.bytes, code_hash_v.bytes, 32);
+                code_map.try_emplace(ch, std::move(code));
             }
         }
-        state.update_account(address, /*initial=*/std::nullopt, account);
+        // storage_root is recomputed by execution; default to kEmptyRoot so
+        // an empty allocation matches the trie leaf.
+        std::memcpy(info.account.storage_root, kEmptyRoot.bytes, 32);
 
         if (account_json.contains("storage")) {
             for (const auto& storage : account_json["storage"].items()) {
                 const Bytes key{*from_hex(storage.key())};
                 const Bytes value{*from_hex(storage.value().get<std::string>())};
-                state.update_storage(address, to_bytes32(key), /*initial=*/{}, to_bytes32(value));
+                info.storage.emplace_back(to_bytes32(key), to_bytes32(value));
             }
         }
+        infos.push_back(std::move(info));
     }
-    return state;
-}
-
-// Modified version with proper code handling
-InMemoryState read_pre_state_from_rlp(ByteView rlp_view) {
-    InMemoryState state;
-    auto mega_header{rlp::decode_header(rlp_view)};
-    if (!mega_header || !mega_header->list) {
-        sys_println("Invalid mega_header");
-    }
-
-    ByteView payload_view = rlp_view.substr(0, mega_header->payload_length);
-
-    // Process accounts
-    auto accounts_header{rlp::decode_header(payload_view)};  // List of accounts
-    if (!accounts_header || !accounts_header->list) {
-        sys_println("Invalid accounts_header");
-    }
-    ByteView accounts_view = payload_view.substr(0, accounts_header->payload_length);
-
-    while (!accounts_view.empty()) {
-        auto entry_header{rlp::decode_header(accounts_view)};
-        if (!entry_header || !entry_header->list) {
-            sys_println("Invalid accounts_header");
+    std::vector<uint8_t> code_store_blob;
+    if (!code_map.empty()) {
+        ::zilkworm::MphfBuilder<32> cb{::zilkworm::kMphfCodeStoreMagic,
+                                       ::zilkworm::kMphfMapVersion};
+        std::vector<uint8_t> enc;
+        for (const auto& [ch, code_bytes] : code_map) {
+            enc.clear();
+            ::zilkworm::FlatKv::encode(enc, ch, ByteView{code_bytes.data(), code_bytes.size()});
+            cb.add(::zilkworm::hash_key8(ch), ByteView{enc.data(), enc.size()});
         }
-        ByteView acc_items_list = accounts_view.substr(0, entry_header->payload_length);
-        evmc::address address;
-        Account account;
-        rlp::decode(acc_items_list, address);
-        rlp::decode(acc_items_list, account.nonce);
-        rlp::decode(acc_items_list, account.balance);
-        rlp::decode(acc_items_list, account.code_hash);
-        rlp::decode(acc_items_list, account.storage_root_);
-        state.update_account(address, /*initial=*/std::nullopt, account);
-        accounts_view.remove_prefix(entry_header->payload_length);
+        code_store_blob = std::move(cb).finalize();
     }
-    payload_view.remove_prefix(accounts_header->payload_length);
-
-    // Process storage
-    auto storage_header{rlp::decode_header(payload_view)};
-    if (!storage_header || !storage_header->list) {
-        sys_println("Invalid storage_header");
-    }
-    ByteView storage_view = payload_view.substr(0, storage_header->payload_length);
-
-    while (!storage_view.empty()) {
-        auto entry_header{rlp::decode_header(storage_view)};
-        if (!entry_header || !entry_header->list) {
-            sys_println("Invalid storage entry_header");
-        }
-        ByteView entry_payload = storage_view.substr(0, entry_header->payload_length);
-        // sys_println("Storage entry:");
-        // sys_println(to_hex(entry_payload).c_str());
-        evmc::address address;
-        rlp::decode(entry_payload, address);
-        // Decode [k,v,k,v,...]
-        auto kvs_header{rlp::decode_header(entry_payload)};
-        if (!kvs_header || !kvs_header->list) {
-            sys_println("Invalid kvs_header");
-        }
-        ByteView kvs_view = entry_payload.substr(0, kvs_header->payload_length);
-
-        while (!kvs_view.empty()) {
-            intx::uint256 key, value;
-            if (!rlp::decode(kvs_view, key, rlp::Leftover::kAllow)) {
-                sys_println("Failed to decode kv_key");
-            }
-            if (!rlp::decode(kvs_view, value, rlp::Leftover::kAllow)) {
-                sys_println("Failed to decode kv_value");
-            }
-            evmc::bytes32 key32 = intx::be::store<evmc::bytes32>(key);
-            evmc::bytes32 value32 = intx::be::store<evmc::bytes32>(value);
-
-            state.update_storage(address, key32, /*initial=*/{}, value32);
-        }
-        storage_view.remove_prefix(entry_header->payload_length);
-    }
-    payload_view.remove_prefix(storage_header->payload_length);
-
-    auto codes_header{rlp::decode_header(payload_view)};
-    ByteView codes_view = payload_view.substr(0, codes_header->payload_length);
-    evmc::address address{};
-    while (!codes_view.empty()) {
-        // auto entry_header{rlp::decode_header(codes_view)};
-        // ByteView entry_payload = codes_view.substr(0, entry_header->payload_length);
-
-        evmc::bytes32 code_hash;
-        Bytes code;
-
-        if (!rlp::decode(codes_view, code_hash, rlp::Leftover::kAllow)) {
-            sys_println("Failed to decode code_hash from codes_view");
-        }
-        if (!rlp::decode(codes_view, code, rlp::Leftover::kAllow)) {
-            sys_println("Failed to decode code from codes_view");
-        }
-
-        state.update_account_code(address, code_hash, code);
-    }
-
-    return state;
+    return DirectState::build_blob_from_accounts(std::move(infos), {},
+                                                 std::move(code_store_blob));
 }
 
 }  // namespace silkworm

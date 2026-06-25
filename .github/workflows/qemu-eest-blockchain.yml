@@ -1,36 +1,35 @@
 name: Qemu EESTs on RV32IM
 
 on:
-  push:
-    branches: [master, main, release/*]
   schedule:
     - cron: "0 0 */3 * *" # Run every 3 days at midnight UTC
   workflow_dispatch:
 
 jobs:
   build-and-run-rv32im:
-    name: Build and Run EEST Tests RV32IM
+    name: Build and Run EEST Tests (Ubuntu 25.10)
     runs-on: ubuntu-latest
+    container: ubuntu:25.10
     environment: ci
-    permissions:
-      contents: read
-      packages: read
-    container:
-      image: ghcr.io/erigontech/zilkworm-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install qemu
+      - name: Install system dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
           TZ: Etc/UTC
-        # The CI image ships build-essential, cmake, ninja, git/git-lfs,
-        # python3, conan, riscv-none-elf-gcc and rustup. Only qemu-system-misc
-        # has to be added here.
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends qemu-system-misc
+          apt update
+          apt install -y \
+            build-essential cmake ninja-build \
+            git git-lfs \
+            python3 python3-pip pipx \
+            nodejs npm \
+            qemu-system-misc
+          pipx install conan
+          pipx ensurepath
+          npm i -g xpm
+          xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
+          echo 'export PATH=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:$PATH' >> ~/.bashrc
+          echo "PATH=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin:$PATH" >> $GITHUB_ENV
 
       - name: Verify tool versions
         run: |
@@ -42,37 +41,40 @@ jobs:
           git lfs version
           python3 --version
           ctest --version
-          cargo --version
           qemu-system-riscv32 --version
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.PAT_TOKEN }}
           submodules: false
 
       - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
           sparse-eest-fixtures: "skip"
 
-      - name: Prepare EEST RLP fixtures
-        id: eest-rlp
-        uses: ./.github/actions/prepare-eest-rlp
+      - name: Prepare EEST MFBD fixtures
+        id: eest-mfbd
+        uses: ./.github/actions/prepare-eest-mfbd
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Build for RV32IM
+      - name: Build EEST blockchain tests
         run: |
           cd qemu_runner && make xpack-elf-eest \
-              EEST_RLP_DIR=${{ github.workspace }}/${{ steps.eest-rlp.outputs.dir }}
+              EEST_MFBD_DIR=${{ github.workspace }}/${{ steps.eest-mfbd.outputs.dir }}
 
-      - name: Run EESTs on qemu-riscv32
+      - name: Run EEST blockchain tests
         id: run_tests
         shell: bash
         env:
-          EEST_RLP_DIR: ${{ github.workspace }}/${{ steps.eest-rlp.outputs.dir }}
+          EEST_MFBD_DIR: ${{ github.workspace }}/${{ steps.eest-mfbd.outputs.dir }}
         run: |
           set +e
           cd qemu_runner
-          make rerun-ctest EEST_RLP_DIR=$EEST_RLP_DIR 2>&1 | tee output.log
+          make rerun-ctest EEST_MFBD_DIR=$EEST_MFBD_DIR 2>&1 | tee output.log
 
           exit_code=${PIPESTATUS[0]}
 
@@ -100,7 +102,7 @@ jobs:
         shell: bash
         run: |
           echo "========================================"
-          echo "     EEST TEST SUMMARY (RV32IM)"
+          echo "         EEST TEST SUMMARY"
           echo "========================================"
           echo ""
           echo "Results: ${{ steps.run_tests.outputs.passed_percent }}% passed, ${{ steps.run_tests.outputs.failed }} failed out of ${{ steps.run_tests.outputs.total }}"
