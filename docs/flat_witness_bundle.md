@@ -888,7 +888,9 @@ host would have written for an SP1 run.
 
 ## 7. EEST JSON tests
 
-The EEST corpus on disk lives at `third_party/eest-fixtures/blockchain_tests/`.
+The EEST corpus on disk lives at
+`test-fixtures-cache/eest_stable/fixtures/blockchain_tests/` (populated by
+`make test-fixtures` from the `test-fixtures.json` pin).
 Two harness paths consume it:
 
 - **Native runner** — `runner.cpp::run_json_test_file` reads a `.json` file

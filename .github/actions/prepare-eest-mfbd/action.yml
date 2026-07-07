@@ -5,21 +5,22 @@
 name: EEST MFBD cache + convert
 description: |
   Compute a content-addressed cache key for the converted MFBD fixture tree,
-  restore from cache if present, and on a miss sparse-init the
-  eest-fixtures submodule and run `bulk-convert` to populate the directory.
+  restore from cache if present, and on a miss download the pinned EEST
+  fixture tarball (test-fixtures.json via tools/test-fixtures.sh) and run
+  `bulk-convert` to populate the directory.
 
   Downstream test steps consume the populated path via the `dir` output:
   set `EEST_MFBD_DIR` from `steps.<id>.outputs.dir` (where `<id>` is the
   step id given to this action's invocation in the calling workflow).
 
-  The cache key is `(eest_sha, cpp_converter_src_sha)`. Any change to the
-  EEST submodule pin or the C++ converter source yields a fresh key,
-  ensuring CI never reads bytes produced by stale conversion logic.
+  The cache key is `(fixture_tarball_sha, cpp_converter_src_sha)`. Any change
+  to the test-fixtures.json pin or the C++ converter source yields a fresh
+  key, ensuring CI never reads bytes produced by stale conversion logic.
 
 inputs:
   token:
-    description: GitHub token used by init-submodules for private fetches.
-    required: true
+    description: Unused (kept for call-site compatibility).
+    required: false
 
 outputs:
   dir:
@@ -36,15 +37,15 @@ runs:
       id: cache-key
       shell: bash
       run: |
-        # eest_sha comes from the parent gitlink, no submodule init required.
-        eest_sha=$(git ls-tree HEAD third_party/eest-fixtures | awk '{print $3}')
+        # The fixture pin comes from the manifest, no download required.
+        eest_sha=$(python3 -c "import json;print(json.load(open('test-fixtures.json'))['eest_stable']['sha256'][:12])")
         # The C++ converter is the MFBD producer; hash its source so any
         # change invalidates the cache.
         conv_sha=$(sha256sum \
             zilk_core/dev/cli/eest_to_flat_bundle.cpp \
           | sha256sum | cut -c1-12)
-        key="mfbd-eest-${eest_sha:0:12}-${conv_sha}"
-        dir="third_party/eest-fixtures-mfbd/${key}"
+        key="mfbd-eest-${eest_sha}-${conv_sha}"
+        dir="test-fixtures-cache/mfbd-${eest_sha}"
         echo "key=${key}" >> "$GITHUB_OUTPUT"
         echo "dir=${dir}" >> "$GITHUB_OUTPUT"
 
@@ -55,12 +56,10 @@ runs:
         path: ${{ steps.cache-key.outputs.dir }}
         key: ${{ steps.cache-key.outputs.key }}
 
-    - name: Init eest-fixtures (sparse, cache miss only)
+    - name: Download EEST fixtures (cache miss only)
       if: steps.mfbd-cache.outputs.cache-hit != 'true'
-      uses: ./.github/actions/init-submodules
-      with:
-        token: ${{ inputs.token }}
-        sparse-eest-fixtures: "true"
+      shell: bash
+      run: tools/test-fixtures.sh test-fixtures.json test-fixtures-cache eest_stable
 
     - name: Build + run converter (cache miss only)
       if: steps.mfbd-cache.outputs.cache-hit != 'true'

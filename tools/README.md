@@ -6,14 +6,15 @@ The Zilkworm test runners (native `state_transition`, QEMU rv32/rv64,
 SP1 prover) consume **MFBD-wrapped FlatBundle** files, one `.mfbd` per
 source EEST JSON. The conversion happens at build time:
 
-1. The EEST version is pinned by the `third_party/eest-fixtures` submodule
-   (sha in the parent gitlink). Bumping EEST = bumping that submodule.
-2. CI sparse-checks-out `blockchain_tests/` from the pinned sha and runs
-   the C++ `eest_to_flat_bundle bulk-convert` binary (std::async-parallel)
-   to produce the MFBD tree.
+1. The EEST version is pinned by the `eest_stable` entry of
+   `test-fixtures.json` (release-tarball URL + sha256 + size).
+   Bumping EEST = editing that entry.
+2. CI downloads, sha256-verifies and extracts the pinned tarball via
+   `tools/test-fixtures.sh`, then runs the C++ `eest_to_flat_bundle
+   bulk-convert` binary (std::async-parallel) to produce the MFBD tree.
 3. The output is cached via `actions/cache@v4` keyed on
-   `(eest_sha, cpp_converter_src_sha)`. Subsequent CI runs hit the cache
-   and skip the conversion entirely.
+   `(tarball_sha, cpp_converter_src_sha)`. Subsequent CI runs hit the cache
+   and skip download and conversion entirely.
 
 There is no published MFBD archive; the converter is the only source of
 truth and is content-deterministic (verified by running `bulk-convert`
@@ -25,12 +26,11 @@ For the on-the-wire MFBD byte layout, see
 ### 1. Local dev: build the MFBD tree
 
 ```bash
-git submodule update --init third_party/eest-fixtures   # ~3 GB sparse if you set sparse-checkout
-make eest-mfbd-build                                     # builds the C++ converter + bulk-convert
+make eest-mfbd-build   # downloads the pinned tarball (make test-fixtures) + builds the C++ converter + bulk-convert
 ```
 
-The output lands at `third_party/eest-fixtures-mfbd/dev-<short-eest-sha>/`
-(content-addressed by sha so different submodule checkouts coexist).
+The output lands at `test-fixtures-cache/mfbd-<short-tarball-sha>/`
+(content-addressed by the pinned tarball sha so different pins coexist).
 A `manifest.json` is written in the output dir; `make eest-mfbd-build`
 no-ops when it exists, so subsequent test runs cost nothing extra.
 
@@ -44,7 +44,7 @@ make z6m_eest_convert
 
 # Emit a single subtest:
 build/zilk_core/dev/cli/eest_to_flat_bundle emit \
-    --json third_party/eest-fixtures/blockchain_tests/.../foo.json \
+    --json test-fixtures-cache/eest_stable/fixtures/blockchain_tests/.../foo.json \
     --index 0 > foo.mfbd
 ```
 
@@ -52,38 +52,37 @@ build/zilk_core/dev/cli/eest_to_flat_bundle emit \
 
 Each EEST workflow runs four steps before the test phase:
 
-1. **Compute key**: `git ls-tree HEAD third_party/eest-fixtures` for the
-   eest sha; `sha256sum zilk_core/dev/cli/eest_to_flat_bundle.cpp` for
-   `conv_sha`; key = `mfbd-eest-<eest_sha>-<conv_sha>`.
+1. **Compute key**: first 12 hex of `eest_stable.sha256` from
+   `test-fixtures.json`; `sha256sum zilk_core/dev/cli/eest_to_flat_bundle.cpp`
+   for `conv_sha`; key = `mfbd-eest-<eest_sha>-<conv_sha>`.
 2. **`actions/cache@v4`** keyed exactly on the above. No restore-keys.
-3. **Init eest-fixtures sparse** (only on cache miss).
+3. **Download + extract the pinned tarball** (only on cache miss):
+   `tools/test-fixtures.sh test-fixtures.json test-fixtures-cache eest_stable`.
 4. **Build + run converter** (only on cache miss). Subsequent steps
-   consume `EEST_MFBD_DIR=third_party/eest-fixtures-mfbd/<key>/`.
+   consume `EEST_MFBD_DIR=test-fixtures-cache/mfbd-<eest_sha>/`.
 
-Cache hit: ~0 s. Cache miss: ~30 s C++ build + ~15 s convert.
+Cache hit: ~0 s. Cache miss: tarball download + ~30 s C++ build + ~15 s convert.
 
 ### 3. Update the in-use EEST version
 
-```bash
-git -C third_party/eest-fixtures fetch --tags
-git -C third_party/eest-fixtures checkout <new-version>
-git add third_party/eest-fixtures
-git commit -m "Bump EEST to <new-version>"
-```
+Edit the `eest_stable` entry in `test-fixtures.json`: point `url` at the new
+release asset and set `sha256`/`size` to its published digest (e.g. from
+`gh api repos/<org>/<repo>/releases/tags/<tag> --jq '.assets[]|{name,size,digest}'`).
+Commit the manifest.
 
-That's it. CI re-runs against the new sha, the cache key changes, the
-converter regenerates the RLP tree once, subsequent runs hit the cache.
+That's it. CI re-runs against the new pin, the cache key changes, the
+converter regenerates the MFBD tree once, subsequent runs hit the cache.
 
 ### 4. JSON path (developer-only)
 
 CI exercises the MFBD path only. The same test pipelines also accept raw EEST
 JSON fixtures — useful when iterating on the converter, validating against
 unconverted upstream tests, or debugging a single subtest. The JSON tree is
-the [`third_party/eest-fixtures`](../third_party/eest-fixtures) submodule;
-initialise it first:
+`test-fixtures-cache/eest_stable/fixtures/blockchain_tests/`; populate it
+first:
 
 ```bash
-git submodule update --init third_party/eest-fixtures
+make test-fixtures
 ```
 
 | Pipeline | MFBD target (CI) | JSON target (dev-only) |

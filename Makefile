@@ -3,7 +3,8 @@
 
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
-.PHONY: z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
+.PHONY: test-fixtures \
+        z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
         execute-block selftest tests eest-mfbd-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
         sp1-benchmark-corpus sp1-benchmark release-artifacts
@@ -34,10 +35,19 @@ z6m_prover_turbo: z6m_guest_turbo
 execute-block: z6m_prover
 	prover/target/release/z6m_prover execute --file-name prover/temp/blocks/23519000/unifiedBlockAndStateRlp23519000.bin
 
-SELFTEST_JSON := third_party/eest-fixtures/blockchain_tests/static/state_tests/stExample/add11.json
+# Pinned EEST fixture releases (test-fixtures.json, erigon-style manifest):
+# `make test-fixtures` downloads, sha256-verifies and extracts every entry
+# into test-fixtures-cache/<key>/. Re-runs are no-ops while the pin matches.
+FIXTURES_CACHE := $(CURDIR)/test-fixtures-cache
+EEST_FIXTURES_DIR := $(FIXTURES_CACHE)/eest_stable/fixtures
+
+test-fixtures:
+	tools/test-fixtures.sh test-fixtures.json $(FIXTURES_CACHE)
+
+SELFTEST_JSON := $(EEST_FIXTURES_DIR)/blockchain_tests/static/state_tests/stExample/add11.json
 SELFTEST_MFBD := build/selftest.mfbd
 
-selftest: z6m_prover z6m_eest_convert
+selftest: z6m_prover z6m_eest_convert test-fixtures
 	@mkdir -p $(dir $(SELFTEST_MFBD))
 	$(EEST_CONVERT_BIN) emit --json $(SELFTEST_JSON) --index 0 > $(SELFTEST_MFBD)
 	prover/target/release/z6m_prover execute --file-name $(SELFTEST_MFBD)
@@ -60,18 +70,18 @@ z6m_eest_convert:
 	cmake --build build --target eest_to_flat_bundle -j$$(nproc)
 
 # MFBD fixtures tree, produced by the C++ `eest_to_flat_bundle bulk-convert`.
-# Content-addressed by the eest-fixtures sha so different submodule
-# checkouts coexist in third_party/eest-fixtures-mfbd/dev-<sha>/. CI
-# overrides EEST_MFBD_DIR with a cache-keyed path.
-EEST_SHA := $(shell git -C third_party/eest-fixtures rev-parse --short=12 HEAD 2>/dev/null)
-EEST_MFBD_DIR ?= $(CURDIR)/third_party/eest-fixtures-mfbd/dev-$(EEST_SHA)
+# Content-addressed by the pinned tarball sha (test-fixtures.json) so
+# different pins coexist in test-fixtures-cache/mfbd-<sha>/. CI overrides
+# EEST_MFBD_DIR with a cache-keyed path.
+EEST_SHA := $(shell python3 -c "import json;print(json.load(open('test-fixtures.json'))['eest_stable']['sha256'][:12])" 2>/dev/null)
+EEST_MFBD_DIR ?= $(FIXTURES_CACHE)/mfbd-$(EEST_SHA)
 
 # Regenerate the MFBD corpus whenever it is missing OR the converter binary
 # changed. The binary hash covers every transitive source that affects the
 # output bytes (eest_to_flat_bundle.cpp, direct_state_builder.cpp, flat_bundle.*,
 # account.hpp, ...); ninja only relinks it when those change, so the hash is
 # stable across no-op runs and self-heals a stale corpus automatically.
-eest-mfbd-build: z6m_eest_convert
+eest-mfbd-build: z6m_eest_convert test-fixtures
 	@conv_sha=$$(sha256sum "$(EEST_CONVERT_BIN)" | cut -c1-16); \
 	if [ -f "$(EEST_MFBD_DIR)/manifest.json" ] && \
 	   grep -q "\"converter_sha\": *\"$$conv_sha\"" "$(EEST_MFBD_DIR)/manifest.json"; then \
@@ -81,7 +91,7 @@ eest-mfbd-build: z6m_eest_convert
 	    rm -rf "$(EEST_MFBD_DIR)/blockchain_tests" "$(EEST_MFBD_DIR)/manifest.json"; \
 	    mkdir -p "$(EEST_MFBD_DIR)"; \
 	    $(EEST_CONVERT_BIN) bulk-convert \
-	        --input-dir $(CURDIR)/third_party/eest-fixtures/blockchain_tests \
+	        --input-dir $(EEST_FIXTURES_DIR)/blockchain_tests \
 	        --output-dir "$(EEST_MFBD_DIR)/blockchain_tests"; \
 	    printf '{"eest_sha":"%s","converter_sha":"%s"}\n' "$(EEST_SHA)" "$$conv_sha" > "$(EEST_MFBD_DIR)/manifest.json"; \
 	fi
@@ -95,7 +105,7 @@ eest-blockchain-tests: eest-mfbd-build
 eest-prover-test: z6m_prover eest-mfbd-build
 	prover/target/release/z6m_prover --test-service --test-dir $(EEST_MFBD_DIR)
 
-EEST_JSON_DIR ?= $(CURDIR)/third_party/eest-fixtures
+EEST_JSON_DIR ?= $(EEST_FIXTURES_DIR)/blockchain_tests
 
 eest-blockchain-tests-json:
 	cmake -B build/eest-json -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \

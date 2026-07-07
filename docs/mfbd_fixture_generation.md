@@ -11,8 +11,8 @@ wire-format discipline rule lives in [`../tools/claude/AGENTS.md`](../tools/clau
 ## 0. TL;DR
 
 ```bash
-# EEST fixtures (auto-keyed; regenerates only when the submodule or converter changed)
-make eest-mfbd-build           # third_party/eest-fixtures/*.json -> third_party/eest-fixtures-mfbd/dev-<sha>/**/*.mfbd
+# EEST fixtures (auto-keyed; regenerates only when the release pin or converter changed)
+make eest-mfbd-build           # test-fixtures-cache/eest_stable/fixtures/**/*.json -> test-fixtures-cache/mfbd-<sha>/**/*.mfbd
 make eest-blockchain-tests     # build + run the ctest suite against those .mfbd
 
 # Benchmark corpus (MANUAL — never auto-regenerates)
@@ -44,7 +44,7 @@ There are **two fixture sets**:
 | Set | Lives in | Source of truth | Regenerates |
 | --- | --- | --- | --- |
 | **Benchmark corpus** (200 mainnet blocks) | `temp/200_benchmark_blocks_mfbd_v2/<N>/flatWitnessBundle<N>.mfbd` | `temp/200_benchmark_blocks/<N>/unifiedBlockAndStateRlp<N>.bin` (raw legacy RLP) | **manually**, via `make sp1-benchmark-corpus` |
-| **EEST fixtures** | `third_party/eest-fixtures-mfbd/dev-<sha>/blockchain_tests/**/*.mfbd` | `third_party/eest-fixtures/blockchain_tests/**/*.json` (git submodule) | **automatically** (SHA-keyed), via `make eest-mfbd-build` |
+| **EEST fixtures** | `test-fixtures-cache/mfbd-<sha>/blockchain_tests/**/*.mfbd` | `test-fixtures-cache/eest_stable/fixtures/blockchain_tests/**/*.json` (pinned release tarball, `test-fixtures.json`) | **automatically** (SHA-keyed), via `make eest-mfbd-build` |
 
 > Note: `temp/200_benchmark_blocks/<N>/` holds **both** the raw `.bin` (the regen
 > source) and a `.mfbd` copy. `release_state_root_check.sh` reads the `.mfbd`
@@ -78,14 +78,14 @@ temp/200_benchmark_blocks/<N>/unifiedBlockAndStateRlp<N>.bin   # raw source (leg
 temp/200_benchmark_blocks/<N>/flatWitnessBundle<N>.mfbd        # converted (host check uses this)
 temp/200_benchmark_blocks_mfbd_v2/<N>/flatWitnessBundle<N>.mfbd # canonical benchmark corpus (BENCH_CORPUS_DIR)
 ```
-Makefile knobs: `BENCH_SRC_DIR ?= temp/200_benchmark_blocks`, `BENCH_CORPUS_DIR ?= temp/200_benchmark_blocks_mfbd_v2` (Makefile:117-118).
+Makefile knobs: `BENCH_SRC_DIR ?= temp/200_benchmark_blocks`, `BENCH_CORPUS_DIR ?= temp/200_benchmark_blocks_mfbd_v2` (Makefile:127-128).
 
 ### 3.2 Generate the corpus from the raw blocks
 ```bash
 make sp1-benchmark-corpus
 ```
 This builds `legacy_to_flat_bundle` and, for each `temp/200_benchmark_blocks/<N>/unifiedBlockAndStateRlp<N>.bin`,
-writes `temp/200_benchmark_blocks_mfbd_v2/<N>/flatWitnessBundle<N>.mfbd` (Makefile:122-133).
+writes `temp/200_benchmark_blocks_mfbd_v2/<N>/flatWitnessBundle<N>.mfbd` (Makefile:132-143).
 It is a plain `for` loop — **no manifest, no staleness check**: it always
 re-converts whatever `.bin` files are present.
 
@@ -112,40 +112,45 @@ Then `make sp1-benchmark-corpus` to convert the new `.bin` into the corpus.
 ## 4. EEST fixtures
 
 ### 4.1 Source
-`third_party/eest-fixtures` — git submodule, remote
-`https://github.com/erigontech/eest-fixtures`, containing
-`blockchain_tests/**/*.json` (per-fork dirs: `frontier/`, `paris/`, `osaka/`, …).
-Current pin: `373eebed796c`.
+`test-fixtures.json` — erigon-style manifest pinning a fixture release tarball
+per corpus key (`url` + `sha256` + `size`). The `eest_stable` key points at an
+`ethereum/execution-spec-tests` release; `make test-fixtures` (i.e.
+`tools/test-fixtures.sh`) downloads, sha256-verifies and extracts it into
+`test-fixtures-cache/eest_stable/fixtures/` — `blockchain_tests/**/*.json`
+in per-fork dirs (`frontier/`, `paris/`, `osaka/`, …). Re-runs are no-ops
+while the pin matches (sentinel `.sha256` in the extracted dir).
 
 ### 4.2 Generate the MFBD tree (auto-keyed)
 ```bash
 make eest-mfbd-build
 ```
-Steps (Makefile:74-87):
-1. Build `eest_to_flat_bundle` (Release).
-2. `EEST_SHA = git -C third_party/eest-fixtures rev-parse --short=12 HEAD`; output dir `EEST_MFBD_DIR = third_party/eest-fixtures-mfbd/dev-<EEST_SHA>`.
-3. **Skip-if-fresh:** if `dev-<sha>/manifest.json` already records the current converter binary's SHA, do nothing.
-4. Otherwise `eest_to_flat_bundle bulk-convert --input-dir third_party/eest-fixtures/blockchain_tests --output-dir dev-<sha>/blockchain_tests`, then write `manifest.json = {"eest_sha":…,"converter_sha":…}`.
+Steps (Makefile:84-97):
+1. Build `eest_to_flat_bundle` (Release); `make test-fixtures` the JSON tree.
+2. `EEST_SHA` = first 12 hex of the manifest's `eest_stable.sha256`; output dir `EEST_MFBD_DIR = test-fixtures-cache/mfbd-<EEST_SHA>`.
+3. **Skip-if-fresh:** if `mfbd-<sha>/manifest.json` already records the current converter binary's SHA, do nothing.
+4. Otherwise `eest_to_flat_bundle bulk-convert --input-dir test-fixtures-cache/eest_stable/fixtures/blockchain_tests --output-dir mfbd-<sha>/blockchain_tests`, then write `manifest.json = {"eest_sha":…,"converter_sha":…}`.
 
-**Double-keyed auto-invalidation:** the output dir is keyed by the **EEST submodule
-SHA** (so a fixture bump lands in a fresh `dev-<sha>/`), and the manifest is keyed
-by the **converter binary SHA** (so editing any converter source —
-`eest_to_flat_bundle.cpp`, `direct_state_builder.cpp`, `flat_bundle.*`, etc. —
-forces a rebuild within the same `dev-<sha>/`). You rarely regen EEST by hand;
-just run a target that depends on it.
+**Double-keyed auto-invalidation:** the output dir is keyed by the **pinned
+tarball SHA** (so a fixture bump lands in a fresh `mfbd-<sha>/`), and the
+manifest is keyed by the **converter binary SHA** (so editing any converter
+source — `eest_to_flat_bundle.cpp`, `direct_state_builder.cpp`,
+`flat_bundle.*`, etc. — forces a rebuild within the same `mfbd-<sha>/`). You
+rarely regen EEST by hand; just run a target that depends on it.
 
 ### 4.3 Consume
 - **C++ ctest suite:** `make eest-blockchain-tests` (configures `build/eest` with `-DEEST_MFBD_DIR=...`, registers each `.mfbd` as a ctest case, runs `ctest --parallel`). This is leg 1 of the 3-leg validation.
-- **Prover against EEST:** `make eest-prover-test` → `z6m_prover --test-service --test-dir dev-<sha>/`.
+- **Prover against EEST:** `make eest-prover-test` → `z6m_prover --test-service --test-dir mfbd-<sha>/`.
 
 ### 4.4 Bump to a newer EEST release
+Edit the `eest_stable` entry of `test-fixtures.json`: set `url` to the new
+release asset and `sha256`/`size` to its published digest (e.g. from
+`gh api repos/<org>/<repo>/releases/tags/<tag> --jq '.assets[]|{name,size,digest}'`).
+Then:
 ```bash
-git submodule update --remote third_party/eest-fixtures   # or: git -C third_party/eest-fixtures fetch && checkout <tag>
-git -C third_party/eest-fixtures rev-parse --short=12 HEAD # confirm new sha
-make eest-mfbd-build                                       # creates a new dev-<new-sha>/ tree
-git add third_party/eest-fixtures                          # commit the new submodule pointer
+make eest-mfbd-build   # downloads + verifies the new tarball, converts into a new mfbd-<new-sha>/ tree
+git add test-fixtures.json && git commit
 ```
-The old `dev-<old-sha>/` tree is left in place (cheap rollback / parallel runs).
+The old `mfbd-<old-sha>/` tree is left in place (cheap rollback / parallel runs).
 Expect the known-failing test set to shift with a new release — re-baseline the
 "2 known failures" if it does.
 
@@ -166,10 +171,11 @@ Expect the known-failing test set to shift with a new release — re-baseline th
    sp1_benchmark.py                      state_transition
 
 
-   third_party/eest-fixtures/blockchain_tests/**/*.json   (submodule)
+   test-fixtures.json pin ──make test-fixtures──▶
+   test-fixtures-cache/eest_stable/fixtures/blockchain_tests/**/*.json
                               │  make eest-mfbd-build (eest_to_flat_bundle bulk-convert)
                               ▼
-   third_party/eest-fixtures-mfbd/dev-<sha>/blockchain_tests/**/*.mfbd
+   test-fixtures-cache/mfbd-<sha>/blockchain_tests/**/*.mfbd
                               │  make eest-blockchain-tests
                               ▼
                          ctest (build/eest)
@@ -231,11 +237,11 @@ make sp1-benchmark
 | --- | --- | --- |
 | Wire-POD layout change (+ `kFlatBundleVersion` bump) | **must** `make sp1-benchmark-corpus` | **must** `make eest-mfbd-build` |
 | Converter logic change (how bytes are written) | **must** `make sp1-benchmark-corpus` | auto (converter SHA changes manifest) |
-| New EEST submodule release | — | bump submodule + `make eest-mfbd-build` |
+| New EEST release pin | — | edit `test-fixtures.json` + `make eest-mfbd-build` |
 | New / different benchmark blocks | fetch `.bin` + `make sp1-benchmark-corpus` | — |
 
 ### 6.3 Key asymmetry to remember
-- **EEST regen is automatic** — keyed by submodule SHA *and* converter binary SHA;
+- **EEST regen is automatic** — keyed by the pinned tarball SHA *and* converter binary SHA;
   any target that depends on `eest-mfbd-build` rebuilds it when stale.
 - **The benchmark corpus regen is manual** — `sp1-benchmark-corpus` has no manifest
   and no staleness check, and nothing ties the `_v2` suffix to `kFlatBundleVersion`.
@@ -267,11 +273,12 @@ as state-root / gas mismatches.
 | Version constant | `zilk_core/core/types_zz/flat_bundle.hpp:54` (`kFlatBundleVersion`) |
 | Version write / check | `flat_bundle.cpp:74` / `flat_bundle.cpp:123-125` |
 | Encoders | `zilk_core/dev/cli/{legacy_to,eest_to,json_witness_to}_flat_bundle.cpp` |
-| Make targets | `Makefile`: `eest-mfbd-build` (74), `eest-blockchain-tests` (89), `sp1-benchmark-corpus` (122), `sp1-benchmark` (136) |
+| Make targets | `Makefile`: `test-fixtures` (44), `eest-mfbd-build` (84), `eest-blockchain-tests` (99), `sp1-benchmark-corpus` (132), `sp1-benchmark` (146) |
 | Benchmark raw source | `temp/200_benchmark_blocks/<N>/unifiedBlockAndStateRlp<N>.bin` |
 | Benchmark corpus | `temp/200_benchmark_blocks_mfbd_v2/<N>/flatWitnessBundle<N>.mfbd` |
-| EEST JSON | `third_party/eest-fixtures/blockchain_tests/**/*.json` |
-| EEST MFBD | `third_party/eest-fixtures-mfbd/dev-<sha>/blockchain_tests/**/*.mfbd` |
+| EEST release pin | `test-fixtures.json` (`eest_stable` key) |
+| EEST JSON | `test-fixtures-cache/eest_stable/fixtures/blockchain_tests/**/*.json` |
+| EEST MFBD | `test-fixtures-cache/mfbd-<sha>/blockchain_tests/**/*.mfbd` |
 | Host check script | `tools/scripts/release_state_root_check.sh` |
 | Benchmark driver | `tools/scripts/sp1_benchmark.py` |
 | Format spec | `docs/flat_witness_bundle.md` |

@@ -40,7 +40,7 @@ jobs:
       - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
-          sparse-eest-fixtures: "skip"
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Prepare EEST MFBD fixtures
         id: eest-mfbd
@@ -97,6 +97,7 @@ jobs:
           retention-days: 30
 
       - name: Check failure threshold
+        shell: bash
         run: |
           failed=${{ steps.run_tests.outputs.failed }}
           total=${{ steps.run_tests.outputs.total }}

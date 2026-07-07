@@ -12,8 +12,8 @@ launches z6m_prover --test-service --test-dir for each shard in parallel
 
 If --fixtures is omitted, defaults (in order):
   $EEST_MFBD_DIR (CI sets this from the actions/cache step), or
-  third_party/eest-fixtures-mfbd/dev-<eest_sha>/ (local build via `make
-  eest-mfbd-build`).
+  test-fixtures-cache/mfbd-<eest_sha>/ (local build via `make
+  eest-mfbd-build`; sha = pinned tarball sha from test-fixtures.json).
 
 Usage:
     python3 eest_runner.py
@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -315,30 +316,25 @@ def default_fixtures_dir(fmt: str) -> Optional[str]:
     """Resolve the default fixtures path for `fmt`.
 
     mfbd / auto → `$EEST_MFBD_DIR` if set (CI sets this via the cache step), or
-                  `<repo>/third_party/eest-fixtures-mfbd/dev-<eest_short_sha>/`
+                  `<repo>/test-fixtures-cache/mfbd-<eest_short_sha>/`
                   (the local default produced by `make eest-mfbd-build`).
-    json        → `<repo>/third_party/eest-fixtures` (JSON submodule).
+    json        → `<repo>/test-fixtures-cache/eest_stable/fixtures`
+                  (populated by `make test-fixtures`).
     """
     here = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(here, "..", ".."))
     if fmt == "json":
-        return os.path.join(repo_root, "third_party", "eest-fixtures")
+        return os.path.join(repo_root, "test-fixtures-cache",
+                            "eest_stable", "fixtures")
     env = os.environ.get("EEST_MFBD_DIR")
     if env:
         return env
     try:
-        r = subprocess.run(
-            ["git", "-C", os.path.join(repo_root, "third_party", "eest-fixtures"),
-             "rev-parse", "--short=12", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            sha = r.stdout.strip()
-            return os.path.join(repo_root, "third_party",
-                                "eest-fixtures-mfbd", f"dev-{sha}")
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return None
+        with open(os.path.join(repo_root, "test-fixtures.json")) as f:
+            sha = json.load(f)["eest_stable"]["sha256"][:12]
+        return os.path.join(repo_root, "test-fixtures-cache", f"mfbd-{sha}")
+    except (OSError, KeyError, ValueError):
+        return None
 
 
 def main() -> int:
@@ -369,7 +365,7 @@ def main() -> int:
     fixtures = os.path.abspath(fixtures_arg)
     if not os.path.isdir(fixtures):
         hint = ("Run `make eest-mfbd-build` first." if args.format != "json"
-                else "Run `git submodule update --init third_party/eest-fixtures` first.")
+                else "Run `make test-fixtures` first.")
         print(f"ERROR: fixtures dir not found: {fixtures}\n  {hint}",
               file=sys.stderr)
         return 1

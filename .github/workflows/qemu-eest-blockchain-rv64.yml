@@ -54,7 +54,6 @@ jobs:
         uses: ./.github/actions/init-submodules
         with:
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
-          sparse-eest-fixtures: "skip"
 
       - name: Prepare EEST MFBD fixtures
         id: eest-mfbd

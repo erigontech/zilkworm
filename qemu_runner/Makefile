@@ -21,8 +21,8 @@ endif
 
 ELF := $(BUILD_DIR)/z6m_debug
 
-EEST_SHA := $(shell git -C $(CURDIR)/../third_party/eest-fixtures rev-parse --short=12 HEAD 2>/dev/null)
-EEST_MFBD_DIR ?= $(CURDIR)/../third_party/eest-fixtures-mfbd/dev-$(EEST_SHA)
+EEST_SHA := $(shell python3 -c "import json;print(json.load(open('$(CURDIR)/../test-fixtures.json'))['eest_stable']['sha256'][:12])" 2>/dev/null)
+EEST_MFBD_DIR ?= $(CURDIR)/../test-fixtures-cache/mfbd-$(EEST_SHA)
 
 CMAKE_FLAGS := \
 	-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
@@ -58,7 +58,7 @@ eest-blockchain-tests: xpack-elf-eest
 rerun-ctest: xpack-elf-eest
 	ctest --test-dir $(BUILD_DIR) --parallel --output-on-failure -V --timeout 7200
 
-EEST_JSON_DIR ?= $(CURDIR)/../third_party/eest-fixtures
+EEST_JSON_DIR ?= $(CURDIR)/../test-fixtures-cache/eest_stable/fixtures/blockchain_tests
 
 xpack-elf-eest-json:
 	cmake -B$(BUILD_DIR) -S. $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=Release \

@@ -49,11 +49,10 @@ jobs:
           submodules: false
           lfs: true
 
-      - name: Init submodules (skip eest-fixtures)
+      - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
-          sparse-eest-fixtures: skip
 
       - name: Symlink cargo target for caching
         run: |
