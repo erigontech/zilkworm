@@ -39,16 +39,8 @@ function(silkworm_library TARGET)
     list(FILTER SRC EXCLUDE REGEX "\/cli\/")
   endif()
 
-  # set(TEST_REGEX "_test\\.cpp$")
-  # # test_util subdirectories without CMakeLists.txt belong to TEST_SRC
-  # if(NOT "${CMAKE_CURRENT_SOURCE_DIR}" MATCHES "/test_util$")
-  #   set(TEST_REGEX "(${TEST_REGEX}|\/test_util\/)")
-  # endif()
-
-  # set(TEST_SRC ${SRC})
-  # list(FILTER TEST_SRC INCLUDE REGEX "${TEST_REGEX}")
-
-  # list(FILTER SRC EXCLUDE REGEX "${TEST_REGEX}")
+  # *_test.cpp files are unit-test TUs (zilkworm.tests target), not library sources.
+  list(FILTER SRC EXCLUDE REGEX "_test\\.cpp$")
   list(FILTER SRC EXCLUDE REGEX "_benchmark\\.cpp$")
 
   add_library(${TARGET} ${ARG_TYPE} ${SRC})
