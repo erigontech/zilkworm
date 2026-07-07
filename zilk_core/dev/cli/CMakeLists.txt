@@ -34,17 +34,11 @@ target_link_libraries(legacy_to_flat_bundle PRIVATE ${ZILK_CLI_TRIE_LIBS})
 add_executable(eest_to_flat_bundle "eest_to_flat_bundle.cpp")
 target_link_libraries(eest_to_flat_bundle PRIVATE ${ZILK_CLI_TRIE_LIBS})
 
-# iter121: standalone test for the MphfBuilder CHD-overflow graceful fallback.
-# The repo's silkworm_library macro has its gtest/Catch2 plumbing commented
-# out, so this is a plain executable using lightweight EXPECT_* macros.
-# Returns non-zero on failure; intended to be invoked directly:
-#   build/zilk_core/dev/cli/mphf_map_test
-add_executable(mphf_map_test "mphf_map_test.cpp")
-target_link_libraries(mphf_map_test PRIVATE silkworm_core)
+# mphf_map_test.cpp is a TU of the zilkworm.tests target (top-level CMakeLists.txt).
 
 # Soundness repro: a witness that omits an existing read-only account still
-# passes check_root while the EVM reads it as empty. Standalone executable
-# (like mphf_map_test); fails until the hidden-node gap is fixed. Run:
+# passes check_root while the EVM reads it as empty. Standalone executable;
+# fails until the hidden-node gap is fixed. Run:
 #   build/zilk_core/dev/cli/witness_hide_node_test
 add_executable(witness_hide_node_test "witness_hide_node_test.cpp")
 target_link_libraries(witness_hide_node_test PRIVATE silkworm_core)

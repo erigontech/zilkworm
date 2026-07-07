@@ -57,6 +57,20 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/compiler_settings.cmake)
 
 add_subdirectory(third_party)
 
+# Unit-test framework. Placed before compiler_warnings.cmake so Catch2
+# builds without the project's -Werror set.
+if(BUILD_TESTING)
+  include(FetchContent)
+  FetchContent_Declare(
+    Catch2
+    URL https://github.com/catchorg/Catch2/archive/refs/tags/v3.15.1.tar.gz
+    URL_HASH SHA256=be23a52b85cf04cd9587612147a10b023d59ed9757fa1843cc99e615d6c0893c
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_MakeAvailable(Catch2)
+  list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/compiler_warnings.cmake)
 
 if(SILKWORM_CLANG_TIDY)
@@ -66,6 +80,17 @@ if(SILKWORM_CLANG_TIDY)
 endif()
 
 add_subdirectory(zilk_core)
+
+# Aggregate Catch2 unit-test target. New *_test.cpp files join its source
+# list; each TEST_CASE is registered with ctest individually. Defined here
+# (not in zilk_core/) so projects embedding zilk_core with BUILD_TESTING=ON
+# but without Catch2 (qemu_runner) are unaffected.
+if(BUILD_TESTING)
+  add_executable(zilkworm.tests zilk_core/dev/cli/mphf_map_test.cpp)
+  target_link_libraries(zilkworm.tests PRIVATE silkworm_core Catch2::Catch2WithMain)
+  include(Catch)
+  catch_discover_tests(zilkworm.tests)
+endif()
 
 # All unit tests target
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/get_all_targets.cmake)
