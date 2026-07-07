@@ -141,21 +141,27 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
 template <bool DeletionEnabled>
 bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
     for (auto updates_it = updates_sorted.begin(); updates_it != updates_sorted.end(); ++updates_it) {
-        if (grid_.empty()) {
-            search_nibbles_ = nibbles64::from_bytes32(updates_it->key);
-            LeafNode l{search_nibbles_, 0, updates_it->current_value()};
-            insert_line(0, 0, std::move(l));
-            continue;
-        }
         const auto& trie_upd = *updates_it;
 
         auto new_nibbles = nibbles64::from_bytes32(trie_upd.key);
         search_nib_cursor_ = 0;
 
-        if (search_nibbles_.len > 0) {
+        if (!grid_.empty() && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
             // and it's in a branch, or just a leaf, or nothing (can't be ext -> leaf)
             seek_with_last_insert(new_nibbles);
+        }
+
+        if (grid_.empty()) {
+            // Either the very first update, or the preceding deletes emptied
+            // the whole trie (seek pops the last line then). Descending the
+            // main loop would read grid_[0] out of bounds; this key simply
+            // (re)seeds the trie as a single full-path leaf.
+            search_nibbles_ = new_nibbles;
+            last_was_delete_ = false;
+            LeafNode l{search_nibbles_, 0, trie_upd.current_value()};
+            insert_line(0, 0, std::move(l));
+            continue;
         }
 
         search_nibbles_ = new_nibbles;
@@ -293,7 +299,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                             delete_leaf(depth_);
                             last_was_delete_ = true;
                             depth_ = parent_depth;
-                            grid_[depth_].modified = true;
+                            if (!grid_.empty()) {  // deleting a root leaf empties the grid
+                                grid_[depth_].modified = true;
+                            }
                             break;  // delete complete
                         }
                     }

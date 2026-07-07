@@ -86,7 +86,10 @@ add_subdirectory(zilk_core)
 # (not in zilk_core/) so projects embedding zilk_core with BUILD_TESTING=ON
 # but without Catch2 (qemu_runner) are unaffected.
 if(BUILD_TESTING)
-  add_executable(zilkworm.tests zilk_core/dev/cli/mphf_map_test.cpp)
+  add_executable(zilkworm.tests
+    zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
+    zilk_core/dev/cli/mphf_map_test.cpp
+  )
   target_link_libraries(zilkworm.tests PRIVATE silkworm_core Catch2::Catch2WithMain)
   include(Catch)
   catch_discover_tests(zilkworm.tests)
