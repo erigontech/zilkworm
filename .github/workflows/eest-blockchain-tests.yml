@@ -2,9 +2,9 @@ name: EEST Blockchain Tests
 
 on:
   push:
-    branches: [master, main, release/*]
+    branches: [master, main]
   pull_request:
-    branches: [master, main, release/*]
+    branches: [master, main]
   workflow_dispatch:
 
 jobs:
@@ -16,7 +16,7 @@ jobs:
       contents: read
       packages: read
     container:
-      image: ghcr.io/erigontech/zilkworm-ci:latest
+      image: ghcr.io/erigontech/z6m-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -35,12 +35,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
           submodules: false
 
       - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
-          sparse-eest-fixtures: "skip"
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Prepare EEST MFBD fixtures
         id: eest-mfbd
@@ -97,6 +98,7 @@ jobs:
           retention-days: 30
 
       - name: Check failure threshold
+        shell: bash
         run: |
           failed=${{ steps.run_tests.outputs.failed }}
           total=${{ steps.run_tests.outputs.total }}

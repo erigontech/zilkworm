@@ -9,8 +9,8 @@ prover/prover_airbender/target/
 prover/target/
 
 # Large test fixtures (4.7 GB) — not needed for prover build
-third_party/eest-fixtures/blockchain_tests/
-third_party/eest-fixtures/state_tests/
+test-fixtures-cache/
+third_party/eest-fixtures/
 third_party/ethereum-tests/
 
 # IDE / editor

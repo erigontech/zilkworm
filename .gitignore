@@ -46,3 +46,4 @@ third_party/*/*/deps/
 .editorconfig
 .claude/worktrees
 .claude/INTENTIONS.md
+test-fixtures-cache/

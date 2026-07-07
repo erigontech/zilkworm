@@ -1,14 +1,8 @@
 [submodule "evmone"]
 	path = third_party/evmone
-	url = https://github.com/erigontech/zvm1.git
-	branch = release/0.1.0-alpha.1
+	url = https://github.com/erigontech/zevmone.git
+	branch = hyper1
 [submodule "intx"]
 	path = third_party/intx
 	url = https://github.com/chfast/intx.git
 	branch = master
-[submodule "ethereum-tests"]
-	path = third_party/ethereum-tests
-	url = https://github.com/ethereum/tests.git
-[submodule "eest-fixtures"]
-	path = third_party/eest-fixtures
-	url = https://github.com/erigontech/eest-fixtures

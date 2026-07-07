@@ -20,7 +20,7 @@ jobs:
           apt update
           apt install -y \
             build-essential cmake ninja-build \
-            git git-lfs \
+            git git-lfs curl \
             python3 python3-pip pipx \
             nodejs npm \
             qemu-system-misc
@@ -53,7 +53,6 @@ jobs:
         uses: ./.github/actions/init-submodules
         with:
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
-          sparse-eest-fixtures: "skip"
 
       - name: Prepare EEST MFBD fixtures
         id: eest-mfbd
