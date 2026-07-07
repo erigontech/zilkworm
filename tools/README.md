@@ -102,3 +102,82 @@ containing both `.mfbd` and `.json` files works without further flags.
 
 For the on-the-wire byte layout consumed by every runner — see
 [`docs/flat_witness_bundle.md`](../docs/flat_witness_bundle.md).
+
+## Check debug_executionWitness content
+
+We have some scripts to validate the `debug_executionWitness` payload an execution client returns for a block — i.e.
+whether the witness contains every trie node and preimage needed to re-execute the block statelessly. Two scripts run
+a full stateless validation against a stateless validator (Zilkworm and Reth); the third one inspects a witness for
+preimage completeness.
+
+Both the stateless validation scripts fetch over JSON-RPC by default (`RPC`, default `http://localhost:8545`); the node
+must expose `debug_getRawBlock` and `debug_executionWitness`.
+
+### 1. Zilkworm validator — `check_execution_witness.sh`
+
+Runs Zilkworm `z6m_prover` in execute mode (built on first use via `make z6m_prover`)
+and classifies each block: `VALID`, `SENTINEL_FAIL`, a `kWrong<…>` validation
+error, or `OTHER`.
+
+```bash
+# Single block over RPC (defaults to the chain tip if --block omitted)
+RPC=<rpc-url> tools/witness/check_execution_witness.sh --block 25350549
+
+# Contiguous range over RPC
+RPC=<rpc-url> tools/witness/check_execution_witness.sh --start-block 25350540 --end-block 25350549
+
+# Poll over RPC the next-latest tip N times
+RPC=<rpc-url> tools/witness/check_execution_witness.sh --count 5 --poll-secs 4
+```
+
+Env: `RPC`, `BLK`, `DIR` (z6m repo root), `DATA_DIR` (prover data-dir,
+default `$DIR/temp/mainnet`, shared with fetched blocks). Logs land in
+`$DATA_DIR/logs/<N>.log`.
+
+### 2. Reth validator — `check_execution_witness_reth.sh`
+
+Cross-checks against Reth's stateless validator. It clones and patches `paradigmxyz/stateless`,
+so the state-root calculation surfaces the exact blinded-node position (account hash + slot hash +
+missing nibble path) instead of a generic error, then builds a small `reth-check` binary and runs
+it per block. On failure it prints `INVALID -> <msg>` and, for a missing storage proof, resolves
+the `(address, slot)` preimages and reports whether an exclusion/inclusion proof is present or missing.
+
+The script accepts also local block/witness files via `--rlp`/`--witness`:
+
+- `blockRlp<N>.json` — the RLP-encoded block (`debug_getRawBlock` response)
+- `executionWitness<N>.json` — the witness (`debug_executionWitness` response), as the
+  raw RPC envelope or the bare `result` object; `.json`, `.json.gz`, or `.json.tar.gz`.
+
+```bash
+# Single block over RPC
+RPC=<rpc-url> tools/witness/check_execution_witness_reth.sh --block 25350549
+
+# Poll over RPC the next-latest tip N times
+RPC=<rpc-url> tools/witness/check_execution_witness_reth.sh --count 5
+
+# Local files in some dir, no RPC
+tools/witness/check_execution_witness_reth.sh --block 25350549 \
+    --rlp /tmp/blockRlp25350549.json --witness /tmp/executionWitness25350549.json
+```
+
+Requires `rustup` (toolchain 1.93+, auto-installed), `curl`, `python3`, and
+network access (clones Reth + stateless on first run). Env: `RPC`, `BLK`,
+`DIR` (reuse a built project dir; otherwise a temp dir is used and removed on
+exit unless `--keep-dir`).
+
+### 3. Preimage completeness — `verify_witness_preimages.py`
+
+Static witness check (no execution). Walks the account trie and each non-empty storage subtrie and
+reports trie leaves whose preimages are absent from `witness.keys`. The account/slot listed are a
+*superset* of true violations (a reported leaf may be a sibling not strictly required for execution);
+you need to cross-reference with the EVM access trace to obtain true violations. For this you use
+`--check-addr` option, which classifies specific addresses (`present`/`absent`/`blinded`)
+and flags any whose preimage is missing from `keys`.
+
+```bash
+python3 tools/witness/verify_witness_preimages.py executionWitness25350549.json
+python3 tools/witness/verify_witness_preimages.py executionWitness25350549.json \
+    --check-addr 0x0e0c281ff05d34729cd764dcfc4fa999b720407c
+```
+
+Requires `pycryptodome` (`pip install pycryptodome`).
