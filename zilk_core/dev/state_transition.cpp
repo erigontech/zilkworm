@@ -73,18 +73,19 @@ namespace {
 
         Block block;
         ByteView view{*rlp};
-        if (view.size() > kMaxRlpBlockSize && blockchain.config().revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
-            if (invalid) {
-                return Status::kPassed;
-            }             
-            sys_println("Block exceeded kMaxRlpBlockSize");
-            return Status::kFailed;
-        }
         if (!rlp::decode(view, block)) {
             if (invalid) {
                 return Status::kPassed;
             }
             sys_println("Failure to decode RLP");
+            return Status::kFailed;
+        }
+        // Only after decode: the fork gate needs the block's number/timestamp.
+        if (rlp->size() > kMaxRlpBlockSize && blockchain.config().revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
+            if (invalid) {
+                return Status::kPassed;
+            }
+            sys_println("Block exceeded kMaxRlpBlockSize");
             return Status::kFailed;
         }
 
@@ -214,16 +215,6 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             (bundle.block_flags[i] & ::zilkworm::kBlockFlagExpectInvalid);
         Block block;
         ByteView view{bundle.block_rlps[i]};
-        if (bundle.block_rlps[i].size() > kMaxRlpBlockSize && cfg_it->second.revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
-            if (expect_invalid) {
-                sys_println(std::format("block {} rejected as expected: decode", i));
-                continue;
-            } else {
-                sys_println(std::format("ERROR: block {} RLP size exceeds kMaxRlpBlockSize", i));
-                failed_ = true;
-                return {0, false};
-            }
-        }
         if (!rlp::decode(view, block).has_value()) {
             if (expect_invalid) {
                 sys_println(std::format("block {} rejected as expected: decode", i));
@@ -232,6 +223,17 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             sys_println(std::format("ERROR: block {} RLP decode failed", i));
             failed_ = true;
             return {0, false};
+        }
+        // Only after decode: the fork gate needs the block's number/timestamp.
+        if (bundle.block_rlps[i].size() > kMaxRlpBlockSize && cfg_it->second.revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
+            if (expect_invalid) {
+                sys_println(std::format("block {} rejected as expected: size", i));
+                continue;
+            } else {
+                sys_println(std::format("ERROR: block {} RLP size exceeds kMaxRlpBlockSize", i));
+                failed_ = true;
+                return {0, false};
+            }
         }
 
         if (ValidationResult err{blockchain.insert_block(block, false)}; err != ValidationResult::kOk) {
