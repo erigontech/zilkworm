@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
-use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_unified_rlp};
+use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_mfbd};
 use alloy_provider::{Provider, ProviderBuilder};
 use eyre::{bail, Context, Result};
 use z6m_common::{fetch_block_and_witness, FetchOutcome, FetchRequest};
@@ -246,7 +246,7 @@ impl Z6mProverService {
         let stdin = if opts.is_test {
             build_stdin_from_eth_tests(&input_path)?
         } else {
-            build_stdin_from_unified_rlp(&input_path)?
+            build_stdin_from_mfbd(&input_path)?
         };
 
         let client = ProverClient::from_env();
@@ -294,7 +294,7 @@ impl Z6mProverService {
         let stdin = if opts.is_test {
             build_stdin_from_eth_tests(&input_path)?
         } else {
-            build_stdin_from_unified_rlp(&input_path)?
+            build_stdin_from_mfbd(&input_path)?
         };
 
         let cfg = bincode::config::standard();
@@ -365,7 +365,7 @@ impl Z6mProverService {
         let stdin = if opts.is_test {
             build_stdin_from_eth_tests(&input_path)?
         } else {
-            build_stdin_from_unified_rlp(&input_path)?
+            build_stdin_from_mfbd(&input_path)?
         };
 
         let cfg = bincode::config::standard();
@@ -745,7 +745,7 @@ impl Z6mProverService {
             );
         }
 
-        let stdin = build_stdin_from_unified_rlp(input_path)?;
+        let stdin = build_stdin_from_mfbd(input_path)?;
 
         // Use CPU executor for the service
         let client = ProverClient::from_env();
