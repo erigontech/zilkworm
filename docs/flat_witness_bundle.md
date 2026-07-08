@@ -817,7 +817,7 @@ pub fn build_stdin_from_eth_tests(path: &Path) -> Result<SP1Stdin> {
     Ok(stdin)
 }
 
-pub fn build_stdin_from_unified_rlp(path: &Path) -> Result<SP1Stdin> {
+pub fn build_stdin_from_mfbd(path: &Path) -> Result<SP1Stdin> {
     let mut stdin = SP1Stdin::new();
     let raw = fs::read(path)?;        // file is already MFBD-wrapped on disk
     stdin.write_vec(raw);

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
-use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_unified_rlp};
+use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_mfbd};
 use alloy_provider::{Provider, ProviderBuilder};
 use eyre::{bail, Context, Result};
 use z6m_common::{fetch_block_and_witness, FetchOutcome, FetchRequest};
@@ -332,7 +332,7 @@ impl Z6mProverService {
         let stdin = if opts.is_test {
             build_stdin_from_eth_tests(&input_path)?
         } else {
-            build_stdin_from_unified_rlp(&input_path)?
+            build_stdin_from_mfbd(&input_path)?
         };
 
         let _cfg = bincode::config::standard();
@@ -431,7 +431,7 @@ impl Z6mProverService {
         let stdin = if opts.is_test {
             build_stdin_from_eth_tests(&input_path)?
         } else {
-            build_stdin_from_unified_rlp(&input_path)?
+            build_stdin_from_mfbd(&input_path)?
         };
 
         let _cfg = bincode::config::standard();
@@ -752,7 +752,7 @@ impl Z6mProverService {
                 let log_path = data_dir.join("executionLogs.log");
 
                 let handle = tokio::spawn(async move {
-                    let stdin = match build_stdin_from_unified_rlp(&input_path) {
+                    let stdin = match build_stdin_from_mfbd(&input_path) {
                         Ok(s) => s,
                         Err(e) => {
                             error!(
@@ -896,7 +896,7 @@ impl Z6mProverService {
                 continue;
             }
 
-            let stdin = match build_stdin_from_unified_rlp(&input_path) {
+            let stdin = match build_stdin_from_mfbd(&input_path) {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("block {} failed to build stdin: {}, skipping", block_number, e);
@@ -951,13 +951,15 @@ impl Z6mProverService {
             bail!("--test-dir {} is not a directory", test_dir.display());
         }
 
-        // Collect all JSON files recursively
+        // Collect all EEST test files recursively: .mfbd bundles produced by
+        // eest_to_flat_bundle, or raw .json fixtures. The guest dispatches on
+        // the leading magic, so both extensions are valid inputs.
         let mut test_files: Vec<PathBuf> = Vec::new();
-        Self::collect_json_files(&test_dir, &mut test_files)?;
+        Self::collect_test_files(&test_dir, &mut test_files)?;
         test_files.sort();
 
         if test_files.is_empty() {
-            bail!("no .json test files found in {}", test_dir.display());
+            bail!("no .mfbd or .json test files found in {}", test_dir.display());
         }
 
         info!("starting EEST test-service mode, {} test files from {}", test_files.len(), test_dir.display());
@@ -994,7 +996,13 @@ impl Z6mProverService {
 
             info!("[{}/{}] executing {}", i + 1, total, test_file.display());
 
-            let stdin = match build_stdin_from_eth_tests(test_file) {
+            let is_json = test_file.extension().map_or(false, |ext| ext == "json");
+            let stdin_result = if is_json {
+                build_stdin_from_eth_tests(test_file)
+            } else {
+                build_stdin_from_mfbd(test_file)
+            };
+            let stdin = match stdin_result {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("test {} failed to build stdin: {}, skipping", file_name, e);
@@ -1012,25 +1020,41 @@ impl Z6mProverService {
                 }
             };
 
-            let gas_used = output.read::<u64>();
+            let result = output.read::<u64>();
             let cycle_count = report.total_instruction_count();
             let prover_gas = report.gas().unwrap_or_default();
             let syscall_count = report.total_syscall_count();
 
-            if gas_used == 0 {
-                error!(test = %file_name, cycles = cycle_count, prover_gas, "test execution FAILED (gas_used=0)");
-                println!(
-                    "[{}/{}] FAILED {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
-                    i + 1, total, file_name, cycle_count, prover_gas, syscall_count
-                );
-                failed += 1;
-            } else {
-                println!(
-                    "[{}/{}] PASS {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
-                    i + 1, total, file_name, gas_used, cycle_count, prover_gas, syscall_count
-                );
-                passed += 1;
-            }
+            // Guest return protocol (see "Public output" docs/architecture.md).
+            const RUN_FAILURE: u64 = u64::MAX;
+            const RUN_SKIPPED: u64 = u64::MAX - 1;
+            let gas_used = match result {
+                RUN_FAILURE => {
+                    error!(test = %file_name, cycles = cycle_count, prover_gas, "test execution FAILED");
+                    println!(
+                        "[{}/{}] FAILED {} (cycles={}, prover_gas={}, syscall_count={})",
+                        i + 1, total, file_name, cycle_count, prover_gas, syscall_count
+                    );
+                    failed += 1;
+                    0
+                }
+                RUN_SKIPPED => {
+                    println!(
+                        "[{}/{}] SKIP {} (guest reported skipped)",
+                        i + 1, total, file_name
+                    );
+                    skipped += 1;
+                    0
+                }
+                gas => {
+                    println!(
+                        "[{}/{}] PASS {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
+                        i + 1, total, file_name, gas, cycle_count, prover_gas, syscall_count
+                    );
+                    passed += 1;
+                    gas
+                }
+            };
 
             let log = ExecutionLog {
                 block_number: 0,
@@ -1048,13 +1072,16 @@ impl Z6mProverService {
         Ok(())
     }
 
-    fn collect_json_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    fn collect_test_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                Self::collect_json_files(&path, files)?;
-            } else if path.extension().map_or(false, |ext| ext == "json") {
+                Self::collect_test_files(&path, files)?;
+            } else if path
+                .extension()
+                .map_or(false, |ext| ext == "mfbd" || ext == "json")
+            {
                 files.push(path);
             }
         }
@@ -1078,7 +1105,7 @@ impl Z6mProverService {
         let stdin = if opts.is_test {
             build_stdin_from_eth_tests(&input_path)?
         } else {
-            build_stdin_from_unified_rlp(&input_path)?
+            build_stdin_from_mfbd(&input_path)?
         };
         // Use CPU executor for the service
         // let client = ProverClient::from_env().await;

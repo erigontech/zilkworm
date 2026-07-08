@@ -31,7 +31,7 @@ pub fn build_stdin_from_eth_tests(path: &Path) -> Result<SP1Stdin> {
 /// Build an SP1Stdin carrying an MFBD-wrapped FlatBundle. The on-disk file
 /// is already MFBD-wrapped post-converter — we just slurp it raw and write
 /// a single Vec into SP1Stdin.
-pub fn build_stdin_from_unified_rlp(path: &Path) -> Result<SP1Stdin> {
+pub fn build_stdin_from_mfbd(path: &Path) -> Result<SP1Stdin> {
     let mut stdin = SP1Stdin::new();
     let raw = fs::read(path)?;
     stdin.write_vec(raw);
