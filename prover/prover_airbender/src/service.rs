@@ -23,10 +23,10 @@ use execution_utils::unrolled_gpu::UnrolledProver;
 
 /// Capacity of the fetcher → prover-worker work queue.
 ///
-/// At most this many pre-fetched blocks can sit on disk (their unified-RLP
+/// At most this many pre-fetched blocks can sit on disk (their MFBD flat-bundle
 /// files already written) before the fetcher backpressures on
 /// `tx.send().await`. Raising this lets the fetcher get further ahead when
-/// the GPU is the bottleneck; each in-flight item costs one unified-RLP
+/// the GPU is the bottleneck; each in-flight item costs one MFBD flat-bundle
 /// file under `data_dir`.
 const PROVER_QUEUE_CAPACITY: usize = 4;
 
@@ -61,13 +61,13 @@ pub struct ProvingLog {
 
 /// One unit of work handed from the fetcher to the prover worker.
 ///
-/// The unified RLP is already on disk at `unified_path` when the item is
+/// The MFBD flat bundle is already on disk at `bundle_path` when the item is
 /// enqueued; only the path travels through the channel to keep queue
 /// memory bounded.
 #[derive(Debug)]
 struct WorkItem {
     block_number: u64,
-    unified_path: PathBuf,
+    bundle_path: PathBuf,
     execute: bool,
     prove: bool,
 }
@@ -149,7 +149,7 @@ impl AirbenderService {
     ///
     /// Topology:
     /// - A **fetcher** task walks block numbers, pulls each one off the RPC,
-    ///   writes the unified RLP to disk, and pushes a `WorkItem` into a
+    ///   writes the MFBD flat bundle to disk, and pushes a `WorkItem` into a
     ///   bounded channel. It fires `ethproofs.queued(block)` as a
     ///   background `tokio::spawn` so the fetcher never waits on HTTP.
     /// - A **prover worker** task drains the channel, running execute
@@ -241,8 +241,8 @@ impl AirbenderService {
                     block_number: Some(block_number),
                     data_dir: self.config.data_dir.clone(),
                     save_all_responses: self.config.save_all_responses,
-                    build_eth_test: false,
                     geth: false,
+                    force_rebuild: false,
                 })
                 .await
                 {
@@ -266,7 +266,7 @@ impl AirbenderService {
 
                 let item = WorkItem {
                     block_number,
-                    unified_path: outcome.unified_rlp_path,
+                    bundle_path: outcome.flat_bundle_path,
                     execute: should_execute,
                     prove: should_prove,
                 };
@@ -307,7 +307,7 @@ impl AirbenderService {
                     Self::format_timestamp(),
                     item.block_number
                 );
-                if let Err(err) = self.execute_block(item.block_number, &item.unified_path) {
+                if let Err(err) = self.execute_block(item.block_number, &item.bundle_path) {
                     error!(block = item.block_number, error = %err, "Execution failed");
                 }
             }
@@ -326,7 +326,7 @@ impl AirbenderService {
                     tokio::spawn(async move { c.proving(bn).await; });
                 }
 
-                match self.prove_inner(item.block_number, &item.unified_path).await {
+                match self.prove_inner(item.block_number, &item.bundle_path).await {
                     Ok((proof_bytes, log)) => {
                         println!(
                             "[{}] Proved block {} gas_used={} cycles={} proofs={} time={}ms",

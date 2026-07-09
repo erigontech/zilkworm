@@ -6,7 +6,6 @@
 
 #include <bit>
 #include <cstring>
-#include <format>
 #include <fstream>
 #include <memory>
 #include <new>
@@ -217,20 +216,20 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         ByteView view{bundle.block_rlps[i]};
         if (!rlp::decode(view, block).has_value()) {
             if (expect_invalid) {
-                sys_println(std::format("block {} rejected as expected: decode", i));
+                sys_println(("block " + std::to_string(i) + " rejected as expected: decode").c_str());
                 continue;
             }
-            sys_println(std::format("ERROR: block {} RLP decode failed", i));
+            sys_println(("ERROR: block " + std::to_string(i) + " RLP decode failed").c_str());
             failed_ = true;
             return {0, false};
         }
         // Only after decode: the fork gate needs the block's number/timestamp.
         if (bundle.block_rlps[i].size() > kMaxRlpBlockSize && cfg_it->second.revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
             if (expect_invalid) {
-                sys_println(std::format("block {} rejected as expected: size", i));
+                sys_println(("block " + std::to_string(i) + " rejected as expected: size").c_str());
                 continue;
             } else {
-                sys_println(std::format("ERROR: block {} RLP size exceeds kMaxRlpBlockSize", i));
+                sys_println(("ERROR: block " + std::to_string(i) + " RLP size exceeds kMaxRlpBlockSize").c_str());
                 failed_ = true;
                 return {0, false};
             }
@@ -238,17 +237,18 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
 
         if (ValidationResult err{blockchain.insert_block(block, false)}; err != ValidationResult::kOk) {
             if (expect_invalid) {
-                sys_println(std::format("block {} rejected as expected: {}",
-                                        i, magic_enum::enum_name(err)));
+                sys_println(("block " + std::to_string(i) + " rejected as expected: "
+                             + std::string(magic_enum::enum_name(err))).c_str());
                 continue;
             }
-            sys_println(std::format("ERROR: validation error at block {}: {} ({})",
-                                    i, magic_enum::enum_name(err), magic_enum::enum_integer(err)));
+            sys_println(("ERROR: validation error at block " + std::to_string(i) + ": "
+                         + std::string(magic_enum::enum_name(err)) + " ("
+                         + std::to_string(magic_enum::enum_integer(err)) + ")").c_str());
             failed_ = true;
             return {0, false};
         }
         if (expect_invalid) {
-            sys_println(std::format("ERROR: expected-invalid block {} was accepted", i));
+            sys_println(("ERROR: expected-invalid block " + std::to_string(i) + " was accepted").c_str());
             failed_ = true;
             return {0, false};
         }
@@ -258,8 +258,8 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
                                  : check_root_new_block(bundle.direct, block.header, rev);
         first_root_check = false;
         if (!root_ok) {
-            sys_println(std::format("ERROR: State Root Mismatch at block {}: expected {}",
-                                    i, to_hex(block.header.state_root)));
+            sys_println(("ERROR: State Root Mismatch at block " + std::to_string(i)
+                         + ": expected " + to_hex(block.header.state_root)).c_str());
             failed_ = true;
             return {0, false};
         }
@@ -453,7 +453,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     auto prev_root = direct_state.read_header(header.number - 1, header.parent_hash)->state_root;
     mpt::GridMPT<true> acc_trie(direct_state, prev_root);
     auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
-    sys_println(std::format("New Root: {}", to_hex(new_root)));
+    sys_println(("New Root: " + to_hex(new_root)).c_str());
     const bool ok = (new_root == header.state_root);
     for (const auto& addr : direct_state.changed_addresses_journal()) {
         if (direct_state.is_deleted(addr) || (clear_empty && direct_state.is_empty_account(addr))) continue;
@@ -518,7 +518,7 @@ bool StateTransition::check_root_new_block(DirectState& direct_state,
                     r.rlp);
     }
     const auto new_root = leaves.empty() ? kEmptyRoot : hb.root_hash();
-    sys_println(std::format("New Root (incremental): {}", to_hex(new_root)));
+    sys_println(("New Root (incremental): " + to_hex(new_root)).c_str());
     const bool ok = (new_root == header.state_root);
     direct_state.clear_change_journal();
     return ok;

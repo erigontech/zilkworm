@@ -206,27 +206,37 @@ struct ExecutionLog {
 ///   word 0: dispatch flag (0=unified RLP, 1=EEST JSON test)
 ///   word 1: num_bytes (u32, little-endian byte count)
 ///   words 2..N: file contents packed into u32 words (LE, zero-padded tail)
+// Mirrors zilk_core/core/types_zz/flat_bundle.hpp.
+const INPUT_MAGIC_EJSN: u32 = 0x4E534A45; // "EJSN"
+const INPUT_VERSION_EJSN: u32 = 1;
+
 pub(crate) fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>> {
     let bytes = fs::read(input_file)
         .map_err(|e| eyre!("failed to read input file '{}': {}", input_file.display(), e))?;
 
-    // If is_test, minify the JSON first
+    // The guest dispatches on the envelope's leading 4-byte magic (MFBD/EJSN).
+    // MFBD files are already enveloped on disk by the flat-bundle converter;
+    // EEST JSON test fixtures are minified and wrapped in an EJSN envelope here.
     let bytes = if is_test {
         let value: serde_json::Value = serde_json::from_str(
             std::str::from_utf8(&bytes).map_err(|e| eyre!("invalid UTF-8 in test file: {}", e))?,
         )
         .map_err(|e| eyre!("invalid JSON in test file: {}", e))?;
-        serde_json::to_vec(&value).map_err(|e| eyre!("JSON re-serialize failed: {}", e))?
+        let minified =
+            serde_json::to_vec(&value).map_err(|e| eyre!("JSON re-serialize failed: {}", e))?;
+        let mut envelope = Vec::with_capacity(8 + minified.len());
+        envelope.extend_from_slice(&INPUT_MAGIC_EJSN.to_le_bytes());
+        envelope.extend_from_slice(&INPUT_VERSION_EJSN.to_le_bytes());
+        envelope.extend_from_slice(&minified);
+        envelope
     } else {
         bytes
     };
 
     let num_bytes = bytes.len() as u32;
     let num_words = (bytes.len() + 3) / 4;
-    // +2 capacity: dispatch word + byte count + data words
-    let mut oracle = Vec::with_capacity(2 + num_words);
-    // Dispatch word: 1 = test mode, 0 = unified RLP
-    oracle.push(if is_test { 1u32 } else { 0u32 });
+    // +1 capacity: byte count + data words
+    let mut oracle = Vec::with_capacity(1 + num_words);
     oracle.push(num_bytes);
     for chunk in bytes.chunks(4) {
         let mut word = [0u8; 4];

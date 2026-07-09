@@ -30,7 +30,7 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
 endif()
 
 project(zilkworm)
-set(PROJECT_VERSION 0.1.0-alpha.2)
+set(PROJECT_VERSION 0.1.0-alpha.1)
 
 include(CTest)
 
@@ -122,14 +122,8 @@ install(
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/zilk_core
 )
 
-# Header-only transitive deps since this is fetched and qemu has split build required by zilk_core public headers
 install(
-    DIRECTORY
-    ${CMAKE_BINARY_DIR}/_deps/nlohmann_json-src/include/nlohmann
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-install(
-    DIRECTORY
-    ${CMAKE_BINARY_DIR}/_deps/magic_enum-src/include/magic_enum
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/zilk_core/print.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/zilk_core
 )

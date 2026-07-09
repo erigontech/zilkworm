@@ -4,5 +4,5 @@
 	branch = hyper1
 [submodule "intx"]
 	path = third_party/intx
-	url = https://github.com/chfast/intx.git
-	branch = master
+	url = https://github.com/somnergy/intx.git
+	branch = som/airbender-intx-opts

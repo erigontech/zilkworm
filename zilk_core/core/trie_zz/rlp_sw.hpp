@@ -21,8 +21,9 @@
 
 namespace zilkworm {
 
-// rlp helpers live in silkworm::rlp; alias for local readability.
+// rlp/endian helpers live in silkworm; aliases for local readability.
 namespace rlp = ::silkworm::rlp;
+namespace endian = ::silkworm::endian;
 
 #if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG)
 inline thread_local Bytes static_buffer = []() {

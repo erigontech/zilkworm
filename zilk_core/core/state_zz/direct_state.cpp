@@ -368,7 +368,7 @@ void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
     if (pa.slot_count > 0) {
         const auto cap_slots = slots_for(pa);
         const auto begin = cap_slots.begin();
-        const auto end = begin + pa.slot_count;
+        const auto end = begin + static_cast<std::ptrdiff_t>(pa.slot_count);
         auto it = std::lower_bound(begin, end, key,
                                    [](const Slot& s, const evmc::bytes32& k) {
                                        return std::memcmp(s.key, k.bytes, 32) < 0;

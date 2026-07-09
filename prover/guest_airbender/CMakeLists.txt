@@ -19,6 +19,10 @@ add_executable(z6m_guest
     src/start.S
 )
 
+# zilk_core headers (print.hpp, mphf_map.hpp, ...) dispatch on AIRBENDER;
+# without it they fall back to the iostream host implementation.
+target_compile_definitions(z6m_guest PRIVATE AIRBENDER)
+
 
 # ====== For Zilkworm project at .. ===============
 set(SW_INSTALL_DIR ${CMAKE_BINARY_DIR}/zilkworm-install CACHE PATH "")
@@ -78,13 +82,14 @@ target_link_options(z6m_guest PRIVATE
 target_link_libraries(z6m_guest PRIVATE
     -Wl,--start-group
     silkworm_dev silkworm_core
+    "${CMAKE_BINARY_DIR}/zilkworm/zilk_core/core/types_zz/libsilkworm_types_zz.a"
     "${CMAKE_BINARY_DIR}/zilkworm/third_party/libevmone.a"
     "${CMAKE_BINARY_DIR}/zilkworm/deps/src/blst/libblst.a"
     "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-loader.a"
     "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-instructions.a"
     # libsecp256k1 disabled — using evmone's built-in ecrecover
     # "${CMAKE_BINARY_DIR}/zilkworm/_deps/libsecp256k1-build/lib/libsecp256k1.a"
-    c gcc nosys stdc++
+    c m gcc nosys stdc++
     -Wl,--end-group
 )
 
