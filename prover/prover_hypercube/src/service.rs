@@ -634,22 +634,32 @@ impl Z6mProverService {
         };
         let url = Url::parse(&service.rpc_url)?;
         // HTTP provider over `--rpc-url`. Drives the `Poll` head source, seeds
-        // the `Ws` watermark, and backs the `Ws` backstop poll — kept on HTTP so
-        // it keeps advancing the watermark even while the WS connection is down
-        // or was never established (initial connect failure).
+        // the `Ws` watermark, backs the `Ws` backstop poll, and serves the
+        // WS-mode HTTP fetch fallback — kept on HTTP so it keeps working even
+        // while the WS connection is down or was never established.
         let http_provider = ProviderBuilder::new().connect_http(url).erased();
+        // Fallback fetch provider for `fetch_block_with_fallback` — an `Arc`
+        // clone of the same client, not a second connection pool.
+        let http_fallback = http_provider.clone();
 
-        let mut next_block = if let Some(start) = service.start_block {
-            start
-        } else {
+        // One startup poll covers both consumers of the initial tip: the cursor
+        // start (when `--start-block` is absent) and the `Ws` watermark seed.
+        // Poll mode with `--start-block` never polled at startup and still
+        // doesn't; `start_tip` is unused there.
+        let start_tip: u64 = if service.start_block.is_none() || validated_ws_url.is_some() {
             match Self::get_block_number_with_retry(&http_provider, 3).await {
-                Ok(block_num) => block_num.saturating_add(1),
+                Ok(block_num) => block_num,
                 Err(e) => {
                     error!("Failed to get initial block number after retries: {}", e);
                     return Err(e);
                 }
             }
+        } else {
+            0
         };
+        let mut next_block = service
+            .start_block
+            .unwrap_or_else(|| start_tip.saturating_add(1));
 
         info!("Service starting from block: {}", next_block);
 
@@ -659,26 +669,18 @@ impl Z6mProverService {
         // (memoryless). The Ws arm seeds `latest` up front so a behind-tip start
         // begins in catch-up (drain, never await) instead of stalling.
         let mut latest: u64 = 0;
-        let mut head_source = match head_source_kind(&service) {
-            HeadSourceKind::Poll => {
+        let mut head_source = match validated_ws_url {
+            None => {
                 info!("head source: poll (eth_blockNumber)");
                 HeadSource::Poll {
                     provider: http_provider,
                 }
             }
-            HeadSourceKind::Ws => {
-                let ws_url =
-                    validated_ws_url.expect("Ws head-source kind implies a validated --ws-url");
-                // Seed the watermark with one `eth_blockNumber` regardless of
-                // `--start-block`; without it a behind-tip start would route the
-                // first iteration into `await_tip` and stall catch-up.
-                latest = match Self::get_block_number_with_retry(&http_provider, 3).await {
-                    Ok(h) => h,
-                    Err(e) => {
-                        error!("Failed to seed WS watermark after retries: {}", e);
-                        return Err(e);
-                    }
-                };
+            Some(ws_url) => {
+                // Seed the watermark from the startup poll; without it a
+                // behind-tip start would route the first iteration into
+                // `await_tip` and stall catch-up.
+                latest = start_tip;
                 // Initial connect is best-effort: on failure we degrade to the
                 // HTTP backstop poll (never fatal — see `HeadSource::await_tip`)
                 // and keep `provider: None`.
@@ -694,7 +696,6 @@ impl Z6mProverService {
                     provider,
                     heads,
                     backstop: Backstop::Provider(http_provider),
-                    backoff_attempt: 0,
                 }
             }
         };
@@ -762,80 +763,21 @@ impl Z6mProverService {
                 now_ms()
             );
 
-            // In Ws mode with a live subscription the fetch rides the WS socket;
-            // otherwise (Poll mode, or WS never established) it falls back to an
-            // HTTP provider built from `--rpc-url` inside the fetcher.
-            let fetch_provider = head_source.fetch_provider();
-            let ws_routed = fetch_provider.is_some();
-            let outcome = match fetch_block_and_witness(FetchRequest {
-                rpc_url: &service.rpc_url,
-                block_number: Some(block_number),
-                data_dir: data_dir.clone(),
-                save_all_responses: service.save_all_responses,
-                geth: false,
-                force_rebuild: true,
-                provider: fetch_provider,
-            })
+            let outcome = match fetch_block_with_fallback(
+                &head_source,
+                &service,
+                &data_dir,
+                block_number,
+                &http_fallback,
+            )
             .await
             {
-                Ok(outcome) => outcome,
-                Err(err) if ws_routed => {
-                    // A dead WS connection must not skip a block HTTP could still
-                    // serve: retry once over HTTP (`--rpc-url`, provider: None)
-                    // before the skip below.
-                    warn!(%block_number, error = %err, "WS-routed fetch failed; retrying once over HTTP");
-                    match fetch_block_and_witness(FetchRequest {
-                        rpc_url: &service.rpc_url,
-                        block_number: Some(block_number),
-                        data_dir: data_dir.clone(),
-                        save_all_responses: service.save_all_responses,
-                        geth: false,
-                        force_rebuild: true,
-                        provider: None,
-                    })
-                    .await
-                    {
-                        Ok(outcome) => outcome,
-                        Err(err) => {
-                            // The downward-reorg rollback is live-mode only: it
-                            // re-gates a height via the persistent watermark.
-                            // In `--end-block` mode there is no watermark gate
-                            // (the loop bounds on `next_block > end`), so rolling
-                            // `latest` back and `continue`ing would re-fetch the
-                            // same not-yet-mined block forever with no backoff.
-                            // Fall through to the byte-identical Poll-mode skip.
-                            let receded = if service.end_block.is_none() {
-                                head_source.tip_receded_below(block_number).await
-                            } else {
-                                None
-                            };
-                            if let Some(tip) = receded {
-                                warn!(%block_number, tip, "block not canonical yet (downward reorg); awaiting re-canonicalization instead of skipping");
-                                latest = tip;
-                                continue;
-                            }
-                            error!(%block_number, error = %err, "fetch_block_and_witness failed (HTTP fallback)");
-                            next_block += 1;
-                            continue;
-                        }
-                    }
+                BlockFetch::Fetched(outcome) => outcome,
+                BlockFetch::AwaitRecede(tip) => {
+                    latest = tip;
+                    continue;
                 }
-                Err(err) => {
-                    // Live-mode only (see the HTTP-fallback branch above): in
-                    // `--end-block` mode the watermark never gates the loop, so
-                    // the rollback+`continue` would hot-spin on a block at/above
-                    // the tip. Skip forward instead, matching Poll mode.
-                    let receded = if service.end_block.is_none() {
-                        head_source.tip_receded_below(block_number).await
-                    } else {
-                        None
-                    };
-                    if let Some(tip) = receded {
-                        warn!(%block_number, tip, "block not canonical yet (downward reorg); awaiting re-canonicalization instead of skipping");
-                        latest = tip;
-                        continue;
-                    }
-                    error!(%block_number, error = %err, "fetch_block_and_witness failed");
+                BlockFetch::Skip => {
                     next_block += 1;
                     continue;
                 }
@@ -1469,24 +1411,6 @@ const WS_BACKSTOP: Duration = Duration::from_secs(24);
 /// tuning. 256 MiB leaves comfortable headroom.
 const WS_MAX_MESSAGE_SIZE: usize = 256 << 20;
 
-/// Which tip-watermark source the live service loop should use, decided purely
-/// from config so the choice is unit-testable without building any provider.
-#[derive(Debug, PartialEq, Eq)]
-enum HeadSourceKind {
-    Poll,
-    Ws,
-}
-
-/// Select the head-source mode: `Ws` iff `--ws-url` is set, else `Poll`. Pure —
-/// the only input is [`ServiceConfig::ws_url`].
-fn head_source_kind(cfg: &ServiceConfig) -> HeadSourceKind {
-    if cfg.ws_url.is_some() {
-        HeadSourceKind::Ws
-    } else {
-        HeadSourceKind::Poll
-    }
-}
-
 /// Source of the chain-tip watermark that gates the live service loop.
 ///
 /// `Poll` is a verbatim extraction of the historical per-iteration
@@ -1503,27 +1427,26 @@ enum HeadSource {
     /// byte (persisting a max here would diverge whenever `eth_blockNumber`
     /// decreases).
     Poll { provider: DynProvider },
-    /// `newHeads` subscription used purely as a tip watermark. Reconnect with
-    /// capped backoff on stream death and never-fatal backstop degradation live
-    /// in [`HeadSource::await_tip`]; `run_service` selects this variant when
-    /// `--ws-url` is set, seeding the watermark up front. Unit tests construct it
-    /// with a channel-backed head stream and a canned backstop.
+    /// `newHeads` subscription used purely as a tip watermark. Transient socket
+    /// drops are healed by alloy's own transport reconnect underneath the same
+    /// subscription handle (see [`connect_ws_head_stream`]); never-fatal
+    /// backstop degradation lives in [`HeadSource::await_tip`]. `run_service`
+    /// selects this variant when `--ws-url` is set, seeding the watermark up
+    /// front. Unit tests construct it with a channel-backed head stream and a
+    /// canned backstop.
     Ws {
-        /// Pubsub provider hosting both the subscription and the backstop poll
+        /// Pubsub provider hosting both the subscription and the fetch RPCs
         /// over one connection (alloy multiplexes requests and subscriptions).
-        /// Retained for the WS-routed fetch path and for resubscribe. `None` in
-        /// unit tests (which inject a channel-backed head stream) and after an
-        /// initial connect failure — with no provider a resubscribe cannot
-        /// succeed, so the source stays on the backstop.
+        /// `None` in unit tests (which inject a channel-backed head stream) and
+        /// after an initial connect failure, where the source runs on the
+        /// backstop alone.
         provider: Option<DynProvider>,
-        /// Live head stream, or `None` while the subscription is down;
-        /// `await_tip` resubscribes with capped backoff on the next call.
+        /// Live head stream, or `None` when the subscription is gone for good
+        /// (never established, or alloy's reconnect budget was exhausted);
+        /// `await_tip` then paces on the backstop.
         heads: Option<HeadStream>,
         /// Fallback watermark poll fired by the `WS_BACKSTOP` timer.
         backstop: Backstop,
-        /// Consecutive resubscribe failures; feeds [`backoff_delay`]. Reset to
-        /// `0` on a successful resubscribe.
-        backoff_attempt: u32,
     },
 }
 
@@ -1600,62 +1523,105 @@ impl Backstop {
     }
 }
 
-/// Result of one [`HeadSource::await_tip`] race between the next announced
-/// head, a stream end, and the `WS_BACKSTOP` timer.
-enum AwaitOutcome {
-    Head(u64),
-    Ended,
-    Timer,
-}
-
 /// Build a pubsub provider over `url` and subscribe to `newHeads`, returning
-/// the provider (retained for the fetch path and resubscribe) plus the mapped
-/// head stream. Raises the incoming-message cap to [`WS_MAX_MESSAGE_SIZE`] so a
-/// large `debug_executionWitness` response sharing this socket is not rejected
-/// by tungstenite's 64 MiB default.
+/// the provider (retained for the fetch path) plus the mapped head stream.
+/// Raises the incoming-message cap to [`WS_MAX_MESSAGE_SIZE`] so a large
+/// `debug_executionWitness` response sharing this socket is not rejected by
+/// tungstenite's 64 MiB default.
 ///
-/// alloy 1.0 facts (verified against alloy 1.0.35): `WsConnect::with_config`
-/// takes a `WebSocketConfig`; `ProviderBuilder::connect_ws` builds the pubsub
-/// provider; `.erased()` yields the same `DynProvider` used for the HTTP path.
+/// Reconnection is alloy's job, not ours (verified against alloy 1.0.35):
+/// on a socket drop the pubsub service reconnects the transport, re-issues
+/// pending requests, and re-subscribes every active subscription into the same
+/// `Subscription` handle (`alloy-pubsub/src/service.rs::reconnect`). The retry
+/// budget is per-outage, so `u32::MAX` retries at the default 3s interval means
+/// the connection self-heals indefinitely; the stream ends only if alloy gives
+/// up, which this budget makes practically unreachable.
 async fn connect_ws_head_stream(url: &Url) -> Result<(DynProvider, HeadStream)> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(WS_MAX_MESSAGE_SIZE))
         .max_frame_size(Some(WS_MAX_MESSAGE_SIZE));
-    let ws = WsConnect::new(url.as_str()).with_config(config);
+    let ws = WsConnect::new(url.as_str())
+        .with_config(config)
+        .with_max_retries(u32::MAX);
     let provider = ProviderBuilder::new().connect_ws(ws).await?.erased();
     let heads = provider.subscribe_blocks().await?;
     Ok((provider, HeadStream::Live(heads)))
 }
 
-/// Capped exponential backoff between WS resubscribe attempts: `2^attempt`
-/// seconds, capped at 32s (`attempt >= 5`). Mirrors the retry cadence in
-/// `z6m_common`'s fetcher (`2_u64.pow(attempts.min(5))`); those helpers are
-/// private to that crate, so this small duplication is deliberate. Pure, so the
-/// progression is unit-testable without a socket.
-fn backoff_delay(attempt: u32) -> Duration {
-    Duration::from_secs(2_u64.pow(attempt.min(5)))
+/// Outcome of one per-block fetch attempt ([`fetch_block_with_fallback`]).
+enum BlockFetch {
+    Fetched(FetchOutcome),
+    /// The canonical tip receded below the gated height (downward reorg): the
+    /// caller rolls the watermark back to the given tip and retries the same
+    /// height once it re-canonicalizes.
+    AwaitRecede(u64),
+    /// Genuine fetch failure: advance the cursor — the byte-identical
+    /// Poll-mode skip.
+    Skip,
 }
 
-/// Attempt to re-establish the `newHeads` subscription over the retained pubsub
-/// provider. alloy manages the underlying WS transport's own reconnection, so
-/// re-issuing `subscribe_blocks()` picks up a healed connection; a failure just
-/// leaves the source on the backstop until the next attempt. `None` — provider
-/// absent (unit tests, or an initial connect that never produced a provider) or
-/// the resubscribe RPC errored — keeps the subscription down.
-async fn try_resubscribe(provider: &Option<DynProvider>) -> Option<HeadStream> {
-    let provider = provider.as_ref()?;
-    match provider.subscribe_blocks().await {
-        Ok(sub) => Some(HeadStream::Live(sub)),
+/// Fetch one block's data + witness through the head source's preferred
+/// provider, classifying failures.
+///
+/// On a WS-routed failure the downward-reorg check runs FIRST — it costs one
+/// `eth_blockNumber` against a multi-MB refetch, and "not found" right at the
+/// tip (a `newHeads` announcement racing read availability) is the common
+/// case. Only a still-covered tip triggers the one-shot HTTP retry, over the
+/// retained `http_fallback` provider (an `Arc` clone of the backstop's client,
+/// not a fresh connection pool). The reorg rollback is live-mode only: in
+/// `--end-block` mode there is no watermark gate, so rolling back would
+/// re-fetch a not-yet-mined block forever; and it is a no-op `None` for
+/// `Poll`, preserving its byte-identical skip-on-error path.
+async fn fetch_block_with_fallback(
+    head_source: &HeadSource,
+    service: &ServiceConfig,
+    data_dir: &Path,
+    block_number: u64,
+    http_fallback: &DynProvider,
+) -> BlockFetch {
+    let request = |provider: Option<DynProvider>| FetchRequest {
+        rpc_url: &service.rpc_url,
+        block_number: Some(block_number),
+        data_dir: data_dir.to_path_buf(),
+        save_all_responses: service.save_all_responses,
+        geth: false,
+        force_rebuild: true,
+        provider,
+    };
+
+    let fetch_provider = head_source.fetch_provider();
+    let ws_routed = fetch_provider.is_some();
+    let err = match fetch_block_and_witness(request(fetch_provider)).await {
+        Ok(outcome) => return BlockFetch::Fetched(outcome),
+        Err(err) => err,
+    };
+
+    if service.end_block.is_none() {
+        if let Some(tip) = head_source.tip_receded_below(block_number).await {
+            warn!(%block_number, tip, "block not canonical yet (downward reorg); awaiting re-canonicalization instead of skipping");
+            return BlockFetch::AwaitRecede(tip);
+        }
+    }
+
+    if !ws_routed {
+        error!(%block_number, error = %err, "fetch_block_and_witness failed");
+        return BlockFetch::Skip;
+    }
+
+    // A dead WS connection must not skip a block HTTP could still serve.
+    warn!(%block_number, error = %err, "WS-routed fetch failed; retrying once over HTTP");
+    match fetch_block_and_witness(request(Some(http_fallback.clone()))).await {
+        Ok(outcome) => BlockFetch::Fetched(outcome),
         Err(err) => {
-            warn!(error = %err, "newHeads resubscribe failed; staying on backstop poll");
-            None
+            error!(%block_number, error = %err, "fetch_block_and_witness failed (HTTP fallback)");
+            BlockFetch::Skip
         }
     }
 }
 
 /// Whether the next block is available to fetch, as reported by the head
 /// source. `NotReady` means the source has already applied the appropriate
-/// backoff sleep and the caller must skip this loop iteration.
+/// pacing sleep and the caller must skip this loop iteration.
 enum TipStatus {
     Ready,
     NotReady,
@@ -1790,67 +1756,44 @@ impl HeadSource {
     ///
     /// When the subscription is live, race the next announced head against the
     /// `WS_BACKSTOP` timer: a head advances the watermark, the timer falls back
-    /// to a single backstop poll, and a stream end drops the (dead) stream so
-    /// the next call re-establishes it. When the subscription is down — the
-    /// stream ended, or was never established after an initial connect failure —
-    /// wait out the capped [`backoff_delay`], attempt one resubscribe, and reset
-    /// the backoff on success. Either way the backstop poll advances the
-    /// watermark, so a dead or absent subscription is never fatal: the service
-    /// keeps draining the backlog on backstop-paced watermarks until WS
-    /// recovers.
+    /// to a single backstop poll. Transient socket drops never surface here —
+    /// alloy reconnects the transport and re-subscribes under the same handle
+    /// (see [`connect_ws_head_stream`]). The stream ends only if alloy's
+    /// reconnect gives up for good; from then on every call paces one backstop
+    /// poll per `WS_BACKSTOP`, so a dead or never-established subscription is
+    /// never fatal: the service keeps advancing on backstop watermarks.
     ///
     /// Returns `latest` unchanged for the `Poll` variant.
     async fn await_tip(&mut self, latest: u64) -> u64 {
         let HeadSource::Ws {
-            provider,
-            heads,
-            backstop,
-            backoff_attempt,
+            heads, backstop, ..
         } = self
         else {
             return latest;
         };
 
-        // Subscription down: back off, try to re-establish it, and reset the
-        // backoff on success. The backstop still advances the watermark whether
-        // or not the resubscribe succeeds, so the service never stalls.
-        if heads.is_none() {
-            sleep(backoff_delay(*backoff_attempt)).await;
-            match try_resubscribe(provider).await {
-                Some(stream) => {
+        // Take the stream out so the arms below can restore or drop it without
+        // a borrow conflict inside `select!`. `None` = subscription gone for
+        // good (or never established): pace on the backstop.
+        let Some(mut stream) = heads.take() else {
+            sleep(WS_BACKSTOP).await;
+            return backstop.watermark(latest).await;
+        };
+        tokio::select! {
+            next = stream.next_height() => match next {
+                Some(height) => {
                     *heads = Some(stream);
-                    *backoff_attempt = 0;
+                    advance_watermark(latest, height)
                 }
                 None => {
-                    *backoff_attempt = backoff_attempt.saturating_add(1);
+                    // Stream ended for good; `heads` stays `None` and the
+                    // backstop supplies this and every later watermark.
+                    warn!("newHeads stream ended; continuing on backstop poll");
+                    backstop.watermark(latest).await
                 }
-            }
-            return backstop.watermark(latest).await;
-        }
-
-        // Subscription live: take the stream out so the match arms can restore
-        // or drop it without a borrow conflict inside `select!`.
-        let mut stream = heads.take().expect("await_tip: heads is Some");
-        let outcome = tokio::select! {
-            next = stream.next_height() => match next {
-                Some(height) => AwaitOutcome::Head(height),
-                None => AwaitOutcome::Ended,
             },
-            _ = sleep(WS_BACKSTOP) => AwaitOutcome::Timer,
-        };
-        match outcome {
-            AwaitOutcome::Head(height) => {
+            _ = sleep(WS_BACKSTOP) => {
                 *heads = Some(stream);
-                advance_watermark(latest, height)
-            }
-            AwaitOutcome::Timer => {
-                *heads = Some(stream);
-                backstop.watermark(latest).await
-            }
-            AwaitOutcome::Ended => {
-                // `stream` is dropped here; `heads` stays `None` so the next
-                // call takes the resubscribe branch above. The backstop supplies
-                // this iteration's watermark.
                 backstop.watermark(latest).await
             }
         }
@@ -1988,7 +1931,6 @@ mod tests {
             provider: None,
             heads: Some(HeadStream::Channel(rx)),
             backstop: Backstop::Canned(backstop_height),
-            backoff_attempt: 0,
         };
         (source, tx)
     }
@@ -2043,10 +1985,9 @@ mod tests {
     async fn tip_receded_below_is_none_for_poll() {
         // Poll mode keeps its byte-identical skip-on-error path: the method
         // short-circuits to `None` on the enum arm without polling any provider.
-        let provider = ProviderBuilder::new()
-            .connect_http("http://127.0.0.1:1".parse().unwrap())
-            .erased();
-        let source = HeadSource::Poll { provider };
+        let source = HeadSource::Poll {
+            provider: dummy_provider(),
+        };
         assert_eq!(source.tip_receded_below(10).await, None);
     }
 
@@ -2074,154 +2015,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ws_await_tip_backstop_after_stream_end() {
-        // Dropping the sender ends the stream; `await_tip` falls back to the
-        // backstop rather than stalling.
-        let (mut source, tx) = ws_with_channel(15);
-        drop(tx);
-        assert_eq!(source.await_tip(5).await, 15);
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn poll_variant_head_methods_are_noops() {
         // The `Poll` variant must not drive the Ws head machinery: both helpers
         // return the watermark unchanged. (HTTP providers construct lazily, so
         // this makes no network call.)
-        let provider = ProviderBuilder::new()
-            .connect_http("http://localhost:8545".parse().unwrap())
-            .erased();
-        let mut source = HeadSource::Poll { provider };
+        let mut source = HeadSource::Poll {
+            provider: dummy_provider(),
+        };
         assert_eq!(source.drain_tip(7), 7);
         assert_eq!(source.await_tip(7).await, 7);
     }
 
-    // ---- WS reconnect / backoff (Task 4) ----
-
-    #[test]
-    fn backoff_delay_progression_and_cap() {
-        // `2^attempt` seconds, matching the fetcher's `2_u64.pow(attempts.min(5))`,
-        // capped at 32s once the exponent saturates at 5.
-        assert_eq!(backoff_delay(0), Duration::from_secs(1));
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-        assert_eq!(backoff_delay(4), Duration::from_secs(16));
-        assert_eq!(backoff_delay(5), Duration::from_secs(32));
-        assert_eq!(backoff_delay(6), Duration::from_secs(32));
-        assert_eq!(backoff_delay(100), Duration::from_secs(32));
-    }
+    // ---- Stream end / backstop degradation ----
 
     #[tokio::test(start_paused = true)]
     async fn ws_await_tip_clears_stream_on_end() {
-        // A stream end drops the dead stream (`heads` -> None) so the next call
-        // takes the resubscribe branch, while still returning a backstop
-        // watermark for this iteration. The end itself attempts no resubscribe,
-        // so the backoff counter is untouched.
+        // A stream end falls back to the backstop for this iteration and drops
+        // the dead stream (`heads` -> None); later calls stay on the backstop.
         let (mut source, tx) = ws_with_channel(30);
         drop(tx);
         assert_eq!(source.await_tip(5).await, 30);
         match &source {
-            HeadSource::Ws {
-                heads,
-                backoff_attempt,
-                ..
-            } => {
+            HeadSource::Ws { heads, .. } => {
                 assert!(heads.is_none(), "dead stream should be cleared");
-                assert_eq!(*backoff_attempt, 0);
             }
             _ => panic!("expected Ws"),
         }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ws_await_tip_serves_backstop_and_backs_off_while_down() {
-        // With no provider a resubscribe can never succeed, so the subscription
-        // stays down (mirrors an initial connect failure). Each down-state call
-        // still advances the watermark from the backstop — the service never
-        // stalls — and bumps the capped backoff counter, evidencing a
-        // resubscribe attempt per iteration.
-        let (mut source, tx) = ws_with_channel(30);
-        drop(tx);
-        // First call: stream Ended, heads cleared, counter still 0.
-        assert_eq!(source.await_tip(5).await, 30);
-        // Down-branch call #1: resubscribe attempted, fails (provider None) -> 1.
-        assert_eq!(source.await_tip(5).await, 30);
-        match &source {
-            HeadSource::Ws {
-                heads,
-                backoff_attempt,
-                ..
-            } => {
-                assert!(heads.is_none());
-                assert_eq!(*backoff_attempt, 1);
-            }
-            _ => panic!("expected Ws"),
-        }
-        // Down-branch call #2: 1 -> 2, still serving the backstop watermark.
-        assert_eq!(source.await_tip(30).await, 30);
-        match &source {
-            HeadSource::Ws {
-                backoff_attempt, ..
-            } => assert_eq!(*backoff_attempt, 2),
-            _ => panic!("expected Ws"),
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn ws_await_tip_never_stalls_across_many_down_iterations() {
-        // Never-fatal invariant: however long WS stays down, every await_tip
-        // returns the backstop watermark and the backoff counter keeps climbing
-        // toward its cap without the future ever hanging (auto-advanced clock).
+    async fn ws_await_tip_never_stalls_while_down() {
+        // Never-fatal invariant: however long the subscription stays gone,
+        // every await_tip returns a backstop watermark on WS_BACKSTOP pacing
+        // (auto-advanced clock) without the future ever hanging.
         let (mut source, tx) = ws_with_channel(50);
         drop(tx);
         for _ in 0..8 {
             assert_eq!(source.await_tip(10).await, 50);
         }
-        match &source {
-            HeadSource::Ws {
-                backoff_attempt, ..
-            } => {
-                // 1 Ended call (no bump) + 7 down-branch bumps.
-                assert_eq!(*backoff_attempt, 7);
-            }
-            _ => panic!("expected Ws"),
-        }
     }
 
-    // ---- Head-source selection + live-mode routing (Task 5) ----
-
-    /// Minimal `ServiceConfig` for the pure `head_source_kind` decision. Only
-    /// `ws_url` matters; the rest are placeholders.
-    fn test_service_config(ws_url: Option<String>) -> ServiceConfig {
-        ServiceConfig {
-            start_block: None,
-            end_block: None,
-            prove_every: None,
-            execute_every: None,
-            post_every: None,
-            rpc_url: "http://localhost:8545".to_string(),
-            ws_url,
-            save_all_responses: false,
-            proving_key_path: None,
-            proof_type: "compressed".to_string(),
-        }
-    }
-
-    #[test]
-    fn head_source_kind_is_poll_without_ws_url() {
-        assert_eq!(
-            head_source_kind(&test_service_config(None)),
-            HeadSourceKind::Poll
-        );
-    }
-
-    #[test]
-    fn head_source_kind_is_ws_with_ws_url() {
-        assert_eq!(
-            head_source_kind(&test_service_config(Some("ws://host:8545".to_string()))),
-            HeadSourceKind::Ws
-        );
-    }
+    // ---- Live-mode routing (Task 5) ----
 
     #[tokio::test(start_paused = true)]
     async fn ws_wait_for_tip_live_catch_up_is_ready_without_awaiting() {
@@ -2308,7 +2142,6 @@ mod tests {
             provider: Some(dummy_provider()),
             heads: None,
             backstop: Backstop::Canned(0),
-            backoff_attempt: 0,
         };
         assert!(source.fetch_provider().is_some());
     }
@@ -2321,7 +2154,6 @@ mod tests {
             provider: None,
             heads: None,
             backstop: Backstop::Canned(0),
-            backoff_attempt: 0,
         };
         assert!(source.fetch_provider().is_none());
     }
@@ -2360,7 +2192,6 @@ mod tests {
             heads: Some(heads),
             // Backstop is the HTTP provider (Task 5), but heads should win here.
             backstop: Backstop::Provider(http.clone()),
-            backoff_attempt: 0,
         };
         let advanced = tokio::time::timeout(Duration::from_secs(30), async {
             let mut latest = seed;
@@ -2411,7 +2242,6 @@ mod tests {
             provider: Some(provider),
             heads: Some(heads),
             backstop: Backstop::Provider(http.clone()),
-            backoff_attempt: 0,
         };
         // Seed the watermark via the startup poll (Task 5 semantics).
         let mut latest = http.get_block_number().await.expect("seed poll");
