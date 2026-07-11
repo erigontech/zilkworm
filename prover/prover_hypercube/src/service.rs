@@ -797,6 +797,11 @@ impl Z6mProverService {
                     {
                         Ok(outcome) => outcome,
                         Err(err) => {
+                            if let Some(tip) = head_source.tip_receded_below(block_number).await {
+                                warn!(%block_number, tip, "block not canonical yet (downward reorg); awaiting re-canonicalization instead of skipping");
+                                latest = tip;
+                                continue;
+                            }
                             error!(%block_number, error = %err, "fetch_block_and_witness failed (HTTP fallback)");
                             next_block += 1;
                             continue;
@@ -804,6 +809,11 @@ impl Z6mProverService {
                     }
                 }
                 Err(err) => {
+                    if let Some(tip) = head_source.tip_receded_below(block_number).await {
+                        warn!(%block_number, tip, "block not canonical yet (downward reorg); awaiting re-canonicalization instead of skipping");
+                        latest = tip;
+                        continue;
+                    }
                     error!(%block_number, error = %err, "fetch_block_and_witness failed");
                     next_block += 1;
                     continue;
@@ -1712,6 +1722,30 @@ impl HeadSource {
         }
     }
 
+    /// On a `Ws`-mode fetch failure, tell a not-yet-canonical block apart from a
+    /// genuinely unfetchable one. The `Ws` watermark is monotonic
+    /// ([`advance_watermark`]), so after a *downward* reorg (the canonical tip
+    /// recedes below a height it previously announced) it still gates that
+    /// height as ready; `eth_getBlockByNumber` then returns "not found" and the
+    /// loop would skip the block forever, never revisiting it once it
+    /// re-canonicalizes. This re-polls the current tip through the backstop (the
+    /// HTTP `--rpc-url` provider, which stays live even when WS is down):
+    /// `Some(tip)` when the tip has receded below `block` — the block is not
+    /// canonical yet, so the caller rolls the watermark back to `tip` and awaits
+    /// re-canonicalization instead of advancing the cursor (mirroring `Poll`
+    /// mode's back-pressure). `None` when the tip still covers `block` (a real
+    /// fetch failure → skip as before), and always `None` for `Poll`, which
+    /// keeps its byte-identical skip-on-error path and issues no extra RPC.
+    async fn tip_receded_below(&self, block: u64) -> Option<u64> {
+        match self {
+            HeadSource::Ws { backstop, .. } => match backstop.poll().await {
+                Some(tip) if tip < block => Some(tip),
+                _ => None,
+            },
+            HeadSource::Poll { .. } => None,
+        }
+    }
+
     /// Non-blocking watermark refresh from any buffered `newHeads` (Ws mode).
     /// Used during catch-up (`next_block <= latest`), where the loop must never
     /// wait on the socket: it drains every already-buffered head and folds each
@@ -1963,6 +1997,36 @@ mod tests {
         let (mut source, _tx) = ws_with_channel(0);
         // Empty channel: drain returns the input watermark immediately.
         assert_eq!(source.drain_tip(42), 42);
+    }
+
+    #[tokio::test]
+    async fn tip_receded_below_signals_wait_after_downward_reorg() {
+        // Backstop tip 8 has receded below the gated block 10 (downward reorg):
+        // the block is not canonical yet, so the caller must wait and retry it
+        // rather than skip it forever.
+        let (source, _tx) = ws_with_channel(8);
+        assert_eq!(source.tip_receded_below(10).await, Some(8));
+    }
+
+    #[tokio::test]
+    async fn tip_receded_below_skips_when_tip_covers_block() {
+        // Tip still at or above the block → not a reorg → a genuine fetch
+        // failure, so the caller keeps today's skip behaviour.
+        let (source, _tx) = ws_with_channel(10);
+        assert_eq!(source.tip_receded_below(10).await, None);
+        let (source, _tx) = ws_with_channel(12);
+        assert_eq!(source.tip_receded_below(10).await, None);
+    }
+
+    #[tokio::test]
+    async fn tip_receded_below_is_none_for_poll() {
+        // Poll mode keeps its byte-identical skip-on-error path: the method
+        // short-circuits to `None` on the enum arm without polling any provider.
+        let provider = ProviderBuilder::new()
+            .connect_http("http://127.0.0.1:1".parse().unwrap())
+            .erased();
+        let source = HeadSource::Poll { provider };
+        assert_eq!(source.tip_receded_below(10).await, None);
     }
 
     #[tokio::test(start_paused = true)]
