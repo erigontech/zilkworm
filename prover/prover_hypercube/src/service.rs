@@ -192,8 +192,7 @@ pub struct ServiceConfig {
     pub post_every: Option<u64>,
     pub rpc_url: String,
     /// Opt-in WebSocket EL endpoint (`ws`/`wss`). `None` → poll-based behaviour
-    /// identical to today. Validated at [`Z6mProverService::run_service`]
-    /// startup by [`validate_ws_url`].
+    /// identical to today.
     pub ws_url: Option<String>,
     pub save_all_responses: bool,
     pub download_only: bool,
@@ -626,26 +625,17 @@ impl Z6mProverService {
 
     pub async fn run_service(&mut self, service: ServiceConfig) -> Result<()> {
         info!("starting service mode");
-        // Fail fast on a malformed `--ws-url` before any connection attempt,
-        // keeping the parsed URL for the `Ws` head-source construction below.
         let validated_ws_url: Option<Url> = match &service.ws_url {
             Some(raw) => Some(validate_ws_url(raw)?),
             None => None,
         };
         let url = Url::parse(&service.rpc_url)?;
-        // HTTP provider over `--rpc-url`. Drives the `Poll` head source, seeds
-        // the `Ws` watermark, backs the `Ws` backstop poll, and serves the
-        // WS-mode HTTP fetch fallback — kept on HTTP so it keeps working even
-        // while the WS connection is down or was never established.
+        // On HTTP so poll, backstop, and fetch fallback all work while WS is down.
         let http_provider = ProviderBuilder::new().connect_http(url).erased();
-        // Fallback fetch provider for `fetch_block_with_fallback` — an `Arc`
-        // clone of the same client, not a second connection pool.
         let http_fallback = http_provider.clone();
 
-        // One startup poll covers both consumers of the initial tip: the cursor
-        // start (when `--start-block` is absent) and the `Ws` watermark seed.
-        // Poll mode with `--start-block` never polled at startup and still
-        // doesn't; `start_tip` is unused there.
+        // One poll serves both the cursor start and the Ws watermark seed. Poll
+        // mode with `--start-block` never polled at startup and still doesn't.
         let start_tip: u64 = if service.start_block.is_none() || validated_ws_url.is_some() {
             match Self::get_block_number_with_retry(&http_provider, 3).await {
                 Ok(block_num) => block_num,
@@ -663,11 +653,7 @@ impl Z6mProverService {
 
         info!("Service starting from block: {}", next_block);
 
-        // Tip-watermark source: `Poll` (verbatim per-iteration `eth_blockNumber`)
-        // unless `--ws-url` selects the `Ws` newHeads watermark. `latest` is the
-        // persistent Ws watermark; it stays `0` and unused in Poll mode
-        // (memoryless). The Ws arm seeds `latest` up front so a behind-tip start
-        // begins in catch-up (drain, never await) instead of stalling.
+        // `latest` is the persistent Ws watermark; stays 0/unused in Poll mode.
         let mut latest: u64 = 0;
         let mut head_source = match validated_ws_url {
             None => {
@@ -677,13 +663,9 @@ impl Z6mProverService {
                 }
             }
             Some(ws_url) => {
-                // Seed the watermark from the startup poll; without it a
-                // behind-tip start would route the first iteration into
-                // `await_tip` and stall catch-up.
+                // Unseeded, a behind-tip start would stall in `await_tip`.
                 latest = start_tip;
-                // Initial connect is best-effort: on failure we degrade to the
-                // HTTP backstop poll (never fatal — see `HeadSource::await_tip`)
-                // and keep `provider: None`.
+                // Best-effort: on failure run on the backstop poll, never fatal.
                 let (provider, heads) = match connect_ws_head_stream(&ws_url).await {
                     Ok((provider, heads)) => (Some(provider), Some(heads)),
                     Err(err) => {
@@ -1398,65 +1380,37 @@ fn matches_interval(interval: Option<u64>, block_number: u64) -> bool {
     }
 }
 
-/// Silence window before the `Ws` head source falls back to a single
-/// `eth_blockNumber` backstop poll. Chosen well above mainnet's ~12s block
-/// interval so a healthy `newHeads` subscription never triggers it, yet short
-/// enough to keep the service advancing if the stream stalls or dies.
+/// Silence window before the `Ws` source falls back to one backstop poll —
+/// above mainnet's ~12s blocks so a healthy subscription never triggers it.
 const WS_BACKSTOP: Duration = Duration::from_secs(24);
 
-/// Incoming-message cap for the WS connection. tungstenite 0.26 defaults to
-/// 64 MiB (`WebSocketConfig::max_message_size` = 64 MiB, `max_frame_size` =
-/// 16 MiB), which would *reject* a large `debug_executionWitness` response
-/// (10–80 MB of hex JSON) riding this same socket — a correctness item, not
-/// tuning. 256 MiB leaves comfortable headroom.
+/// tungstenite's 64 MiB default would reject a large `debug_executionWitness`
+/// response (10–80 MB hex JSON) on this socket — correctness, not tuning.
 const WS_MAX_MESSAGE_SIZE: usize = 256 << 20;
 
-/// Source of the chain-tip watermark that gates the live service loop.
-///
-/// `Poll` is a verbatim extraction of the historical per-iteration
-/// `eth_blockNumber` poll. `Ws` is a `newHeads` subscription used purely as a
-/// tip watermark: during catch-up the loop drains buffered heads
-/// non-blockingly ([`HeadSource::drain_tip`]) and never waits on the socket;
-/// at tip it awaits the next head or a backstop poll ([`HeadSource::await_tip`]).
-/// Both watermark advances go through [`advance_watermark`], so a reorg
-/// re-announcement can never move the cursor backward.
+/// Chain-tip watermark source gating the live service loop: `Poll` is the
+/// verbatim historical per-iteration poll; `Ws` treats `newHeads` purely as a
+/// watermark — drained non-blockingly during catch-up, awaited at tip.
 enum HeadSource {
-    /// Poll `eth_blockNumber` once per live iteration. Memoryless: every
-    /// iteration compares `next_block` against a freshly-polled `latest` with
-    /// no persisted maximum, matching the pre-watermark behaviour byte for
-    /// byte (persisting a max here would diverge whenever `eth_blockNumber`
-    /// decreases).
+    /// Memoryless per-iteration `eth_blockNumber` poll, byte-identical to the
+    /// pre-watermark behaviour (a persisted max would diverge on a lower tip).
     Poll { provider: DynProvider },
-    /// `newHeads` subscription used purely as a tip watermark. Transient socket
-    /// drops are healed by alloy's own transport reconnect underneath the same
-    /// subscription handle (see [`connect_ws_head_stream`]); never-fatal
-    /// backstop degradation lives in [`HeadSource::await_tip`]. `run_service`
-    /// selects this variant when `--ws-url` is set, seeding the watermark up
-    /// front. Unit tests construct it with a channel-backed head stream and a
-    /// canned backstop.
+    /// `newHeads` as tip watermark. alloy heals transient socket drops under
+    /// the same handle ([`connect_ws_head_stream`]); a gone subscription
+    /// degrades to the backstop, never fatal.
     Ws {
-        /// Pubsub provider hosting both the subscription and the fetch RPCs
-        /// over one connection (alloy multiplexes requests and subscriptions).
-        /// `None` in unit tests (which inject a channel-backed head stream) and
-        /// after an initial connect failure, where the source runs on the
-        /// backstop alone.
+        /// Pubsub provider shared by the subscription and the fetch RPCs.
+        /// `None` after an initial connect failure (and in unit tests).
         provider: Option<DynProvider>,
-        /// Live head stream, or `None` when the subscription is gone for good
-        /// (never established, or alloy's reconnect budget was exhausted);
-        /// `await_tip` then paces on the backstop.
+        /// Head stream; `None` once gone for good → backstop pacing.
         heads: Option<HeadStream>,
         /// Fallback watermark poll fired by the `WS_BACKSTOP` timer.
         backstop: Backstop,
     },
 }
 
-/// Thin seam over the live `newHeads` subscription, mapping each announced
-/// header to its block height. alloy 1.0 facts (verified against alloy 1.0.35):
-/// `provider.subscribe_blocks()` issues `eth_subscribe("newHeads")` and yields
-/// a `Subscription<Header>`; `Header` derefs to `alloy_consensus::Header`,
-/// whose `number: u64` is the height. Unit tests substitute an in-memory
-/// channel so head semantics run without a live socket. Subscription lag or a
-/// dropped item is harmless — only `max(height)` feeds the watermark.
+/// `newHeads` subscription mapped to block heights; tests inject a channel.
+/// Lag or dropped items are harmless — only `max(height)` feeds the watermark.
 enum HeadStream {
     /// Production: the alloy `newHeads` subscription.
     Live(Subscription<Header>),
@@ -1466,11 +1420,7 @@ enum HeadStream {
 }
 
 impl HeadStream {
-    /// Non-blocking: return one already-buffered height, or `None` when nothing
-    /// is ready (empty channel), the receiver lagged, or the stream closed.
-    /// Backs [`HeadSource::drain_tip`]. A lagged/closed result simply ends this
-    /// drain pass; the watermark is monotonic and any newer buffered head is
-    /// picked up on the next pass or by the backstop.
+    /// Non-blocking: one buffered height, or `None` (empty, lagged, closed).
     fn try_next_height(&mut self) -> Option<u64> {
         match self {
             HeadStream::Live(sub) => sub.try_recv().ok().map(|h| h.number),
@@ -1479,10 +1429,8 @@ impl HeadStream {
         }
     }
 
-    /// Await the next announced height. `None` when the stream ends (the
-    /// subscription closed or lagged out, or the test channel was dropped).
-    /// Backs [`HeadSource::await_tip`]; a broadcast/mpsc `recv` future is
-    /// cancel-safe, so racing it on the `WS_BACKSTOP` timer loses no head.
+    /// Next announced height; `None` on stream end. `recv` is cancel-safe, so
+    /// racing the `WS_BACKSTOP` timer loses no head.
     async fn next_height(&mut self) -> Option<u64> {
         match self {
             HeadStream::Live(sub) => sub.recv().await.ok().map(|h| h.number),
@@ -1492,11 +1440,7 @@ impl HeadStream {
     }
 }
 
-/// Fallback watermark source fired by the `WS_BACKSTOP` timer when the head
-/// stream is silent. `run_service` backs it with the HTTP `--rpc-url` provider
-/// (not the WS one), so a single `eth_blockNumber` keeps advancing the watermark
-/// even while the WS connection is down or was never established; tests return a
-/// canned height so the backstop path runs without a socket.
+/// Watermark fallback poll — HTTP (`--rpc-url`), so it works while WS is down.
 enum Backstop {
     Provider(DynProvider),
     #[cfg(test)]
@@ -1504,8 +1448,7 @@ enum Backstop {
 }
 
 impl Backstop {
-    /// One watermark poll. `None` on RPC error — the caller keeps the current
-    /// watermark and retries on the next backstop tick.
+    /// One poll; `None` on RPC error (caller keeps the current watermark).
     async fn poll(&self) -> Option<u64> {
         match self {
             Backstop::Provider(provider) => provider.get_block_number().await.ok(),
@@ -1523,19 +1466,10 @@ impl Backstop {
     }
 }
 
-/// Build a pubsub provider over `url` and subscribe to `newHeads`, returning
-/// the provider (retained for the fetch path) plus the mapped head stream.
-/// Raises the incoming-message cap to [`WS_MAX_MESSAGE_SIZE`] so a large
-/// `debug_executionWitness` response sharing this socket is not rejected by
-/// tungstenite's 64 MiB default.
-///
-/// Reconnection is alloy's job, not ours (verified against alloy 1.0.35):
-/// on a socket drop the pubsub service reconnects the transport, re-issues
-/// pending requests, and re-subscribes every active subscription into the same
-/// `Subscription` handle (`alloy-pubsub/src/service.rs::reconnect`). The retry
-/// budget is per-outage, so `u32::MAX` retries at the default 3s interval means
-/// the connection self-heals indefinitely; the stream ends only if alloy gives
-/// up, which this budget makes practically unreachable.
+/// Pubsub provider + `newHeads` stream over `url`. Reconnection is alloy's
+/// job: on a socket drop it reconnects and re-subscribes into the same handle
+/// (`alloy-pubsub::service::reconnect`), and the per-outage `u32::MAX` retry
+/// budget at 3s intervals makes a permanent stream end practically unreachable.
 async fn connect_ws_head_stream(url: &Url) -> Result<(DynProvider, HeadStream)> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(WS_MAX_MESSAGE_SIZE))
@@ -1551,27 +1485,17 @@ async fn connect_ws_head_stream(url: &Url) -> Result<(DynProvider, HeadStream)> 
 /// Outcome of one per-block fetch attempt ([`fetch_block_with_fallback`]).
 enum BlockFetch {
     Fetched(FetchOutcome),
-    /// The canonical tip receded below the gated height (downward reorg): the
-    /// caller rolls the watermark back to the given tip and retries the same
-    /// height once it re-canonicalizes.
+    /// Downward reorg: roll the watermark back to this tip, retry the height.
     AwaitRecede(u64),
-    /// Genuine fetch failure: advance the cursor — the byte-identical
-    /// Poll-mode skip.
+    /// Genuine failure: advance the cursor (byte-identical Poll-mode skip).
     Skip,
 }
 
-/// Fetch one block's data + witness through the head source's preferred
-/// provider, classifying failures.
-///
-/// On a WS-routed failure the downward-reorg check runs FIRST — it costs one
-/// `eth_blockNumber` against a multi-MB refetch, and "not found" right at the
-/// tip (a `newHeads` announcement racing read availability) is the common
-/// case. Only a still-covered tip triggers the one-shot HTTP retry, over the
-/// retained `http_fallback` provider (an `Arc` clone of the backstop's client,
-/// not a fresh connection pool). The reorg rollback is live-mode only: in
-/// `--end-block` mode there is no watermark gate, so rolling back would
-/// re-fetch a not-yet-mined block forever; and it is a no-op `None` for
-/// `Poll`, preserving its byte-identical skip-on-error path.
+/// Fetch one block through the head source's provider, classifying failures.
+/// The reorg check runs before the HTTP retry — one `eth_blockNumber` vs a
+/// multi-MB refetch, and "not found" at tip (announcement racing read
+/// availability) is the common case. Rollback is live-mode only: with
+/// `--end-block` there is no watermark gate, so it would refetch forever.
 async fn fetch_block_with_fallback(
     head_source: &HeadSource,
     service: &ServiceConfig,
@@ -1628,13 +1552,8 @@ enum TipStatus {
 }
 
 impl HeadSource {
-    /// Decide whether `next_block` is at or below the current chain tip.
-    ///
-    /// For [`HeadSource::Poll`] this is the exact historical live-mode logic:
-    /// poll `eth_blockNumber` with 6 retries (flat 2s delay inside
-    /// [`Z6mProverService::get_block_number_with_retry`]), compare against the
-    /// fresh value, sleep 2s and skip when the block is beyond the tip, and on
-    /// retry exhaustion log the same warning, sleep 30s, and skip.
+    /// Poll-mode tip gate — the exact historical logic (6 retries, 2s tip
+    /// sleep, 30s on exhaustion); byte-identity is load-bearing here.
     async fn wait_for_tip(&mut self, next_block: u64) -> TipStatus {
         match self {
             HeadSource::Poll { provider } => {
@@ -1654,27 +1573,16 @@ impl HeadSource {
                     }
                 }
             }
-            // Ws mode never routes through `wait_for_tip`: the live loop drains
-            // heads (`drain_tip`) during catch-up and awaits them (`await_tip`)
-            // at tip. `wait_for_tip_live` dispatches only the `Poll` variant
-            // here, so this arm is unreachable by construction.
+            // `wait_for_tip_live` routes only Poll here.
             HeadSource::Ws { .. } => {
                 unreachable!("wait_for_tip is Poll-only; Ws mode uses drain_tip/await_tip")
             }
         }
     }
 
-    /// Live-mode tip gate for one loop iteration, dispatching by variant.
-    ///
-    /// `Poll` delegates to [`HeadSource::wait_for_tip`] — byte-identical to the
-    /// historical memoryless per-iteration poll; `latest` is never read or
-    /// written (Poll keeps no persistent watermark). `Ws` uses the persistent
-    /// `latest` watermark: during catch-up (`next_block <= latest`) it drains
-    /// buffered heads without ever blocking and is immediately `Ready`; at tip
-    /// (`next_block > latest`) it awaits the next head or the backstop poll, then
-    /// reports `Ready` only once the watermark reaches `next_block` (otherwise
-    /// `NotReady`, and the loop re-awaits — no busy spin, since `await_tip`
-    /// always awaits a head or the `WS_BACKSTOP` timer).
+    /// Live-mode tip gate. Poll never touches `latest` (memoryless); Ws drains
+    /// non-blockingly during catch-up (`next_block <= latest`) and awaits a
+    /// head or the backstop at tip — no busy spin.
     async fn wait_for_tip_live(&mut self, next_block: u64, latest: &mut u64) -> TipStatus {
         if matches!(self, HeadSource::Poll { .. }) {
             return self.wait_for_tip(next_block).await;
@@ -1692,13 +1600,8 @@ impl HeadSource {
         }
     }
 
-    /// Provider to route this block's fetch RPCs through. In `Ws` mode with an
-    /// established subscription this is a clone of the pubsub provider, so the
-    /// fetch (`eth_getBlockByNumber`, `debug_getRawBlock`,
-    /// `debug_executionWitness`) rides the same socket as `newHeads`. `None` in
-    /// `Poll` mode and whenever the WS provider is absent (initial connect
-    /// failure), so the fetcher builds an HTTP provider from `--rpc-url` exactly
-    /// as today.
+    /// The WS pubsub clone when established (fetches ride the `newHeads`
+    /// socket), else `None` → the fetcher builds HTTP from `--rpc-url` as today.
     fn fetch_provider(&self) -> Option<DynProvider> {
         match self {
             HeadSource::Ws {
@@ -1709,20 +1612,10 @@ impl HeadSource {
         }
     }
 
-    /// On a `Ws`-mode fetch failure, tell a not-yet-canonical block apart from a
-    /// genuinely unfetchable one. The `Ws` watermark is monotonic
-    /// ([`advance_watermark`]), so after a *downward* reorg (the canonical tip
-    /// recedes below a height it previously announced) it still gates that
-    /// height as ready; `eth_getBlockByNumber` then returns "not found" and the
-    /// loop would skip the block forever, never revisiting it once it
-    /// re-canonicalizes. This re-polls the current tip through the backstop (the
-    /// HTTP `--rpc-url` provider, which stays live even when WS is down):
-    /// `Some(tip)` when the tip has receded below `block` — the block is not
-    /// canonical yet, so the caller rolls the watermark back to `tip` and awaits
-    /// re-canonicalization instead of advancing the cursor (mirroring `Poll`
-    /// mode's back-pressure). `None` when the tip still covers `block` (a real
-    /// fetch failure → skip as before), and always `None` for `Poll`, which
-    /// keeps its byte-identical skip-on-error path and issues no extra RPC.
+    /// After a downward reorg the monotonic watermark still gates a height the
+    /// chain no longer has — a plain skip would drop it forever. `Some(tip)`
+    /// when the backstop poll shows the tip receded below `block` (roll back
+    /// and wait); `None` otherwise, and always for `Poll` (no extra RPC).
     async fn tip_receded_below(&self, block: u64) -> Option<u64> {
         match self {
             HeadSource::Ws { backstop, .. } => match backstop.poll().await {
@@ -1733,11 +1626,8 @@ impl HeadSource {
         }
     }
 
-    /// Non-blocking watermark refresh from any buffered `newHeads` (Ws mode).
-    /// Used during catch-up (`next_block <= latest`), where the loop must never
-    /// wait on the socket: it drains every already-buffered head and folds each
-    /// through [`advance_watermark`]. Returns `latest` unchanged for the `Poll`
-    /// variant (which advances via [`HeadSource::wait_for_tip`]).
+    /// Non-blocking drain of buffered heads — catch-up must never wait on the
+    /// socket. `latest` unchanged for `Poll`.
     fn drain_tip(&mut self, latest: u64) -> u64 {
         let mut latest = latest;
         if let HeadSource::Ws {
@@ -1752,18 +1642,10 @@ impl HeadSource {
         latest
     }
 
-    /// Await the next watermark advance at tip (Ws mode).
-    ///
-    /// When the subscription is live, race the next announced head against the
-    /// `WS_BACKSTOP` timer: a head advances the watermark, the timer falls back
-    /// to a single backstop poll. Transient socket drops never surface here —
-    /// alloy reconnects the transport and re-subscribes under the same handle
-    /// (see [`connect_ws_head_stream`]). The stream ends only if alloy's
-    /// reconnect gives up for good; from then on every call paces one backstop
-    /// poll per `WS_BACKSTOP`, so a dead or never-established subscription is
-    /// never fatal: the service keeps advancing on backstop watermarks.
-    ///
-    /// Returns `latest` unchanged for the `Poll` variant.
+    /// At-tip wait: next head raced against the `WS_BACKSTOP` timer. Transient
+    /// drops never surface here (alloy reconnects under the handle); a stream
+    /// gone for good degrades to backstop pacing — never fatal. `latest`
+    /// unchanged for `Poll`.
     async fn await_tip(&mut self, latest: u64) -> u64 {
         let HeadSource::Ws {
             heads, backstop, ..
@@ -1772,9 +1654,7 @@ impl HeadSource {
             return latest;
         };
 
-        // Take the stream out so the arms below can restore or drop it without
-        // a borrow conflict inside `select!`. `None` = subscription gone for
-        // good (or never established): pace on the backstop.
+        // Take the stream out for the `select!` arms; `None` = gone for good.
         let Some(mut stream) = heads.take() else {
             sleep(WS_BACKSTOP).await;
             return backstop.watermark(latest).await;
@@ -1786,8 +1666,7 @@ impl HeadSource {
                     advance_watermark(latest, height)
                 }
                 None => {
-                    // Stream ended for good; `heads` stays `None` and the
-                    // backstop supplies this and every later watermark.
+                    // Ends only if alloy gave up; stay on the backstop.
                     warn!("newHeads stream ended; continuing on backstop poll");
                     backstop.watermark(latest).await
                 }
@@ -1800,28 +1679,17 @@ impl HeadSource {
     }
 }
 
-/// Watermark update rule for the `Ws` head source: the tip never moves
-/// backward, so a reorg re-announcement at the same or lower height is
-/// ignored and each height is processed exactly once. Kept as a pure free
-/// function so it is unit-testable without a live socket.
-///
-/// The `Poll` arm deliberately does NOT call this — it stays memoryless for
-/// byte-identical behaviour. Its production callers are the `Ws` head source's
-/// [`HeadSource::drain_tip`]/[`HeadSource::await_tip`] and the backstop poll.
+/// Ws watermark rule: never moves backward, so each height is processed once.
+/// The Poll arm must NOT call this — it stays memoryless (byte-identity).
 fn advance_watermark(latest: u64, announced: u64) -> u64 {
     latest.max(announced)
 }
 
-/// Parse and validate the opt-in `--ws-url` flag. Accepts only `ws`/`wss`
-/// schemes; anything else (including HTTP endpoints or schemeless input) is a
-/// startup error so a misconfigured flag fails fast rather than silently
-/// falling back to polling. Pure so it is unit-testable without a socket.
+/// `--ws-url` must be `ws`/`wss`; anything else fails startup fast rather than
+/// silently falling back to polling.
 fn validate_ws_url(url: &str) -> Result<Url> {
-    // Never echo the raw `url` in errors. Hosted EL endpoints embed the API key
-    // in the path/userinfo, so pasting a hosted `https://.../v2/<KEY>` endpoint
-    // here (a common mistake that trips the scheme check) would leak the key to
-    // startup logs. The parse error does not repeat the input, and the
-    // scheme-mismatch message routes the parsed URL through `redact_url`.
+    // Never echo the raw input: hosted endpoints embed API keys and errors
+    // land in startup logs. Scheme mismatches go through `redact_url`.
     let parsed = Url::parse(url).with_context(|| "--ws-url is not a valid URL")?;
     match parsed.scheme() {
         "ws" | "wss" => Ok(parsed),
@@ -1832,11 +1700,8 @@ fn validate_ws_url(url: &str) -> Result<Url> {
     }
 }
 
-/// Render a URL for logging with credentials stripped. Hosted EL WS endpoints
-/// routinely embed the API key in the path or userinfo (e.g.
-/// `wss://eth-mainnet.g.alchemy.com/v2/<KEY>`, `wss://name.quiknode.pro/<token>/`);
-/// logging the full URL would leak that secret into always-on logs. Keep only
-/// `scheme://host[:port]`.
+/// `scheme://host[:port]` only — hosted endpoints embed API keys in
+/// path/userinfo, which must not reach logs.
 fn redact_url(url: &Url) -> String {
     let host = url.host_str().unwrap_or("");
     match url.port() {
@@ -1920,9 +1785,8 @@ mod tests {
 
     // ---- Ws head source (channel-injected seam, no live socket) ----
 
-    /// Build a `HeadSource::Ws` whose head stream is a plain mpsc channel and
-    /// whose backstop returns `backstop_height`. Returns the source and the
-    /// sender so a test drives announced heights directly.
+    /// Channel-backed `HeadSource::Ws` with a canned backstop; the sender
+    /// drives announced heights.
     fn ws_with_channel(
         backstop_height: u64,
     ) -> (HeadSource, tokio::sync::mpsc::UnboundedSender<u64>) {
@@ -2158,24 +2022,14 @@ mod tests {
         assert!(source.fetch_provider().is_none());
     }
 
-    // ---- Anvil integration tests (Task 8) ----
-    //
-    // These drive a real `HeadSource::Ws` against a live `newHeads`
-    // subscription on a locally-spawned Anvil node. They are `#[ignore]`d
-    // because they need `anvil` in PATH and a real event loop (no
-    // `tokio::time::pause`); run them explicitly with:
-    //
-    //     cargo test -p z6m_prover -- --ignored ws_
-    //
-    // `multi_thread` flavor so alloy's pubsub background service task is driven
-    // independently of the test's awaits.
+    // ---- Anvil integration tests (need `anvil` in PATH) ----
+    // Run: cargo test -p z6m_prover -- --ignored ws_
+    // multi_thread so alloy's pubsub service task runs independently.
 
     use alloy::node_bindings::Anvil;
 
-    /// Watermark advances as Anvil mines. Connect a real WS head source, seed
-    /// the watermark from an HTTP poll, then confirm `await_tip` moves it past
-    /// the seed within a bounded wait (Anvil mines ~1 block/s, well inside
-    /// `WS_BACKSTOP`, so a stuck subscription fails the test instead of hanging).
+    /// Watermark advances past the seed as Anvil mines (~1 block/s, inside
+    /// `WS_BACKSTOP`, so a stuck subscription fails instead of hanging).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires anvil in PATH; run: cargo test -p z6m_prover -- --ignored ws_"]
     async fn ws_watermark_advances_as_anvil_mines() {
@@ -2208,13 +2062,9 @@ mod tests {
         );
     }
 
-    /// Behind-tip start catches up strictly sequentially via `drain_tip` only,
-    /// never entering `await_tip`. Mine ≥5 blocks *before* subscribing (so the
-    /// subscription cannot supply heights 1..=5), seed the watermark from the
-    /// startup poll (Task 5 semantics), then run an in-test cursor loop: each
-    /// catch-up step must return `Ready` from the non-blocking drain branch.
-    /// Wrapping every step in a 2s timeout proves it never blocks on the
-    /// `WS_BACKSTOP` timer that `await_tip` would wait on.
+    /// Behind-tip start catches up sequentially via `drain_tip` only: blocks
+    /// are mined before subscribing, so heads can't supply 1..=5, and the 2s
+    /// per-step timeout proves catch-up never waits on `WS_BACKSTOP`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires anvil in PATH; run: cargo test -p z6m_prover -- --ignored ws_"]
     async fn ws_behind_tip_start_catches_up_sequentially_via_drain() {

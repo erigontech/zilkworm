@@ -177,13 +177,9 @@ pub struct FetchRequest<'a> {
     /// is rebuilt from a fresh RPC fetch. Used by the live prover service so
     /// `--execute-every 1` always operates on a freshly-built bundle.
     pub force_rebuild: bool,
-    /// Provider used for the JSON-RPC fetch calls (`eth_getBlockByNumber`,
-    /// `debug_getRawBlock`, `debug_executionWitness`). `None` → build a fresh
-    /// HTTP provider from `rpc_url`, exactly as before (all CLI paths pass
-    /// `None`). `Some` → use the injected provider; the live service passes its
-    /// WS pubsub provider so the fetch RPCs ride the same socket as the
-    /// `newHeads` subscription. Does not affect the raw-reqwest `--geth` path,
-    /// which stays HTTP-only.
+    /// `None` → HTTP from `rpc_url` (all CLI paths); `Some` → injected — the
+    /// service passes its WS provider so fetches ride the `newHeads` socket.
+    /// The raw-reqwest `--geth` path stays HTTP-only either way.
     pub provider: Option<DynProvider>,
 }
 
@@ -193,11 +189,7 @@ pub struct FetchOutcome {
     pub flat_bundle_path: PathBuf,
 }
 
-/// Resolve the provider used for the JSON-RPC fetch calls. `Some` returns the
-/// injected provider verbatim (the live service passes its WS pubsub provider so
-/// the fetch RPCs ride the subscription's socket); `None` builds a fresh HTTP
-/// provider from `rpc_url`, exactly as the CLI paths do. alloy HTTP providers
-/// construct lazily, so the `None` arm issues no network call here.
+/// Injected provider, or HTTP built from `rpc_url` (lazy — no network call).
 fn resolve_provider(injected: Option<DynProvider>, rpc_url: &str) -> Result<DynProvider> {
     match injected {
         Some(provider) => Ok(provider),
@@ -208,24 +200,16 @@ fn resolve_provider(injected: Option<DynProvider>, rpc_url: &str) -> Result<DynP
     }
 }
 
-/// Where the execution witness for a block is obtained. Today the only variant
-/// is `Request` (disk cache → geth/alloy RPC — the three paths that used to be
-/// inlined in `fetch_block_and_witness`). This is a seam: PR 3 adds a
-/// `PushWithFallback` variant here (erigon push subscription with request
-/// fallback) without touching `run_service` or the fetch orchestration.
+/// Witness acquisition seam: PR 3 adds a `PushWithFallback` variant here
+/// (erigon push subscription with request fallback) without touching the
+/// fetch orchestration.
 enum WitnessSource {
-    /// Read the witness from the on-disk cache if present; otherwise request it
-    /// over RPC — the raw-reqwest geth path when `geth`, else alloy's
-    /// `debug_executionWitness`. Fetched witnesses are persisted to
-    /// `witness_path` when `save_all_responses`.
+    /// Disk cache, then geth or alloy RPC.
     Request,
 }
 
 impl WitnessSource {
-    /// Acquire the witness for `block_number`, verbatim semantics of the former
-    /// inline 3-path match: disk cache first, then geth or alloy RPC. `provider`
-    /// is only touched on the alloy path; the disk-cache and geth paths make no
-    /// use of it.
+    /// `provider` is used only on the alloy path.
     async fn acquire(
         &self,
         provider: &DynProvider,
