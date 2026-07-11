@@ -667,8 +667,8 @@ impl Z6mProverService {
                 }
             }
             HeadSourceKind::Ws => {
-                let ws_url = validated_ws_url
-                    .expect("Ws head-source kind implies a validated --ws-url");
+                let ws_url =
+                    validated_ws_url.expect("Ws head-source kind implies a validated --ws-url");
                 // Seed the watermark with one `eth_blockNumber` regardless of
                 // `--start-block`; without it a behind-tip start would route the
                 // first iteration into `await_tip` and stall catch-up.

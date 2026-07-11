@@ -219,11 +219,19 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] no `--ws-url` → byte-identical: diff-audit the Poll arm against pre-branch `service.rs` (cadence, retry counts, sleeps, memoryless per-iteration `latest`, all println/log formats); `grep -n 'BEGIN_FETCH\|BEGIN_EXEC\|Received block number' prover/prover_hypercube/src/service.rs` formats match `main`
-- [ ] `git diff --stat main` touches only: `prover/prover_hypercube/src/{main,service}.rs`, `prover/common/src/fetcher.rs`, `prover/common/Cargo.toml`, `prover/Cargo.lock`, this plan, and (only if Task 3 needed the dep) `prover/prover_hypercube/Cargo.toml`; **zero `prover_turbo` changes**
-- [ ] full suite: `cd prover && cargo test -p z6m_common -p z6m_prover`, then the diff-scoped clippy gate over both crates and fmt-cleanliness of this branch's hunks only (pre-existing clippy/fmt debt on `main` stays untouched — see Development Approach)
-- [ ] `make z6m_prover` (Makefile:22) still builds
-- [ ] re-read Overview requirements and confirm each is implemented (opt-in flag, watermark-only WS, seeded watermark + catch-up never waits, reconnect non-fatal, WS-routed fetch with HTTP fallback, formats unchanged)
+- [x] no `--ws-url` → byte-identical: diff-audit the Poll arm against pre-branch `service.rs` (cadence, retry counts, sleeps, memoryless per-iteration `latest`, all println/log formats); `grep -n 'BEGIN_FETCH\|BEGIN_EXEC\|Received block number' prover/prover_hypercube/src/service.rs` formats match `main`
+- [x] `git diff --stat main` touches only: `prover/prover_hypercube/src/{main,service}.rs`, `prover/common/src/fetcher.rs`, `prover/common/Cargo.toml`, `prover/Cargo.lock`, this plan, and (only if Task 3 needed the dep) `prover/prover_hypercube/Cargo.toml`; **zero `prover_turbo` changes**
+- [x] full suite: `cd prover && cargo test -p z6m_common -p z6m_prover`, then the diff-scoped clippy gate over both crates and fmt-cleanliness of this branch's hunks only (pre-existing clippy/fmt debt on `main` stays untouched — see Development Approach)
+- [x] `make z6m_prover` (Makefile:22) still builds
+- [x] re-read Overview requirements and confirm each is implemented (opt-in flag, watermark-only WS, seeded watermark + catch-up never waits, reconnect non-fatal, WS-routed fetch with HTTP fallback, formats unchanged)
+
+**Task 9 verification results:**
+- Byte-identity: Poll arm delegates to `wait_for_tip` (6 retries flat 2s, 2s sleep at tip, 30s + skip on exhaustion, `latest` never read/written); all four markers (`Received block number from RPC`, `BEGIN_FETCH`, `BEGIN_EXEC`, `END_EXEC`) are byte-identical to `main`.
+- Diff scope: exactly the 7 expected files; **0** `prover_turbo` changes.
+- Suite: `z6m_common` 5/5, `z6m_prover` 31/31 (2 Anvil `ws_` tests `#[ignore]`d as designed). Diff-scoped clippy gate green: all remaining warnings blame to non-branch commits (`block_ts_ms` `u64::from`, `use chrono`, `map_or`/`is_multiple_of` on `main` — pre-existing debt), **0** on branch-added lines.
+- ⚠️ Fmt: one branch-only fmt-dirty hunk found and fixed — `service.rs` `let ws_url = validated_ws_url.expect(...)` reflowed to rustfmt's form. `fetcher.rs` import line (`alloy_provider` added `DynProvider`) is flagged by rustfmt for ordering, but that misordering (`alloy_provider` before `alloy_primitives`) **pre-exists on `main`** — reordering it is baseline import cleanup the plan prohibits, so left as-is (branch only edited the line's content). Toolchain note: `rustfmt`/`cargo fmt` must run from `prover/` (pinned `1.91.0`); the repo-default `1.92` toolchain has no `rustfmt`.
+- `make z6m_prover` builds (release, guest ELF present).
+- Overview requirements all implemented: opt-in `--ws-url`, watermark-only WS (`advance_watermark` max), seeded watermark + `drain_tip` catch-up never waits, reconnect non-fatal (`backoff_delay`/`try_resubscribe`/backstop), WS-routed fetch (`fetch_provider`) with one-shot HTTP fallback, formats unchanged.
 
 ### Task 10: Documentation + wrap-up
 
