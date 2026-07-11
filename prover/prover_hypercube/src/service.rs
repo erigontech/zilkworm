@@ -188,6 +188,10 @@ pub struct ServiceConfig {
     pub execute_every: Option<u64>,
     pub post_every: Option<u64>,
     pub rpc_url: String,
+    /// Opt-in WebSocket EL endpoint (`ws`/`wss`). `None` → poll-based behaviour
+    /// identical to today. Validated at [`Z6mProverService::run_service`]
+    /// startup by [`validate_ws_url`].
+    pub ws_url: Option<String>,
     pub save_all_responses: bool,
     pub download_only: bool,
     #[allow(dead_code)]
@@ -617,6 +621,12 @@ impl Z6mProverService {
 
     pub async fn run_service(&mut self, service: ServiceConfig) -> Result<()> {
         info!("starting service mode");
+        // Fail fast on a malformed `--ws-url` before any connection attempt.
+        // A valid `ws`/`wss` URL is consumed by the `Ws` head source in a later
+        // task; here we only validate.
+        if let Some(ws_url) = &service.ws_url {
+            validate_ws_url(ws_url)?;
+        }
         let url = Url::parse(&service.rpc_url)?;
         let provider = ProviderBuilder::new().connect_http(url).erased();
 
@@ -1402,6 +1412,19 @@ fn advance_watermark(latest: u64, announced: u64) -> u64 {
     latest.max(announced)
 }
 
+/// Parse and validate the opt-in `--ws-url` flag. Accepts only `ws`/`wss`
+/// schemes; anything else (including HTTP endpoints or schemeless input) is a
+/// startup error so a misconfigured flag fails fast rather than silently
+/// falling back to polling. Pure so it is unit-testable without a socket.
+fn validate_ws_url(url: &str) -> Result<Url> {
+    let parsed =
+        Url::parse(url).with_context(|| format!("--ws-url is not a valid URL: {url:?}"))?;
+    match parsed.scheme() {
+        "ws" | "wss" => Ok(parsed),
+        other => bail!("--ws-url must use the ws:// or wss:// scheme, got {other:?} in {url:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1427,5 +1450,37 @@ mod tests {
     #[test]
     fn advance_watermark_seeds_from_zero() {
         assert_eq!(advance_watermark(0, 1), 1);
+    }
+
+    #[test]
+    fn validate_ws_url_accepts_ws_with_port() {
+        let url = validate_ws_url("ws://host:8545").expect("ws:// should be accepted");
+        assert_eq!(url.scheme(), "ws");
+    }
+
+    #[test]
+    fn validate_ws_url_accepts_wss() {
+        let url = validate_ws_url("wss://host").expect("wss:// should be accepted");
+        assert_eq!(url.scheme(), "wss");
+    }
+
+    #[test]
+    fn validate_ws_url_rejects_http() {
+        assert!(validate_ws_url("http://host:8545").is_err());
+    }
+
+    #[test]
+    fn validate_ws_url_rejects_https() {
+        assert!(validate_ws_url("https://host").is_err());
+    }
+
+    #[test]
+    fn validate_ws_url_rejects_schemeless() {
+        assert!(validate_ws_url("host:8545").is_err());
+    }
+
+    #[test]
+    fn validate_ws_url_rejects_garbage() {
+        assert!(validate_ws_url("not a url").is_err());
     }
 }

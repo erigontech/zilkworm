@@ -106,10 +106,10 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 - Modify: `prover/prover_hypercube/src/main.rs`
 - Modify: `prover/prover_hypercube/src/service.rs`
 
-- [ ] add `#[arg(long)] ws_url: Option<String>` to `Args` (top level, next to `rpc_url`; no env attr — consistent with existing flags) and plumb into `ServiceConfig.ws_url: Option<String>`
-- [ ] add pure `fn validate_ws_url(url: &str) -> eyre::Result<Url>` accepting only `ws`/`wss` schemes with an actionable error message; call it at `run_service` startup before any connection attempt (malformed flag = immediate startup error)
-- [ ] write tests: `validate_ws_url` accepts `ws://host:8545` and `wss://host`, rejects `http://`, `https://`, schemeless, and garbage
-- [ ] run tests — must pass before Task 3
+- [x] add `#[arg(long)] ws_url: Option<String>` to `Args` (top level, next to `rpc_url`; no env attr — consistent with existing flags) and plumb into `ServiceConfig.ws_url: Option<String>`
+- [x] add pure `fn validate_ws_url(url: &str) -> eyre::Result<Url>` accepting only `ws`/`wss` schemes with an actionable error message; call it at `run_service` startup before any connection attempt (malformed flag = immediate startup error)
+- [x] write tests: `validate_ws_url` accepts `ws://host:8545` and `wss://host`, rejects `http://`, `https://`, schemeless, and garbage
+- [x] run tests — must pass before Task 3
 
 ### Task 3: `HeadStream` seam + `HeadSource::Ws` tip semantics
 
