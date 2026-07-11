@@ -3,8 +3,11 @@
 
 use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
 use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_mfbd};
+use alloy::pubsub::Subscription;
+use alloy::transports::ws::{WebSocketConfig, WsConnect};
 use alloy_primitives::B256;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_types::Header;
 use eyre::{bail, Context, Result};
 use z6m_common::{fetch_block_and_witness, FetchOutcome, FetchRequest};
 
@@ -1345,12 +1348,28 @@ fn matches_interval(interval: Option<u64>, block_number: u64) -> bool {
     }
 }
 
+/// Silence window before the `Ws` head source falls back to a single
+/// `eth_blockNumber` backstop poll. Chosen well above mainnet's ~12s block
+/// interval so a healthy `newHeads` subscription never triggers it, yet short
+/// enough to keep the service advancing if the stream stalls or dies.
+const WS_BACKSTOP: Duration = Duration::from_secs(24);
+
+/// Incoming-message cap for the WS connection. tungstenite 0.26 defaults to
+/// 64 MiB (`WebSocketConfig::max_message_size` = 64 MiB, `max_frame_size` =
+/// 16 MiB), which would *reject* a large `debug_executionWitness` response
+/// (10–80 MB of hex JSON) riding this same socket — a correctness item, not
+/// tuning. 256 MiB leaves comfortable headroom.
+const WS_MAX_MESSAGE_SIZE: usize = 256 << 20;
+
 /// Source of the chain-tip watermark that gates the live service loop.
 ///
-/// Today only `Poll` exists — a verbatim extraction of the historical
-/// per-iteration `eth_blockNumber` poll. The `Ws` variant (a `newHeads`
-/// subscription used purely as a tip watermark) is added in a later task; it
-/// will be the only user of [`advance_watermark`].
+/// `Poll` is a verbatim extraction of the historical per-iteration
+/// `eth_blockNumber` poll. `Ws` is a `newHeads` subscription used purely as a
+/// tip watermark: during catch-up the loop drains buffered heads
+/// non-blockingly ([`HeadSource::drain_tip`]) and never waits on the socket;
+/// at tip it awaits the next head or a backstop poll ([`HeadSource::await_tip`]).
+/// Both watermark advances go through [`advance_watermark`], so a reorg
+/// re-announcement can never move the cursor backward.
 enum HeadSource {
     /// Poll `eth_blockNumber` once per live iteration. Memoryless: every
     /// iteration compares `next_block` against a freshly-polled `latest` with
@@ -1358,6 +1377,127 @@ enum HeadSource {
     /// byte (persisting a max here would diverge whenever `eth_blockNumber`
     /// decreases).
     Poll { provider: DynProvider },
+    /// `newHeads` subscription used purely as a tip watermark. Reconnect and
+    /// capped backoff on stream death are added in Task 4; `run_service`
+    /// wiring (mode selection + watermark seeding) is Task 5. Until then the
+    /// only constructor is the unit tests, which inject a channel-backed head
+    /// stream and a canned backstop.
+    #[allow(dead_code)] // constructed by tests now; wired into run_service in Task 5
+    Ws {
+        /// Pubsub provider hosting both the subscription and the backstop poll
+        /// over one connection (alloy multiplexes requests and subscriptions).
+        /// Retained for the WS-routed fetch path and for resubscribe (Task 4).
+        /// `None` in unit tests, which inject a channel-backed head stream.
+        provider: Option<DynProvider>,
+        /// Live head stream, or `None` while the subscription is down (Task 4
+        /// resubscribes on the next `await_tip`).
+        heads: Option<HeadStream>,
+        /// Fallback watermark poll fired by the `WS_BACKSTOP` timer.
+        backstop: Backstop,
+        /// Consecutive resubscribe failures, for capped backoff (Task 4).
+        backoff_attempt: u32,
+    },
+}
+
+/// Thin seam over the live `newHeads` subscription, mapping each announced
+/// header to its block height. alloy 1.0 facts (verified against alloy 1.0.35):
+/// `provider.subscribe_blocks()` issues `eth_subscribe("newHeads")` and yields
+/// a `Subscription<Header>`; `Header` derefs to `alloy_consensus::Header`,
+/// whose `number: u64` is the height. Unit tests substitute an in-memory
+/// channel so head semantics run without a live socket. Subscription lag or a
+/// dropped item is harmless — only `max(height)` feeds the watermark.
+enum HeadStream {
+    /// Production: the alloy `newHeads` subscription.
+    Live(Subscription<Header>),
+    /// Test seam: heights fed directly over a channel.
+    #[cfg(test)]
+    Channel(tokio::sync::mpsc::UnboundedReceiver<u64>),
+}
+
+impl HeadStream {
+    /// Non-blocking: return one already-buffered height, or `None` when nothing
+    /// is ready (empty channel), the receiver lagged, or the stream closed.
+    /// Backs [`HeadSource::drain_tip`]. A lagged/closed result simply ends this
+    /// drain pass; the watermark is monotonic and any newer buffered head is
+    /// picked up on the next pass or by the backstop.
+    fn try_next_height(&mut self) -> Option<u64> {
+        match self {
+            HeadStream::Live(sub) => sub.try_recv().ok().map(|h| h.number),
+            #[cfg(test)]
+            HeadStream::Channel(rx) => rx.try_recv().ok(),
+        }
+    }
+
+    /// Await the next announced height. `None` when the stream ends (the
+    /// subscription closed or lagged out, or the test channel was dropped).
+    /// Backs [`HeadSource::await_tip`]; a broadcast/mpsc `recv` future is
+    /// cancel-safe, so racing it on the `WS_BACKSTOP` timer loses no head.
+    async fn next_height(&mut self) -> Option<u64> {
+        match self {
+            HeadStream::Live(sub) => sub.recv().await.ok().map(|h| h.number),
+            #[cfg(test)]
+            HeadStream::Channel(rx) => rx.recv().await,
+        }
+    }
+}
+
+/// Fallback watermark source fired by the `WS_BACKSTOP` timer when the head
+/// stream is silent. Production issues a single `eth_blockNumber` over the WS
+/// provider (requests and subscriptions multiplex over one pubsub connection);
+/// tests return a canned height so the backstop path runs without a socket.
+enum Backstop {
+    #[allow(dead_code)] // constructed by the Task 5 run_service wiring
+    Provider(DynProvider),
+    #[cfg(test)]
+    Canned(u64),
+}
+
+impl Backstop {
+    /// One watermark poll. `None` on RPC error — the caller keeps the current
+    /// watermark and retries on the next backstop tick.
+    async fn poll(&self) -> Option<u64> {
+        match self {
+            Backstop::Provider(provider) => provider.get_block_number().await.ok(),
+            #[cfg(test)]
+            Backstop::Canned(height) => Some(*height),
+        }
+    }
+
+    /// Apply one backstop poll to the running watermark; never regresses it.
+    async fn watermark(&self, latest: u64) -> u64 {
+        match self.poll().await {
+            Some(height) => advance_watermark(latest, height),
+            None => latest,
+        }
+    }
+}
+
+/// Result of one [`HeadSource::await_tip`] race between the next announced
+/// head, a stream end, and the `WS_BACKSTOP` timer.
+enum AwaitOutcome {
+    Head(u64),
+    Ended,
+    Timer,
+}
+
+/// Build a pubsub provider over `url` and subscribe to `newHeads`, returning
+/// the provider (retained for the fetch path and resubscribe) plus the mapped
+/// head stream. Raises the incoming-message cap to [`WS_MAX_MESSAGE_SIZE`] so a
+/// large `debug_executionWitness` response sharing this socket is not rejected
+/// by tungstenite's 64 MiB default.
+///
+/// alloy 1.0 facts (verified against alloy 1.0.35): `WsConnect::with_config`
+/// takes a `WebSocketConfig`; `ProviderBuilder::connect_ws` builds the pubsub
+/// provider; `.erased()` yields the same `DynProvider` used for the HTTP path.
+#[allow(dead_code)] // wired into run_service in Task 5
+async fn connect_ws_head_stream(url: &Url) -> Result<(DynProvider, HeadStream)> {
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(WS_MAX_MESSAGE_SIZE))
+        .max_frame_size(Some(WS_MAX_MESSAGE_SIZE));
+    let ws = WsConnect::new(url.as_str()).with_config(config);
+    let provider = ProviderBuilder::new().connect_ws(ws).await?.erased();
+    let heads = provider.subscribe_blocks().await?;
+    Ok((provider, HeadStream::Live(heads)))
 }
 
 /// Whether the next block is available to fetch, as reported by the head
@@ -1394,6 +1534,82 @@ impl HeadSource {
                         TipStatus::NotReady
                     }
                 }
+            }
+            // Ws mode never routes through `wait_for_tip`: the live loop drains
+            // heads (`drain_tip`) during catch-up and awaits them (`await_tip`)
+            // at tip. Unreachable today — `run_service` only builds `Poll` until
+            // the Task 5 mode-selection wiring lands.
+            HeadSource::Ws { .. } => {
+                unreachable!("wait_for_tip is Poll-only; Ws mode uses drain_tip/await_tip")
+            }
+        }
+    }
+
+    /// Non-blocking watermark refresh from any buffered `newHeads` (Ws mode).
+    /// Used during catch-up (`next_block <= latest`), where the loop must never
+    /// wait on the socket: it drains every already-buffered head and folds each
+    /// through [`advance_watermark`]. Returns `latest` unchanged for the `Poll`
+    /// variant (which advances via [`HeadSource::wait_for_tip`]).
+    #[allow(dead_code)] // wired into run_service in Task 5
+    fn drain_tip(&mut self, latest: u64) -> u64 {
+        let mut latest = latest;
+        if let HeadSource::Ws {
+            heads: Some(stream),
+            ..
+        } = self
+        {
+            while let Some(height) = stream.try_next_height() {
+                latest = advance_watermark(latest, height);
+            }
+        }
+        latest
+    }
+
+    /// Await the next watermark advance at tip (Ws mode): race the next head
+    /// against the `WS_BACKSTOP` timer, falling back to a single backstop poll
+    /// when the timer wins or the stream has ended. Returns `latest` unchanged
+    /// for the `Poll` variant. Resubscribe on stream end is added in Task 4;
+    /// for now a dead stream is cleared and the source paces on the backstop.
+    #[allow(dead_code)] // wired into run_service in Task 5
+    async fn await_tip(&mut self, latest: u64) -> u64 {
+        let HeadSource::Ws {
+            heads, backstop, ..
+        } = self
+        else {
+            return latest;
+        };
+        match heads {
+            Some(_) => {
+                // Take the stream out so the timer/`Ended` arms can restore or
+                // clear it without a borrow conflict inside `select!`.
+                let mut stream = heads.take().expect("await_tip: heads is Some");
+                let outcome = tokio::select! {
+                    next = stream.next_height() => match next {
+                        Some(height) => AwaitOutcome::Head(height),
+                        None => AwaitOutcome::Ended,
+                    },
+                    _ = sleep(WS_BACKSTOP) => AwaitOutcome::Timer,
+                };
+                match outcome {
+                    AwaitOutcome::Head(height) => {
+                        *heads = Some(stream);
+                        advance_watermark(latest, height)
+                    }
+                    AwaitOutcome::Timer => {
+                        *heads = Some(stream);
+                        backstop.watermark(latest).await
+                    }
+                    AwaitOutcome::Ended => {
+                        // Stream dropped; `heads` stays `None`. Task 4 resubscribes.
+                        backstop.watermark(latest).await
+                    }
+                }
+            }
+            None => {
+                // Subscription is down: pace on the backstop until Task 4
+                // re-establishes it.
+                sleep(WS_BACKSTOP).await;
+                backstop.watermark(latest).await
             }
         }
     }
@@ -1482,5 +1698,95 @@ mod tests {
     #[test]
     fn validate_ws_url_rejects_garbage() {
         assert!(validate_ws_url("not a url").is_err());
+    }
+
+    // ---- Ws head source (channel-injected seam, no live socket) ----
+
+    /// Build a `HeadSource::Ws` whose head stream is a plain mpsc channel and
+    /// whose backstop returns `backstop_height`. Returns the source and the
+    /// sender so a test drives announced heights directly.
+    fn ws_with_channel(
+        backstop_height: u64,
+    ) -> (HeadSource, tokio::sync::mpsc::UnboundedSender<u64>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let source = HeadSource::Ws {
+            provider: None,
+            heads: Some(HeadStream::Channel(rx)),
+            backstop: Backstop::Canned(backstop_height),
+            backoff_attempt: 0,
+        };
+        (source, tx)
+    }
+
+    #[test]
+    fn ws_drain_tip_advances_watermark_from_heads() {
+        let (mut source, tx) = ws_with_channel(0);
+        tx.send(5).unwrap();
+        tx.send(7).unwrap();
+        // Non-blocking drain of already-buffered heads takes the max height.
+        assert_eq!(source.drain_tip(3), 7);
+    }
+
+    #[test]
+    fn ws_drain_tip_ignores_equal_and_lower_heads() {
+        // Neither a same-height re-announcement nor a lower reorg regresses the
+        // watermark.
+        let (mut source, tx) = ws_with_channel(0);
+        tx.send(10).unwrap(); // fresh tip
+        tx.send(10).unwrap(); // re-announcement at the same height
+        tx.send(8).unwrap(); // reorg to a lower height
+        assert_eq!(source.drain_tip(10), 10);
+    }
+
+    #[test]
+    fn ws_drain_tip_noop_on_empty_channel() {
+        let (mut source, _tx) = ws_with_channel(0);
+        // Empty channel: drain returns the input watermark immediately.
+        assert_eq!(source.drain_tip(42), 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ws_await_tip_returns_on_first_head() {
+        let (mut source, tx) = ws_with_channel(0);
+        tx.send(12).unwrap();
+        // The buffered head resolves before the paused-clock backstop timer.
+        assert_eq!(source.await_tip(9).await, 12);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ws_await_tip_ignores_lower_head() {
+        let (mut source, tx) = ws_with_channel(0);
+        tx.send(4).unwrap(); // a reorg re-announcement below the watermark
+        assert_eq!(source.await_tip(10).await, 10);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ws_await_tip_fires_backstop_when_silent() {
+        // No heads are sent (sender kept alive), so the `WS_BACKSTOP` timer must
+        // win and the canned backstop (height 20) advances the watermark.
+        let (mut source, _tx) = ws_with_channel(20);
+        assert_eq!(source.await_tip(5).await, 20);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ws_await_tip_backstop_after_stream_end() {
+        // Dropping the sender ends the stream; `await_tip` falls back to the
+        // backstop rather than stalling.
+        let (mut source, tx) = ws_with_channel(15);
+        drop(tx);
+        assert_eq!(source.await_tip(5).await, 15);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_variant_head_methods_are_noops() {
+        // The `Poll` variant must not drive the Ws head machinery: both helpers
+        // return the watermark unchanged. (HTTP providers construct lazily, so
+        // this makes no network call.)
+        let provider = ProviderBuilder::new()
+            .connect_http("http://localhost:8545".parse().unwrap())
+            .erased();
+        let mut source = HeadSource::Poll { provider };
+        assert_eq!(source.drain_tip(7), 7);
+        assert_eq!(source.await_tip(7).await, 7);
     }
 }

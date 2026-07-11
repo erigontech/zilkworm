@@ -67,6 +67,12 @@ git = "https://github.com/erigontech/sp1.git"
 branch = "erigon/patches-v6.0.2"
 default-features = false
 
+[dev-dependencies]
+# `test-util` (not in tokio's `full`) enables `tokio::time` pause/auto-advance
+# so the WS backstop-timer tests run instantly instead of sleeping ~24s. Dev-only:
+# the binary build never pulls it in.
+tokio = { version = "1", features = ["test-util"] }
+
 [build-dependencies]
 sp1-build = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.0.2" }
 cxx-build = "1.0.160" # build-time codegen & C++ compilation

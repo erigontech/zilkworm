@@ -117,13 +117,18 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 - Modify: `prover/prover_hypercube/src/service.rs`
 - Modify (only if the message-size knob needs it): `prover/prover_hypercube/Cargo.toml`
 
-- [ ] verify alloy 1.0 facts and record them as code comments where used: `WsConnect`/`ProviderBuilder` ws connection API, `subscribe_blocks()` return type and height field access, subscription lag/drop semantics
-- [ ] configure the WS connection's max message size ≥128MB at construction (tungstenite default ~64MiB rejects large witness responses — correctness, not tuning); if `WsConnect` doesn't expose it, add the explicit `alloy-transport-ws`/`tokio-tungstenite` manifest entry (already in Cargo.lock via `full`) and note it in the plan
-- [ ] add `HeadStream` seam: production impl wraps the alloy subscription mapped to `u64` heights; test impl backed by `tokio::sync::mpsc`
-- [ ] add `HeadSource::Ws` variant with `drain_tip(latest) -> u64` (non-blocking drain of all buffered heads via the seam; never awaits) and `await_tip(latest) -> u64` (`tokio::select!` over next head vs `WS_BACKSTOP` timer (~24s const) firing the backstop)
-- [ ] inject the backstop behind its own seam (boxed async closure or alloy mocked provider/`Asserter`): prod = one `eth_blockNumber` call; tests = canned value
-- [ ] write tests (channel-injected, `tokio::time::pause()` for timing): heads advance the watermark; equal/lower reorg heads don't regress it; `drain_tip` returns immediately on an empty channel; `await_tip` returns on first head; backstop fires (canned backstop) when no heads arrive
-- [ ] run tests — must pass before Task 4
+- [x] verify alloy 1.0 facts and record them as code comments where used: `WsConnect`/`ProviderBuilder` ws connection API, `subscribe_blocks()` return type and height field access, subscription lag/drop semantics (verified against alloy 1.0.35: `WsConnect::with_config(WebSocketConfig)`; `ProviderBuilder::connect_ws(WsConnect).await?.erased()`; `subscribe_blocks() -> Subscription<Header>`, `Header` derefs to `alloy_consensus::Header` → `number: u64`; `Subscription::{try_recv,recv}` for non-blocking/awaiting drain, both cancel-safe — comments live in `connect_ws_head_stream`/`HeadStream`)
+- [x] configure the WS connection's max message size ≥128MB at construction (tungstenite default ~64MiB rejects large witness responses — correctness, not tuning); if `WsConnect` doesn't expose it, add the explicit `alloy-transport-ws`/`tokio-tungstenite` manifest entry (already in Cargo.lock via `full`) and note it in the plan — **`WsConnect::with_config` DOES expose the knob, so no new runtime manifest entry was needed; set `WS_MAX_MESSAGE_SIZE = 256 MiB` on both `max_message_size` and `max_frame_size`**
+- [x] add `HeadStream` seam: production impl wraps the alloy subscription mapped to `u64` heights; test impl backed by `tokio::sync::mpsc`
+- [x] add `HeadSource::Ws` variant with `drain_tip(latest) -> u64` (non-blocking drain of all buffered heads via the seam; never awaits) and `await_tip(latest) -> u64` (`tokio::select!` over next head vs `WS_BACKSTOP` timer (~24s const) firing the backstop)
+- [x] inject the backstop behind its own seam (boxed async closure or alloy mocked provider/`Asserter`): prod = one `eth_blockNumber` call; tests = canned value — implemented as a small `Backstop` enum (`Provider(DynProvider)` / `#[cfg(test)] Canned(u64)`), mirroring the `HeadStream` seam
+- [x] write tests (channel-injected, `tokio::time::pause()` for timing): heads advance the watermark; equal/lower reorg heads don't regress it; `drain_tip` returns immediately on an empty channel; `await_tip` returns on first head; backstop fires (canned backstop) when no heads arrive
+- [x] run tests — must pass before Task 4
+
+**Task 3 scope notes (per "update the plan when scope changes"):**
+- ➕ Added `[dev-dependencies] tokio = { features = ["test-util"] }` to `prover/prover_hypercube/Cargo.toml`. tokio's `full` does NOT include `test-util`, which the `tokio::time` pause/auto-advance timing tests require. Dev-only — the binary build never pulls it in; `Cargo.lock` is unchanged (feature-only on already-locked tokio 1.47.1). This is the sole `Cargo.toml` change (the message-size knob needed none), so Task 9's diff-stat exception for `prover_hypercube/Cargo.toml` applies.
+- ⚠️ `Ws` variant shape refined vs Technical Details (`{ url, heads, backstop, backoff_attempt }` → `{ provider: Option<DynProvider>, heads, backstop, backoff_attempt }`): resubscribe (Task 4) re-calls `subscribe_blocks()` on the retained provider rather than rebuilding from a URL (alloy multiplexes subscriptions/requests over the one live connection), so the provider is the field that must be kept. The validated `Url` is still consumed by `connect_ws_head_stream(&Url)` at construction.
+- `Ws`/`drain_tip`/`await_tip`/`connect_ws_head_stream`/`Backstop::Provider` carry `#[allow(dead_code)]` (constructed only by tests until Task 4 reconnect + Task 5 run_service wiring); remove those allows as they are wired.
 
 ### Task 4: WS reconnect with capped backoff; never fatal
 
