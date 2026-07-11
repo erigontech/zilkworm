@@ -1819,11 +1819,18 @@ fn advance_watermark(latest: u64, announced: u64) -> u64 {
 /// startup error so a misconfigured flag fails fast rather than silently
 /// falling back to polling. Pure so it is unit-testable without a socket.
 fn validate_ws_url(url: &str) -> Result<Url> {
-    let parsed =
-        Url::parse(url).with_context(|| format!("--ws-url is not a valid URL: {url:?}"))?;
+    // Never echo the raw `url` in errors. Hosted EL endpoints embed the API key
+    // in the path/userinfo, so pasting a hosted `https://.../v2/<KEY>` endpoint
+    // here (a common mistake that trips the scheme check) would leak the key to
+    // startup logs. The parse error does not repeat the input, and the
+    // scheme-mismatch message routes the parsed URL through `redact_url`.
+    let parsed = Url::parse(url).with_context(|| "--ws-url is not a valid URL")?;
     match parsed.scheme() {
         "ws" | "wss" => Ok(parsed),
-        other => bail!("--ws-url must use the ws:// or wss:// scheme, got {other:?} in {url:?}"),
+        other => bail!(
+            "--ws-url must use the ws:// or wss:// scheme, got {other:?} in {}",
+            redact_url(&parsed)
+        ),
     }
 }
 
