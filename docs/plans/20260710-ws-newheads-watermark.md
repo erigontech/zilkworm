@@ -205,11 +205,17 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 **Files:**
 - Modify: `prover/prover_hypercube/src/service.rs` (tests live in the in-crate `#[cfg(test)]` module — the crate is binary-only, a `tests/` file cannot import `HeadSource`)
 
-- [ ] add `#[tokio::test] #[ignore]` tests (names prefixed `ws_`) spawning Anvil via `node-bindings` with `--block-time 1`, connecting a real `HeadSource::Ws` to its ws endpoint
-- [ ] test: watermark advances as Anvil mines (bounded wait, generous timeout)
-- [ ] test: behind-tip start — mine 5 blocks first, seed the watermark via the startup poll (Task 5 semantics), assert an in-test cursor loop observes heights strictly sequentially to ≥5 via `drain_tip` only, never entering `await_tip` during catch-up
-- [ ] mark both `#[ignore]` with a comment: requires `anvil` in PATH; run via `cargo test -p z6m_prover -- --ignored ws_`
-- [ ] run the ignored tests locally once — must pass before Task 9
+- [x] add `#[tokio::test] #[ignore]` tests (names prefixed `ws_`) spawning Anvil via `node-bindings` with `--block-time 1`, connecting a real `HeadSource::Ws` to its ws endpoint
+- [x] test: watermark advances as Anvil mines (bounded wait, generous timeout)
+- [x] test: behind-tip start — mine 5 blocks first, seed the watermark via the startup poll (Task 5 semantics), assert an in-test cursor loop observes heights strictly sequentially to ≥5 via `drain_tip` only, never entering `await_tip` during catch-up
+- [x] mark both `#[ignore]` with a comment: requires `anvil` in PATH; run via `cargo test -p z6m_prover -- --ignored ws_`
+- [x] run the ignored tests locally once — must pass before Task 9
+
+**Task 8 scope notes:**
+- Tests: `ws_watermark_advances_as_anvil_mines` and `ws_behind_tip_start_catches_up_sequentially_via_drain`, both `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` (real event loop for alloy's pubsub service task — `tokio::time::pause` can't be used against a live socket) `#[ignore]`d with a run-command comment. `use alloy::node_bindings::Anvil;` lives in the test module (`node-bindings` is already enabled on the `alloy` dep).
+- Behind-tip catch-up is mined by **waiting for natural block production** (`--block-time 1`, poll the tip to ≥5 under a 60s timeout) rather than an explicit `anvil_mine` RPC — no extra API surface, and the subscription is opened only *after* the 5 blocks so it genuinely cannot supply heights 1..=5.
+- The "never enters `await_tip` during catch-up" claim is made **empirical**: each `wait_for_tip_live` catch-up call is wrapped in a 2s `tokio::time::timeout` — the drain branch returns instantly, whereas entering `await_tip` would block on the 24s `WS_BACKSTOP` timer and trip the timeout. The `Ws` backstop is the HTTP `--rpc-url` provider (Task 5), matching production.
+- Ran `cargo test -p z6m_prover -- --ignored ws_`: both pass (~5s). Diff is one additive hunk at the end of `service.rs`; diff-scoped clippy/fmt gates green (all warnings/rustfmt suggestions land on pre-existing lines outside the hunk).
 
 ### Task 9: Verify acceptance criteria
 

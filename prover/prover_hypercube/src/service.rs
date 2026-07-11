@@ -2206,4 +2206,124 @@ mod tests {
         };
         assert!(source.fetch_provider().is_none());
     }
+
+    // ---- Anvil integration tests (Task 8) ----
+    //
+    // These drive a real `HeadSource::Ws` against a live `newHeads`
+    // subscription on a locally-spawned Anvil node. They are `#[ignore]`d
+    // because they need `anvil` in PATH and a real event loop (no
+    // `tokio::time::pause`); run them explicitly with:
+    //
+    //     cargo test -p z6m_prover -- --ignored ws_
+    //
+    // `multi_thread` flavor so alloy's pubsub background service task is driven
+    // independently of the test's awaits.
+
+    use alloy::node_bindings::Anvil;
+
+    /// Watermark advances as Anvil mines. Connect a real WS head source, seed
+    /// the watermark from an HTTP poll, then confirm `await_tip` moves it past
+    /// the seed within a bounded wait (Anvil mines ~1 block/s, well inside
+    /// `WS_BACKSTOP`, so a stuck subscription fails the test instead of hanging).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires anvil in PATH; run: cargo test -p z6m_prover -- --ignored ws_"]
+    async fn ws_watermark_advances_as_anvil_mines() {
+        let anvil = Anvil::new().block_time(1).spawn();
+        let (provider, heads) = connect_ws_head_stream(&anvil.ws_endpoint_url())
+            .await
+            .expect("ws connect to anvil");
+        let http = ProviderBuilder::new()
+            .connect_http(anvil.endpoint_url())
+            .erased();
+        let seed = http.get_block_number().await.expect("seed poll");
+        let mut source = HeadSource::Ws {
+            provider: Some(provider),
+            heads: Some(heads),
+            // Backstop is the HTTP provider (Task 5), but heads should win here.
+            backstop: Backstop::Provider(http.clone()),
+            backoff_attempt: 0,
+        };
+        let advanced = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut latest = seed;
+            while latest <= seed {
+                latest = source.await_tip(latest).await;
+            }
+            latest
+        })
+        .await
+        .expect("watermark should advance within 30s");
+        assert!(
+            advanced > seed,
+            "watermark {advanced} should exceed seed {seed}"
+        );
+    }
+
+    /// Behind-tip start catches up strictly sequentially via `drain_tip` only,
+    /// never entering `await_tip`. Mine ≥5 blocks *before* subscribing (so the
+    /// subscription cannot supply heights 1..=5), seed the watermark from the
+    /// startup poll (Task 5 semantics), then run an in-test cursor loop: each
+    /// catch-up step must return `Ready` from the non-blocking drain branch.
+    /// Wrapping every step in a 2s timeout proves it never blocks on the
+    /// `WS_BACKSTOP` timer that `await_tip` would wait on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires anvil in PATH; run: cargo test -p z6m_prover -- --ignored ws_"]
+    async fn ws_behind_tip_start_catches_up_sequentially_via_drain() {
+        let anvil = Anvil::new().block_time(1).spawn();
+        let http = ProviderBuilder::new()
+            .connect_http(anvil.endpoint_url())
+            .erased();
+        // Wait for the tip to reach ≥5 so the start is genuinely behind it.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if http.get_block_number().await.expect("poll tip") >= 5 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("anvil should mine >=5 blocks within 60s");
+        // Subscribe only now: the subscription sees new heads only, so catch-up
+        // over 1..=5 cannot rely on it — exactly the behind-tip case.
+        let (provider, heads) = connect_ws_head_stream(&anvil.ws_endpoint_url())
+            .await
+            .expect("ws connect to anvil");
+        let mut source = HeadSource::Ws {
+            provider: Some(provider),
+            heads: Some(heads),
+            backstop: Backstop::Provider(http.clone()),
+            backoff_attempt: 0,
+        };
+        // Seed the watermark via the startup poll (Task 5 semantics).
+        let mut latest = http.get_block_number().await.expect("seed poll");
+        assert!(latest >= 5, "expected a behind-tip seed, got {latest}");
+
+        let mut observed = Vec::new();
+        let mut next_block = 1u64;
+        while next_block <= 5 {
+            // Catch-up invariant: the cursor never exceeds the seeded watermark,
+            // so `wait_for_tip_live` takes the non-blocking drain branch.
+            assert!(
+                next_block <= latest,
+                "catch-up must never exceed the watermark"
+            );
+            let status = tokio::time::timeout(
+                Duration::from_secs(2),
+                source.wait_for_tip_live(next_block, &mut latest),
+            )
+            .await
+            .expect("drain branch must return without awaiting the backstop");
+            assert!(
+                matches!(status, TipStatus::Ready),
+                "catch-up block {next_block} should be Ready"
+            );
+            observed.push(next_block);
+            next_block += 1;
+        }
+        assert_eq!(
+            observed,
+            vec![1, 2, 3, 4, 5],
+            "catch-up must observe heights strictly sequentially"
+        );
+    }
 }
