@@ -208,6 +208,72 @@ fn resolve_provider(injected: Option<DynProvider>, rpc_url: &str) -> Result<DynP
     }
 }
 
+/// Where the execution witness for a block is obtained. Today the only variant
+/// is `Request` (disk cache → geth/alloy RPC — the three paths that used to be
+/// inlined in `fetch_block_and_witness`). This is a seam: PR 3 adds a
+/// `PushWithFallback` variant here (erigon push subscription with request
+/// fallback) without touching `run_service` or the fetch orchestration.
+enum WitnessSource {
+    /// Read the witness from the on-disk cache if present; otherwise request it
+    /// over RPC — the raw-reqwest geth path when `geth`, else alloy's
+    /// `debug_executionWitness`. Fetched witnesses are persisted to
+    /// `witness_path` when `save_all_responses`.
+    Request,
+}
+
+impl WitnessSource {
+    /// Acquire the witness for `block_number`, verbatim semantics of the former
+    /// inline 3-path match: disk cache first, then geth or alloy RPC. `provider`
+    /// is only touched on the alloy path; the disk-cache and geth paths make no
+    /// use of it.
+    async fn acquire(
+        &self,
+        provider: &DynProvider,
+        block_number: u64,
+        witness_path: &Path,
+        geth: bool,
+        rpc_url: &str,
+        save_all_responses: bool,
+    ) -> Result<ExecutionWitness> {
+        match self {
+            WitnessSource::Request => {
+                if witness_path.exists() {
+                    let witness_json = fs::read_to_string(witness_path)?;
+                    match serde_json::from_str::<ExecutionWitness>(&witness_json) {
+                        Ok(w) => Ok(w),
+                        Err(e) if geth => {
+                            debug!("alloy format parse failed ({}), trying geth format...", e);
+                            let geth_witness: GethExecutionWitness =
+                                serde_json::from_str(&witness_json)
+                                    .wrap_err("failed to parse witness file as geth format")?;
+                            convert_geth_witness(geth_witness)
+                        }
+                        Err(e) => Err(e).wrap_err(
+                            "failed to parse witness file; if using geth, pass --geth flag",
+                        ),
+                    }
+                } else if geth {
+                    let witness = fetch_geth_execution_witness_with_retry(rpc_url, block_number, 3)
+                        .await
+                        .wrap_err("failed to fetch geth execution witness after retries")?;
+                    if save_all_responses {
+                        write_json(witness_path, &witness)?;
+                    }
+                    Ok(witness)
+                } else {
+                    let witness = debug_execution_witness_with_retry(provider, block_number, 3)
+                        .await
+                        .wrap_err("failed to fetch execution witness after retries")?;
+                    if save_all_responses {
+                        write_json(witness_path, &witness)?;
+                    }
+                    Ok(witness)
+                }
+            }
+        }
+    }
+}
+
 pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchOutcome> {
     let provider = resolve_provider(request.provider, request.rpc_url)?;
 
@@ -278,39 +344,16 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
         rlp
     };
 
-    let execution_witness: ExecutionWitness = if witness_path.exists() {
-        let witness_json = fs::read_to_string(&witness_path)?;
-        match serde_json::from_str::<ExecutionWitness>(&witness_json) {
-            Ok(w) => w,
-            Err(e) if request.geth => {
-                debug!("alloy format parse failed ({}), trying geth format...", e);
-                let geth: GethExecutionWitness = serde_json::from_str(&witness_json)
-                    .wrap_err("failed to parse witness file as geth format")?;
-                convert_geth_witness(geth)?
-            }
-            Err(e) => {
-                return Err(e).wrap_err(
-                    "failed to parse witness file; if using geth, pass --geth flag",
-                );
-            }
-        }
-    } else if request.geth {
-        let witness = fetch_geth_execution_witness_with_retry(request.rpc_url, block_number, 3)
-            .await
-            .wrap_err("failed to fetch geth execution witness after retries")?;
-        if request.save_all_responses {
-            write_json(&witness_path, &witness)?;
-        }
-        witness
-    } else {
-        let witness = debug_execution_witness_with_retry(&provider, block_number, 3)
-            .await
-            .wrap_err("failed to fetch execution witness after retries")?;
-        if request.save_all_responses {
-            write_json(&witness_path, &witness)?;
-        }
-        witness
-    };
+    let execution_witness: ExecutionWitness = WitnessSource::Request
+        .acquire(
+            &provider,
+            block_number,
+            &witness_path,
+            request.geth,
+            request.rpc_url,
+            request.save_all_responses,
+        )
+        .await?;
 
     let payload = serde_json::json!({
         "block":   alloy_primitives::hex::encode_prefixed(&current_block_rlp),
@@ -518,6 +561,40 @@ mod tests {
         // `Some` → return the injected provider verbatim. The garbage `rpc_url`
         // proves the injected arm never parses it (it would error otherwise).
         assert!(resolve_provider(Some(dummy_provider()), "not a url").is_ok());
+    }
+
+    #[tokio::test]
+    async fn witness_source_request_reads_disk_cache_without_network() {
+        // Disk-cache hit: `acquire` parses the on-disk witness JSON and never
+        // touches the provider or network. The garbage `rpc_url` and the
+        // lazily-constructed dummy provider prove no RPC path is taken.
+        let dir = tempfile::tempdir().unwrap();
+        let block_number = 42;
+        let witness_path = dir
+            .path()
+            .join(format!("executionWitness{}.json", block_number));
+
+        let fixture = ExecutionWitness {
+            state: vec![Bytes::from(vec![0x01, 0x02])],
+            codes: vec![Bytes::from(vec![0x03])],
+            keys: vec![],
+            headers: vec![Bytes::from(vec![0x04, 0x05, 0x06])],
+        };
+        write_json(&witness_path, &fixture).unwrap();
+
+        let got = WitnessSource::Request
+            .acquire(
+                &dummy_provider(),
+                block_number,
+                &witness_path,
+                false,
+                "not a url",
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(got, fixture);
     }
 
     #[test]

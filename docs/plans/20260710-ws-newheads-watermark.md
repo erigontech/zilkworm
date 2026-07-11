@@ -189,10 +189,16 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 - Modify: `prover/common/src/fetcher.rs`
 - Modify: `prover/common/Cargo.toml` (add `[dev-dependencies] tempfile` — lock-transitive crates are not importable without an explicit entry)
 
-- [ ] extract the witness-acquisition 3-path match (:258-290 — disk cache / geth / alloy) behind a thin `WitnessSource` enum with single variant `Request`; signature takes the resolved provider + block number + cache paths; `fetch_block_and_witness` delegates to it (PR 3 adds `PushWithFallback` here without touching `run_service`)
-- [ ] keep the seam minimal — no config surface, no trait objects beyond what the two future variants need
-- [ ] write tests: disk-cache-hit path returns a parsed witness from a fixture `executionWitness<N>.json` in a temp dir without any network
-- [ ] run tests — must pass before Task 8
+- [x] extract the witness-acquisition 3-path match (:258-290 — disk cache / geth / alloy) behind a thin `WitnessSource` enum with single variant `Request`; signature takes the resolved provider + block number + cache paths; `fetch_block_and_witness` delegates to it (PR 3 adds `PushWithFallback` here without touching `run_service`)
+- [x] keep the seam minimal — no config surface, no trait objects beyond what the two future variants need
+- [x] write tests: disk-cache-hit path returns a parsed witness from a fixture `executionWitness<N>.json` in a temp dir without any network
+- [x] run tests — must pass before Task 8
+
+**Task 7 scope notes:**
+- Seam shape: `enum WitnessSource { Request }` with `async fn acquire(&self, provider: &DynProvider, block_number, witness_path: &Path, geth: bool, rpc_url: &str, save_all_responses: bool) -> Result<ExecutionWitness>`. `fetch_block_and_witness` replaces its inline 3-path `if/else if/else` with one `WitnessSource::Request.acquire(...)` call; the body is a verbatim move (disk cache → geth-raw / alloy `debug_executionWitness`, geth-format fallback on parse error, `save_all_responses` persistence). No config surface, no trait objects — PR 3 adds a `PushWithFallback` variant to the same enum + a `match` arm, never touching `run_service`.
+- `provider` is passed by `&DynProvider`; only the alloy arm touches it (disk-cache and geth arms ignore it), which is what lets the disk-cache-hit test pass a lazily-constructed dummy provider + garbage `rpc_url` and prove no network call.
+- `Cargo.lock`: one line — registers the new `tempfile` dev-dep edge on `z6m_common` (tempfile 3.20.0 was already resolved transitively; no new package/version). Allowed by Task 9's diff-stat.
+- Diff-scoped gates green: the sole `fetcher.rs` clippy warning (`u64::from(...)` at the pre-existing `block_ts_ms` line) is untouched by this branch; my hunks are rustfmt-clean (remaining rustfmt suggestions all land on pre-existing lines outside the plan's scope, left as-is per the baseline-cleanup prohibition).
 
 ### Task 8: Anvil integration tests (`#[ignore]`, in-crate)
 
