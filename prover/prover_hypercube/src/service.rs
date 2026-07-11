@@ -797,7 +797,19 @@ impl Z6mProverService {
                     {
                         Ok(outcome) => outcome,
                         Err(err) => {
-                            if let Some(tip) = head_source.tip_receded_below(block_number).await {
+                            // The downward-reorg rollback is live-mode only: it
+                            // re-gates a height via the persistent watermark.
+                            // In `--end-block` mode there is no watermark gate
+                            // (the loop bounds on `next_block > end`), so rolling
+                            // `latest` back and `continue`ing would re-fetch the
+                            // same not-yet-mined block forever with no backoff.
+                            // Fall through to the byte-identical Poll-mode skip.
+                            let receded = if service.end_block.is_none() {
+                                head_source.tip_receded_below(block_number).await
+                            } else {
+                                None
+                            };
+                            if let Some(tip) = receded {
                                 warn!(%block_number, tip, "block not canonical yet (downward reorg); awaiting re-canonicalization instead of skipping");
                                 latest = tip;
                                 continue;
@@ -809,7 +821,16 @@ impl Z6mProverService {
                     }
                 }
                 Err(err) => {
-                    if let Some(tip) = head_source.tip_receded_below(block_number).await {
+                    // Live-mode only (see the HTTP-fallback branch above): in
+                    // `--end-block` mode the watermark never gates the loop, so
+                    // the rollback+`continue` would hot-spin on a block at/above
+                    // the tip. Skip forward instead, matching Poll mode.
+                    let receded = if service.end_block.is_none() {
+                        head_source.tip_receded_below(block_number).await
+                    } else {
+                        None
+                    };
+                    if let Some(tip) = receded {
                         warn!(%block_number, tip, "block not canonical yet (downward reorg); awaiting re-canonicalization instead of skipping");
                         latest = tip;
                         continue;
