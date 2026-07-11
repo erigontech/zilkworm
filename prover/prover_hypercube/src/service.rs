@@ -343,6 +343,8 @@ impl Z6mProverService {
             save_all_responses: opts.save_all_responses,
             geth: false,
             force_rebuild: false,
+            // One-shot fetch: always build the HTTP provider from `rpc_url`.
+            provider: None,
         })
         .await?;
         Ok(outcome)
@@ -760,6 +762,11 @@ impl Z6mProverService {
                 now_ms()
             );
 
+            // In Ws mode with a live subscription the fetch rides the WS socket;
+            // otherwise (Poll mode, or WS never established) it falls back to an
+            // HTTP provider built from `--rpc-url` inside the fetcher.
+            let fetch_provider = head_source.fetch_provider();
+            let ws_routed = fetch_provider.is_some();
             let outcome = match fetch_block_and_witness(FetchRequest {
                 rpc_url: &service.rpc_url,
                 block_number: Some(block_number),
@@ -767,10 +774,35 @@ impl Z6mProverService {
                 save_all_responses: service.save_all_responses,
                 geth: false,
                 force_rebuild: true,
+                provider: fetch_provider,
             })
             .await
             {
                 Ok(outcome) => outcome,
+                Err(err) if ws_routed => {
+                    // A dead WS connection must not skip a block HTTP could still
+                    // serve: retry once over HTTP (`--rpc-url`, provider: None)
+                    // before the skip below.
+                    warn!(%block_number, error = %err, "WS-routed fetch failed; retrying once over HTTP");
+                    match fetch_block_and_witness(FetchRequest {
+                        rpc_url: &service.rpc_url,
+                        block_number: Some(block_number),
+                        data_dir: data_dir.clone(),
+                        save_all_responses: service.save_all_responses,
+                        geth: false,
+                        force_rebuild: true,
+                        provider: None,
+                    })
+                    .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(err) => {
+                            error!(%block_number, error = %err, "fetch_block_and_witness failed (HTTP fallback)");
+                            next_block += 1;
+                            continue;
+                        }
+                    }
+                }
                 Err(err) => {
                     error!(%block_number, error = %err, "fetch_block_and_witness failed");
                     next_block += 1;
@@ -1663,6 +1695,23 @@ impl HeadSource {
         }
     }
 
+    /// Provider to route this block's fetch RPCs through. In `Ws` mode with an
+    /// established subscription this is a clone of the pubsub provider, so the
+    /// fetch (`eth_getBlockByNumber`, `debug_getRawBlock`,
+    /// `debug_executionWitness`) rides the same socket as `newHeads`. `None` in
+    /// `Poll` mode and whenever the WS provider is absent (initial connect
+    /// failure), so the fetcher builds an HTTP provider from `--rpc-url` exactly
+    /// as today.
+    fn fetch_provider(&self) -> Option<DynProvider> {
+        match self {
+            HeadSource::Ws {
+                provider: Some(provider),
+                ..
+            } => Some(provider.clone()),
+            _ => None,
+        }
+    }
+
     /// Non-blocking watermark refresh from any buffered `newHeads` (Ws mode).
     /// Used during catch-up (`next_block <= latest`), where the loop must never
     /// wait on the socket: it drains every already-buffered head and folds each
@@ -2111,5 +2160,50 @@ mod tests {
             TipStatus::Ready
         ));
         assert_eq!(latest, 12);
+    }
+
+    // ---- Fetch provider selection (Task 6) ----
+
+    /// A throwaway erased HTTP provider. alloy HTTP providers construct lazily,
+    /// so this makes no network call.
+    fn dummy_provider() -> DynProvider {
+        ProviderBuilder::new()
+            .connect_http("http://localhost:8545".parse().unwrap())
+            .erased()
+    }
+
+    #[test]
+    fn fetch_provider_none_for_poll() {
+        // Poll mode fetches over HTTP from `--rpc-url` (provider: None).
+        let source = HeadSource::Poll {
+            provider: dummy_provider(),
+        };
+        assert!(source.fetch_provider().is_none());
+    }
+
+    #[test]
+    fn fetch_provider_some_for_ws_with_established_provider() {
+        // Ws mode with an established subscription routes the fetch over the WS
+        // pubsub provider.
+        let source = HeadSource::Ws {
+            provider: Some(dummy_provider()),
+            heads: None,
+            backstop: Backstop::Canned(0),
+            backoff_attempt: 0,
+        };
+        assert!(source.fetch_provider().is_some());
+    }
+
+    #[test]
+    fn fetch_provider_none_for_ws_without_provider() {
+        // Ws mode after an initial connect failure has no provider, so the fetch
+        // falls back to HTTP (provider: None).
+        let source = HeadSource::Ws {
+            provider: None,
+            heads: None,
+            backstop: Backstop::Canned(0),
+            backoff_attempt: 0,
+        };
+        assert!(source.fetch_provider().is_none());
     }
 }

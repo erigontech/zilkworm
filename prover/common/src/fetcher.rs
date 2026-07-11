@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloy_consensus::Header as ConsensusHeader;
-use alloy_provider::{ext::DebugApi, Provider, ProviderBuilder};
+use alloy_provider::{ext::DebugApi, DynProvider, Provider, ProviderBuilder};
 use alloy_primitives::Bytes;
 use alloy_rpc_types::Block as RpcBlock;
 use alloy_rpc_types_debug::ExecutionWitness;
@@ -101,6 +101,8 @@ fn extract_bytes_from_value(value: &serde_json::Value) -> Result<Vec<Bytes>> {
 }
 
 /// Fetch execution witness from a geth node using a raw JSON-RPC call.
+/// HTTP-only: this path talks to `rpc_url` directly via reqwest and is never
+/// routed through the injected provider (the `--geth` flow stays on HTTP).
 async fn fetch_geth_execution_witness(
     rpc_url: &str,
     block_number: u64,
@@ -175,6 +177,14 @@ pub struct FetchRequest<'a> {
     /// is rebuilt from a fresh RPC fetch. Used by the live prover service so
     /// `--execute-every 1` always operates on a freshly-built bundle.
     pub force_rebuild: bool,
+    /// Provider used for the JSON-RPC fetch calls (`eth_getBlockByNumber`,
+    /// `debug_getRawBlock`, `debug_executionWitness`). `None` → build a fresh
+    /// HTTP provider from `rpc_url`, exactly as before (all CLI paths pass
+    /// `None`). `Some` → use the injected provider; the live service passes its
+    /// WS pubsub provider so the fetch RPCs ride the same socket as the
+    /// `newHeads` subscription. Does not affect the raw-reqwest `--geth` path,
+    /// which stays HTTP-only.
+    pub provider: Option<DynProvider>,
 }
 
 pub struct FetchOutcome {
@@ -183,9 +193,23 @@ pub struct FetchOutcome {
     pub flat_bundle_path: PathBuf,
 }
 
+/// Resolve the provider used for the JSON-RPC fetch calls. `Some` returns the
+/// injected provider verbatim (the live service passes its WS pubsub provider so
+/// the fetch RPCs ride the subscription's socket); `None` builds a fresh HTTP
+/// provider from `rpc_url`, exactly as the CLI paths do. alloy HTTP providers
+/// construct lazily, so the `None` arm issues no network call here.
+fn resolve_provider(injected: Option<DynProvider>, rpc_url: &str) -> Result<DynProvider> {
+    match injected {
+        Some(provider) => Ok(provider),
+        None => {
+            let url = Url::parse(rpc_url)?;
+            Ok(ProviderBuilder::new().connect_http(url).erased())
+        }
+    }
+}
+
 pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchOutcome> {
-    let url = Url::parse(request.rpc_url)?;
-    let provider = ProviderBuilder::new().connect_http(url);
+    let provider = resolve_provider(request.provider, request.rpc_url)?;
 
     let mut block_number = if let Some(num) = request.block_number {
         num
@@ -461,4 +485,62 @@ pub fn write_json<T: ?Sized + Serialize>(path: &Path, value: &T) -> Result<()> {
     let writer = BufWriter::new(file);
     serde_json::to_writer_pretty(writer, value)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway erased HTTP provider for the injected-provider arm. alloy
+    /// HTTP providers construct lazily, so this makes no network call.
+    fn dummy_provider() -> DynProvider {
+        ProviderBuilder::new()
+            .connect_http("http://localhost:8545".parse().unwrap())
+            .erased()
+    }
+
+    #[test]
+    fn resolve_provider_none_builds_http_from_rpc_url() {
+        // `None` → build the HTTP provider from `rpc_url` (offline-safe: alloy
+        // HTTP providers construct lazily).
+        assert!(resolve_provider(None, "http://localhost:8545").is_ok());
+    }
+
+    #[test]
+    fn resolve_provider_none_rejects_bad_rpc_url() {
+        // The `None` arm parses `rpc_url`; a malformed URL is a construction
+        // error rather than a silent HTTP provider.
+        assert!(resolve_provider(None, "not a url").is_err());
+    }
+
+    #[test]
+    fn resolve_provider_some_returns_injected_without_parsing_url() {
+        // `Some` → return the injected provider verbatim. The garbage `rpc_url`
+        // proves the injected arm never parses it (it would error otherwise).
+        assert!(resolve_provider(Some(dummy_provider()), "not a url").is_ok());
+    }
+
+    #[test]
+    fn fetch_request_accepts_optional_provider() {
+        // Locks the call-site shape: both a plain (HTTP) request and a
+        // provider-injected one construct.
+        let _http = FetchRequest {
+            rpc_url: "http://localhost:8545",
+            block_number: Some(1),
+            data_dir: PathBuf::from("/tmp"),
+            save_all_responses: false,
+            geth: false,
+            force_rebuild: false,
+            provider: None,
+        };
+        let _injected = FetchRequest {
+            rpc_url: "http://localhost:8545",
+            block_number: Some(1),
+            data_dir: PathBuf::from("/tmp"),
+            save_all_responses: false,
+            geth: false,
+            force_rebuild: false,
+            provider: Some(dummy_provider()),
+        };
+    }
 }

@@ -170,12 +170,18 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 - Modify: `prover/prover_hypercube/src/service.rs`
 - Modify: `prover/prover_hypercube/src/main.rs`
 
-- [ ] **cover first**: add `fn resolve_provider(injected: Option<DynProvider>, rpc_url: &str) -> eyre::Result<DynProvider>` with tests written BEFORE moving construction: `None` → builds HTTP provider from `rpc_url` (offline-safe — alloy HTTP providers construct lazily), `Some` → returns the injected provider; both arms construct without error
-- [ ] refactor `fetch_block_and_witness`: `FetchRequest` gains `provider: Option<DynProvider>`; internal `connect_http` (:188-189) replaced by `resolve_provider`; raw-reqwest geth path (:105-135) untouched and documented HTTP-only
-- [ ] update ALL THREE `FetchRequest` construction sites: `main.rs:295` (Fetch one-shot → `None`), `service.rs:305` (dead-code `fetch_block` → `None`), `service.rs:667` (run_service → `Some(ws_provider.clone())` iff WS mode and the subscription has been established at least once, `None` otherwise)
-- [ ] WS-mode fetch fallback: on `fetch_block_and_witness` error with a `Some` provider, retry the block once with `provider: None` (HTTP from `--rpc-url`) before the existing skip at service.rs:679-682 — a dead WS connection must not skip blocks HTTP could serve
-- [ ] write/extend tests for the refactor (both `resolve_provider` arms; `FetchRequest` construction from the call-site shapes)
-- [ ] verify: `cargo build -p z6m_common -p z6m_prover && cargo test -p z6m_common -p z6m_prover`, then the diff-scoped clippy gate (no new warnings on changed lines)
+- [x] **cover first**: add `fn resolve_provider(injected: Option<DynProvider>, rpc_url: &str) -> eyre::Result<DynProvider>` with tests written BEFORE moving construction: `None` → builds HTTP provider from `rpc_url` (offline-safe — alloy HTTP providers construct lazily), `Some` → returns the injected provider; both arms construct without error
+- [x] refactor `fetch_block_and_witness`: `FetchRequest` gains `provider: Option<DynProvider>`; internal `connect_http` (:188-189) replaced by `resolve_provider`; raw-reqwest geth path (:105-135) untouched and documented HTTP-only
+- [x] update ALL THREE `FetchRequest` construction sites: `main.rs:295` (Fetch one-shot → `None`), `service.rs:305` (dead-code `fetch_block` → `None`), `service.rs:667` (run_service → `Some(ws_provider.clone())` iff WS mode and the subscription has been established at least once, `None` otherwise)
+- [x] WS-mode fetch fallback: on `fetch_block_and_witness` error with a `Some` provider, retry the block once with `provider: None` (HTTP from `--rpc-url`) before the existing skip at service.rs:679-682 — a dead WS connection must not skip blocks HTTP could serve
+- [x] write/extend tests for the refactor (both `resolve_provider` arms; `FetchRequest` construction from the call-site shapes)
+- [x] verify: `cargo build -p z6m_common -p z6m_prover && cargo test -p z6m_common -p z6m_prover`, then the diff-scoped clippy gate (no new warnings on changed lines)
+
+**Task 6 scope notes:**
+- `DynProvider` (not a generic parameter) resolved cleanly: it implements `Provider` and picks up `DebugApi` via alloy's blanket impl, so the existing generic retry helpers (`get_block_number_with_retry`/`debug_execution_witness_with_retry` etc.) accept `&DynProvider` unchanged. No generic-parameter fallback needed on `FetchRequest`/`fetch_block_and_witness`.
+- The WS-provider selection lives behind `HeadSource::fetch_provider(&self) -> Option<DynProvider>`: `Some(provider.clone())` only for `Ws { provider: Some(..) }` (subscription established at least once), `None` for `Poll` and for `Ws` after an initial connect failure — so the fetcher builds HTTP from `--rpc-url` in every non-WS-routed case.
+- WS→HTTP fallback is gated on `ws_routed = fetch_provider.is_some()`: only a WS-routed fetch error triggers the one-shot HTTP retry (`provider: None`); a plain HTTP fetch error keeps today's single-skip behaviour byte-for-byte. The retry warns (`WS-routed fetch failed; retrying once over HTTP`) then skips only if HTTP also fails.
+- No `Cargo.toml` change: `alloy_provider::DynProvider` is already available in `z6m_common` via the existing `alloy-provider` dependency.
 
 ### Task 7: `WitnessSource` seam in fetcher
 

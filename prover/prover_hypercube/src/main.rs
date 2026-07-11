@@ -358,6 +358,8 @@ async fn main() -> Result<()> {
                 data_dir: data_dir.unwrap_or_else(|| args.data_dir.clone()),
                 geth,
                 force_rebuild: false,
+                // CLI one-shot: always build the HTTP provider from `--rpc-url`.
+                provider: None,
             })
             .await?;
             println!(
