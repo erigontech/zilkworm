@@ -135,11 +135,16 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 **Files:**
 - Modify: `prover/prover_hypercube/src/service.rs`
 
-- [ ] extract pure `fn backoff_delay(attempt: u32) -> Duration` (`2^attempts` capped, mirroring `fetcher.rs` constants; deliberate small duplication — the fetcher helpers are private to `z6m_common`)
-- [ ] on head-stream end/error inside `await_tip`: drop the stream, re-establish subscription with `backoff_delay`, reset backoff on success; while down, the backstop poll continues to supply the watermark
-- [ ] initial connect failure at service start: `warn!` and enter backstop mode with retries — the service must never exit due to `--ws-url` runtime failures
-- [ ] write tests: stream close → source keeps yielding watermarks via backstop and attempts resubscribe; `backoff_delay` progression and cap
-- [ ] run tests — must pass before Task 5
+- [x] extract pure `fn backoff_delay(attempt: u32) -> Duration` (`2^attempts` capped, mirroring `fetcher.rs` constants; deliberate small duplication — the fetcher helpers are private to `z6m_common`)
+- [x] on head-stream end/error inside `await_tip`: drop the stream, re-establish subscription with `backoff_delay`, reset backoff on success; while down, the backstop poll continues to supply the watermark
+- [x] initial connect failure at service start: `warn!` and enter backstop mode with retries — the service must never exit due to `--ws-url` runtime failures (resilience mechanism delivered: `await_tip`'s down-branch treats `heads: None` — from a dead stream OR a never-established subscription — as backstop mode, retrying `try_resubscribe` on capped backoff each iteration and never erroring/exiting; the startup `warn!` + `HeadSource` construction that first enters this state lives at the Task 5 wiring site)
+- [x] write tests: stream close → source keeps yielding watermarks via backstop and attempts resubscribe; `backoff_delay` progression and cap
+- [x] run tests — must pass before Task 5
+
+**Task 4 scope notes:**
+- Reconnect re-issues `subscribe_blocks()` on the **retained pubsub provider** (`try_resubscribe`), per the Task 3 shape decision — alloy manages the WS transport's own reconnection, so re-subscribing picks up a healed connection. `backoff_delay` = `2_u64.pow(attempt.min(5))` s (1→2→4→8→16→32, capped), mirroring the fetcher.
+- ⚠️ Consequence for Task 5: an **initial connect failure** leaves `provider: None`, so `try_resubscribe` can never succeed and the source runs on the backstop **indefinitely** (never-fatal, but no WS recovery). Full-connect retry after an initial failure would need the validated `Url` retained in the `Ws` variant and reconnect via `connect_ws_head_stream(&url)` instead — out of scope for never-fatal; Task 5 may add it if initial-failure WS recovery is required. A stream death **after** a successful connect is fully covered (provider retained → resubscribe with backoff).
+- Backoff-counter semantics: the stream-end (`Ended`) transition only clears `heads` (no resubscribe attempted yet → counter unchanged); the down-branch is where `try_resubscribe` runs and bumps the counter on failure / resets to `0` on success.
 
 ### Task 5: Wire `HeadSource` selection into `run_service`
 
