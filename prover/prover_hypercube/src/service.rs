@@ -685,11 +685,11 @@ impl Z6mProverService {
                 let (provider, heads) = match connect_ws_head_stream(&ws_url).await {
                     Ok((provider, heads)) => (Some(provider), Some(heads)),
                     Err(err) => {
-                        warn!(error = %err, %ws_url, "initial WS connect failed; running on backstop poll");
+                        warn!(error = %err, ws_url = %redact_url(&ws_url), "initial WS connect failed; running on backstop poll");
                         (None, None)
                     }
                 };
-                info!(%ws_url, "head source: ws newHeads watermark");
+                info!(ws_url = %redact_url(&ws_url), "head source: ws newHeads watermark");
                 HeadSource::Ws {
                     provider,
                     heads,
@@ -1659,8 +1659,8 @@ impl HeadSource {
             }
             // Ws mode never routes through `wait_for_tip`: the live loop drains
             // heads (`drain_tip`) during catch-up and awaits them (`await_tip`)
-            // at tip. Unreachable today — `run_service` only builds `Poll` until
-            // the Task 5 mode-selection wiring lands.
+            // at tip. `wait_for_tip_live` dispatches only the `Poll` variant
+            // here, so this arm is unreachable by construction.
             HeadSource::Ws { .. } => {
                 unreachable!("wait_for_tip is Poll-only; Ws mode uses drain_tip/await_tip")
             }
@@ -1827,6 +1827,19 @@ fn validate_ws_url(url: &str) -> Result<Url> {
     }
 }
 
+/// Render a URL for logging with credentials stripped. Hosted EL WS endpoints
+/// routinely embed the API key in the path or userinfo (e.g.
+/// `wss://eth-mainnet.g.alchemy.com/v2/<KEY>`, `wss://name.quiknode.pro/<token>/`);
+/// logging the full URL would leak that secret into always-on logs. Keep only
+/// `scheme://host[:port]`.
+fn redact_url(url: &Url) -> String {
+    let host = url.host_str().unwrap_or("");
+    match url.port() {
+        Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
+        None => format!("{}://{}", url.scheme(), host),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1858,6 +1871,20 @@ mod tests {
     fn validate_ws_url_accepts_ws_with_port() {
         let url = validate_ws_url("ws://host:8545").expect("ws:// should be accepted");
         assert_eq!(url.scheme(), "ws");
+    }
+
+    #[test]
+    fn redact_url_strips_path_userinfo_and_query() {
+        // An embedded API key (path, userinfo, or query) must never reach logs.
+        let url = Url::parse("wss://user:secret@eth-mainnet.example.com/v2/APIKEY?token=xyz")
+            .expect("valid url");
+        assert_eq!(redact_url(&url), "wss://eth-mainnet.example.com");
+    }
+
+    #[test]
+    fn redact_url_keeps_explicit_port() {
+        let url = Url::parse("ws://node.example.com:8546/ws/v3/SECRET").expect("valid url");
+        assert_eq!(redact_url(&url), "ws://node.example.com:8546");
     }
 
     #[test]
