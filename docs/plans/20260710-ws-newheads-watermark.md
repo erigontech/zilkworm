@@ -35,7 +35,8 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
   2. Build the C++ guest ELF: `make z6m_guest` (CMake + the SP1 RISC-V toolchain required; if the environment cannot build it, obtain `z6m_guest.elf` out-of-band and place it at `prover/guest_hypercube/build/z6m_guest.elf`). Without it, `build.rs` panics and no `-p z6m_prover` command runs. `-p z6m_common` is unaffected.
   3. Sanity-check the harness: `cd prover && cargo check -p z6m_prover` must pass before starting Task 1.
 - Complete each task fully before moving to the next; small focused changes.
-- Every task ends with its tests written and `cargo test -p z6m_prover` (and `-p z6m_common` when touched) passing, plus `cargo clippy -p <pkg> -- -D warnings` clean.
+- Every task ends with its tests written and `cargo test -p z6m_prover` (and `-p z6m_common` when touched) passing, plus the diff-scoped lint gate below.
+- **Lint/format gate — diff-scoped, NOT repo-wide.** `main` has pre-existing clippy and rustfmt debt in both crates (verified: `cargo clippy` errors under `-D warnings` and `cargo fmt --check` fails on untouched files; there is no clippy/fmt CI). The gate is: run `cargo clippy -p z6m_prover -p z6m_common` and confirm NO warning/error points at a line this branch changed (`git diff main` is the scope); new files must be warning-free. Format only the files this plan touches (`rustfmt <file>` or targeted `cargo fmt`), and only your own hunks must be fmt-clean. **NEVER fix pre-existing lints or reformat code outside the plan's file scope — baseline cleanup is explicitly out of scope and pollutes the PR diff.**
 - Backward compatibility is the acceptance bar: no `--ws-url` → identical behavior, log lines, and RPC pattern.
 - Update this plan file when scope changes during implementation.
 
@@ -97,7 +98,7 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 - [ ] add pure helper `advance_watermark(latest: u64, announced: u64) -> u64` (max) — used ONLY by the `Ws` arm from Task 3 on; the Poll arm must not call it (byte-identity)
 - [ ] wire `run_service` to construct `HeadSource::Poll` unconditionally (flag arrives in Task 2); the loop body reads identically apart from the extraction
 - [ ] write tests: `advance_watermark` (advance, equal, lower/reorg cases) in a new `#[cfg(test)]` module (first tests in the crate — verify test harness runs)
-- [ ] verify: `cd prover && cargo build -p z6m_prover && cargo test -p z6m_prover && cargo clippy -p z6m_prover -- -D warnings`; confirm by reading the diff that poll cadence/retry/sleep constants and all println formats are untouched
+- [ ] verify: `cd prover && cargo build -p z6m_prover && cargo test -p z6m_prover`, then the diff-scoped clippy gate (no new warnings on changed lines; pre-existing debt stays untouched); confirm by reading the diff that poll cadence/retry/sleep constants and all println formats are untouched
 
 ### Task 2: `--ws-url` flag, `ServiceConfig` plumbing, scheme validation
 
@@ -159,7 +160,7 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 - [ ] update ALL THREE `FetchRequest` construction sites: `main.rs:295` (Fetch one-shot → `None`), `service.rs:305` (dead-code `fetch_block` → `None`), `service.rs:667` (run_service → `Some(ws_provider.clone())` iff WS mode and the subscription has been established at least once, `None` otherwise)
 - [ ] WS-mode fetch fallback: on `fetch_block_and_witness` error with a `Some` provider, retry the block once with `provider: None` (HTTP from `--rpc-url`) before the existing skip at service.rs:679-682 — a dead WS connection must not skip blocks HTTP could serve
 - [ ] write/extend tests for the refactor (both `resolve_provider` arms; `FetchRequest` construction from the call-site shapes)
-- [ ] verify: `cargo build -p z6m_common -p z6m_prover && cargo test -p z6m_common -p z6m_prover && cargo clippy -p z6m_common -p z6m_prover -- -D warnings`
+- [ ] verify: `cargo build -p z6m_common -p z6m_prover && cargo test -p z6m_common -p z6m_prover`, then the diff-scoped clippy gate (no new warnings on changed lines)
 
 ### Task 7: `WitnessSource` seam in fetcher
 
@@ -187,7 +188,7 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 
 - [ ] no `--ws-url` → byte-identical: diff-audit the Poll arm against pre-branch `service.rs` (cadence, retry counts, sleeps, memoryless per-iteration `latest`, all println/log formats); `grep -n 'BEGIN_FETCH\|BEGIN_EXEC\|Received block number' prover/prover_hypercube/src/service.rs` formats match `main`
 - [ ] `git diff --stat main` touches only: `prover/prover_hypercube/src/{main,service}.rs`, `prover/common/src/fetcher.rs`, `prover/common/Cargo.toml`, `prover/Cargo.lock`, this plan, and (only if Task 3 needed the dep) `prover/prover_hypercube/Cargo.toml`; **zero `prover_turbo` changes**
-- [ ] full suite: `cd prover && cargo test -p z6m_common -p z6m_prover && cargo clippy -p z6m_common -p z6m_prover -- -D warnings && cargo fmt -p z6m_common -p z6m_prover --check`
+- [ ] full suite: `cd prover && cargo test -p z6m_common -p z6m_prover`, then the diff-scoped clippy gate over both crates and fmt-cleanliness of this branch's hunks only (pre-existing clippy/fmt debt on `main` stays untouched — see Development Approach)
 - [ ] `make z6m_prover` (Makefile:22) still builds
 - [ ] re-read Overview requirements and confirm each is implemented (opt-in flag, watermark-only WS, seeded watermark + catch-up never waits, reconnect non-fatal, WS-routed fetch with HTTP fallback, formats unchanged)
 
