@@ -151,12 +151,17 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 **Files:**
 - Modify: `prover/prover_hypercube/src/service.rs`
 
-- [ ] add pure `fn head_source_kind(cfg: &ServiceConfig) -> HeadSourceKind` (Ws iff `ws_url` set) and construct the matching `HeadSource` at service start; one startup `info!` naming the mode (new startup-only line; per-block formats untouched)
-- [ ] Ws mode: seed `latest` with one `eth_blockNumber` call at service start regardless of `--start-block` (unseeded `latest=0` would send a behind-tip start into `await_tip` and stall catch-up); Poll mode startup unchanged
-- [ ] live-mode loop: Poll mode keeps today's per-iteration poll exactly; Ws mode calls `drain_tip` during catch-up (`next_block <= latest`, zero polling) and `await_tip` at tip
-- [ ] confirm `"[{ts}] Received block number from RPC {}"`, `BEGIN_FETCH`, and dispatch logic are byte-identical in both modes
-- [ ] write tests: `head_source_kind` selection for both configs; behind-tip first-iteration routing given a seeded watermark (pure decision fn or channel-injected `HeadSource`)
-- [ ] run tests — must pass before Task 6
+- [x] add pure `fn head_source_kind(cfg: &ServiceConfig) -> HeadSourceKind` (Ws iff `ws_url` set) and construct the matching `HeadSource` at service start; one startup `info!` naming the mode (new startup-only line; per-block formats untouched)
+- [x] Ws mode: seed `latest` with one `eth_blockNumber` call at service start regardless of `--start-block` (unseeded `latest=0` would send a behind-tip start into `await_tip` and stall catch-up); Poll mode startup unchanged
+- [x] live-mode loop: Poll mode keeps today's per-iteration poll exactly; Ws mode calls `drain_tip` during catch-up (`next_block <= latest`, zero polling) and `await_tip` at tip
+- [x] confirm `"[{ts}] Received block number from RPC {}"`, `BEGIN_FETCH`, and dispatch logic are byte-identical in both modes (verified: only the live-mode gate call changed to `wait_for_tip_live`; Poll delegates to the Task 1 `wait_for_tip` verbatim; all marker formats match `main` byte-for-byte)
+- [x] write tests: `head_source_kind` selection for both configs; behind-tip first-iteration routing given a seeded watermark (pure decision fn or channel-injected `HeadSource`)
+- [x] run tests — must pass before Task 6
+
+**Task 5 scope notes:**
+- Backstop provider decision: the `Ws` backstop is backed by the **HTTP `--rpc-url` provider**, not the WS pubsub provider. This is what makes the degradation contract hold — the backstop `eth_blockNumber` keeps advancing the watermark even when WS is fully down or was never established (initial connect failure leaves `provider: None`). The `Backstop` enum doc was updated from the Task 3 "over the WS provider" wording accordingly. The WS pubsub provider is retained only in `Ws.provider` for resubscribe (and the Task 6 WS-routed fetch).
+- Initial-failure WS recovery was **not** added (the Task 4 note flagged it as optional here): the HTTP backstop already satisfies never-fatal, so `provider: None` after an initial connect failure runs on the backstop indefinitely with no WS resubscribe, exactly as Task 4 documented. A stream death *after* a successful connect is still fully covered (provider retained → resubscribe with backoff).
+- New live-mode dispatcher `HeadSource::wait_for_tip_live(next_block, &mut latest)`: Poll delegates to the existing `wait_for_tip` (byte-identical, `latest` untouched); Ws drains during catch-up and awaits at tip, reporting `NotReady` (loop re-awaits, no busy spin) until the watermark reaches `next_block`. Removed the Task 3/4 `#[allow(dead_code)]` markers now that `Ws`/`drain_tip`/`await_tip`/`connect_ws_head_stream`/`backoff_delay`/`try_resubscribe`/`advance_watermark`/`Backstop::Provider` are reachable from `run_service`.
 
 ### Task 6: Fetcher provider injection (cover-first) + WS-routed fetch
 
