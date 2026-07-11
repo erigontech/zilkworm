@@ -94,11 +94,11 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 **Files:**
 - Modify: `prover/prover_hypercube/src/service.rs`
 
-- [ ] add `enum HeadSource` with `Poll { provider }` variant; move the live-mode tip logic (service.rs:611-623) and `get_block_number_with_retry` usage into it, preserving exact semantics: poll on every live iteration, **memoryless comparison against the fresh poll value** (no persisted max — persisting would diverge when `eth_blockNumber` decreases), 6 retries with flat 2s delay, 2s sleep when `next_block > latest`, 30s sleep + skip-iteration on retry exhaustion
-- [ ] add pure helper `advance_watermark(latest: u64, announced: u64) -> u64` (max) — used ONLY by the `Ws` arm from Task 3 on; the Poll arm must not call it (byte-identity)
-- [ ] wire `run_service` to construct `HeadSource::Poll` unconditionally (flag arrives in Task 2); the loop body reads identically apart from the extraction
-- [ ] write tests: `advance_watermark` (advance, equal, lower/reorg cases) in a new `#[cfg(test)]` module (first tests in the crate — verify test harness runs)
-- [ ] verify: `cd prover && cargo build -p z6m_prover && cargo test -p z6m_prover`, then the diff-scoped clippy gate (no new warnings on changed lines; pre-existing debt stays untouched); confirm by reading the diff that poll cadence/retry/sleep constants and all println formats are untouched
+- [x] add `enum HeadSource` with `Poll { provider }` variant; move the live-mode tip logic (service.rs:611-623) and `get_block_number_with_retry` usage into it, preserving exact semantics: poll on every live iteration, **memoryless comparison against the fresh poll value** (no persisted max — persisting would diverge when `eth_blockNumber` decreases), 6 retries with flat 2s delay, 2s sleep when `next_block > latest`, 30s sleep + skip-iteration on retry exhaustion
+- [x] add pure helper `advance_watermark(latest: u64, announced: u64) -> u64` (max) — used ONLY by the `Ws` arm from Task 3 on; the Poll arm must not call it (byte-identity)
+- [x] wire `run_service` to construct `HeadSource::Poll` unconditionally (flag arrives in Task 2); the loop body reads identically apart from the extraction
+- [x] write tests: `advance_watermark` (advance, equal, lower/reorg cases) in a new `#[cfg(test)]` module (first tests in the crate — verify test harness runs)
+- [x] verify: `cd prover && cargo build -p z6m_prover && cargo test -p z6m_prover`, then the diff-scoped clippy gate (no new warnings on changed lines; pre-existing debt stays untouched); confirm by reading the diff that poll cadence/retry/sleep constants and all println formats are untouched
 
 ### Task 2: `--ws-url` flag, `ServiceConfig` plumbing, scheme validation
 

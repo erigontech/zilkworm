@@ -4,7 +4,7 @@
 use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
 use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_mfbd};
 use alloy_primitives::B256;
-use alloy_provider::{Provider, ProviderBuilder};
+use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use eyre::{bail, Context, Result};
 use z6m_common::{fetch_block_and_witness, FetchOutcome, FetchRequest};
 
@@ -618,7 +618,7 @@ impl Z6mProverService {
     pub async fn run_service(&mut self, service: ServiceConfig) -> Result<()> {
         info!("starting service mode");
         let url = Url::parse(&service.rpc_url)?;
-        let provider = ProviderBuilder::new().connect_http(url);
+        let provider = ProviderBuilder::new().connect_http(url).erased();
 
         let mut next_block = if let Some(start) = service.start_block {
             start
@@ -634,6 +634,11 @@ impl Z6mProverService {
 
         info!("Service starting from block: {}", next_block);
 
+        // Tip-watermark source. Task 1 wires `Poll` unconditionally (verbatim
+        // extraction of the historical `eth_blockNumber` poll); the `--ws-url`
+        // selection of a `Ws` variant arrives in a later task.
+        let mut head_source = HeadSource::Poll { provider };
+
         // Handles for tasks dispatched per block. We only join them when the
         // loop is about to exit (end_block reached) so each iteration advances
         // as soon as a prover lock is acquired, not when the work finishes.
@@ -641,24 +646,16 @@ impl Z6mProverService {
 
         loop {
             // Bounds: in end_block mode, stop once we're past it. In live mode
-            // (no end_block) we wait for the RPC to expose the next block.
+            // (no end_block) we wait for the head source to expose the next
+            // block.
             if let Some(end) = service.end_block {
                 if next_block > end {
                     break;
                 }
             } else {
-                match Self::get_block_number_with_retry(&provider, 6).await {
-                    Ok(latest) => {
-                        if next_block > latest {
-                            sleep(Duration::from_secs(2)).await;
-                            continue;
-                        }
-                    }
-                    Err(err) => {
-                        error!(error = %err, "Failed to get latest block number after retries, will retry in 30 seconds");
-                        sleep(Duration::from_secs(30)).await;
-                        continue;
-                    }
+                match head_source.wait_for_tip(next_block).await {
+                    TipStatus::Ready => {}
+                    TipStatus::NotReady => continue,
                 }
             }
 
@@ -1335,5 +1332,100 @@ fn matches_interval(interval: Option<u64>, block_number: u64) -> bool {
         Some(0) => false,
         Some(n) => block_number % n == 0,
         None => false,
+    }
+}
+
+/// Source of the chain-tip watermark that gates the live service loop.
+///
+/// Today only `Poll` exists — a verbatim extraction of the historical
+/// per-iteration `eth_blockNumber` poll. The `Ws` variant (a `newHeads`
+/// subscription used purely as a tip watermark) is added in a later task; it
+/// will be the only user of [`advance_watermark`].
+enum HeadSource {
+    /// Poll `eth_blockNumber` once per live iteration. Memoryless: every
+    /// iteration compares `next_block` against a freshly-polled `latest` with
+    /// no persisted maximum, matching the pre-watermark behaviour byte for
+    /// byte (persisting a max here would diverge whenever `eth_blockNumber`
+    /// decreases).
+    Poll { provider: DynProvider },
+}
+
+/// Whether the next block is available to fetch, as reported by the head
+/// source. `NotReady` means the source has already applied the appropriate
+/// backoff sleep and the caller must skip this loop iteration.
+enum TipStatus {
+    Ready,
+    NotReady,
+}
+
+impl HeadSource {
+    /// Decide whether `next_block` is at or below the current chain tip.
+    ///
+    /// For [`HeadSource::Poll`] this is the exact historical live-mode logic:
+    /// poll `eth_blockNumber` with 6 retries (flat 2s delay inside
+    /// [`Z6mProverService::get_block_number_with_retry`]), compare against the
+    /// fresh value, sleep 2s and skip when the block is beyond the tip, and on
+    /// retry exhaustion log the same warning, sleep 30s, and skip.
+    async fn wait_for_tip(&mut self, next_block: u64) -> TipStatus {
+        match self {
+            HeadSource::Poll { provider } => {
+                match Z6mProverService::get_block_number_with_retry(provider, 6).await {
+                    Ok(latest) => {
+                        if next_block > latest {
+                            sleep(Duration::from_secs(2)).await;
+                            TipStatus::NotReady
+                        } else {
+                            TipStatus::Ready
+                        }
+                    }
+                    Err(err) => {
+                        error!(error = %err, "Failed to get latest block number after retries, will retry in 30 seconds");
+                        sleep(Duration::from_secs(30)).await;
+                        TipStatus::NotReady
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Watermark update rule for the `Ws` head source: the tip never moves
+/// backward, so a reorg re-announcement at the same or lower height is
+/// ignored and each height is processed exactly once. Kept as a pure free
+/// function so it is unit-testable without a live socket.
+///
+/// The `Poll` arm deliberately does NOT call this — it stays memoryless for
+/// byte-identical behaviour. Currently only exercised by tests; the `Ws`
+/// variant becomes its first production caller in a later task.
+#[allow(dead_code)]
+fn advance_watermark(latest: u64, announced: u64) -> u64 {
+    latest.max(announced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advance_watermark_advances_on_higher() {
+        assert_eq!(advance_watermark(10, 15), 15);
+    }
+
+    #[test]
+    fn advance_watermark_holds_on_equal() {
+        // A re-announcement of the same height must not change the watermark.
+        assert_eq!(advance_watermark(10, 10), 10);
+    }
+
+    #[test]
+    fn advance_watermark_ignores_lower_reorg() {
+        // A reorg re-announcement at a lower height must never move the
+        // watermark backward.
+        assert_eq!(advance_watermark(10, 7), 10);
+    }
+
+    #[test]
+    fn advance_watermark_seeds_from_zero() {
+        assert_eq!(advance_watermark(0, 1), 1);
     }
 }
