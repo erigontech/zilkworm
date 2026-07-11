@@ -235,9 +235,9 @@ This is PR 1 of a 3-PR series: PR 2 adds an erigon-side witness push subscriptio
 
 ### Task 10: Documentation + wrap-up
 
-- [ ] add `--ws-url` to the service-mode docs if any exist (check `docs/architecture.md` service section; `--help` text otherwise suffices)
-- [ ] update this plan's checkboxes to final state
-- [ ] move this plan to `docs/plans/completed/`
+- [x] add `--ws-url` to the service-mode docs if any exist (check `docs/architecture.md` service section; `--help` text otherwise suffices) — no service-mode CLI-flag reference doc exists to extend: `docs/architecture.md` carries only a high-level "Service" module role row (no flag list), and the sole `--service` invocation example (`docs/mfbd_fixture_generation.md:101-105`) is a bounded backfill (`--start-block`/`--end-block`) where a live-tip WS watermark is irrelevant and would mislead. The clap `--help` text (`main.rs:31-33`) is a complete flag reference (opt-in `ws://`/`wss://`, newHeads tip watermark, fetch RPCs over the same connection, absent → identical poll behaviour), so the "`--help` text otherwise suffices" branch applies. No doc file edited — keeps the PR diff scope byte-identical to Task 9's checked diff-stat.
+- [x] update this plan's checkboxes to final state
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
