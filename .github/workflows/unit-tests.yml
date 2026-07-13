@@ -1,0 +1,58 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: Run Unit Tests
+    runs-on: ubuntu-latest
+    environment: ci
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/erigontech/z6m-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Verify tool versions
+        run: |
+          gcc --version
+          g++ --version
+          cmake --version
+          ninja --version
+          ctest --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          submodules: false
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+
+      - name: Build unit tests
+        run: cmake --build build --target zilkworm.tests
+
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure --parallel
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-logs
+          path: build/Testing/Temporary/LastTest.log
+          retention-days: 30
