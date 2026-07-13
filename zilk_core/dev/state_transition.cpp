@@ -59,11 +59,129 @@ namespace {
         kSkipped
     };
 
+    /// Marker indicating the test expects an RLP / structural rejection that
+    /// completes before insert_block returns a ValidationResult (e.g. malformed
+    /// RLP, oversized block). Used in @ref exception_map to express "matched at
+    /// the RLP-decode short-circuit, not via a ValidationResult."
+    inline constexpr auto kPreInsertReject = static_cast<ValidationResult>(-1);
+
+    /// Map an EEST @c expectException string ("TransactionException.X" /
+    /// "BlockException.Y") to the silkworm ValidationResult set that satisfies
+    /// it. The runner requires an exact match: if silkworm rejects via a code
+    /// outside the mapped set, the test fails. This catches implementations
+    /// that bypass the spec-required pre-validate gate and rely on an
+    /// incidental post-execute check (state-root mismatch, gas-used mismatch).
+    static const std::unordered_map<std::string_view, std::vector<ValidationResult>>& exception_map() {
+        static const std::unordered_map<std::string_view, std::vector<ValidationResult>> m{
+            // Transaction-level rejections (must fire in pre-validate / per-tx validate).
+            {"TransactionException.INTRINSIC_GAS_TOO_LOW",                  {ValidationResult::kIntrinsicGas}},
+            {"TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST",     {ValidationResult::kFloorCost}},
+            {"TransactionException.INSUFFICIENT_ACCOUNT_FUNDS",             {ValidationResult::kInsufficientFunds}},
+            {"TransactionException.INSUFFICIENT_MAX_FEE_PER_GAS",           {ValidationResult::kMaxFeeLessThanBase}},
+            {"TransactionException.INSUFFICIENT_MAX_FEE_PER_BLOB_GAS",      {ValidationResult::kMaxFeePerBlobGasTooLow}},
+            {"TransactionException.NONCE_IS_MAX",                           {ValidationResult::kNonceTooHigh}},
+            {"TransactionException.NONCE_MISMATCH_TOO_HIGH",                {ValidationResult::kWrongNonce}},
+            {"TransactionException.NONCE_MISMATCH_TOO_LOW",                 {ValidationResult::kWrongNonce}},
+            {"TransactionException.PRIORITY_GREATER_THAN_MAX_FEE_PER_GAS",  {ValidationResult::kMaxPriorityFeeGreaterThanMax}},
+            {"TransactionException.SENDER_NOT_EOA",                         {ValidationResult::kSenderNoEOA}},
+            {"TransactionException.GAS_ALLOWANCE_EXCEEDED",                 {ValidationResult::kBlockGasLimitExceeded}},
+            {"TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM",              {ValidationResult::kMaxTransactionGasLimitExceeded}},
+            {"TransactionException.GASLIMIT_PRICE_PRODUCT_OVERFLOW",        {ValidationResult::kInsufficientFunds}},
+            {"TransactionException.INITCODE_SIZE_EXCEEDED",                 {ValidationResult::kMaxInitCodeSizeExceeded}},
+            {"TransactionException.TYPE_3_TX_PRE_FORK",                     {ValidationResult::kUnsupportedTransactionType}},
+            {"TransactionException.TYPE_4_TX_PRE_FORK",                     {ValidationResult::kUnsupportedTransactionType}},
+            {"TransactionException.TYPE_3_TX_ZERO_BLOBS",                   {ValidationResult::kNoBlobs}},
+            {"TransactionException.TYPE_3_TX_BLOB_COUNT_EXCEEDED",          {ValidationResult::kTooManyBlobs}},
+            {"TransactionException.TYPE_3_TX_INVALID_BLOB_VERSIONED_HASH",  {ValidationResult::kWrongBlobCommitmentVersion}},
+            {"TransactionException.TYPE_3_TX_MAX_BLOB_GAS_ALLOWANCE_EXCEEDED", {ValidationResult::kTooManyBlobs, ValidationResult::kInsufficientFunds}},
+            {"TransactionException.TYPE_3_TX_CONTRACT_CREATION",            {ValidationResult::kProhibitedContractCreation}},
+            {"TransactionException.TYPE_3_TX_WITH_FULL_BLOBS",              {ValidationResult::kInvalidSignature}},
+            {"TransactionException.TYPE_4_TX_CONTRACT_CREATION",            {ValidationResult::kProhibitedContractCreation}},
+            {"TransactionException.TYPE_4_EMPTY_AUTHORIZATION_LIST",        {ValidationResult::kEmptyAuthorizations}},
+
+            // Block-level rejections.
+            {"BlockException.INVALID_GASLIMIT",                             {ValidationResult::kInvalidGasLimit, ValidationResult::kGasAboveLimit}},
+            {"BlockException.INVALID_BASEFEE_PER_GAS",                      {ValidationResult::kWrongBaseFee}},
+            {"BlockException.INCORRECT_BLOB_GAS_USED",                      {ValidationResult::kWrongBlobGasUsed}},
+            {"BlockException.INCORRECT_EXCESS_BLOB_GAS",                    {ValidationResult::kWrongExcessBlobGas}},
+            {"BlockException.BLOB_GAS_USED_ABOVE_LIMIT",                    {ValidationResult::kWrongBlobGasUsed}},
+            {"BlockException.INVALID_WITHDRAWALS_ROOT",                     {ValidationResult::kWrongWithdrawalsRoot}},
+            {"BlockException.INVALID_REQUESTS",                             {ValidationResult::kRequestsRootMismatch, ValidationResult::kRequestsProcessingFailure}},
+            {"BlockException.INVALID_DEPOSIT_EVENT_LAYOUT",                 {ValidationResult::kRequestsProcessingFailure}},
+            {"BlockException.SYSTEM_CONTRACT_CALL_FAILED",                  {ValidationResult::kRequestsProcessingFailure}},
+            {"BlockException.SYSTEM_CONTRACT_EMPTY",                        {ValidationResult::kRequestsProcessingFailure}},
+            {"BlockException.INVALID_VERSIONED_HASHES",                     {ValidationResult::kWrongBlobCommitmentVersion}},
+            {"BlockException.INCORRECT_BLOCK_FORMAT",                       {ValidationResult::kFieldBeforeFork, ValidationResult::kMissingField, kPreInsertReject}},
+            // RLP-shape rejections short-circuit in rlp::decode / size check
+            // before insert_block runs. Mark them with a sentinel so the runner
+            // can match without consulting a ValidationResult.
+            {"BlockException.RLP_STRUCTURES_ENCODING",                      {kPreInsertReject}},
+            {"BlockException.RLP_BLOCK_LIMIT_EXCEEDED",                     {kPreInsertReject}},
+        };
+        return m;
+    }
+
+    /// Returns true iff @p got is one of the silkworm ValidationResults that
+    /// satisfies any pipe-separated alternative in @p expectation. Unknown
+    /// tokens are ignored (the other alternatives in a `A|B` composite can
+    /// still match); if no token resolves to a ValidationResult set containing
+    /// @p got, the match fails — there is no permissive fallback, so an
+    /// EEST fixture pinning a new exception string forces a map update.
+    static bool strict_exception_match(ValidationResult got, std::string_view expectation) {
+        if (expectation.empty()) return false;  // Empty expectation is never valid.
+        const auto& m = exception_map();
+        size_t pos = 0;
+        while (pos <= expectation.size()) {
+            const auto pipe = expectation.find('|', pos);
+            const auto end = (pipe == std::string_view::npos) ? expectation.size() : pipe;
+            const std::string_view tok = expectation.substr(pos, end - pos);
+            if (const auto it = m.find(tok); it != m.end()) {
+                for (const auto r : it->second) {
+                    if (r == got) return true;
+                }
+            }
+            if (pipe == std::string_view::npos) break;
+            pos = pipe + 1;
+        }
+        return false;
+    }
+
+    /// Same as @ref strict_exception_match but for the pre-insert reject path
+    /// (RLP decode or oversized-block short-circuit): returns true iff at least
+    /// one alternative in @p expectation resolves to a set containing
+    /// @ref kPreInsertReject.
+    static bool strict_exception_match_pre_insert(std::string_view expectation) {
+        return strict_exception_match(kPreInsertReject, expectation);
+    }
+
     Status run_json_block(const nlohmann::json& json_block, Blockchain& blockchain, DirectState& direct) {
         bool invalid{json_block.contains("expectException")};
+        const std::string expectation = invalid ? json_block["expectException"].get<std::string>() : std::string{};
+
+        // Helper to verify a rejection matches expectation when invalid is true.
+        // For pre-insert rejections (RLP / oversize), pass nullopt; otherwise pass
+        // the silkworm ValidationResult.
+        const auto check_strict = [&](std::optional<ValidationResult> got) -> bool {
+            if (!got.has_value()) {
+                return strict_exception_match_pre_insert(expectation);
+            }
+            return strict_exception_match(*got, expectation);
+        };
+
+        // Common diagnostic helper. @p rejection_mode identifies which gate fired
+        // (real ValidationResult name, or one of the pre-insert short-circuits).
+        const auto fail_strict = [&](std::string_view rejection_mode) {
+            sys_println(std::format("STRICT: rejected via {} but expected {}",
+                rejection_mode, expectation).c_str());
+        };
+
         std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
         if (!rlp) {
             if (invalid) {
+                if (!check_strict(std::nullopt)) {
+                    fail_strict("bad-hex");
+                    return Status::kFailed;
+                }
                 return Status::kPassed;
             }
             sys_println("Failure to read hex");
@@ -72,8 +190,33 @@ namespace {
 
         Block block;
         ByteView view{*rlp};
+
+        /// The CL gossip protocol constraint of the maximum block size (EIP-7934).
+        constexpr size_t MAX_BLOCK_SIZE = 10 * 1024 * 1024;
+        /// The safety margin for beacon block content (EIP-7934).
+        constexpr size_t SAFETY_MARGIN = 2 * 1024 * 1024;
+        /// The maximum EL block size when RLP encoded (EIP-7934).
+        constexpr size_t MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN;
+
+        if (view.size() > MAX_RLP_BLOCK_SIZE) {
+            if (invalid) {
+                if (!check_strict(std::nullopt)) {
+                    fail_strict("oversize-block");
+                    return Status::kFailed;
+                }
+                return Status::kPassed;
+            }
+
+            // TODO: Ignore big blocks before Osaka because we don't have fork config here.
+            return Status::kSkipped;
+        }
+
         if (!rlp::decode(view, block)) {
             if (invalid) {
+                if (!check_strict(std::nullopt)) {
+                    fail_strict("rlp-decode");
+                    return Status::kFailed;
+                }
                 return Status::kPassed;
             }
             sys_println("Failure to decode RLP");
@@ -91,6 +234,10 @@ namespace {
         const bool check_state_root{true};
         if (ValidationResult err{blockchain.insert_block(block, check_state_root)}; err != ValidationResult::kOk) {
             if (invalid) {
+                if (!check_strict(err)) {
+                    fail_strict(magic_enum::enum_name<ValidationResult>(err));
+                    return Status::kFailed;
+                }
                 return Status::kPassed;
             }
             (void)err;
