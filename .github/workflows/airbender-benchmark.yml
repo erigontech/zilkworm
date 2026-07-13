@@ -1,0 +1,138 @@
+name: Airbender 200-block Bench
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  airbender-benchmark:
+    name: Run Airbender Benchmark
+    runs-on: ubuntu-latest
+    environment: ci
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/erigontech/z6m-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init -v /tmp/z6m-cargo-cache:/cargo-cache -v /tmp/z6m-benchmark-blocks:/benchmark-blocks
+    env:
+      CARGO_HOME: /cargo-cache/cargo
+    steps:
+      - name: Prepare local cargo cache
+        run: |
+          mkdir -p /cargo-cache/cargo /cargo-cache/target-airbender
+          # Wipe extracted crate sources:
+          # this only forces re-extraction, not re-download.
+          rm -rf /cargo-cache/cargo/registry/src
+          cat > /cargo-cache/cargo/config.toml <<'TOML'
+          [net]
+          git-fetch-with-cli = true
+          TOML
+
+      - name: Verify tool versions
+        run: |
+          cmake --version
+          rustc --version
+          riscv-none-elf-gcc --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          submodules: false
+          lfs: true
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
+      - name: Symlink cargo target for caching
+        run: |
+          # prover_airbender has its own workspace target dir.
+          if [ ! -d prover/prover_airbender/target ] && [ -d /cargo-cache/target-airbender ]; then
+            ln -s /cargo-cache/target-airbender prover/prover_airbender/target
+          elif [ -d prover/prover_airbender/target ] && [ ! -L prover/prover_airbender/target ]; then
+            mv prover/prover_airbender/target/* /cargo-cache/target-airbender/ 2>/dev/null || true
+            rm -rf prover/prover_airbender/target
+            ln -s /cargo-cache/target-airbender prover/prover_airbender/target
+          fi
+
+      - name: Drop stale build-script artifacts
+        # Stale .fingerprint marks build scripts fresh but their OUT_DIR is evicted; force re-run.
+        run: rm -rf prover/prover_airbender/target/release/build prover/prover_airbender/target/release/.fingerprint
+
+      - name: Build guest ELF and prover
+        run: make z6m_prover_airbender
+
+      - name: Download raw benchmark blocks
+        run: |
+          # Cache RAW blocks, not a pinned .mfbd corpus (goes stale on version bumps).
+          if [ -d /benchmark-blocks/200_benchmark_blocks ] && [ "$(ls -d /benchmark-blocks/200_benchmark_blocks/*/ 2>/dev/null | wc -l)" -gt 0 ]; then
+            echo "Using cached raw blocks from local volume"
+          else
+            mkdir -p /benchmark-blocks
+            curl -L -o /tmp/200_benchmark_blocks.tar.gz \
+              "https://github.com/erigontech/zilkworm-testdata/releases/download/benchmark-200-spread/200_benchmark_blocks.tar.gz"
+            tar xzf /tmp/200_benchmark_blocks.tar.gz -C /benchmark-blocks
+            rm -f /tmp/200_benchmark_blocks.tar.gz
+          fi
+          ls /benchmark-blocks/200_benchmark_blocks/ | head -5
+          echo "Total raw blocks: $(ls -d /benchmark-blocks/200_benchmark_blocks/*/ | wc -l)"
+
+      - name: Regenerate benchmark corpus with current converter
+        run: |
+          # Regenerate corpus with the just-built converter (matches current wire format).
+          make sp1-benchmark-corpus \
+            BENCH_SRC_DIR=/benchmark-blocks/200_benchmark_blocks \
+            BENCH_CORPUS_DIR=/benchmark-blocks/200_benchmark_blocks_corpus
+          echo "Corpus blocks: $(ls -d /benchmark-blocks/200_benchmark_blocks_corpus/*/ | wc -l)"
+
+      - name: Run airbender_benchmark.sh on all blocks
+        id: benchmark
+        shell: bash
+        run: |
+          set +e
+          tools/scripts/airbender_benchmark.sh \
+            --dir /benchmark-blocks/200_benchmark_blocks_corpus \
+            -l temp/airbender_benchmark 2>&1 | tee bench-output.log
+          exit_code=${PIPESTATUS[0]}
+
+          total=$(grep -oP '^Total : \K\d+' temp/airbender_benchmark/summary.log || echo 0)
+          failed=$(grep -oP '^Failed: \K\d+' temp/airbender_benchmark/summary.log || echo 0)
+          echo "total=$total" >> $GITHUB_OUTPUT
+          echo "failed=$failed" >> $GITHUB_OUTPUT
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+
+      - name: Upload benchmark logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: airbender-benchmark-logs
+          path: |
+            bench-output.log
+            temp/airbender_benchmark/
+          retention-days: 30
+
+      - name: Check results
+        run: |
+          failed=${{ steps.benchmark.outputs.failed }}
+          total=${{ steps.benchmark.outputs.total }}
+
+          if [ "$total" -eq 0 ]; then
+            echo "ERROR: No blocks were tested"
+            exit 1
+          fi
+
+          if [ "$failed" -gt 0 ]; then
+            echo "FAIL: $failed / $total blocks failed"
+            exit 1
+          fi
+
+          echo "SUCCESS: All $total blocks passed"
