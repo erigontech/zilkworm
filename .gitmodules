@@ -5,4 +5,4 @@
 [submodule "intx"]
 	path = third_party/intx
 	url = https://github.com/somnergy/intx.git
-	branch = som/airbender-intx-opts
+	branch = som/airbender-bigint-secp
