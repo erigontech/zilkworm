@@ -14,7 +14,10 @@
 namespace silkworm {
 
 // Classification of invalid transactions and blocks.
-enum class [[nodiscard]] ValidationResult {
+// Underlying type is fixed at `int` so consumers can safely store/forward
+// non-enumerator sentinel values (e.g. test runners that distinguish
+// pre-validate short-circuits from real ValidationResult codes).
+enum class [[nodiscard]] ValidationResult : int {
     kOk,  // All checks passed
 
     kUnknownProtocolRuleSet,  // Unsupported protocol rule set
