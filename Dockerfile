@@ -1,7 +1,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Zilkworm v0.1.0-alpha.1 unified build + runtime
+# Zilkworm unified build + runtime
 #
 # Builds from source:
 #   1. C++ guest ELF (RISC-V 64IM)
@@ -12,10 +12,10 @@
 #   git submodule update --init --recursive
 #
 # Build:
-#   docker build -t somnergy/z6m_prover:0.1.0-alpha.1 .
+#   docker build --build-arg ZILKWORM_VERSION=0.1.0-alpha.1 -t somnergy/z6m_prover:0.1.0-alpha.1 .
 #
 # Build for specific GPU architecture (default: 89 = RTX 4090):
-#   docker build --build-arg CUDA_ARCHS="90" -t somnergy/z6m_prover:0.1.0-alpha.1 .
+#   docker build --build-arg CUDA_ARCHS="90" --build-arg ZILKWORM_VERSION=0.1.0-alpha.1 -t somnergy/z6m_prover:0.1.0-alpha.1 .
 #
 # Run (CPU):
 #   docker run --rm somnergy/z6m_prover:0.1.0-alpha.1 --help
@@ -27,6 +27,7 @@
 #     somnergy/z6m_prover:0.1.0-alpha.1 execute --file-name /work/block.bin
 
 ARG CUDA_ARCHS="89"
+ARG ZILKWORM_VERSION="dev"
 
 # Stage 1: Build sp1-gpu-server from the SP1 repository
 FROM nvidia/cuda:13.0.0-devel-ubuntu24.04 AS gpu-builder
@@ -128,9 +129,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # Stage 3: Runtime
 FROM ubuntu:24.04 AS runtime
 
-LABEL maintainer="erigontech/z6m" \
+ARG ZILKWORM_VERSION
+LABEL maintainer="erigontech/zilkworm" \
       description="Zilkworm ZKEVM prover" \
-      version="0.1.0-alpha.1"
+      version="${ZILKWORM_VERSION}"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8
