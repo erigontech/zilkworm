@@ -32,7 +32,7 @@ namespace {
         std::vector<uint8_t> body(body_size, 0);
 
         auto* pa = reinterpret_cast<Account*>(body.data());
-        std::memcpy(pa->addr, info.addr.bytes, 20);
+        std::memcpy(pa->addr_hash, info.addr_hash.bytes, 32);
         pa->nonce = info.account.nonce;
         std::memcpy(pa->balance, info.account.balance, 32);
         std::memcpy(pa->code_hash, info.account.code_hash, 32);
@@ -64,18 +64,29 @@ namespace {
 std::vector<uint8_t> DirectState::build_blob_from_accounts(std::vector<AccountInfo> accounts,
                                                            std::vector<BlockHashEntry> block_hashes,
                                                            std::vector<uint8_t> code_store_blob) {
+    // Normalize every account to trie-key form: addr_hash = keccak256(addr)
+    // unless the producer supplied the hash directly (preimage-less witness
+    // leaves), and storage keys hashed unless already flagged as such.
+    for (auto& info : accounts) {
+        if (evmc::is_zero(info.addr_hash)) {
+            std::memcpy(info.addr_hash.bytes,
+                        silkworm::keccak256(ByteView{info.addr.bytes, 20}).bytes, 32);
+        }
+        if (!info.storage_keys_hashed) {
+            for (auto& kv : info.storage) {
+                const auto h = silkworm::keccak256(ByteView{kv.first.bytes, 32});
+                std::memcpy(kv.first.bytes, h.bytes, 32);
+            }
+            info.storage_keys_hashed = true;
+        }
+    }
+
     std::sort(accounts.begin(), accounts.end(),
               [](const AccountInfo& x, const AccountInfo& y) {
-                  return std::memcmp(x.addr.bytes, y.addr.bytes, 20) < 0;
+                  return std::memcmp(x.addr_hash.bytes, y.addr_hash.bytes, 32) < 0;
               });
 
     const uint32_t n_accounts = static_cast<uint32_t>(accounts.size());
-
-    std::vector<uint64_t> addr_key8_entries;
-    addr_key8_entries.reserve(n_accounts);
-    for (uint32_t i = 0; i < n_accounts; ++i) {
-        addr_key8_entries.push_back(addr_key8(accounts[i].addr));
-    }
 
     std::vector<AddrHashEntry> addr_hashes;
     std::vector<std::vector<uint8_t>> acc_body_bytes;
@@ -84,17 +95,16 @@ std::vector<uint8_t> DirectState::build_blob_from_accounts(std::vector<AccountIn
 
     for (uint32_t i = 0; i < n_accounts; ++i) {
         AddrHashEntry ahe{};
-        std::memcpy(ahe.addr_hash, silkworm::keccak256(ByteView{accounts[i].addr.bytes, 20}).bytes, 32);
-        std::memcpy(ahe.addr, accounts[i].addr.bytes, 20);
+        std::memcpy(ahe.addr_hash, accounts[i].addr_hash.bytes, 32);
         addr_hashes.push_back(ahe);
         acc_body_bytes.emplace_back(account_info_to_pre_account_bytes(accounts[i]));
     }
 
     std::vector<uint8_t> mphf_bytes;
     if (n_accounts > 0) {
-        MphfBuilder<20> mphf_builder{kMphfAddrMapMagic, kMphfMapVersion};
+        MphfBuilder<32> mphf_builder{kMphfAddrMapMagic, kMphfMapVersion};
         for (uint32_t i = 0; i < n_accounts; ++i) {
-            mphf_builder.add(addr_key8_entries[i],
+            mphf_builder.add(hash_key8(accounts[i].addr_hash),
                              ByteView{acc_body_bytes[i].data(), acc_body_bytes[i].size()});
         }
         mphf_bytes = std::move(mphf_builder).finalize();
@@ -153,18 +163,17 @@ std::vector<uint8_t> DirectState::build_blob_from_accounts(std::vector<AccountIn
                                ? reinterpret_cast<const MphfMapHeader*>(blob.data() + prestate_offset)
                                : nullptr;
 
-    auto entry_offset_for_addr = [&](const uint8_t addr20[20]) -> uint32_t {
+    auto entry_offset_for_hash = [&](const uint8_t addr_hash32[32]) -> uint32_t {
         if (!mphf_hdr) return 0u;
         uint64_t k8;
-        std::memcpy(&k8, addr20, 8);
-        k8 = (k8 & 0x00FFFFFFFFFFFFFFull) | (uint64_t(addr20[19]) << 56);
+        std::memcpy(&k8, addr_hash32, 8);
         const uint32_t idx = mphf_hdr->index_lookup(k8);
         const auto* slot_offsets = reinterpret_cast<const uint32_t*>(
             reinterpret_cast<const uint8_t*>(mphf_hdr) + mphf_hdr->slot_offsets_offset);
         const uint32_t off_singleton = slot_offsets[idx];
         const uint8_t* data = reinterpret_cast<const uint8_t*>(mphf_hdr) + mphf_hdr->data_offset;
         if (off_singleton != 0) {
-            if (std::memcmp(data + off_singleton + 8u, addr20, 20) == 0) return off_singleton;
+            if (std::memcmp(data + off_singleton + 8u, addr_hash32, 32) == 0) return off_singleton;
         }
         if (mphf_hdr->collisions_size > 0) {
             const auto* entries = reinterpret_cast<const MphfCollisionEntry*>(
@@ -174,7 +183,7 @@ std::vector<uint8_t> DirectState::build_blob_from_accounts(std::vector<AccountIn
                 entries, entries + n_c, k8,
                 [](const MphfCollisionEntry& e, uint64_t k) noexcept { return e.key < k; });
             for (; it != entries + n_c && it->key == k8; ++it) {
-                if (std::memcmp(data + it->offset + 8u, addr20, 20) == 0) return it->offset;
+                if (std::memcmp(data + it->offset + 8u, addr_hash32, 32) == 0) return it->offset;
             }
         }
         return 0u;
@@ -183,7 +192,7 @@ std::vector<uint8_t> DirectState::build_blob_from_accounts(std::vector<AccountIn
     auto* ahe_base = reinterpret_cast<AddrHashEntry*>(blob.data() + addr_hashes_offset);
     for (uint32_t s = 0; s < n_accounts; ++s) {
         AddrHashEntry e = addr_hashes[s];
-        e.entry_offset = entry_offset_for_addr(e.addr);
+        e.entry_offset = entry_offset_for_hash(e.addr_hash);
         ahe_base[s] = e;
     }
 

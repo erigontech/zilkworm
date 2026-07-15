@@ -32,8 +32,10 @@
 
 #include <evmc/evmc.hpp>
 
+#include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/common_zz/mphf_builder.hpp>
 #include <zilk_core/core/common_zz/mphf_map.hpp>
+#include <zilk_core/core/rlp/encode.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/trie/hash_builder.hpp>
 #include <zilk_core/core/trie/nibbles.hpp>
@@ -73,9 +75,8 @@ bytes32 keccak_addr32(const evmc::address& a) {
 
 // Build the canonical account RLP via the SAME encoder the flat state uses,
 // so the trie-leaf value is byte-identical to what check_root compares against.
-Bytes account_rlp(const evmc::address& addr, uint64_t nonce, uint64_t balance) {
+Bytes account_rlp(const evmc::address& /*addr*/, uint64_t nonce, uint64_t balance) {
     Account acc{};
-    std::memcpy(acc.addr, addr.bytes, 20);
     acc.nonce = nonce;
     intx::uint256 bal{balance};
     std::memcpy(acc.balance, &bal, 32);
@@ -90,7 +91,6 @@ Bytes account_rlp(const evmc::address& addr, uint64_t nonce, uint64_t balance) {
 DirectState::AccountInfo make_info(const evmc::address& addr, uint64_t nonce, uint64_t balance) {
     DirectState::AccountInfo info{};
     info.addr = addr;
-    std::memcpy(info.account.addr, addr.bytes, 20);
     info.account.nonce = nonce;
     intx::uint256 bal{balance};
     std::memcpy(info.account.balance, &bal, 32);
@@ -230,10 +230,92 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
                 "to the EVM, not read as empty");
 }
 
+// Regression test for the missing-preimage soundness gap (block 25538620):
+//
+//   An account leaf reachable in the node store whose 20-byte address
+//   preimage is NOT known to the witness producer (e.g. a counterfactual
+//   CREATE2 address) used to be silently dropped from the flat pre-state,
+//   so the EVM read of e.g. BALANCE returned 0 for an account with funds.
+//
+// Fixed by keying the flat pre-state with the trie key keccak256(address)
+// (always derivable from the leaf path) and hashing the queried address at
+// lookup time. This test builds the pre-state exactly the way the producer
+// now does for a preimage-less leaf — AccountInfo carries only addr_hash
+// (raw addr zeroed) and pre-hashed storage keys — and checks execution-side
+// reads observe the account and its storage.
+void PreimagelessAccount_VisibleToExecution() {
+    const evmc::address W = make_addr(0x33, 0x01);   // preimage known
+    const evmc::address C = make_addr(0x44, 0x02);   // preimage withheld
+    const bytes32 kC = keccak_addr32(C);
+
+    const evmc::bytes32 raw_slot{intx::be::store<evmc::bytes32>(intx::uint256{7})};
+    const bytes32 hashed_slot = keccak_bytes(ByteView{raw_slot.bytes, 32});
+    const evmc::bytes32 slot_value{intx::be::store<evmc::bytes32>(intx::uint256{0xBEEF})};
+
+    std::vector<DirectState::AccountInfo> accts;
+    accts.push_back(make_info(W, /*nonce=*/1, /*balance=*/1000));
+
+    // Producer view of a preimage-less leaf: trie keys only.
+    DirectState::AccountInfo hidden{};
+    hidden.addr_hash = std::bit_cast<evmc::bytes32>(kC);
+    hidden.storage_keys_hashed = true;
+    hidden.account.nonce = 0;
+    intx::uint256 bal{5000};
+    std::memcpy(hidden.account.balance, &bal, 32);
+    std::memcpy(hidden.account.code_hash, silkworm::kEmptyHash.bytes, 32);
+    std::memcpy(hidden.account.storage_root, silkworm::kEmptyRoot.bytes, 32);
+    hidden.storage.emplace_back(std::bit_cast<evmc::bytes32>(hashed_slot), slot_value);
+    accts.push_back(std::move(hidden));
+
+    std::vector<uint8_t> prestate =
+        DirectState::build_blob_from_accounts(std::move(accts),
+                                              /*block_hashes=*/{}, /*code_store=*/{});
+    expect_true(!prestate.empty(), "P1: prestate blob built without any address preimage for C");
+
+    DirectState direct{std::span<uint8_t>{prestate}};
+    expect_true(direct.sanitize(),
+                "P2: sanitize() accepts hashed-key records (no preimage required)");
+
+    // Execution-side reads hash the queried address/slot themselves.
+    const Account* paC = direct.read_account(C);
+    expect_true(paC != nullptr,
+                "P3: preimage-less account C is visible to the EVM read path");
+    expect_true(direct.get_balance(C) == intx::uint256{5000},
+                "P4: BALANCE(C) reads the trie-committed value, not 0");
+    expect_true(direct.read_storage(C, raw_slot) == slot_value,
+                "P5: SLOAD(C, slot) resolves via keccak256(slot) trie key");
+    expect_true(direct.read_account(W) != nullptr &&
+                    direct.get_balance(W) == intx::uint256{1000},
+                "P6: raw-address producer path (W) still resolves");
+
+    // Root recomputation needs no preimage either.
+    const auto root = direct.state_root_hash();
+    expect_true(root.has_value(), "P7: state_root_hash computable without preimages");
+    if (root.has_value()) {
+        const Bytes wRlp = account_rlp(W, 1, 1000);
+        Account acc_c{};
+        acc_c.nonce = 0;
+        std::memcpy(acc_c.balance, &bal, 32);
+        std::memcpy(acc_c.code_hash, silkworm::kEmptyHash.bytes, 32);
+        Bytes value_rlp;
+        silkworm::rlp::encode(value_rlp, silkworm::zeroless_view(ByteView{slot_value.bytes, 32}));
+        silkworm::trie::HashBuilder shb;
+        shb.add_leaf(silkworm::trie::unpack_nibbles(ByteView{hashed_slot.bytes, 32}), value_rlp);
+        const bytes32 c_storage_root = shb.root_hash();
+        const uint8_t len = acc_c.rlp_into_cache(std::bit_cast<evmc::bytes32>(c_storage_root));
+        const Bytes cRlp{acc_c.acc_rlp_buf, acc_c.acc_rlp_buf + len};
+        const bytes32 expected =
+            hashbuilder_root({{keccak_addr32(W), wRlp}, {kC, cRlp}});
+        expect_true(*root == expected,
+                    "P8: recomputed state root matches canonical trie root");
+    }
+}
+
 }  // namespace
 
 int main() {
     HiddenReadOnlyAccount_AcceptedByValidator();
+    PreimagelessAccount_VisibleToExecution();
     std::println("\n{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

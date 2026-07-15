@@ -419,20 +419,30 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
 bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                                  evmc_revision rev) {
     const bool clear_empty = rev >= EVMC_SPURIOUS_DRAGON;
-    std::vector<zilkworm::AddrHashEntry> created_acc_hashes_spill;  // to be used with InlineVec additional cache area
-    zilkworm::InlineVec<zilkworm::AddrHashEntry, 32> created_acc_hashes(
+    // Blob records carry no raw address (only the trie key), so created
+    // accounts need their own (hash, addr) pairing for the merge below.
+    struct CreatedAccEntry {
+        uint8_t addr_hash[32];
+        evmc::address addr;
+
+        bool operator<(const CreatedAccEntry& other) const {
+            return std::memcmp(addr_hash, other.addr_hash, 32) < 0;
+        }
+    };
+    std::vector<CreatedAccEntry> created_acc_hashes_spill;  // to be used with InlineVec additional cache area
+    zilkworm::InlineVec<CreatedAccEntry, 32> created_acc_hashes(
         direct_state.created_accounts().size(), created_acc_hashes_spill);
     for (auto& [addr, _] : direct_state.created_accounts()) {
         auto& e = created_acc_hashes.emplace_back();
         std::memcpy(e.addr_hash, keccak_bytes(addr.bytes).bytes, 32);
-        std::memcpy(e.addr, addr.bytes, 20);
+        e.addr = addr;
     }
     if (created_acc_hashes.size() > 1) [[likely]] {
         auto* const data = created_acc_hashes.data();
         const std::size_t n = created_acc_hashes.size();
         if (n <= 16) [[likely]] {
             for (std::size_t i = 1; i < n; ++i) {
-                zilkworm::AddrHashEntry key = std::move(data[i]);
+                CreatedAccEntry key = std::move(data[i]);
                 std::size_t j = i;
                 while (j > 0 && key < data[j - 1]) {
                     data[j] = std::move(data[j - 1]);
@@ -455,24 +465,6 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
 
     std::vector<mpt::TrieNodeFlat> storage_spill;
 
-    // keccak(slot_key) depends only on key bytes (account- and block-independent),
-    // so entries never go stale. Soft cap bounds memory.
-    static thread_local FlatHashMap<bytes32, bytes32> keccak_cache_map = [] {
-        FlatHashMap<bytes32, bytes32> m;
-        m.reserve(4096);
-        return m;
-    }();
-    if (keccak_cache_map.size() > 16384) [[unlikely]] {
-        keccak_cache_map.clear();
-    }
-    auto keccak_cache = [&](const bytes32& key) [[gnu::always_inline]] -> const bytes32& {
-        auto [it, inserted] = keccak_cache_map.try_emplace(key);
-        if (inserted) [[unlikely]] {
-            it->second = keccak_bytes32(key);
-        }
-        return it->second;
-    };
-
     mpt::GridMPT<true> storage_trie{direct_state, kEmptyRoot};
 
     while (it_existing_hashes != end_it_existing || it_created_hashes != end_created_hashes) {
@@ -481,13 +473,13 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             it_created_hashes == end_created_hashes ? true
             : it_existing_hashes == end_it_existing ? false
                                                     : std::memcmp(it_existing_hashes->addr_hash, it_created_hashes->addr_hash, 32) < 0;
-        const auto& addr = *reinterpret_cast<const evmc::address*>(
-            has_existing ? it_existing_hashes->addr : it_created_hashes->addr);
+        const bytes32 addr_hash = std::bit_cast<bytes32>(
+            has_existing ? it_existing_hashes->addr_hash : it_created_hashes->addr_hash);
 
         {
             const Account* rec = has_existing
                                      ? direct_state.account_at_offset(it_existing_hashes->entry_offset)
-                                     : direct_state.find_created_account(addr);
+                                     : direct_state.find_created_account(it_created_hashes->addr);
             if (rec->deleted) [[unlikely]] {
                 if (has_existing) {
                     // 0x80 current value signals leaf deletion.
@@ -508,7 +500,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
 
         Account* pa = has_existing
                           ? direct_state.account_at_offset(it_existing_hashes->entry_offset)
-                          : direct_state.find_created_account(addr);
+                          : direct_state.find_created_account(it_created_hashes->addr);
 
         // Readonly accounts: pa.modified=false guarantees initial==current.
         const bool acc_modified = has_existing ? pa->modified : true;
@@ -517,7 +509,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         if (has_existing && pa->slot_count > 0) {
             existing_slots = direct_state.slots_for(*pa).first(pa->slot_count);
         }
-        const auto* created_slots = direct_state.overflow_slots_for(addr);
+        const auto* created_slots = direct_state.overflow_slots_for(addr_hash);
 
         // Walk pre-state slots even with no SSTORE: binds slot.initial to keccak(key) under pa->storage_root.
         const bool has_pre_slots = !existing_slots.empty();
@@ -530,8 +522,9 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                                                                   : 0);
             zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(need, storage_spill);
             for (const auto& slot : existing_slots) {
-                const auto& key = *reinterpret_cast<const bytes32*>(slot.key);
-                auto& node = storage_updates.emplace_back(keccak_cache(key));
+                // Slot.key already holds the trie key (keccak256(slot key)).
+                auto& node = storage_updates.emplace_back(
+                    *reinterpret_cast<const bytes32*>(slot.key));
                 node.self_initial_len = static_cast<uint8_t>(rlp::encode_into_small(
                     node.buf + 0, zeroless_view(ByteView{slot.initial, 32})));
                 if (acc_modified && !zilkworm::eq_hash32(slot.initial, slot.current)) [[unlikely]] {
@@ -542,13 +535,14 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             }
             if (created_slots != nullptr) {
                 for (const auto& [k, v] : *created_slots) {
-                    auto& node = storage_updates.emplace_back(keccak_cache(k));
+                    // Overflow keys are trie keys as well.
+                    auto& node = storage_updates.emplace_back(k);
                     node.current_off = 40;
                     node.current_len = static_cast<uint8_t>(rlp::encode_into_small(
                         node.buf + 40, zeroless_view(ByteView{v.bytes, 32})));
                 }
             }
-            // Raw-key order != keccak(key) order; sort required.
+            // Existing slots are hash-sorted, overflow keys are not; sort the merge.
             if (storage_updates.size() > 1) [[likely]] {
                 auto* const data = storage_updates.data();
                 const std::size_t n = storage_updates.size();
@@ -638,9 +632,9 @@ bool StateTransition::check_root_new_block(DirectState& direct_state,
     leaves.reserve(direct_state.addr_hashes().size() + direct_state.created_accounts().size());
 
     for (const auto& e : direct_state.addr_hashes()) {
-        const auto& addr = *reinterpret_cast<const evmc::address*>(e.addr);
-        if (direct_state.is_deleted(addr) || (clear_empty && direct_state.is_empty_account(addr))) continue;
+        // Record-based checks: blob records may lack a raw address preimage.
         const Account* pa = direct_state.account_at_offset(e.entry_offset);
+        if (pa->deleted || (clear_empty && DirectState::account_is_empty(*pa))) continue;
         LeafRef r;
         std::memcpy(r.addr_hash.bytes, e.addr_hash, 32);
         r.rlp = ByteView{pa->acc_rlp_buf, pa->acc_rlp_len};

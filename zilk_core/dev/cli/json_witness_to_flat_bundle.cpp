@@ -227,13 +227,14 @@ int main() {
         }
     }
 
+    // The "keys" (preimage) section is intentionally ignored: the flat
+    // pre-state is keyed by the trie keys (keccak256(address) /
+    // keccak256(slot)), which are always derivable from the leaf paths.
     std::vector<std::vector<uint8_t>> state_records;
     std::vector<std::vector<uint8_t>> code_records;
-    std::vector<std::vector<uint8_t>> key_records;
     if (!collect_hex_records(doc.value("state",  nlohmann::json::array()), state_records) ||
-        !collect_hex_records(doc.value("codes",  nlohmann::json::array()), code_records)  ||
-        !collect_hex_records(doc.value("keys",   nlohmann::json::array()), key_records)) {
-        std::cerr << "flat_bundle_builder: bad state/codes/keys section\n";
+        !collect_hex_records(doc.value("codes",  nlohmann::json::array()), code_records)) {
+        std::cerr << "flat_bundle_builder: bad state/codes section\n";
         return 1;
     }
 
@@ -257,30 +258,34 @@ int main() {
         code_map.emplace(keccak_view(v), v);
     }
 
-    std::unordered_map<evmc::bytes32,
-                       ByteView,
-                       zilkworm::witness::NodeHash> preimage_map;
-    preimage_map.reserve(key_records.size());
-    for (const auto& k : key_records) {
-        ByteView v{k.data(), k.size()};
-        preimage_map.emplace(keccak_view(v), v);
-    }
-
+    // Every account/storage leaf reachable from pre_root MUST be included in
+    // the flat pre-state, keyed by its trie key. A leaf we cannot represent
+    // is a hard error — silently dropping it would let execution observe an
+    // existing account/slot as empty (soundness gap, see block 25538620).
     std::vector<zilkworm::DirectState::AccountInfo> accounts;
+    bool walk_error = false;
 
     zilkworm::witness::for_each_leaf(nodes, pre_root,
         [&](std::span<const uint8_t> nibbles, ByteView account_rlp) {
-            if (nibbles.size() != 64) return;
-            evmc::bytes32 hashed_addr = nibbles_to_bytes32(nibbles);
-
-            auto pit = preimage_map.find(hashed_addr);
-            if (pit == preimage_map.end() || pit->second.size() != 20) return;
+            if (walk_error) return;
+            if (nibbles.size() != 64) {
+                std::cerr << "flat_bundle_builder: account leaf at depth "
+                          << nibbles.size() << " != 64 nibbles\n";
+                walk_error = true;
+                return;
+            }
+            const evmc::bytes32 hashed_addr = nibbles_to_bytes32(nibbles);
 
             zilkworm::Account acc{};
-            if (!zilkworm::decode_trie_account(account_rlp, acc)) return;
+            if (!zilkworm::decode_trie_account(account_rlp, acc)) {
+                std::cerr << "flat_bundle_builder: undecodable account leaf\n";
+                walk_error = true;
+                return;
+            }
 
             zilkworm::DirectState::AccountInfo info;
-            std::memcpy(info.addr.bytes, pit->second.data(), 20);
+            info.addr_hash = hashed_addr;
+            info.storage_keys_hashed = true;
             info.account = acc;
 
             const auto acc_code_hash    = std::bit_cast<evmc::bytes32>(acc.code_hash);
@@ -294,21 +299,35 @@ int main() {
             if (!evmc::is_zero(acc_storage_root) && acc_storage_root != silkworm::kEmptyRoot) {
                 zilkworm::witness::for_each_leaf(nodes, acc_storage_root,
                     [&](std::span<const uint8_t> slot_nibs, ByteView slot_rlp) {
-                        if (slot_nibs.size() != 64) return;
-                        evmc::bytes32 hashed_slot = nibbles_to_bytes32(slot_nibs);
-                        auto sit = preimage_map.find(hashed_slot);
-                        if (sit == preimage_map.end() || sit->second.size() != 32) return;
-                        evmc::bytes32 slot_key{};
-                        std::memcpy(slot_key.bytes, sit->second.data(), 32);
+                        if (walk_error) return;
+                        if (slot_nibs.size() != 64) {
+                            std::cerr << "flat_bundle_builder: storage leaf at depth "
+                                      << slot_nibs.size() << " != 64 nibbles\n";
+                            walk_error = true;
+                            return;
+                        }
+                        const evmc::bytes32 hashed_slot = nibbles_to_bytes32(slot_nibs);
                         evmc::bytes32 slot_value{};
-                        if (!decode_storage_value(slot_rlp, slot_value)) return;
-                        if (evmc::is_zero(slot_value)) return;
-                        info.storage.emplace_back(slot_key, slot_value);
+                        if (!decode_storage_value(slot_rlp, slot_value)) {
+                            std::cerr << "flat_bundle_builder: undecodable storage leaf\n";
+                            walk_error = true;
+                            return;
+                        }
+                        if (evmc::is_zero(slot_value)) {
+                            std::cerr << "flat_bundle_builder: zero-valued storage leaf in trie\n";
+                            walk_error = true;
+                            return;
+                        }
+                        info.storage.emplace_back(hashed_slot, slot_value);
                     });
             }
+            if (walk_error) return;
 
             accounts.push_back(std::move(info));
         });
+    if (walk_error) {
+        return 1;
+    }
 
     std::vector<zilkworm::BlockHashEntry> block_hashes;
     block_hashes.reserve(ancestors.size());

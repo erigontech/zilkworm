@@ -17,6 +17,9 @@ namespace zilkworm {
 inline constexpr uint32_t kInputMagicMFBD = 0x4442464Du;  // "MFBD"
 inline constexpr uint32_t kInputMagicEJSN = 0x4E534A45u;  // "EJSN"
 
+// The MFBD envelope layout (magic/version/count + concatenated bundles) is
+// unchanged; the semantic break of the hashed-key pre-state is gated by
+// kFlatBundleVersion and pre_state kVersion below/in pre_state.hpp.
 inline constexpr uint32_t kInputVersionMFBD = 1u;
 inline constexpr uint32_t kInputVersionEJSN = 1u;
 
@@ -51,7 +54,9 @@ struct FlatBundle {
 };
 
 inline constexpr uint32_t kFlatBundleMagic   = 0x444E4246u;  // 'FBND'
-inline constexpr uint32_t kFlatBundleVersion = 13u;
+// v14: direct-state keyed by trie keys (keccak256(address)/keccak256(slot));
+// bundles produced with raw-address keying (<= v13) are rejected.
+inline constexpr uint32_t kFlatBundleVersion = 14u;
 struct alignas(8) FlatBundleHeader {
     uint32_t magic;
     uint32_t version;

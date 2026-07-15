@@ -306,7 +306,6 @@ std::vector<uint8_t> build_subtest(const nlohmann::json& test,
         pairs.reserve(pre.size());
         for (const auto& acc : pre) {
             Account wire{};
-            std::memcpy(wire.addr, acc.addr.bytes, 20);
             wire.nonce = acc.nonce;
             std::memcpy(wire.balance, &acc.balance, 32);
             std::memcpy(wire.code_hash, acc.code_hash.bytes, 32);
