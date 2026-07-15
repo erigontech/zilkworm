@@ -46,6 +46,7 @@ pub struct ServiceConfig {
     pub gpu: bool,
     pub until: Option<ProvingLimit>,
     pub setup_dir: Option<PathBuf>,
+    pub security: verifier_common::SecurityModel,
     pub ethproofs: Option<EthProofsConfig>,
 }
 
@@ -80,6 +81,30 @@ pub struct AirbenderService {
     /// Hex-encoded end_params from the highest recursion level setup.
     /// Used as verifier_id when posting to ethproofs.
     verifier_id: String,
+    /// Guest ROM image, loaded once for VM runs.
+    guest_binary_u32: Vec<u32>,
+    /// Preprocessed guest instruction tape, decoded once for VM runs.
+    guest_instructions: Vec<riscv_transpiler::ir::Instruction>,
+    /// PC of the final self-loop of the guest's canonical EXIT_SEQUENCE.
+    /// A run that ends on any other PC took the `finish_error` path.
+    guest_exit_pc: u32,
+}
+
+/// Result of running a block through the JIT executor (no proving).
+struct VmRunOutcome {
+    gas_used: u64,
+    cycle_count: u64,
+    reached_end: bool,
+    final_pc: u32,
+    elapsed_secs: f64,
+}
+
+impl VmRunOutcome {
+    /// The guest signals success by parking in the EXIT_SEQUENCE self-loop;
+    /// a validation failure parks in `finish_error`'s loop at a different PC.
+    fn succeeded(&self, exit_pc: u32) -> bool {
+        self.reached_end && self.final_pc == exit_pc
+    }
 }
 
 impl AirbenderService {
@@ -89,6 +114,17 @@ impl AirbenderService {
         if !Path::new(&bin_path).exists() {
             bail!("Guest binary not found at {}", bin_path);
         }
+
+        // Load and decode the guest once for JIT execution (preflight and
+        // execute-only runs), and locate the canonical exit point so runs
+        // that take the finish_error path can be recognized.
+        let text_path = format!("{}.text", config.guest_base.display());
+        let (binary_bytes, guest_binary_u32) =
+            execution_utils::setups::read_binary(Path::new(&bin_path));
+        let (_, text_u32) = execution_utils::setups::read_binary(Path::new(&text_path));
+        let guest_instructions = preprocess_bytecode::<FullMachineDecoderConfig>(&text_u32);
+        let guest_exit_pc = execution_utils::find_binary_exit_point(&binary_bytes);
+        info!("Guest exit sequence PC: 0x{:08x}", guest_exit_pc);
 
         let eth_client = config
             .ethproofs
@@ -103,11 +139,17 @@ impl AirbenderService {
             let prover = if let Some(ref dir) = config.setup_dir {
                 let setup_path = dir.join("setup.bin");
                 let cache = crate::prove::load_setup(&setup_path)?;
+                if cache.security() != config.security {
+                    bail!(
+                        "setup cache at {} was computed for {:?}, but the service requested {:?}",
+                        setup_path.display(), cache.security(), config.security,
+                    );
+                }
                 crate::prove::create_gpu_prover_from_cache(cache)
             } else {
                 let guest_path = config.guest_base.display().to_string();
                 let until = config.until.clone().unwrap_or(ProvingLimit::Base);
-                crate::prove::create_gpu_prover(&guest_path, &until)
+                crate::prove::create_gpu_prover(&guest_path, &until, config.security)
             };
             info!("GPU prover initialized in {:.2}s", start.elapsed().as_secs_f64());
             Some(Arc::new(prover))
@@ -136,6 +178,9 @@ impl AirbenderService {
             #[cfg(feature = "gpu")]
             gpu_prover,
             verifier_id,
+            guest_binary_u32,
+            guest_instructions,
+            guest_exit_pc,
         })
     }
 
@@ -313,6 +358,45 @@ impl AirbenderService {
             }
 
             if item.prove {
+                // Preflight in the JIT before touching the GPU: skip blocks
+                // whose execution fails guest validation instead of letting
+                // the recursion stage abort the process.
+                match self.preflight_block(item.block_number, &item.bundle_path) {
+                    Ok(run) if run.succeeded(self.guest_exit_pc) => {}
+                    Ok(run) => {
+                        error!(
+                            block = item.block_number,
+                            final_pc = format!("0x{:08x}", run.final_pc),
+                            reached_end = run.reached_end,
+                            "Guest validation failed in preflight; skipping prove"
+                        );
+                        let _ = self.persist_proving_log(&ProvingLog {
+                            block_number: item.block_number,
+                            gas_used: 0,
+                            cycle_count: run.cycle_count,
+                            num_proofs: 0,
+                            proving_millis: 0,
+                            message: format!(
+                                "SKIPPED: guest validation failure (final_pc=0x{:08x} reached_end={})",
+                                run.final_pc, run.reached_end
+                            ),
+                        });
+                        continue;
+                    }
+                    Err(err) => {
+                        error!(block = item.block_number, error = %err, "Preflight errored; skipping prove");
+                        let _ = self.persist_proving_log(&ProvingLog {
+                            block_number: item.block_number,
+                            gas_used: 0,
+                            cycle_count: 0,
+                            num_proofs: 0,
+                            proving_millis: 0,
+                            message: format!("SKIPPED: preflight error: {}", err),
+                        });
+                        continue;
+                    }
+                }
+
                 println!(
                     "[{}] Proving block {}",
                     Self::format_timestamp(),
@@ -374,21 +458,16 @@ impl AirbenderService {
         Ok(())
     }
 
-    fn execute_block(&self, block_number: u64, input_path: &Path) -> Result<()> {
+    /// Run a block through the JIT executor (no proving) using the cached
+    /// guest tape, and report the final machine state.
+    fn run_vm(&self, input_path: &Path) -> Result<VmRunOutcome> {
         let oracle = crate::build_oracle(input_path, false)?;
         let source = QuasiUARTSource::new_with_reads(oracle);
 
-        let bin_path = format!("{}.bin", self.config.guest_base.display());
-        let text_path = format!("{}.text", self.config.guest_base.display());
-
-        let (_, binary_u32) = execution_utils::setups::read_binary(Path::new(&bin_path));
-        let (_, text_u32) = execution_utils::setups::read_binary(Path::new(&text_path));
-
-        let instructions = preprocess_bytecode::<FullMachineDecoderConfig>(&text_u32);
-        let tape = SimpleTape::new(&instructions);
+        let tape = SimpleTape::new(&self.guest_instructions);
         let mut ram =
             RamWithRomRegion::<{ prover::common_constants::rom::ROM_SECOND_WORD_BITS }>::from_rom_content(
-                &binary_u32,
+                &self.guest_binary_u32,
                 crate::DEFAULT_RAM_BOUND,
             );
 
@@ -408,19 +487,48 @@ impl AirbenderService {
 
         let cycles = (state.timestamp - riscv_transpiler::common_constants::INITIAL_TIMESTAMP)
             / riscv_transpiler::common_constants::TIMESTAMP_STEP;
-        let gas_used = state.registers[10].value as u64;
 
+        Ok(VmRunOutcome {
+            gas_used: state.registers[10].value as u64,
+            cycle_count: cycles,
+            reached_end: finished,
+            final_pc: state.pc,
+            elapsed_secs: wall_elapsed.as_secs_f64(),
+        })
+    }
+
+    fn execute_block(&self, block_number: u64, input_path: &Path) -> Result<()> {
+        let run = self.run_vm(input_path)?;
         println!(
-            "[{}] Executed block {} gas_used={} cycles={} time={:.2}s reached_end={}",
+            "[{}] Executed block {} gas_used={} cycles={} time={:.2}s reached_end={} ok={}",
             Self::format_timestamp(),
             block_number,
-            gas_used,
-            cycles,
-            wall_elapsed.as_secs_f64(),
-            finished,
+            run.gas_used,
+            run.cycle_count,
+            run.elapsed_secs,
+            run.reached_end,
+            run.succeeded(self.guest_exit_pc),
         );
-
         Ok(())
+    }
+
+    /// Cheap JIT dry-run before committing the GPU to a block. A guest
+    /// validation failure (e.g. state/receipts root mismatch) takes the
+    /// `finish_error` path; proving such a run makes the recursion verifier
+    /// reject it via a non-unwindable JIT panic that aborts the whole
+    /// process, so those blocks must be skipped before proving starts.
+    fn preflight_block(&self, block_number: u64, input_path: &Path) -> Result<VmRunOutcome> {
+        let run = self.run_vm(input_path)?;
+        println!(
+            "[{}] Preflight block {} cycles={} time={:.2}s ok={} (final_pc=0x{:08x})",
+            Self::format_timestamp(),
+            block_number,
+            run.cycle_count,
+            run.elapsed_secs,
+            run.succeeded(self.guest_exit_pc),
+            run.final_pc,
+        );
+        Ok(run)
     }
 
     /// Run the GPU proof for a single block, write `proof.bin`, and return
