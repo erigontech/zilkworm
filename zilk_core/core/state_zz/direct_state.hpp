@@ -47,9 +47,7 @@ using ::silkworm::kEmptyRoot;
 }
 [[gnu::always_inline]] inline uint64_t hash_key8(const evmc::bytes32& hash) noexcept { return hash_key8(hash.bytes); }
 
-// 7 MSBs + 19th byte (LSB): precompile addrs vary only in byte 19.
-// Legacy raw-address key reduction; the pre-state map is now keyed by
-// keccak256(address) via hash_key8. Kept for generic MphfMap tests.
+// 7 MSBs + 19th byte (LSB): precompile addrs vary only in byte 19
 [[gnu::always_inline]] inline uint64_t addr_key8(const uint8_t (&a)[20]) noexcept {
     uint64_t k; std::memcpy(&k, a, 8);
     k = (k & 0x00FFFFFFFFFFFFFFull) | (uint64_t(a[19]) << 56); return k;
@@ -80,9 +78,7 @@ class DirectState : public BlockState {
     std::span<const BlockHashEntry> block_hashes_;
 
     FlatHashMap<evmc::address, Account> created_accounts_;
-    // Keyed by keccak256(address); inner map by keccak256(slot key) — the same
-    // trie keys the pre-state blob uses, so root computation needs no preimage.
-    FlatHashMap<evmc::bytes32, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;
+    FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
     FlatHashSet<evmc::address> touched_;
@@ -94,10 +90,6 @@ class DirectState : public BlockState {
     // Journal only used for multi-block cases
     FlatHashSet<evmc::address> changed_addresses_journal_;
     FlatHashMap<evmc::address, FlatHashSet<evmc::bytes32>> changed_storage_journal_;
-
-    // Memoized trie-key hashing: one keccak per unique address / slot key.
-    mutable FlatHashMap<evmc::address, evmc::bytes32> addr_hash_cache_;
-    mutable FlatHashMap<evmc::bytes32, evmc::bytes32> slot_hash_cache_;
 
     Account* find_or_create_pre_account_slow(const evmc::address& addr);
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
@@ -123,13 +115,12 @@ class DirectState : public BlockState {
     }
     evmc::bytes32 get_block_hash(BlockNum n) const noexcept;
     [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr) const noexcept {
-        const evmc::bytes32 ah = hashed_address(addr);
-        if (const auto* pa = find_pre_account_by_hash(ah); pa != nullptr) {
+        if (const auto* pa = find_pre_account_unchecked(addr); pa != nullptr) {
             if (pa->deleted) [[unlikely]]
                 return false;
             if (pa->slot_count > 0) return true;
         }
-        if (auto it = overflow_slots_.find(ah); it != overflow_slots_.end() && !it->second.empty()) return true;
+        if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end() && !it->second.empty()) return true;
         return false;
     }
 
@@ -153,10 +144,6 @@ class DirectState : public BlockState {
     void clear_touched() noexcept { touched_.clear(); }
 
     evmc::bytes32 account_storage_root(const evmc::address& addr) const;
-    // Storage root from a pre-state record (may be nullptr) merged with the
-    // overflow slots registered under addr_hash. Slot keys are trie keys.
-    evmc::bytes32 storage_root_from(const Account* pa,
-                                    const evmc::bytes32& addr_hash) const;
     std::optional<evmc::bytes32> state_root_hash() const;
 
     std::optional<BlockHeader> read_header(BlockNum block_num,
@@ -169,16 +156,10 @@ class DirectState : public BlockState {
 
     bool sanitize();
 
-    // Producer-side account description. Either the raw address (hashed by
-    // build_blob_from_accounts) or the trie key addr_hash directly may be
-    // given; addr_hash == 0 means "derive from addr". storage keys are raw
-    // slot keys unless storage_keys_hashed is set (then keccak256(slot key)).
     struct AccountInfo {
         evmc::address addr;
-        evmc::bytes32 addr_hash;
         Account account;
         std::vector<std::pair<evmc::bytes32, evmc::bytes32>> storage;
-        bool storage_keys_hashed{false};
     };
 
     static std::vector<uint8_t> build_blob_from_accounts(
@@ -219,28 +200,10 @@ class DirectState : public BlockState {
                         pa.code_store_len};
     }
 
-    // keccak256 of a queried address / slot key, memoized so each unique key
-    // costs one keccak (relevant inside the zkVM guest).
-    evmc::bytes32 hashed_address(const evmc::address& addr) const noexcept;
-    evmc::bytes32 hashed_slot_key(const evmc::bytes32& key) const noexcept;
-
-    // True iff the record satisfies the EIP-161 empty-account predicate.
-    [[gnu::always_inline]] static inline bool
-    account_is_empty(const Account& pa) noexcept {
-        intx::uint256 bal;
-        std::memcpy(&bal, pa.balance, 32);
-        return pa.nonce == 0 && eq_hash32(pa.code_hash, kEmptyHash.bytes) && bal == 0;
-    }
-
     [[gnu::always_inline]] inline const Account*
     find_pre_account(const evmc::address& addr) const noexcept;
     [[gnu::always_inline]] inline Account*
     find_pre_account(const evmc::address& addr) noexcept;
-
-    [[gnu::always_inline]] inline const Account*
-    find_pre_account_by_hash(const evmc::bytes32& addr_hash) const noexcept;
-    [[gnu::always_inline]] inline Account*
-    find_pre_account_by_hash(const evmc::bytes32& addr_hash) noexcept;
 
     [[gnu::always_inline]] inline const Account*
     find_pre_account_unchecked(const evmc::address& addr) const noexcept;
@@ -273,8 +236,8 @@ class DirectState : public BlockState {
     }
 
     [[gnu::always_inline]] inline const FlatHashMap<evmc::bytes32, evmc::bytes32>*
-    overflow_slots_for(const evmc::bytes32& addr_hash) const noexcept {
-        const auto it = overflow_slots_.find(addr_hash);
+    overflow_slots_for(const evmc::address& addr) const noexcept {
+        const auto it = overflow_slots_.find(addr);
         if (it == overflow_slots_.end()) return nullptr;
         return &it->second;
     }
@@ -342,29 +305,17 @@ DirectState::find_pre_account(const evmc::address& addr) const noexcept {
 }
 
 [[gnu::always_inline]] inline const Account*
-DirectState::find_pre_account_by_hash(const evmc::bytes32& addr_hash) const noexcept {
-    if (auto b = pre_state_map_.find<32, 0, &hash_key8>(addr_hash.bytes))
+DirectState::find_pre_account_unchecked(const evmc::address& addr) const noexcept {
+    if (auto b = pre_state_map_.find<20, 0, &addr_key8>(addr.bytes))
         return reinterpret_cast<const Account*>(b->data());
     return nullptr;
 }
 
 [[gnu::always_inline]] inline Account*
-DirectState::find_pre_account_by_hash(const evmc::bytes32& addr_hash) noexcept {
-    if (auto b = pre_state_map_.find<32, 0, &hash_key8>(addr_hash.bytes))
+DirectState::find_pre_account_unchecked(const evmc::address& addr) noexcept {
+    if (auto b = pre_state_map_.find<20, 0, &addr_key8>(addr.bytes))
         return reinterpret_cast<Account*>(b->data());
     return nullptr;
-}
-
-[[gnu::always_inline]] inline const Account*
-DirectState::find_pre_account_unchecked(const evmc::address& addr) const noexcept {
-    if (!pre_state_map_.valid()) return nullptr;
-    return find_pre_account_by_hash(hashed_address(addr));
-}
-
-[[gnu::always_inline]] inline Account*
-DirectState::find_pre_account_unchecked(const evmc::address& addr) noexcept {
-    if (!pre_state_map_.valid()) return nullptr;
-    return find_pre_account_by_hash(hashed_address(addr));
 }
 
 [[gnu::always_inline]] inline Account*

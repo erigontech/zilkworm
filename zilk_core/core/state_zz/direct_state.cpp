@@ -136,7 +136,7 @@ namespace {
                 meta->addr_hashes_offset > meta->prestate_offset
                     ? meta->addr_hashes_offset - meta->prestate_offset
                     : 0u;
-            if (!validate_mphf<32>(blob, meta->prestate_offset, addr_mphf_size,
+            if (!validate_mphf<20>(blob, meta->prestate_offset, addr_mphf_size,
                                    kMphfAddrMapMagic)) [[unlikely]] {
                 return false;
             }
@@ -259,26 +259,6 @@ void DirectState::reserve_block_maps_() noexcept {
     headers_.reserve(256);
     created_block_hashes_.reserve(256);
     delegated_designations_.reserve(32);
-    addr_hash_cache_.reserve(1024);
-    slot_hash_cache_.reserve(2048);
-}
-
-evmc::bytes32 DirectState::hashed_address(const evmc::address& addr) const noexcept {
-    auto [it, inserted] = addr_hash_cache_.try_emplace(addr);
-    if (inserted) [[unlikely]] {
-        it->second = std::bit_cast<evmc::bytes32>(
-            silkworm::keccak256(ByteView{addr.bytes, 20}));
-    }
-    return it->second;
-}
-
-evmc::bytes32 DirectState::hashed_slot_key(const evmc::bytes32& key) const noexcept {
-    auto [it, inserted] = slot_hash_cache_.try_emplace(key);
-    if (inserted) [[unlikely]] {
-        it->second = std::bit_cast<evmc::bytes32>(
-            silkworm::keccak256(ByteView{key.bytes, 32}));
-    }
-    return it->second;
 }
 
 // Rebuilds typed sub-views; blob bytes are caller-owned and pointer-stable.
@@ -306,8 +286,6 @@ DirectState::DirectState(DirectState&& other) noexcept
     created_block_hashes_ = std::move(other.created_block_hashes_);
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
     changed_storage_journal_ = std::move(other.changed_storage_journal_);
-    addr_hash_cache_ = std::move(other.addr_hash_cache_);
-    slot_hash_cache_ = std::move(other.slot_hash_cache_);
     multi_block_ = other.multi_block_;
     other.prestate_view_ = {};
     other.pre_state_meta_ = nullptr;
@@ -320,23 +298,21 @@ DirectState::DirectState(DirectState&& other) noexcept
 
 evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
                                         const evmc::bytes32& key) const noexcept {
-    const evmc::bytes32 addr_hash = hashed_address(addr);
-    const evmc::bytes32 key_hash = hashed_slot_key(key);
-    if (const auto* pa = find_pre_account_by_hash(addr_hash); pa != nullptr && pa->slot_count > 0) {
+    if (const auto* pa = find_pre_account_unchecked(addr); pa != nullptr && pa->slot_count > 0) {
         if (pa->deleted) [[unlikely]]
             return {};
         const auto storage_slots = slots_for(*pa);
-        auto it = std::lower_bound(storage_slots.cbegin(), storage_slots.cend(), key_hash,
+        auto it = std::lower_bound(storage_slots.cbegin(), storage_slots.cend(), key,
                                    [](const Slot& s, const evmc::bytes32& k) {
                                        return std::memcmp(s.key, k.bytes, 32) < 0;
                                    });
-        if (it != storage_slots.cend() && eq_hash32(it->key, key_hash.bytes)) {
+        if (it != storage_slots.cend() && eq_hash32(it->key, key.bytes)) {
             return std::bit_cast<evmc::bytes32>(it->current);
         }
     }
 
-    if (auto it = overflow_slots_.find(addr_hash); it != overflow_slots_.end()) {
-        if (auto kv = it->second.find(key_hash); kv != it->second.end()) {
+    if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end()) {
+        if (auto kv = it->second.find(key); kv != it->second.end()) {
             return kv->second;
         }
     }
@@ -345,7 +321,7 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
 
 Account* DirectState::find_or_create_pre_account_slow(const evmc::address& addr) {
     Account fresh{};
-    copy32(fresh.addr_hash, hashed_address(addr));
+    std::memcpy(fresh.addr, addr.bytes, 20);
     copy32(fresh.code_hash, kEmptyHash);
     copy32(fresh.storage_root, kEmptyRoot);
     auto [ins, _] = created_accounts_.emplace(addr, fresh);
@@ -372,7 +348,6 @@ void DirectState::set_account_from_diff(Account& pa, uint64_t nonce,
 
 // Caller guarantees pa.deleted; reset to a fresh account.
 bool DirectState::revive_if_deleted_slow(const evmc::address& addr, Account& pa) {
-    (void)addr;
     pa.deleted = false;
     copy32(pa.code_hash, kEmptyHash);
     copy32(pa.storage_root, kEmptyRoot);
@@ -380,7 +355,7 @@ bool DirectState::revive_if_deleted_slow(const evmc::address& addr, Account& pa)
     pa.code_store_len = 0;
     pa.nonce = 0;
     store_be_u256(pa.balance, intx::uint256{0});
-    overflow_slots_.erase(std::bit_cast<evmc::bytes32>(pa.addr_hash));
+    overflow_slots_.erase(addr);
     // created_code_ is hash-keyed and possibly shared across addresses.
     pa.modified = true;
     pa.acc_rlp_sroot_off = 0;
@@ -389,35 +364,32 @@ bool DirectState::revive_if_deleted_slow(const evmc::address& addr, Account& pa)
 
 void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
                                    const evmc::bytes32& key, const evmc::bytes32& value) {
-    (void)addr;
     pa.modified = true;
-    const evmc::bytes32 key_hash = hashed_slot_key(key);
     if (pa.slot_count > 0) {
         const auto cap_slots = slots_for(pa);
         const auto begin = cap_slots.begin();
         const auto end = begin + static_cast<std::ptrdiff_t>(pa.slot_count);
-        auto it = std::lower_bound(begin, end, key_hash,
+        auto it = std::lower_bound(begin, end, key,
                                    [](const Slot& s, const evmc::bytes32& k) {
                                        return std::memcmp(s.key, k.bytes, 32) < 0;
                                    });
-        if (it != end && eq_hash32(it->key, key_hash.bytes)) {
+        if (it != end && eq_hash32(it->key, key.bytes)) {
             copy32(it->current, value);
             return;
         }
         // Builder enforces slot_capacity == slot_count, so no in-place insert.
     }
 
-    const auto addr_hash = std::bit_cast<evmc::bytes32>(pa.addr_hash);
     // Zero writes must remove from overflow so storage-trie iteration never
     // sees a stale zero slot.
     if (evmc::is_zero(value)) {
-        if (auto it = overflow_slots_.find(addr_hash); it != overflow_slots_.end()) {
-            it->second.erase(key_hash);
+        if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end()) {
+            it->second.erase(key);
             if (it->second.empty()) overflow_slots_.erase(it);
         }
         return;
     }
-    overflow_slots_[addr_hash][key_hash] = value;
+    overflow_slots_[addr][key] = value;
 }
 
 void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
@@ -430,7 +402,7 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
     // delegation target.
     if (!is_delegated && !delegated_designations_.contains(addr)) {
         pa.slot_count = 0;
-        overflow_slots_.erase(std::bit_cast<evmc::bytes32>(pa.addr_hash));
+        overflow_slots_.erase(addr);
     }
     if (is_delegated) {
         delegated_designations_.insert(addr);
@@ -587,11 +559,10 @@ void DirectState::set_code(const evmc::address& addr, ByteView code) {
 
 void DirectState::destruct(const evmc::address& addr) {
     // Flag every record (blob AND overlay twin); none existing means nothing to mask.
-    const evmc::bytes32 addr_hash = hashed_address(addr);
-    if (auto* pa = find_pre_account_by_hash(addr_hash)) pa->deleted = true;
+    if (auto* pa = find_pre_account_unchecked(addr)) pa->deleted = true;
     if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
         it->second.deleted = true;
-    overflow_slots_.erase(addr_hash);
+    overflow_slots_.erase(addr);
     // created_code_ is hash-keyed and shared across addresses; do not erase here.
     touched_.insert(addr);
     journal_address_changed(addr);
@@ -606,7 +577,7 @@ bool DirectState::is_empty_account(const evmc::address& addr) const noexcept {
     const auto* pa = read_account_unchecked(addr);
     if (pa == nullptr || pa->deleted) [[unlikely]]
         return false;
-    return account_is_empty(*pa);
+    return pa->nonce == 0 && eq_hash32(pa->code_hash, kEmptyHash.bytes) && load_be_u256(pa->balance) == 0;
 }
 
 bool DirectState::is_dead(const evmc::address& addr) const noexcept {
@@ -619,14 +590,12 @@ void DirectState::destruct_dead_among(const FlatHashSet<evmc::address>& addrs) {
     }
 }
 
-evmc::bytes32 DirectState::storage_root_from(const Account* pa,
-                                             const evmc::bytes32& addr_hash) const {
+evmc::bytes32 DirectState::account_storage_root(const evmc::address& addr) const {
     // Merge first-map slots with overflow_slots_ (overflow wins), drop zero
-    // values per Yellow-Paper trie semantics. Keys are already trie keys
-    // (keccak256(slot key)), so no per-slot hashing is needed here.
+    // values per Yellow-Paper trie semantics.
     std::map<evmc::bytes32, evmc::bytes32> live;
 
-    if (pa != nullptr && pa->slot_count > 0 && !pa->deleted) {
+    if (const auto* pa = find_pre_account(addr); pa != nullptr && pa->slot_count > 0) {
         const auto sl = slots_for(*pa);
         for (uint32_t i = 0; i < pa->slot_count; ++i) {
             const auto k = std::bit_cast<evmc::bytes32>(sl[i].key);
@@ -634,7 +603,7 @@ evmc::bytes32 DirectState::storage_root_from(const Account* pa,
             if (!evmc::is_zero(v)) live.emplace(k, v);
         }
     }
-    if (auto it = overflow_slots_.find(addr_hash); it != overflow_slots_.end()) {
+    if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end()) {
         // Zero-current entries are erased on write, so anything here is live.
         for (const auto& [k, v] : it->second) {
             live[k] = v;
@@ -645,10 +614,11 @@ evmc::bytes32 DirectState::storage_root_from(const Account* pa,
 
     std::map<evmc::bytes32, Bytes> storage_rlp;
     Bytes buffer;
-    for (const auto& [hashed_key, value] : live) {
+    for (const auto& [location, value] : live) {
+        const ethash::hash256 hash{silkworm::keccak256({location.bytes, 32})};
         buffer.clear();
         rlp::encode(buffer, zeroless_view(value.bytes));
-        storage_rlp[hashed_key] = buffer;
+        storage_rlp[to_bytes32(hash.bytes)] = buffer;
     }
 
     trie::HashBuilder hb;
@@ -658,19 +628,16 @@ evmc::bytes32 DirectState::storage_root_from(const Account* pa,
     return hb.root_hash();
 }
 
-evmc::bytes32 DirectState::account_storage_root(const evmc::address& addr) const {
-    return storage_root_from(find_pre_account(addr), hashed_address(addr));
-}
-
 std::optional<evmc::bytes32> DirectState::state_root_hash() const {
     // HashBuilder requires leaves in keccak(addr) order.
     std::map<evmc::bytes32, Bytes> account_rlp;
 
-    auto emit = [&](const evmc::bytes32& addr_hash, const Account& pa) {
+    auto emit = [&](const evmc::address& addr, const Account& pa) {
         if (pa.deleted) [[unlikely]]
             return;
-        const auto sr = storage_root_from(&pa, addr_hash);
-        account_rlp[addr_hash] = pa.rlp(sr);
+        const auto sr = account_storage_root(addr);
+        const ethash::hash256 hash{silkworm::keccak256({addr.bytes, 20})};
+        account_rlp[to_bytes32(hash.bytes)] = pa.rlp(sr);
     };
 
     if (pre_state_meta_->n_accounts > 0) {
@@ -678,16 +645,18 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
             if (body.size() < sizeof(Account)) [[unlikely]]
                 return;
             const auto* pa = reinterpret_cast<const Account*>(body.data());
-            emit(std::bit_cast<evmc::bytes32>(pa->addr_hash), *pa);
+            evmc::address addr;
+            std::memcpy(addr.bytes, pa->addr, 20);
+            emit(addr, *pa);
         };
-        if (!pre_state_map_.for_each<32>(
+        if (!pre_state_map_.for_each<20>(
                                [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
                                    handle(std::span<const uint8_t>{body.data(), body.size()});
                                }))
             return std::nullopt;
     }
     for (const auto& [addr, pa] : created_accounts_) {
-        emit(hashed_address(addr), pa);
+        emit(addr, pa);
     }
 
     if (account_rlp.empty()) return kEmptyRoot;
@@ -805,7 +774,7 @@ bool DirectState::sanitize() {
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
     };
     if (pre_state_meta_->n_accounts > 0) {
-        if (!pre_state_map_.for_each<32>(
+        if (!pre_state_map_.for_each<20>(
                                [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
                                    handle_account_body(body);
                                }))
@@ -813,24 +782,22 @@ bool DirectState::sanitize() {
     }
     if (!acc_walk_ok) return false;
 
-    // The map key IS the trie key (keccak256(address)); the EVM read path
-    // hashes queried addresses itself, so no preimage check is required here.
-    // addr_hashes_ must cover every map record exactly once (modified-flag
-    // sweep below) and bind each entry to the record it points at.
     const uint32_t data_size = pre_state_map_.valid() ? pre_state_map_.header()->data_size : 0u;
     const uint8_t* prev_hash = nullptr;
     for (const auto& e : addr_hashes_) {
         if (prev_hash != nullptr && std::memcmp(prev_hash, e.addr_hash, 32) >= 0) return false;
+        const auto h = silkworm::keccak256(ByteView{e.addr, 20});
+        if (std::memcmp(h.bytes, e.addr_hash, 32) != 0) return false;
         if (static_cast<uint64_t>(e.entry_offset) + 8u + sizeof(Account) > data_size) return false;
         auto* pa = account_at_offset(e.entry_offset);
-        if (!pa || !eq_hash32(pa->addr_hash, e.addr_hash)) return false;
+        if (!pa || !eq_addr20(pa->addr, e.addr)) return false;
         pa->modified = false;  // This account's hash now checked
         prev_hash = e.addr_hash;
     }
 
     bool addr_hash_skipped = false;
     if (pre_state_meta_->n_accounts > 0) {
-        if (!pre_state_map_.for_each<32>(
+        if (!pre_state_map_.for_each<20>(
                                [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
                                    auto* pa = reinterpret_cast<Account*>(body.data());
                                     addr_hash_skipped = pa->modified || addr_hash_skipped;   // Should be all false

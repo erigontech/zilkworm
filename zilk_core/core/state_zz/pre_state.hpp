@@ -37,10 +37,7 @@ using ::silkworm::Bytes;
 }
 
 inline constexpr uint32_t kMagic = 0x53455250u;  // 'PRES' little-endian
-// v5: pre-state keyed by keccak256(address) / keccak256(slot) trie keys;
-// raw address preimages are no longer stored (Account.addr_hash replaces
-// Account.addr, AddrHashEntry loses its addr field, Slot.key is hashed).
-inline constexpr uint32_t kVersion = 5u;
+inline constexpr uint32_t kVersion = 4u;
 
 inline constexpr uint32_t align8(uint32_t v) noexcept { return (v + 7u) & ~uint32_t{7u}; }
 
@@ -61,15 +58,15 @@ struct PreStateMeta {
 };
 
 struct alignas(8) Slot {
-    uint8_t key[32];      // keccak256(slot key) == storage trie key
+    uint8_t key[32];
     uint8_t initial[32];
     uint8_t current[32];
 };
 
 struct alignas(8) AddrHashEntry {
-    uint8_t  addr_hash[32];  // keccak256(address) == account trie key
+    uint8_t  addr_hash[32];
+    uint8_t  addr[20];
     uint32_t entry_offset;
-    uint32_t reserved;
 
     bool operator<(const AddrHashEntry& other) const {
         return std::memcmp(addr_hash, other.addr_hash, 32) < 0;
@@ -100,7 +97,7 @@ static_assert(sizeof(AddrHashEntry) % 8 == 0);
 static_assert(sizeof(BlockHashEntry) % 8 == 0);
 
 static_assert(sizeof(Slot) == 96);
-static_assert(sizeof(AddrHashEntry) == 40);
+static_assert(sizeof(AddrHashEntry) == 56);
 static_assert(sizeof(BlockHashEntry) == 40);
 
 }  // namespace zilkworm
