@@ -216,7 +216,14 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
             // Note: the following isn't code duplication
             // We are applying parent br transformation here to avoid having to store hashed entry to be unfolded again
             // single-child br -> ext
-            if (parent.kind == kBranch && parent.branch.has_single_child()) {
+            // Only when this line is modified: the transform leaves the new ext's
+            // child empty, expecting the encode path below to set it. An
+            // unmodified line takes the early-return that never writes the
+            // child ref, leaving an "empty" ext that a later fold cascade
+            // deletes (loses the whole surviving subtree). Unmodified lines
+            // keep the parent branch intact (hash ref still valid); the
+            // parent's own fold collapses it via the node store.
+            if (parent.kind == kBranch && parent.branch.has_single_child() && grid_line.modified) {
                 ExtensionNode ext{
                     nibbles64{1, {parent.branch.first_set_bit()}}};
                 transform_line(parent, std::move(ext));

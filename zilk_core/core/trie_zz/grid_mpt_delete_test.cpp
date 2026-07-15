@@ -140,6 +140,59 @@ void check_delete_all_then_insert(const Bytes32Map& pre, const Bytes32Map& post)
     REQUIRE(got == expected);
 }
 
+// Runs a batch of {read-only | delete | upsert} updates through GridMPT<true>
+// against a complete witness of the pre trie and REQUIREs the canonical post
+// root. `ro` keys are visited read-only (current empty); `del` keys are
+// deleted; `post` keys are upserted.
+void check_mixed_updates(const Bytes32Map& pre, const std::vector<bytes32>& ro,
+                         const std::vector<bytes32>& del, const Bytes32Map& post) {
+    Bytes32Map nodes;
+    const bytes32 pre_root = hashbuilder_root(pre, &nodes);
+    std::vector<uint8_t> prestate =
+        DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
+    std::vector<uint8_t> nodestore = build_node_store(nodes);
+    DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
+
+    Bytes32Map expected_leaves = pre;
+    std::vector<TrieNodeFlat> updates;
+    updates.reserve(ro.size() + del.size() + post.size());
+    for (const auto& k : ro) {
+        auto& node = updates.emplace_back(k);
+        const auto& v = pre.at(k);
+        node.self_initial_len = static_cast<uint8_t>(v.size());
+        std::memcpy(node.buf, v.data(), v.size());
+        // current empty => read-only check
+    }
+    for (const auto& k : del) {
+        auto& node = updates.emplace_back(k);
+        const auto& v = pre.at(k);
+        node.self_initial_len = static_cast<uint8_t>(v.size());
+        std::memcpy(node.buf, v.data(), v.size());
+        node.buf[40] = 0x80;
+        node.current_off = 40;
+        node.current_len = 1;
+        expected_leaves.erase(k);
+    }
+    for (const auto& [k, v] : post) {
+        auto& node = updates.emplace_back(k);
+        node.current_off = 40;
+        node.current_len = static_cast<uint8_t>(v.size());
+        std::memcpy(node.buf + 40, v.data(), v.size());
+        expected_leaves[k] = v;
+    }
+    std::ranges::sort(updates, [](const TrieNodeFlat& a, const TrieNodeFlat& b) {
+        return std::memcmp(a.key.bytes, b.key.bytes, 32) < 0;
+    });
+
+    GridMPT<true> trie{direct, pre_root};
+    const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
+    const bytes32 expected = hashbuilder_root(expected_leaves, nullptr);
+
+    CAPTURE(silkworm::to_hex(got), silkworm::to_hex(expected));
+    CHECK(trie.missing_count() == 0);
+    REQUIRE(got == expected);
+}
+
 }  // namespace
 
 TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmpt]") {
@@ -177,4 +230,25 @@ TEST_CASE("GridMPT<true> seek cursor after folding a delete-emptied line", "[tri
                          {key_with_prefix({0xc, 0xf, 7}), slot_value_rlp(2)}};
     check_delete_all_then_insert(pre, {{key_with_prefix({0xc, 7}), slot_value_rlp(3)},
                                        {key_with_prefix({0xc, 0xf, 0xf}), slot_value_rlp(4)}});
+}
+
+// A read-only visit into one child of a branch, followed by deleting the
+// branch's only other child, used to lose the surviving subtree: fold_line
+// transformed the (now single-child) parent branch into an extension with an
+// empty child placeholder, but the read-only (unmodified) child line took the
+// early-return that never writes the child ref; the "empty" extension was
+// then cascade-deleted. Seen on mainnet block 25538720 (storage trie of
+// 0xf820fb4680712cd7263a0d3d024d5b5aea82fd70).
+TEST_CASE("GridMPT<true> read-only sibling visit then delete of the branch's other child",
+          "[trie][gridmpt]") {
+    // branch(610*) with children {6, c}; child 6 is itself a branch {a, e}.
+    const bytes32 ro_key = key_with_prefix({6, 1, 0, 6, 0xa});
+    const bytes32 sib_key = key_with_prefix({6, 1, 0, 6, 0xe});
+    const bytes32 del_key = key_with_prefix({6, 1, 0, 0xc});
+    const Bytes32Map pre{{ro_key, slot_value_rlp(1)},
+                         {sib_key, slot_value_rlp(2)},
+                         {del_key, slot_value_rlp(3)},
+                         {key_with_prefix({6, 4}), slot_value_rlp(4)},
+                         {key_with_prefix({7}), slot_value_rlp(5)}};
+    check_mixed_updates(pre, /*ro=*/{ro_key}, /*del=*/{del_key}, /*post=*/{});
 }
