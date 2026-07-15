@@ -19,61 +19,102 @@ use tracing_subscriber::{fmt, EnvFilter};
 #[derive(Parser, Debug)]
 #[command(name = "z6m_prover", about = "Zilkworm prover service")]
 struct Args {
+    /// Run the continuous prover service (requires --rpc-url)
+    ///
+    /// Processes blocks from --start-block (default: chain head + 1) to
+    /// --end-block (default: follow the chain head), fetching block + witness
+    /// and proving/executing per --prove-every / --execute-every.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     service: bool,
 
+    /// Run offline test mode (conflicts with --service)
+    ///
+    /// With --test-dir, executes EEST fixtures from that directory. Otherwise
+    /// requires --start-block/--end-block and executes already-downloaded
+    /// bundles from --data-dir. No RPC access, no proving.
     #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "service")]
     test_service: bool,
 
+    /// Ethereum JSON-RPC endpoint (must expose debug_getRawBlock and debug_executionWitness)
     #[arg(long)]
     rpc_url: Option<String>,
 
-    /// Root data directory containing a blocks/ subdirectory (e.g. /mnt/data, not /mnt/data/blocks)
+    /// Root data directory (e.g. /mnt/data, not /mnt/data/blocks)
+    ///
+    /// Block artifacts are written to <data-dir>/blocks/<N>/; execution and
+    /// proving logs are appended at the root.
     #[arg(long, default_value = "temp")]
     data_dir: PathBuf,
 
+    /// Also save raw RPC JSON responses next to each block's flat bundle
+    ///
+    /// Writes block<N>.json, blockRlp<N>.json and executionWitness<N>.json;
+    /// the flatWitnessBundle<N>.mfbd bundle is always written regardless. In
+    /// service mode this also fetches blocks that match no prove/execute
+    /// interval.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     save_all_responses: bool,
 
+    /// Service mode: fetch block + witness bundles only, skip proving and executing
+    ///
+    /// Continuously downloads each block's flat bundle into
+    /// <data-dir>/blocks/<N>/, taking precedence over --prove-every and
+    /// --execute-every.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    download_only: bool,
+
+    /// Service mode: prove blocks whose number is divisible by N (0 or unset: never)
     #[arg(long)]
     prove_every: Option<u64>,
 
+    /// Execute (without proving) blocks whose number is divisible by N (0 or unset: never)
+    ///
+    /// Skipped for blocks that also match --prove-every. Also used by
+    /// --test-service without --test-dir, where it defaults to 1 (every block).
     #[arg(long)]
     execute_every: Option<u64>,
 
+    /// Reserved posting interval; currently unused
     #[arg(long)]
     post_every: Option<u64>,
 
+    /// First block to process (service default: chain head + 1; required by --test-service without --test-dir)
     #[arg(long)]
     start_block: Option<u64>,
 
+    /// Last block to process, inclusive; the service exits after it (default: follow the chain head)
     #[arg(long)]
     end_block: Option<u64>,
 
-    /// Custom path for the execution log output (only used in --test-service mode)
+    /// Execution log path for --test-service (default: executionLogs.log in --data-dir or --test-dir)
     #[arg(long)]
     execution_log_file: Option<PathBuf>,
 
-    /// Directory of EEST JSON test files to run in test-service mode
+    /// Directory of EEST fixtures for --test-service, scanned recursively for .mfbd/.json files
     #[arg(long)]
     test_dir: Option<PathBuf>,
 
-    /// Max test file size in bytes (default 20MB, 0 = no limit)
+    /// Skip EEST test files larger than this many bytes (0 = no limit)
     #[arg(long, default_value = "20971520")]
     max_file_size: u64,
 
+    /// Proving key path; currently unused (the key is generated in-process at startup)
     #[arg(long, default_value = "pk.bin")]
     pk_path: PathBuf,
 
+    /// Proof mode for service proving: core, compressed, groth16 or plonk (unknown values fall back to compressed)
     #[arg(long, default_value = "compressed")]
     proof_type: String,
 
+    /// EthProofs API endpoint; reporting is enabled only when endpoint, token and cluster id are all set
     #[arg(long)]
     ethproofs_endpoint: Option<String>,
 
+    /// EthProofs API token (see --ethproofs-endpoint)
     #[arg(long)]
     ethproofs_token: Option<String>,
 
+    /// EthProofs cluster id to report under (see --ethproofs-endpoint)
     #[arg(long)]
     ethproofs_cluster_id: Option<u64>,
 
@@ -83,83 +124,93 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run setup to generate proving and verifying keys
+    /// Generate proving and verifying keys (currently a no-op)
     Setup {
+        /// File path to save the proving key
         #[arg(long, default_value = "pk.bin")]
         pk_path: PathBuf,
-        /// File path to save verifying key
+        /// File path to save the verifying key
         #[arg(long, default_value = "vk.bin")]
         vk_path: PathBuf,
     },
-    /// Fetch block and witness from RPC
+    /// Fetch a block and its witness over RPC and write the flat bundle
+    ///
+    /// Writes <data-dir>/blocks/<N>/flatWitnessBundle<N>.mfbd, reusing a
+    /// cached bundle if one already exists (unlike service mode, which
+    /// force-rebuilds).
     Fetch {
-        /// RPC endpoint URL
+        /// RPC endpoint URL (falls back to the top-level --rpc-url)
         #[arg(long)]
         rpc_url: Option<String>,
 
-        /// Block number to fetch
+        /// Block number to fetch (unset or 0: latest chain head)
         #[arg(long)]
         block_number: Option<u64>,
 
-        /// Output directory
+        /// Output root directory (falls back to the top-level --data-dir)
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// Whether to save all the json files to disk after download
+        /// Also save raw RPC JSON responses next to the bundle
         #[arg(long, action = clap::ArgAction::SetTrue)]
         save_all_responses: bool,
 
-        /// Use geth's debug_executionWitness format instead of reth/alloy format
+        /// Use geth's debug_executionWitness format instead of reth/alloy
         #[arg(long, action = clap::ArgAction::SetTrue)]
         geth: bool,
     },
-    /// Execute the guest program without proving
+    /// Execute the guest program for one block without proving
     Execute {
-        /// Block number to execute
+        /// Block number to execute; input read from <data-dir>/blocks/<N>/ (required unless --file-name is set)
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Whether the input file is an Ethereum/tests file
+        /// Explicit input file path, overriding block-number resolution
         #[arg(long)]
         file_name: Option<PathBuf>,
 
+        /// Treat the input as an ethereum/tests JSON fixture instead of an .mfbd bundle
         #[arg(long, action = clap::ArgAction::SetTrue)]
         is_test: bool,
 
-        /// Data directory
+        /// Root data directory (falls back to the top-level --data-dir)
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
-    /// Generate a proof for a block
+    /// Generate a proof for one block
+    ///
+    /// Current implementation proves in compressed mode via the CUDA prover
+    /// and does not write the proof to disk.
     Prove {
-        /// JSON file to load ethereum/tests format test from
+        /// Block number to prove; input read from <data-dir>/blocks/<N>/ (required unless --file-name is set)
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Whether the input file is an Ethereum/tests file
+        /// Explicit input file path, overriding block-number resolution
         #[arg(long)]
         file_name: Option<PathBuf>,
 
+        /// Treat the input as an ethereum/tests JSON fixture instead of an .mfbd bundle
         #[arg(long, action = clap::ArgAction::SetTrue)]
         is_test: bool,
 
-        /// Data directory
+        /// Root data directory (falls back to the top-level --data-dir)
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// Proving key path
+        /// Proving key path (currently unused)
         #[arg(long, default_value = "pk.bin")]
         pk_path: PathBuf,
 
-        /// Proof output path
+        /// Proof output path (currently unused)
         #[arg(long)]
         proof_path: Option<PathBuf>,
 
-        /// Proof type: core, compressed, groth16, plonk
+        /// Proof mode: core, compressed, groth16 or plonk (currently ignored by this subcommand)
         #[arg(long, default_value = "compressed")]
         proof_type: String,
     },
-    /// Verify a proof using a verification key
+    /// Verify a proof against a verifying key (currently a no-op)
     Verify {
         /// Proof file path
         #[arg(long, default_value = "proof.bin")]
@@ -244,6 +295,7 @@ async fn main() -> Result<()> {
                 post_every: args.post_every,
                 rpc_url,
                 save_all_responses: args.save_all_responses,
+                download_only: args.download_only,
                 proving_key_path: Some(args.pk_path.clone()),
                 proof_type: args.proof_type.clone(),
             };

@@ -163,6 +163,7 @@ pub struct ServiceConfig {
     pub post_every: Option<u64>,
     pub rpc_url: String,
     pub save_all_responses: bool,
+    pub download_only: bool,
     #[allow(dead_code)]
     pub proving_key_path: Option<PathBuf>,
     pub proof_type: String,
@@ -637,8 +638,10 @@ impl Z6mProverService {
             let _should_post =
                 matches_interval(service.post_every, block_number) || should_prove;
 
-            let should_anything =
-                should_prove || should_execute || service.save_all_responses;
+            let should_anything = should_prove
+                || should_execute
+                || service.save_all_responses
+                || service.download_only;
             if !should_anything {
                 println!(
                     "[{}] Nothing to do for block {}",
@@ -682,6 +685,17 @@ impl Z6mProverService {
                 }
             };
             let unified_path = outcome.flat_bundle_path.clone();
+
+            if service.download_only {
+                println!(
+                    "[{}] Downloaded block {} to {}",
+                    Self::format_timestamp(),
+                    block_number,
+                    unified_path.display()
+                );
+                next_block += 1;
+                continue;
+            }
 
             if should_prove {
                 println!(
