@@ -38,7 +38,8 @@ void walk_tree(
                 const uint8_t child_len = br.child_len[slot];
                 if (child_len == 32) {
                     evmc::bytes32 child_hash;
-                    std::memcpy(child_hash.bytes, br.child[slot].bytes, 32);
+                    const uint8_t* hs = br.child_ptr[slot] ? br.child_ptr[slot] : br.child[slot].bytes;
+                    std::memcpy(child_hash.bytes, hs, 32);
                     auto it = nodes.find(child_hash);
                     if (it != nodes.end()) {
                         walk_tree(nodes, it->second, path, depth + 1, cb);

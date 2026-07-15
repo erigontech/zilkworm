@@ -102,25 +102,25 @@ inline const Bytes& encode_branch(const BranchNode& b) {
 
     h.payload_length += rlp::length(b.value);
     rlp::encode_header(static_buffer, h);
+    const size_t header_len = static_buffer.size();
+    static_buffer.resize(header_len + h.payload_length);
+    uint8_t* p = static_buffer.data() + header_len;
 
-    // Encode 16 children — must emit all 16 in order for valid RLP
     for (size_t i = 0; i < 16; ++i) {
         auto child_len = b.child_len[i];
         if (child_len == 0) {
-            static_buffer.push_back(rlp::kEmptyStringCode);
+            *p++ = rlp::kEmptyStringCode;
         } else if (child_len == 32) {
-            // hashed ref
-            static_buffer.push_back(0xa0);
-            static_buffer.append(b.child[i].bytes, 32);
+            *p++ = 0xa0;
+            const uint8_t* href = b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes;
+            std::memcpy(p, href, 32);
+            p += 32;
         } else {
-            // No double encoding of embedded node
-            static_buffer.append(b.child[i].bytes, child_len);
-            // Double encoding of embedded node
-            // rlp::encode(static_buffer, ByteView{b.child[i].bytes, b.child_len[i]});        
+            std::memcpy(p, b.child[i].bytes, child_len);
+            p += child_len;
         }
     }
-
-    rlp::encode(static_buffer, b.value);
+    p += rlp::encode_into(p, b.value);
     return static_buffer;
 }
 
@@ -185,6 +185,66 @@ inline const Bytes& encode_leaf(const LeafNode& l) {
 // Decoding helpers for MPT nodes
 // ---------------------------------------------
 
+// Store one decoded child into branch slot i (empty / embedded / 0xa0-hash).
+// start_byte is the child's RLP start byte; data/len is its decoded payload.
+[[gnu::always_inline]] inline bool fill_branch_child(BranchNode& out, size_t i,
+                                                     uint8_t start_byte,
+                                                     const uint8_t* data, size_t len) {
+    if (len == 0) {
+        out.child_len[i] = 0;  // empty child (RLP empty string 0x80)
+        out.child_ptr[i] = nullptr;
+        return true;
+    }
+    if (start_byte != 0xa0) {
+        if (len > 31) return false;  // embedded child must fit child[i].bytes (with header byte)
+        out.child_len[i] = static_cast<uint8_t>(len + 1);
+        out.child[i].bytes[0] = start_byte;  // keep header byte for embedded child
+        out.child_ptr[i] = nullptr;
+        std::copy_n(data, len, &out.child[i].bytes[1]);
+    } else {
+        out.child_len[i] = 32;  // 0xa0 hashref is always 32 bytes
+        out.child_ptr[i] = data;  // reference witness blob; no copy
+    }
+    out.mask |= (1 << i);
+    return true;
+}
+
+// Decode one branch child from `remaining` into slot i, advancing `remaining`.
+// A branch child is only: 0x80 (empty) | 0xa0+32 (hash ref) | short embedded
+// list (0xc0..0xf7, <32B). Skips the general decode_header (no single-byte /
+// long-string / long-list handling a branch child never hits).
+[[gnu::always_inline]] inline bool fill_branch_child_rlp(BranchNode& out, size_t i, ByteView& remaining) {
+    if (remaining.empty()) return false;
+    const uint8_t b0 = remaining[0];
+    if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty
+        out.child_len[i] = 0;
+        out.child_ptr[i] = nullptr;
+        remaining.remove_prefix(1);
+        return true;
+    }
+    if (b0 == 0xa0) {  // 32-byte hash ref
+        if (remaining.size() < 33) return false;  // input-too-short (matches decode_header)
+        out.child_ptr[i] = remaining.data() + 1;
+        out.child_len[i] = 32;
+        out.mask |= (1u << i);
+        remaining.remove_prefix(33);
+        return true;
+    }
+    if (b0 >= 0xc0 && b0 <= 0xf7) {  // embedded short list
+        const size_t payload = static_cast<size_t>(b0 - 0xc0);
+        if (payload > 31) return false;  // must fit child[i].bytes (header + payload)
+        if (remaining.size() < 1 + payload) return false;
+        out.child[i].bytes[0] = b0;
+        std::copy_n(remaining.data() + 1, payload, &out.child[i].bytes[1]);
+        out.child_len[i] = static_cast<uint8_t>(payload + 1);
+        out.child_ptr[i] = nullptr;
+        out.mask |= (1u << i);
+        remaining.remove_prefix(1 + payload);
+        return true;
+    }
+    return false;  // not a valid branch child
+}
+
 inline bool decode_branch(ByteView payload, BranchNode& out) {
     out.mask = 0;
 
@@ -192,40 +252,19 @@ inline bool decode_branch(ByteView payload, BranchNode& out) {
 
     // Decode 16 children
     for (size_t i = 0; i < 16; ++i) {
-        // Save position before decode_header consumes the header
-
-        if (remaining.empty()) return false;
-        const uint8_t child_start = *remaining.data();
-        auto hdr = rlp::decode_header(remaining);
-        if (!hdr) return false;
-
-        if (hdr->payload_length == 0) {
-            // Empty child (RLP empty string 0x80)
-            out.child_len[i] = 0;
-        } else {
-            if (child_start != 0xa0) {
-                // embedded child keeps header byte; dest has 31 bytes after [0]
-                if (hdr->payload_length > 31) return false;
-                out.child_len[i] = hdr->payload_length + 1;
-                out.child[i].bytes[0] = child_start;  // Keep the header byte for embedded child
-                std::copy_n(remaining.data(), hdr->payload_length, &out.child[i].bytes[1]);
-            } else {
-                if (hdr->payload_length > 32) return false;
-                out.child_len[i] = hdr->payload_length;
-                std::copy_n(remaining.data(), hdr->payload_length, &out.child[i].bytes[0]);
-            }
-            out.mask |= (1 << i);
-        }
-        remaining.remove_prefix(hdr->payload_length);
+        if (!fill_branch_child_rlp(out, i, remaining)) return false;
     }
 
-    // Decode value (17th element)
+    // Decode value - usually empty
+    if (remaining.size() == 1 && remaining[0] == rlp::kEmptyStringCode) {
+        out.value = {};
+        return true;  // value empty + list fully consumed
+    }
+    // Rare: non-empty value.
     auto hdr_value = rlp::decode_header(remaining);
     if (!hdr_value || hdr_value->list) return false;
     out.value = remaining.substr(0, hdr_value->payload_length);
     remaining.remove_prefix(hdr_value->payload_length);
-
-    // Should have consumed everything
     return remaining.empty();
 }
 
@@ -271,6 +310,69 @@ inline bool decode_ext_or_leaf(ByteView payload, bool& is_leaf,
 
     // Should have consumed everything
     return remaining.empty();
+}
+
+// Single-pass node decode
+inline Kind decode_node(ByteView payload, BranchNode& out_branch,
+                            bool& is_leaf, std::array<uint8_t, 64>& path,
+                            uint8_t& plen, ByteView& second) {
+    ByteView remaining = payload;
+
+    // Element 0
+    const uint8_t e0_start = remaining.empty() ? 0 : *remaining.data();
+    auto h0 = rlp::decode_header(remaining);
+    if (!h0) return kInvalid;
+    const ByteView e0_payload = remaining.substr(0, h0->payload_length);
+    const bool e0_list = h0->list;
+    remaining.remove_prefix(h0->payload_length);
+
+    // Element 1
+    const uint8_t e1_start = remaining.empty() ? 0 : *remaining.data();
+    const uint8_t* e1_start_ptr = remaining.data();
+    auto h1 = rlp::decode_header(remaining);
+    if (!h1) return kInvalid;
+    const ByteView e1_payload = remaining.substr(0, h1->payload_length);
+    const bool e1_list = h1->list;
+    remaining.remove_prefix(h1->payload_length);
+
+    if (remaining.empty()) {    // This is leaf or extension
+        if (e0_list) [[unlikely]] return kInvalid;
+        if (!hp_decode(e0_payload, is_leaf, path, plen)) [[unlikely]] return kInvalid;
+        if (e1_list) [[unlikely]] return kInvalid;
+
+        if (!is_leaf) {
+            if (h1->payload_length == 32) {
+                second = e1_payload;  // exactly the 32-byte hash payload
+            } else {
+                size_t header_len = static_cast<size_t>(e1_payload.data() - e1_start_ptr);
+                second = ByteView{e1_start_ptr, header_len + h1->payload_length};
+            }
+        } else {
+            second = e1_payload;
+        }
+        return kExtOrLeaf;
+    }
+
+    // Elements 0 and 1 are already decoded; fill them, then decode slots 2..15.
+    out_branch.mask = 0;
+    if (!fill_branch_child(out_branch, 0, e0_start, e0_payload.data(), h0->payload_length)) return kInvalid;
+    if (!fill_branch_child(out_branch, 1, e1_start, e1_payload.data(), h1->payload_length)) return kInvalid;
+
+    for (size_t i = 2; i < 16; ++i) {
+        if (!fill_branch_child_rlp(out_branch, i, remaining)) return kInvalid;
+    }
+
+    // Value (17th) — empty (0x80) for fixed-length-key tries; short-circuit the common case.
+    if (remaining.size() == 1 && remaining[0] == rlp::kEmptyStringCode) {
+        out_branch.value = {};
+        return kBranch;  // value empty + list fully consumed
+    }
+    // Rare: non-empty value.
+    auto hv = rlp::decode_header(remaining);
+    if (!hv || hv->list) return kInvalid;
+    out_branch.value = remaining.substr(0, hv->payload_length);
+    remaining.remove_prefix(hv->payload_length);
+    return remaining.empty() ? kBranch : kInvalid;  // preserve the all-consumed check
 }
 
 inline bool is_empty(const GridLine& line) {

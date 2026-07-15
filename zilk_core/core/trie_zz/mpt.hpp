@@ -66,7 +66,11 @@ struct nibbles64 {
 };
 
 struct BranchNode {
-    std::array<bytes32, 16> child{};
+    // child/child_ptr intentionally left uninitialized: every read is gated by
+    // child_len (set slots only), and decode/set_child write them before any
+    // read
+    std::array<bytes32, 16> child;
+    std::array<const uint8_t*, 16> child_ptr;
     std::array<uint8_t, 16> child_len{};
     uint16_t mask{};
     ByteView value{};
@@ -90,15 +94,18 @@ struct BranchNode {
         mask |= 1 << slot;
         if (b.size() == 0) {
             child_len[slot] = 1;
+            child_ptr[slot] = nullptr;
             return;
         }
         std::memcpy(child[slot].bytes, b.data(), b.size());
         child_len[slot] = static_cast<uint8_t>(b.size());
+        child_ptr[slot] = nullptr;  // recomputed hash reads own inline storage
     }
 
     inline void delete_child(unsigned slot) noexcept {
         [[assume(slot < 16)]];
         child_len[slot] = 0;
+        child_ptr[slot] = nullptr;
         mask &= ~(1 << slot);
     }
 };
@@ -135,15 +142,17 @@ inline bool is_zero_quick(const ByteView b) noexcept {
 inline void zero(bytes32& h) noexcept { std::memset(h.bytes, 0, 32); }
 
 enum Kind : uint8_t {
-    kBranch = 0,
-    kExt = 1,
-    kLeaf = 2
+    kInvalid = 0,
+    kBranch = 1,
+    kExt = 2,
+    kLeaf = 3,
+    kExtOrLeaf = 4
 };
 
-// Result of an unfold attempt against a branch slot. Distinguishes a legitimate
-// empty slot (insert-here is correct) from a 32-byte hash ref whose RLP is
-// missing from the node store (witness incomplete — must hard-fail rather than
-// silently insert a phantom leaf).
+// Result of an unfold attempt against a branch slot.
+// kEmpty - The RLP indicates empty
+// kMissing - The RLP indicates non-empty but the target RLP not found
+// kUndefined - Error occurred
 enum class UnfoldResult : uint8_t {
     kSuccess,
     kEmpty,
@@ -152,7 +161,7 @@ enum class UnfoldResult : uint8_t {
 };
 
 struct GridLine {
-    uint8_t kind;          // Kind
+    Kind kind;          // Kind
     uint8_t parent_slot;   // parent child index (0..15) or 16 = branch value
     uint8_t parent_depth;  // Depth in the stack the current line's parent is at
     uint8_t consumed;      // path nibbles consumed till this node (cumulative)
@@ -166,7 +175,7 @@ struct GridLine {
     };
 
     GridLine() : kind(kBranch), parent_slot(0), parent_depth(0), consumed(0), modified(false), branch{} {}
-    GridLine(unsigned k, unsigned pslot, unsigned pdepth, unsigned c) : kind{static_cast<uint8_t>(k)}, parent_slot{static_cast<uint8_t>(pslot)}, parent_depth{static_cast<uint8_t>(pdepth)}, consumed{static_cast<uint8_t>(c)}, modified{false}, child_depth{} {}
+    GridLine(Kind k, unsigned pslot, unsigned pdepth, unsigned c) : kind{k}, parent_slot{static_cast<uint8_t>(pslot)}, parent_depth{static_cast<uint8_t>(pdepth)}, consumed{static_cast<uint8_t>(c)}, modified{false}, child_depth{} {}
 };
 
 struct TrieNodeFlat {
@@ -233,6 +242,12 @@ class GridMPT {
     // of mpt.hpp.
     void init_from_root(bytes32 previous_root_hash);
 
+    // Update the grid_line's parent-child bookkeeping
+    void link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, unsigned parent_depth);
+
+    // emplace_back a grid_line of `kind`, set the `depth_` to it and `link_to_parent()`.
+    GridLine* emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, unsigned consumed_init);
+
   public:
     GridMPT(const DirectState& state, bytes32 previous_root_hash)
         : prev_root_{previous_root_hash},
@@ -288,6 +303,7 @@ class GridMPT {
     static constexpr bool supports_deletion() noexcept { return DeletionEnabled; }
 
     unsigned missing_count() const noexcept { return missing_count_; }
+    unsigned cascade_delete(unsigned depth);
 };
 
 }  // namespace zilkworm
