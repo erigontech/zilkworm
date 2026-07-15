@@ -1,5 +1,5 @@
 {
-    "cmake.sourceDirectory": "/home/som/Documents/code/z6m",
+    "cmake.sourceDirectory": "${workspaceFolder}",
     "files.associations": {
         "*.S": "c",
         "any": "cpp",
