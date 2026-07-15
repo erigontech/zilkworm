@@ -17,9 +17,9 @@
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/rlp/encode.hpp>
+#include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/print.hpp>
 
-#include <zilk_core/core/state_zz/direct_state.hpp>
 #include "fold_unfold.hpp"
 
 //------------------------- GRID_MPT -----------------------------
@@ -63,8 +63,8 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     // Tip: When we are searching for the next nibble, we don't need more than
     // the first level of children from the common branch, ever again
     //================================================
-    if (grid_.size() == 1) {
-        if (is_empty(grid_[0])) {
+    if (grid_.size() <= 1 || depth_ == 0) {
+        if (grid_.size() > 0 && is_empty(grid_[0])) {
             delete_line(0);
         }
         return;
@@ -73,12 +73,16 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     unsigned cur_parent_depth;
     if constexpr (DeletionEnabled) {
         if (last_was_delete_) {
-            cur_parent_depth = depth_;
+            cur_parent_depth = cascade_delete(depth_);
         } else {
             cur_parent_depth = grid_[depth_].parent_depth;
         }
     } else {
         cur_parent_depth = grid_[depth_].parent_depth;
+    }
+    if (cur_parent_depth == 0) {
+        depth_ = 0;
+        return;
     }
     auto& parent = grid_[cur_parent_depth];
     if (parent.kind != kBranch) {
@@ -92,6 +96,7 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     if (lcp >= parent_consumed) {
         if constexpr (DeletionEnabled) {
             if (last_was_delete_) {
+                depth_ = cur_parent_depth;
                 search_nib_cursor_ = parent_consumed - 1;
                 return;
             }
@@ -111,25 +116,12 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
             parent_consumed = grid_[next_parent_depth].consumed;
         }
         depth_ = cur_parent_depth;
-        // For the case when a delete of a branch caused by delete of a leaf
-        // This only matters if there are more entries to be added, so this
-        // condition isn't required in the final loop
-        // We avoid immediate deletes of branch following deletes of leaves
-        // as more entries could be added.
-        // Note that even for the top-level node fold isn't harmful
-        if constexpr (DeletionEnabled) {
-            if (auto& line = grid_.back();
-                (line.kind == kBranch && (line.branch.mask == 0)) || (line.kind == kExt && line.ext.child_len == 0)) {
-                depth_ = line.parent_depth;
-                fold_line(grid_.size() - 1);
-            }
-        }
     } else {
         depth_ = cur_parent_depth;
     }
 
     if (depth_ == 0) {
-        search_nib_cursor_ = 0;
+        search_nib_cursor_ = 0;  // No parent of 0'th element
     } else {
         search_nib_cursor_ = parent_consumed;
     }
@@ -179,12 +171,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     insert_line(l.parent_slot, depth_, std::move(l));
                     grid_[depth_].modified = true;
                     break;
-                }
-                if (unfold_res == UnfoldResult::kMissing) {
+                } else if (unfold_res == UnfoldResult::kMissing || unfold_res == UnfoldResult::kUndefined) {
                     sys_println("ERROR: missing hash ref in node store (witness incomplete)");
                     return {};
                 }
-
                 search_nib_cursor_++;
                 continue;
             } else if (grid_line.kind == kExt) {
@@ -243,6 +233,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     grid_line.consumed = grid_line.consumed - 1 - new_ext_len;
                     grid_line.ext.child_len = 1;
                     grid_line.ext.path.len = m;
+                    grid_[depth_].modified = true;
                     insert_line_at(d1, grid_line.ext.path[m - 1], depth_, BranchNode{});
                     grid_[d1].modified = true;
                     d1 = 0;  // Used up
@@ -250,7 +241,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     transform_line(grid_line, BranchNode{});
                     grid_line.modified = true;
                 }
-                grid_line.child_depth[last_nib] = 0;  // Reset unfolded child
+                grid_line.child_depth[last_nib] = 0;  // Reset old unfolded child position
 
                 auto br_depth = depth_;
                 if (new_ext_len > 0) {  // (orig_ext) -> new_br -> new_ext -> old_child
@@ -305,7 +296,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                             break;  // delete complete
                         }
                     }
-                    if (grid_line.leaf.value != trie_upd.current_value()){
+                    if (grid_line.leaf.value != trie_upd.current_value()) {
                         grid_line.leaf.value = trie_upd.current_value();
                         grid_line.modified = true;
                     }

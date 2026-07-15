@@ -20,6 +20,22 @@
       }
     },
     {
+      "name": "zilkworm.tests gridmpt",
+      "type": "cppdbg",
+      "request": "launch",
+      "preLaunchTask": "Build zilkworm.tests (Debug)",
+      "program": "${workspaceFolder}/build-debug/zilkworm.tests",
+      "args": ["[gridmpt]", "--break"],
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
       "name": "Native runner",
       "type": "cppdbg",
       "request": "launch",

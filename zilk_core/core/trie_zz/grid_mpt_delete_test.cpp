@@ -9,8 +9,10 @@
 // every node RLP into a node store (a complete witness), so any root
 // mismatch or missing-node report is a walker bug.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <map>
 #include <span>
 #include <vector>
@@ -75,22 +77,30 @@ std::vector<uint8_t> build_node_store(const Bytes32Map& nodes) {
     return std::move(nb).finalize();
 }
 
-// Brute-force a key whose hashed form starts with the given nibble.
-bytes32 key_with_first_nibble(uint8_t nib) {
+// Brute-force a hashed trie key starting with the given nibbles.
+bytes32 key_with_prefix(std::initializer_list<uint8_t> nibs) {
     for (uint64_t i = 0;; ++i) {
         bytes32 raw{};
         for (int b = 0; b < 8; ++b) raw.bytes[31 - b] = static_cast<uint8_t>(i >> (8 * b));
         const bytes32 h = keccak_bytes(ByteView{raw.bytes, 32});
-        if ((h.bytes[0] >> 4) == nib) return h;
+        bool match = true;
+        size_t j = 0;
+        for (uint8_t want : nibs) {
+            const uint8_t got = (j % 2 == 0) ? (h.bytes[j / 2] >> 4) : (h.bytes[j / 2] & 0x0F);
+            if (got != want) {
+                match = false;
+                break;
+            }
+            ++j;
+        }
+        if (match) return h;
     }
 }
 
-}  // namespace
-
-TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmpt]") {
-    // Pre-state: two leaves diverging at the first nibble; complete witness.
-    const Bytes32Map pre{{key_with_first_nibble(0xa), slot_value_rlp(1)},
-                         {key_with_first_nibble(0xd), slot_value_rlp(2)}};
+// Runs pre -> post through GridMPT<true> against a complete witness of the
+// pre trie: deletes every pre leaf, inserts every post leaf (pre and post
+// keys must be disjoint), and REQUIREs the canonical post root.
+void check_delete_all_then_insert(const Bytes32Map& pre, const Bytes32Map& post) {
     Bytes32Map nodes;
     const bytes32 pre_root = hashbuilder_root(pre, &nodes);
     std::vector<uint8_t> prestate =
@@ -99,10 +109,10 @@ TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmp
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
 
     // Update batch (sorted; must never reallocate, GridMPT keeps ByteViews
-    // into TrieNodeFlat::buf): delete both pre leaves, as check_root encodes
-    // deletes (initial = pre value rlp, current = {0x80}).
+    // into TrieNodeFlat::buf): deletes as check_root encodes them
+    // (initial = pre value rlp, current = {0x80}), then the inserts.
     std::vector<TrieNodeFlat> updates;
-    updates.reserve(3);
+    updates.reserve(pre.size() + post.size());
     for (const auto& [k, v] : pre) {
         auto& node = updates.emplace_back(k);
         node.self_initial_len = static_cast<uint8_t>(v.size());
@@ -111,17 +121,15 @@ TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmp
         node.current_off = 40;
         node.current_len = 1;
     }
-
-    Bytes32Map post;
-    SECTION("deletes then insert (the grid must re-seed)") {
-        post = {{key_with_first_nibble(0xf), slot_value_rlp(3)}};  // sorts after the deletes
-        const auto& [k, v] = *post.begin();
+    for (const auto& [k, v] : post) {
         auto& node = updates.emplace_back(k);
         node.current_off = 40;
         node.current_len = static_cast<uint8_t>(v.size());
         std::memcpy(node.buf + 40, v.data(), v.size());
     }
-    SECTION("deletes only (empty post root)") {}
+    std::ranges::sort(updates, [](const TrieNodeFlat& a, const TrieNodeFlat& b) {
+        return std::memcmp(a.key.bytes, b.key.bytes, 32) < 0;
+    });
 
     GridMPT<true> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
@@ -130,4 +138,43 @@ TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmp
     CAPTURE(silkworm::to_hex(got), silkworm::to_hex(expected));
     CHECK(trie.missing_count() == 0);
     REQUIRE(got == expected);
+}
+
+}  // namespace
+
+TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmpt]") {
+    // Two leaves diverging at the first nibble.
+    const Bytes32Map pre{{key_with_prefix({0xa}), slot_value_rlp(1)},
+                         {key_with_prefix({0xd}), slot_value_rlp(2)}};
+
+    SECTION("deletes then insert (the grid must re-seed)") {
+        check_delete_all_then_insert(pre, {{key_with_prefix({0xf}), slot_value_rlp(3)}});
+    }
+    SECTION("deletes only (empty post root)") {
+        check_delete_all_then_insert(pre, {});
+    }
+}
+
+// Deletes empty an extension's whole subtree (collapse is deferred, so the
+// empty ext stays on the active path); the next insert descending through it
+// used to resurrect the deleted child as a mask-set garbage ref and corrupt
+// the root silently.
+TEST_CASE("GridMPT<true> insert descending a delete-emptied extension", "[trie][gridmpt]") {
+    // ext("8e") -> branch{1,7} -> two leaves; the insert splits the ext path.
+    const Bytes32Map pre{{key_with_prefix({8, 0xe, 1}), slot_value_rlp(1)},
+                         {key_with_prefix({8, 0xe, 7}), slot_value_rlp(2)}};
+    check_delete_all_then_insert(pre, {{key_with_prefix({8, 0xf}), slot_value_rlp(3)}});
+}
+
+// After the eager fold of a delete-emptied line moves the seek's landing
+// depth up, the cursor kept the child's consumed count and the following
+// descent read a shifted key nibble (silent wrong root or a bogus
+// missing-node report).
+TEST_CASE("GridMPT<true> seek cursor after folding a delete-emptied line", "[trie][gridmpt]") {
+    // An insert first splits ext("cf") into ext("c") -> branch; the deletes
+    // then empty the inner branch and the last insert seeks across its fold.
+    const Bytes32Map pre{{key_with_prefix({0xc, 0xf, 1}), slot_value_rlp(1)},
+                         {key_with_prefix({0xc, 0xf, 7}), slot_value_rlp(2)}};
+    check_delete_all_then_insert(pre, {{key_with_prefix({0xc, 7}), slot_value_rlp(3)},
+                                       {key_with_prefix({0xc, 0xf, 0xf}), slot_value_rlp(4)}});
 }

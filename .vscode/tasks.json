@@ -2,6 +2,12 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "Build zilkworm.tests (Debug)",
+      "type": "shell",
+      "command": "cmake -DCMAKE_BUILD_TYPE=Debug -B build-debug -G Ninja -S . && cmake --build build-debug --target zilkworm.tests -j$(nproc)",
+      "problemMatcher": ["$gcc"]
+    },
+    {
       "label": "Run qemu-system",
       "type": "shell",
       "command": "cd debug_build && make qemu",
