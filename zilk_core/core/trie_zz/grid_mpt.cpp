@@ -234,14 +234,19 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     grid_line.ext.child_len = 1;
                     grid_line.ext.path.len = m;
                     grid_[depth_].modified = true;
-                    insert_line_at(d1, grid_line.ext.path[m - 1], depth_, BranchNode{});
+                    const unsigned new_slot = grid_line.ext.path[m - 1];
+                    insert_line_at(d1, new_slot, depth_, BranchNode{});
                     grid_[d1].modified = true;
                     d1 = 0;  // Used up
+                    // insert_line_at wrote child_depth[new_slot]; clearing last_nib when they alias would orphan the new branch.
+                    if (last_nib != new_slot) {
+                        grid_line.child_depth[last_nib] = 0;
+                    }
                 } else {     // new_br -> (new_ext) -> old_child
                     transform_line(grid_line, BranchNode{});
                     grid_line.modified = true;
+                    grid_line.child_depth[last_nib] = 0;  // Reset unfolded child
                 }
-                grid_line.child_depth[last_nib] = 0;  // Reset old unfolded child position
 
                 auto br_depth = depth_;
                 if (new_ext_len > 0) {  // (orig_ext) -> new_br -> new_ext -> old_child
