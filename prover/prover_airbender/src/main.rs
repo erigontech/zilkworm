@@ -30,6 +30,15 @@ const DEFAULT_CYCLES: usize = 5_000_000_000;
 /// Default RAM bound in bytes (1 GB).
 const DEFAULT_RAM_BOUND: usize = 1 << 30;
 
+/// Map the --security bits value to the airbender SecurityModel.
+fn security_model(bits: u32) -> Result<verifier_common::SecurityModel> {
+    match bits {
+        80 => Ok(verifier_common::SecurityModel::Security80),
+        100 => Ok(verifier_common::SecurityModel::Security100),
+        other => bail!("unsupported --security {} (expected 80 or 100)", other),
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "z6m_prover_airbender",
@@ -100,6 +109,10 @@ struct Args {
     /// Path to precomputed setup cache directory (from `setup` command)
     #[arg(long)]
     setup_dir: Option<PathBuf>,
+
+    /// Proof security level in bits (80 or 100)
+    #[arg(long, default_value_t = 100)]
+    security: u32,
 
     /// Ethproofs API endpoint URL
     #[arg(long, env = "ETHPROOFS_ENDPOINT")]
@@ -545,6 +558,7 @@ async fn main() -> Result<()> {
             gpu: args.gpu,
             until: args.until,
             setup_dir: args.setup_dir.clone(),
+            security: security_model(args.security)?,
             ethproofs,
         };
 
@@ -615,13 +629,14 @@ async fn main() -> Result<()> {
         }) => {
             #[cfg(feature = "gpu")]
             {
+                let security = security_model(args.security)?;
                 let guest_path = guest_base.display().to_string();
                 println!(
-                    "[{}] Computing setup (until={:?}, guest={})",
-                    format_timestamp(), until, guest_path,
+                    "[{}] Computing setup (until={:?}, security={:?}, guest={})",
+                    format_timestamp(), until, security, guest_path,
                 );
                 let start = Instant::now();
-                let cache = prove::compute_setup(&guest_path, &until);
+                let cache = prove::compute_setup(&guest_path, &until, security);
                 println!(
                     "[{}] Setup computed in {:.2}s",
                     format_timestamp(), start.elapsed().as_secs_f64(),
@@ -692,10 +707,16 @@ async fn main() -> Result<()> {
                         let setup_path = dir.join("setup.bin");
                         println!("Loading cached setup from {}", setup_path.display());
                         let cache = prove::load_setup(&setup_path)?;
+                        if cache.security() != security_model(args.security)? {
+                            bail!(
+                                "setup cache at {} was computed for {:?}, but --security {} was requested",
+                                setup_path.display(), cache.security(), args.security,
+                            );
+                        }
                         prove::create_gpu_prover_from_cache(cache)
                     } else {
                         let guest_path = guest_base.display().to_string();
-                        prove::create_gpu_prover(&guest_path, &until)
+                        prove::create_gpu_prover(&guest_path, &until, security_model(args.security)?)
                     };
                     let (proof, cycles) = prove::gpu_prove(&prover, oracle, block_num);
 

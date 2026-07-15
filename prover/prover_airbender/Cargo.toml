@@ -12,10 +12,11 @@ path = "src/main.rs"
 riscv_transpiler = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", features = ["delegation", "flamegraph"] }
 
 # Proving dependencies
-execution_utils = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", default-features = false, features = ["prover", "security_80", "verifier_binaries"] }
+execution_utils = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", default-features = false, features = ["prover", "verifier_binaries"] }
 prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", features = ["prover"] }
 worker = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev" }
 setups = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev" }
+verifier_common = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev" }
 
 # GPU prover (optional, requires CUDA)
 gpu_prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", optional = true }

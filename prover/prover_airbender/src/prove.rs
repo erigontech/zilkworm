@@ -9,9 +9,15 @@ use std::time::Instant;
 
 #[cfg(feature = "gpu")]
 use execution_utils::unrolled_gpu::{
-    UnrolledProver, UnrolledProverLevel, UnrolledProverLevelData,
-    RECURSION_UNIFIED_BIN, RECURSION_UNIFIED_TXT,
-    RECURSION_UNROLLED_BIN, RECURSION_UNROLLED_TXT,
+    RuntimeExecutionProver, UnrolledProver, UnrolledProverLevel, UnrolledProverLevelData,
+};
+#[cfg(feature = "gpu")]
+use execution_utils::verifier_binaries;
+#[cfg(feature = "gpu")]
+use execution_utils::{RecursionArtifact, RecursionLayer};
+#[cfg(feature = "gpu")]
+use verifier_common::{
+    security_100::Security100Marker, security_80::Security80Marker, SecurityMarker, SecurityModel,
 };
 #[cfg(feature = "gpu")]
 use execution_utils::unrolled::{
@@ -65,11 +71,27 @@ impl ProvingLimit {
 
 /// Serializable setup cache: everything needed to construct an UnrolledProver
 /// without recomputing circuit setups.
+///
+/// `security_100` records which security model the recursion-layer verifier
+/// binaries were selected for; the GPU prover must be constructed with the
+/// same model (SecurityModel has no serde impls, hence the bool).
 #[cfg(feature = "gpu")]
 #[derive(Serialize, Deserialize)]
 pub struct SetupCache {
     pub max_level: UnrolledProverLevel,
     pub level_data: BTreeMap<UnrolledProverLevel, UnrolledProverLevelData>,
+    pub security_100: bool,
+}
+
+#[cfg(feature = "gpu")]
+impl SetupCache {
+    pub fn security(&self) -> SecurityModel {
+        if self.security_100 {
+            SecurityModel::Security100
+        } else {
+            SecurityModel::Security80
+        }
+    }
 }
 
 // ─── Setup computation ─────────────────────────────────────────────────────
@@ -80,6 +102,7 @@ pub struct SetupCache {
 pub fn compute_setup(
     path_without_ext: &str,
     until: &ProvingLimit,
+    security: SecurityModel,
 ) -> SetupCache {
     let max_level = until.to_unrolled_level();
     let mut level_data = BTreeMap::new();
@@ -117,9 +140,13 @@ pub fn compute_setup(
 
     // ── Unrolled recursion layer ───────────────────────────────────────
     if max_level >= UnrolledProverLevel::RecursionUnrolled {
-        let binary = RECURSION_UNROLLED_BIN.to_vec();
+        let binary = verifier_binaries::recursion_artifact(
+            security, RecursionLayer::Unrolled, RecursionArtifact::Bin,
+        ).to_vec();
         let binary_u32 = binary_u8_to_u32(&binary);
-        let text = RECURSION_UNROLLED_TXT.to_vec();
+        let text = verifier_binaries::recursion_artifact(
+            security, RecursionLayer::Unrolled, RecursionArtifact::Txt,
+        ).to_vec();
         let text_u32 = binary_u8_to_u32(&text);
         log::info!("Computing recursion in unrolled layer setup");
         let mut padded_binary = binary.clone();
@@ -149,9 +176,13 @@ pub fn compute_setup(
 
     // ── Unified recursion layer ────────────────────────────────────────
     if max_level == UnrolledProverLevel::RecursionUnified {
-        let binary = RECURSION_UNIFIED_BIN.to_vec();
+        let binary = verifier_binaries::recursion_artifact(
+            security, RecursionLayer::Unified, RecursionArtifact::Bin,
+        ).to_vec();
         let binary_u32 = binary_u8_to_u32(&binary);
-        let text = RECURSION_UNIFIED_TXT.to_vec();
+        let text = verifier_binaries::recursion_artifact(
+            security, RecursionLayer::Unified, RecursionArtifact::Txt,
+        ).to_vec();
         let text_u32 = binary_u8_to_u32(&text);
         log::info!("Computing recursion in unified layer setup");
         let mut padded_binary = binary.clone();
@@ -179,7 +210,11 @@ pub fn compute_setup(
         );
     }
 
-    SetupCache { max_level, level_data }
+    SetupCache {
+        max_level,
+        level_data,
+        security_100: matches!(security, SecurityModel::Security100),
+    }
 }
 
 /// Save a setup cache to disk using bincode.
@@ -254,19 +289,9 @@ pub fn load_setup(path: &Path) -> Result<SetupCache> {
 
 // ─── GPU prover construction ───────────────────────────────────────────────
 
-/// Build an UnrolledProver from cached setup data.
-/// Only creates the ExecutionProver (GPU init) and registers binaries.
+/// Register each level's binary with the GPU prover.
 #[cfg(feature = "gpu")]
-pub fn create_gpu_prover_from_cache(cache: SetupCache) -> UnrolledProver {
-    let mut config = ExecutionProverConfiguration::default();
-    config.replay_worker_threads_count = 8;
-    config.host_allocators_per_job_count = 96;
-    config.host_allocators_per_device_count = 32;
-    config.min_free_host_allocators_per_job = 16;
-
-    let mut prover = ExecutionProver::with_configuration(config);
-
-    // Register each level's binary with the GPU prover
+fn register_binaries<S: SecurityMarker>(prover: &mut ExecutionProver<S>, cache: &SetupCache) {
     for (&level, data) in &cache.level_data {
         let (kind, machine) = match level {
             UnrolledProverLevel::Base => (ExecutionKind::Unrolled, MachineType::Full),
@@ -282,6 +307,32 @@ pub fn create_gpu_prover_from_cache(cache: SetupCache) -> UnrolledProver {
             None,
         );
     }
+}
+
+/// Build an UnrolledProver from cached setup data.
+/// Only creates the ExecutionProver (GPU init) and registers binaries.
+#[cfg(feature = "gpu")]
+pub fn create_gpu_prover_from_cache(cache: SetupCache) -> UnrolledProver {
+    let mut config = ExecutionProverConfiguration::default();
+    config.replay_worker_threads_count = 8;
+    config.host_allocators_per_job_count = 96;
+    config.host_allocators_per_device_count = 32;
+    config.min_free_host_allocators_per_job = 16;
+
+    let prover = match cache.security() {
+        SecurityModel::Security80 => {
+            let mut prover =
+                ExecutionProver::<Security80Marker>::with_configuration_80(config);
+            register_binaries(&mut prover, &cache);
+            RuntimeExecutionProver::Security80(prover)
+        }
+        SecurityModel::Security100 => {
+            let mut prover =
+                ExecutionProver::<Security100Marker>::with_configuration_100(config);
+            register_binaries(&mut prover, &cache);
+            RuntimeExecutionProver::Security100(prover)
+        }
+    };
 
     UnrolledProver {
         max_level: cache.max_level,
@@ -293,8 +344,12 @@ pub fn create_gpu_prover_from_cache(cache: SetupCache) -> UnrolledProver {
 
 /// Create an UnrolledProver from scratch (computes setup + GPU init).
 #[cfg(feature = "gpu")]
-pub fn create_gpu_prover(path_without_ext: &str, until: &ProvingLimit) -> UnrolledProver {
-    let cache = compute_setup(path_without_ext, until);
+pub fn create_gpu_prover(
+    path_without_ext: &str,
+    until: &ProvingLimit,
+    security: SecurityModel,
+) -> UnrolledProver {
+    let cache = compute_setup(path_without_ext, until, security);
     create_gpu_prover_from_cache(cache)
 }
 
