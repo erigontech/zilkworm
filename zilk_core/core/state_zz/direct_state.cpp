@@ -276,6 +276,7 @@ DirectState::DirectState(DirectState&& other) noexcept
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
     changed_storage_journal_ = std::move(other.changed_storage_journal_);
     multi_block_ = other.multi_block_;
+    other.cache_valid_ = 0;
     other.prestate_view_ = {};
     other.pre_state_meta_ = nullptr;
     other.pre_state_map_ = {};
@@ -329,6 +330,8 @@ Account* DirectState::materialize_absent_account_(const evmc::address& addr) con
     copy32(fresh.storage_root, kEmptyRoot);
     fresh.deleted = true;
     auto [ins, _] = created_accounts_.emplace(addr, fresh);
+    // Cache must not mask this overlay entry.
+    invalidate_addr_cache(addr);
     return &ins->second;
 }
 
@@ -366,6 +369,8 @@ bool DirectState::revive_if_deleted_slow(const evmc::address& addr, Account& pa)
     // created_code_ is hash-keyed and possibly shared across addresses.
     pa.modified = true;
     pa.acc_rlp_sroot_off = 0;
+    // Identity flipped; force fresh lookup.
+    invalidate_addr_cache(addr);
     return true;
 }
 
@@ -550,6 +555,7 @@ void DirectState::destruct(const evmc::address& addr) {
     // created_code_ is hash-keyed and shared across addresses; do not erase here.
     touched_.insert(addr);
     journal_address_changed(addr);
+    invalidate_addr_cache(addr);
 }
 
 bool DirectState::is_deleted(const evmc::address& addr) const noexcept {

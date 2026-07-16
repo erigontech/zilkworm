@@ -106,6 +106,17 @@ class DirectState : public BlockState {
     FlatHashSet<evmc::address> changed_addresses_journal_;
     FlatHashMap<evmc::address, FlatHashSet<evmc::bytes32>> changed_storage_journal_;
 
+    // L0 cache in front of MPHF probe.
+    static constexpr size_t kAddrCacheBuckets = 16;
+    mutable uint64_t cache_key_[kAddrCacheBuckets]{};
+    mutable Account* cache_pa_[kAddrCacheBuckets]{};
+    // Occupancy bits: zero address is real state.
+    mutable uint16_t cache_valid_{0};
+    static_assert(kAddrCacheBuckets <= 16);
+
+    [[gnu::always_inline]] inline Account*
+    find_pre_account_cached_(const evmc::address& addr) const noexcept;
+
     [[gnu::always_inline]] inline const Account*
     lookup_account_(const evmc::address& addr) const noexcept;
     [[gnu::always_inline]] inline Account*
@@ -323,6 +334,8 @@ class DirectState : public BlockState {
         return revive_if_deleted_slow(addr, pa);
     }
 
+    [[gnu::always_inline]] inline void invalidate_addr_cache(const evmc::address& addr) const noexcept;
+
     void set_account_from_diff(Account& pa, uint64_t nonce,
                                const intx::uint256& balance) noexcept;
     void set_storage_slot(const evmc::address& addr, Account& pa,
@@ -334,18 +347,39 @@ class DirectState : public BlockState {
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept;
 };
 
+[[gnu::always_inline]] inline void
+DirectState::invalidate_addr_cache(const evmc::address& addr) const noexcept {
+    const size_t b = addr_key8(addr) & (kAddrCacheBuckets - 1);
+    cache_valid_ = static_cast<uint16_t>(cache_valid_ & ~(1u << b));
+}
+
+[[gnu::always_inline]] inline Account*
+DirectState::find_pre_account_cached_(const evmc::address& addr) const noexcept {
+    const uint64_t k8 = addr_key8(addr);
+    const size_t b = k8 & (kAddrCacheBuckets - 1);
+    // Occupied slot implies cache_pa_[b] non-null.
+    if ((cache_valid_ & (1u << b)) && cache_key_[b] == k8 &&
+        eq_addr20(cache_pa_[b]->addr, addr.bytes)) [[likely]] {
+        return cache_pa_[b];
+    }
+    if (auto body = pre_state_map_.find<20, 0, &addr_key8>(addr.bytes)) {
+        auto* acc = reinterpret_cast<Account*>(body->data());
+        cache_key_[b] = k8;
+        cache_pa_[b] = acc;
+        cache_valid_ = static_cast<uint16_t>(cache_valid_ | (1u << b));
+        return acc;
+    }
+    return nullptr;
+}
+
 [[gnu::always_inline]] inline const Account*
 DirectState::find_pre_account_unchecked(const evmc::address& addr) const noexcept {
-    if (auto b = pre_state_map_.find<20, 0, &addr_key8>(addr.bytes))
-        return reinterpret_cast<const Account*>(b->data());
-    return nullptr;
+    return find_pre_account_cached_(addr);
 }
 
 [[gnu::always_inline]] inline Account*
 DirectState::find_pre_account_unchecked(const evmc::address& addr) noexcept {
-    if (auto b = pre_state_map_.find<20, 0, &addr_key8>(addr.bytes))
-        return reinterpret_cast<Account*>(b->data());
-    return nullptr;
+    return find_pre_account_cached_(addr);
 }
 
 [[gnu::always_inline]] inline std::optional<ByteView>
