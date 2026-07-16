@@ -297,8 +297,14 @@ uint64_t calc_excess_blob_gas(const BlockHeader& header, const BlockHeader& pare
 }
 
 evmc::bytes32 compute_transaction_root(const BlockBody& body) {
+    // HashBuilder verifies appended bytes against transactions_root.
     static constexpr auto kEncoder = [](Bytes& to, const Transaction& txn) {
-        rlp::encode(to, txn, /*wrap_eip2718_into_string=*/false);
+        const ByteView view = txn.rlp_canonical_view();
+        if (!view.empty()) [[likely]] {
+            to.append(view);
+        } else {
+            rlp::encode(to, txn, /*wrap_eip2718_into_string=*/false);
+        }
     };
     return trie::root_hash(body.transactions, kEncoder);
 }
