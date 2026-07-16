@@ -89,6 +89,7 @@ if(BUILD_TESTING)
   add_executable(zilkworm.tests
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
+    zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
   )
   target_link_libraries(zilkworm.tests PRIVATE silkworm_core Catch2::Catch2WithMain)

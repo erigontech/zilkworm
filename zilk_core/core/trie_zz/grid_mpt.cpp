@@ -201,7 +201,11 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                             }
                             rlp = *rlp_opt;
                         }
-                        unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_);
+                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_)) [[unlikely]] {
+                            ++missing_count_;
+                            sys_println("ERROR: malformed ext child rlp in node store");
+                            return {};
+                        }
                     }
                     continue;
                 }

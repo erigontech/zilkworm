@@ -96,6 +96,8 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
         transform_line(line, std::move(l));
     } else {
         ExtensionNode ext{nibbles64{plen, path}, {}};
+        // Reject an oversized child that would overflow child (a 32-byte bytes32).
+        if (second.size() > sizeof(ext.child.bytes)) return false;
         std::copy(second.cbegin(), second.cend(), ext.child.bytes);
         ext.child_len = static_cast<uint8_t>(second.size());
         transform_line(line, std::move(ext));
