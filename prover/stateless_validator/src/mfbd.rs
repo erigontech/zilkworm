@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use alloy_consensus::{Block, BlockBody, Header, TxEnvelope};
 use alloy_primitives::{keccak256, Bytes, B256, U256};
 use alloy_rlp::Decodable;
+use alloy_trie::{nodes::TrieNode, TrieAccount};
 use anyhow::{anyhow, bail, Result};
 use stateless::StatelessInput;
 
@@ -464,179 +465,14 @@ fn mphf_addr_lookup(mphf: &[u8], addr20: &[u8; 20]) -> u32 {
     0
 }
 
-// ---------- MPT walker (decode_branch + decode_ext_or_leaf + walk_tree) ----------
-
-#[derive(Default)]
-struct BranchChildren {
-    /// 16 children; each is either empty (`Vec::new()`) or `[hash:32]` (hashref) or
-    /// `[header_byte || payload]` (embedded). The full RLP for embedded is reconstructed
-    /// by the walker for re-decoding.
-    children: [Vec<u8>; 16],
-    /// True bits indicate non-empty children.
-    mask: u16,
-}
-
-/// RLP header parsed from a node body.
-struct RlpHeader {
-    payload_len: usize,
-    /// True iff this header introduces a list (rather than a byte-string).
-    is_list: bool,
-    /// Total header byte count (1 + length-of-length bytes).
-    header_bytes: usize,
-}
-
-fn rlp_decode_header(input: &[u8]) -> Result<RlpHeader> {
-    let first = *input.first().ok_or_else(|| anyhow!("rlp header: empty"))?;
-    if first < 0x80 {
-        Ok(RlpHeader { payload_len: 1, is_list: false, header_bytes: 0 })
-    } else if first < 0xb8 {
-        Ok(RlpHeader { payload_len: (first - 0x80) as usize, is_list: false, header_bytes: 1 })
-    } else if first < 0xc0 {
-        let n = (first - 0xb7) as usize;
-        if input.len() < 1 + n {
-            bail!("rlp header: short long-string");
-        }
-        let mut len = 0usize;
-        for b in &input[1..1 + n] {
-            len = (len << 8) | *b as usize;
-        }
-        Ok(RlpHeader { payload_len: len, is_list: false, header_bytes: 1 + n })
-    } else if first < 0xf8 {
-        Ok(RlpHeader { payload_len: (first - 0xc0) as usize, is_list: true, header_bytes: 1 })
-    } else {
-        let n = (first - 0xf7) as usize;
-        if input.len() < 1 + n {
-            bail!("rlp header: short long-list");
-        }
-        let mut len = 0usize;
-        for b in &input[1..1 + n] {
-            len = (len << 8) | *b as usize;
-        }
-        Ok(RlpHeader { payload_len: len, is_list: true, header_bytes: 1 + n })
-    }
-}
-
-/// Decode a branch node body (the 17-element list payload, _after_ the outer list header).
-/// Returns the 16 children's stored forms plus the 17th value slice. Mirrors C++
-/// `decode_branch` including the embedded-vs-hashref distinction and the `>31`/`>32`
-/// bounds checks.
-fn decode_branch(payload: &[u8]) -> Result<BranchChildren> {
-    let mut out = BranchChildren::default();
-    let mut remaining = payload;
-
-    for i in 0..16 {
-        if remaining.is_empty() {
-            bail!("decode_branch: cursor empty before child {}", i);
-        }
-        let child_start = remaining[0];
-        let h = rlp_decode_header(remaining)?;
-        let after_header = &remaining[h.header_bytes..];
-        if h.payload_len == 0 {
-            // Empty child (0x80).
-            remaining = &after_header[h.payload_len..];
-            continue;
-        }
-        if child_start != 0xa0 {
-            // Embedded child: keep the header byte and the payload.
-            if h.payload_len > 31 {
-                bail!("decode_branch: embedded child payload >31 at slot {}", i);
-            }
-            let mut buf = Vec::with_capacity(1 + h.payload_len);
-            buf.push(child_start);
-            buf.extend_from_slice(&after_header[..h.payload_len]);
-            out.children[i] = buf;
-            out.mask |= 1 << i;
-        } else {
-            if h.payload_len > 32 {
-                bail!("decode_branch: hashref payload >32 at slot {}", i);
-            }
-            out.children[i] = after_header[..h.payload_len].to_vec();
-            out.mask |= 1 << i;
-        }
-        remaining = &after_header[h.payload_len..];
-    }
-
-    // 17th element: value slot. Must be a non-list. Ignored by leaf-collection.
-    let hv = rlp_decode_header(remaining)?;
-    if hv.is_list {
-        bail!("decode_branch: 17th element is a list");
-    }
-    let after = &remaining[hv.header_bytes..];
-    let _value = &after[..hv.payload_len];
-    if hv.payload_len != after.len() {
-        bail!("decode_branch: trailing bytes after value");
-    }
-    Ok(out)
-}
-
-/// Decode an extension or leaf node body. `path` is filled with up to 64 nibbles;
-/// `plen` is the count actually written. `second` is the second-element bytes:
-/// for leaves it's the value payload; for extensions with a 32-byte child hashref
-/// it's the 32 bytes; for embedded extension children it's the full RLP form
-/// (header + payload).
-fn decode_ext_or_leaf<'a>(
-    payload: &'a [u8],
-) -> Result<(bool, [u8; 64], usize, &'a [u8])> {
-    let mut remaining = payload;
-    let h1 = rlp_decode_header(remaining)?;
-    if h1.is_list {
-        bail!("decode_ext_or_leaf: first element is a list");
-    }
-    let hp_path = &remaining[h1.header_bytes..h1.header_bytes + h1.payload_len];
-    remaining = &remaining[h1.header_bytes + h1.payload_len..];
-
-    let (is_leaf, path, plen) = hp_decode(hp_path)?;
-
-    let second_start = remaining;
-    let h2 = rlp_decode_header(remaining)?;
-    if h2.is_list {
-        bail!("decode_ext_or_leaf: second element is a list");
-    }
-
-    let second = if !is_leaf {
-        if h2.payload_len == 32 {
-            &second_start[h2.header_bytes..h2.header_bytes + 32]
-        } else {
-            &second_start[..h2.header_bytes + h2.payload_len]
-        }
-    } else {
-        &second_start[h2.header_bytes..h2.header_bytes + h2.payload_len]
-    };
-
-    let consumed = h2.header_bytes + h2.payload_len;
-    if consumed != remaining.len() {
-        bail!("decode_ext_or_leaf: trailing bytes");
-    }
-    Ok((is_leaf, path, plen, second))
-}
-
-/// Decode the hex-prefix (compact) encoding from an MPT extension/leaf path.
-fn hp_decode(input: &[u8]) -> Result<(bool, [u8; 64], usize)> {
-    if input.is_empty() {
-        bail!("hp_decode: empty");
-    }
-    let flag = input[0] >> 4;
-    let is_leaf = (flag & 0x2) != 0;
-    let odd = (flag & 0x1) != 0;
-    let nib0 = input[0] & 0x0F;
-
-    let mut out = [0u8; 64];
-    let mut out_len = 0usize;
-    if odd {
-        out[out_len] = nib0 & 0x0F;
-        out_len += 1;
-    }
-    for &b in &input[1..] {
-        if out_len > 62 {
-            bail!("hp_decode: path too long");
-        }
-        out[out_len] = (b >> 4) & 0x0F;
-        out_len += 1;
-        out[out_len] = b & 0x0F;
-        out_len += 1;
-    }
-    Ok((is_leaf, out, out_len))
-}
+// ---------- MPT walker (alloy-trie node decode + local walk_tree) ----------
+//
+// Node RLP is decoded with `alloy_trie::nodes::TrieNode::decode` (bounds-checked,
+// so a truncated node yields `Err` instead of a slice panic). The trie *walk*
+// itself stays local: the encoder must enumerate every leaf, which reth/stateless
+// cannot do. Leaf/extension keys arrive as `nybbles::Nibbles`; we expand them into
+// the existing one-nibble-per-byte `[u8; 64]` buffer so `nibbles_to_bytes32` and the
+// downstream account/U256 decode paths are unchanged.
 
 fn walk_tree<F: FnMut(&[u8], &[u8])>(
     nodes: &HashMap<B256, Vec<u8>>,
@@ -645,59 +481,75 @@ fn walk_tree<F: FnMut(&[u8], &[u8])>(
     depth: usize,
     cb: &mut F,
 ) -> Result<()> {
-    let outer = rlp_decode_header(node_rlp)?;
-    if !outer.is_list {
-        return Ok(());
-    }
-    let body = &node_rlp[outer.header_bytes..outer.header_bytes + outer.payload_len];
+    // Fail-soft: the old hand-rolled walker early-returned `Ok(())` for a non-list
+    // outer node. alloy's decode additionally rejects truncated/malformed input the
+    // same way (`Err`); map both to the same graceful skip to preserve behavior and
+    // byte parity. (A stricter `bail!` here is possible if callers want hard errors.)
+    let node = match TrieNode::decode(&mut &node_rlp[..]) {
+        Ok(n) => n,
+        Err(_) => return Ok(()),
+    };
 
-    // Branch first (heuristic: 17-element lists decode via decode_branch).
-    if let Ok(br) = decode_branch(body) {
-        for slot in 0..16 {
-            if br.mask & (1 << slot) == 0 {
-                continue;
+    match node {
+        // Empty-string node (`0x80`): nothing to walk (old code skipped non-lists).
+        TrieNode::EmptyRoot => Ok(()),
+
+        TrieNode::Branch(branch) => {
+            // Guard against a chain of 65+ branch nodes overrunning the 64-nibble
+            // path buffer (the ext/leaf arm already guards via `depth + plen > 64`).
+            if depth >= 64 {
+                return Ok(());
             }
-            path[depth] = slot as u8;
-            let child = &br.children[slot];
-            if child.len() == 32 {
-                let mut h = [0u8; 32];
-                h.copy_from_slice(child);
-                let key = B256::from(h);
-                if let Some(child_rlp) = nodes.get(&key) {
-                    walk_tree(nodes, child_rlp, path, depth + 1, cb)?;
+            // `children()` yields (nibble, Option<&RlpNode>) over slots 0..16 in order.
+            for (nibble, child) in branch.as_ref().children() {
+                let Some(child) = child else { continue };
+                path[depth] = nibble;
+                if let Some(hash) = child.as_hash() {
+                    // 32-byte hashref: resolve against the node store and recurse.
+                    if let Some(child_rlp) = nodes.get(&hash) {
+                        walk_tree(nodes, child_rlp, path, depth + 1, cb)?;
+                    }
+                } else {
+                    // Embedded child: its bytes are the child's full RLP; recurse directly.
+                    walk_tree(nodes, child.as_slice(), path, depth + 1, cb)?;
+                }
+            }
+            Ok(())
+        }
+
+        TrieNode::Extension(ext) => {
+            let key = ext.key.to_vec();
+            let plen = key.len();
+            if depth + plen > 64 {
+                return Ok(());
+            }
+            path[depth..depth + plen].copy_from_slice(&key);
+            let new_depth = depth + plen;
+            if let Some(hash) = ext.child.as_hash() {
+                if let Some(child_rlp) = nodes.get(&hash) {
+                    walk_tree(nodes, child_rlp, path, new_depth, cb)?;
                 }
             } else {
-                // Embedded child (header byte + payload).
-                walk_tree(nodes, child, path, depth + 1, cb)?;
+                // Embedded extension child: full RLP form; recurse directly.
+                walk_tree(nodes, ext.child.as_slice(), path, new_depth, cb)?;
             }
+            Ok(())
         }
-        return Ok(());
-    }
 
-    // Extension or leaf.
-    let (is_leaf, ext_path, plen, second) = decode_ext_or_leaf(body)?;
-    if depth + plen > 64 {
-        return Ok(());
-    }
-    path[depth..depth + plen].copy_from_slice(&ext_path[..plen]);
-    let new_depth = depth + plen;
-
-    if is_leaf {
-        cb(&path[..new_depth], second);
-        return Ok(());
-    }
-
-    if second.len() == 32 {
-        let mut h = [0u8; 32];
-        h.copy_from_slice(second);
-        let key = B256::from(h);
-        if let Some(child_rlp) = nodes.get(&key) {
-            walk_tree(nodes, child_rlp, path, new_depth, cb)?;
+        TrieNode::Leaf(leaf) => {
+            let key = leaf.key.to_vec();
+            let plen = key.len();
+            if depth + plen > 64 {
+                return Ok(());
+            }
+            path[depth..depth + plen].copy_from_slice(&key);
+            let new_depth = depth + plen;
+            // `leaf.value` is the unwrapped RLP-string payload — identical to the bytes
+            // the old walker passed as `second` (account-RLP list / RLP-encoded U256).
+            cb(&path[..new_depth], &leaf.value);
+            Ok(())
         }
-    } else {
-        walk_tree(nodes, second, path, new_depth, cb)?;
     }
-    Ok(())
 }
 
 fn for_each_leaf<F: FnMut(&[u8], &[u8])>(
@@ -724,28 +576,6 @@ fn nibbles_to_bytes32(nibs: &[u8]) -> Option<B256> {
         out[i] = (nibs[2 * i] << 4) | (nibs[2 * i + 1] & 0x0F);
     }
     Some(B256::from(out))
-}
-
-// ---------- TrieAccount decode (zilk_core/core/types_zz/account.cpp) ----------
-
-struct TrieAccount {
-    nonce: u64,
-    balance: U256,
-    storage_root: B256,
-    code_hash: B256,
-}
-
-fn decode_trie_account(leaf_value: &[u8]) -> Result<TrieAccount> {
-    let mut s = leaf_value;
-    let header = alloy_rlp::Header::decode(&mut s)?;
-    if !header.list {
-        bail!("trie account: not a list");
-    }
-    let nonce = u64::decode(&mut s)?;
-    let balance = U256::decode(&mut s)?;
-    let storage_root = B256::decode(&mut s)?;
-    let code_hash = B256::decode(&mut s)?;
-    Ok(TrieAccount { nonce, balance, storage_root, code_hash })
 }
 
 // ---------- Account body builder (matches account_info_to_pre_account_bytes) ----------
@@ -1053,7 +883,7 @@ pub fn build_mfbd_from_parts(
         let mut addr20 = [0u8; 20];
         addr20.copy_from_slice(addr_preimage.as_ref());
 
-        let acc = match decode_trie_account(&value_rlp) {
+        let acc = match TrieAccount::decode(&mut value_rlp.as_slice()) {
             Ok(a) => a,
             Err(_) => continue,
         };

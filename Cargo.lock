@@ -7640,6 +7640,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-rpc-types-debug",
+ "alloy-trie",
  "anyhow",
  "bincode 2.0.1",
  "reqwest",
