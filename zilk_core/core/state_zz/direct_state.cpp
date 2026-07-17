@@ -23,6 +23,11 @@
 #include <zilk_core/core/types/transaction.hpp>
 #include <zilk_core/print.hpp>
 
+#if USE_HASH_KEY
+#include <zilk_core/core/rlp/decode.hpp>
+#include <zilk_core/core/trie_zz/mpt.hpp>     // nibbles64, BranchNode
+#include <zilk_core/core/trie_zz/rlp_sw.hpp>  // decode_branch, decode_ext_or_leaf
+#endif
 namespace zilkworm {
 
 namespace trie = ::silkworm::trie;
@@ -692,6 +697,115 @@ std::optional<BlockHeader> DirectState::read_header(BlockNum,
     if (it == headers_.end()) return std::nullopt;
     return it->second;
 }
+
+#if USE_HASH_KEY
+const Account*
+DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
+    if (!node_store_map_.valid() || headers_.empty()) return nullptr;
+
+    // Dedupe: later lookups must return the SAME owned copy — execution
+    // mutates it in place, and a fresh walk would both lose those writes and
+    // reallocate recovered_accounts_ under iterators held by callers.
+    for (const auto& up : recovered_accounts_) {
+        if (std::memcmp(up->addr, addr.bytes, sizeof(addr.bytes)) == 0) {
+            return up.get();
+        }
+    }
+
+    // Account-trie pre-root = parent block's state_root. get_account has no
+    // header context here; the highest-numbered header in headers_ is the
+    // pre-state parent (ancestors are inserted before execution).
+    const BlockHeader* parent = nullptr;
+    for (const auto& [h, hdr] : headers_) {
+        if (!parent || hdr.number > parent->number) parent = &hdr;
+    }
+    if (!parent) return nullptr;
+
+    const auto hashed = to_bytes32(keccak256(ByteView{addr.bytes, sizeof(addr.bytes)}).bytes);
+    const nibbles64 want = nibbles64::from_bytes32(hashed);
+
+    evmc::bytes32 node_hash = parent->state_root;
+    ByteView node_rlp;
+    std::array<uint8_t, 32> embedded_rlp;  // embedded RLP outlives loop-local BranchNode
+    bool node_is_embedded = false;
+    size_t depth = 0;
+
+    for (unsigned guard = 0; guard < 70; ++guard) {
+        if (!node_is_embedded) {
+            auto rlp = find_node_rlp(node_hash);
+            if (!rlp) return nullptr;  // subtree absent — genuinely unknown
+            node_rlp = *rlp;
+        }
+
+        auto outer = silkworm::rlp::decode_header(node_rlp);
+        if (!outer || !outer->list) return nullptr;
+        ByteView nbody = node_rlp.substr(0, outer->payload_length);
+
+        BranchNode br{};
+        ByteView branch_probe = nbody;
+        if (decode_branch(branch_probe, br)) {
+            if (depth >= 64) return nullptr;
+            const uint8_t nib = want[depth];
+            if ((br.mask & (1u << nib)) == 0) return nullptr;  // no child — absent
+            const uint8_t clen = br.child_len[nib];
+            ++depth;
+            if (clen == 32) {
+                std::memcpy(node_hash.bytes, br.child_ptr[nib], 32);
+                node_is_embedded = false;
+            } else {
+                std::memcpy(embedded_rlp.data(), br.child[nib].bytes, clen);
+                node_rlp = ByteView{embedded_rlp.data(), clen};
+                node_is_embedded = true;
+            }
+            continue;
+        }
+
+        bool is_leaf = false;
+        std::array<uint8_t, 64> ext_path{};
+        uint8_t plen = 0;
+        ByteView second{};
+        if (!decode_ext_or_leaf(nbody, is_leaf, ext_path, plen, second)) return nullptr;
+        if (depth + plen > 64) return nullptr;
+        for (uint8_t i = 0; i < plen; ++i) {
+            if (want[depth + i] != ext_path[i]) return nullptr;  // diverges — absent
+        }
+        depth += plen;
+
+        if (is_leaf) {
+            if (depth != 64) return nullptr;
+            auto acc = std::make_unique<Account>();
+            std::memset(acc.get(), 0, sizeof(Account));
+            std::memcpy(acc->addr, addr.bytes, sizeof(addr.bytes));
+            std::memcpy(acc->storage_root, kEmptyRoot.bytes, 32);
+            if (!decode_trie_account(second, *acc)) return nullptr;
+            // Snapshot the PRE-state leaf RLP into the rlp cache now, before
+            // execution can mutate the recovered copy in place. check_root uses
+            // acc_rlp_buf as the leaf's initial value; mutators only invalidate
+            // acc_rlp_sroot_off, so the snapshot survives balance/nonce writes.
+            acc->rlp_into_cache(std::bit_cast<evmc::bytes32>(acc->storage_root));
+            sys_println("USE_HASH_KEY: recovered account " +
+                        to_hex(ByteView{addr.bytes, sizeof(addr.bytes)}, true) +
+                        " from node-store (preimage missing from keys)");
+            // Cache the owned copy so the returned pointer outlives the call.
+            const Account* ret = acc.get();
+            recovered_accounts_.push_back(std::move(acc));
+            return ret;
+        }
+
+        if (second.size() == 32) {
+            std::memcpy(node_hash.bytes, second.data(), 32);
+            node_is_embedded = false;
+        } else {
+            if (second.size() > embedded_rlp.size()) return nullptr;  // malformed
+            // memmove: second may already alias embedded_rlp
+            std::memmove(embedded_rlp.data(), second.data(), second.size());
+            node_rlp = ByteView{embedded_rlp.data(), second.size()};
+            node_is_embedded = true;
+        }
+    }
+    return nullptr;
+}
+#endif
 
 void DirectState::insert_header(const BlockHeader& header) {
     headers_[header.hash()] = header;

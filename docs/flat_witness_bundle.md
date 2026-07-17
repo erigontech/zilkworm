@@ -658,12 +658,11 @@ the block-0 state-root recompute:
 > MPT nodes whose first 8 hash bytes collide are disambiguated by the full
 > 32-byte memcmp inside `find`.
 
-There used to be a third, fallback reader — a `recover_account_from_nodestore`
-path guarded by `USE_HASH_KEY` that would walk the account trie from the parent
-`state_root` to recover an account whose preimage was missing from the addr-map.
-That feature and function have been **removed**; only a comment in
-`witness_hide_node_test.cpp` still references the intent (it documents the gap as
-unfixed). There is no `recover_account_from_nodestore` in the codebase today.
+There is also a third, fallback reader — `DirectState::recover_account_from_nodestore`,
+compiled only under `USE_HASH_KEY` (default 0, i.e. compiled away): on a
+prestate-map miss it walks the account trie from the parent `state_root` along
+`keccak(addr)` to recover an account whose preimage was missing from the
+addr-map. `witness_hide_node_test.cpp` documents the gap this guards against.
 
 `check_root` (block 0 of a bundle) and `check_root_new_block` (subsequent
 blocks) in `state_transition.cpp` drive the recomputes (§3.1). The only

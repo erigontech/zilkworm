@@ -25,6 +25,13 @@
 #include <zilk_core/core/types_zz/flat_kv.hpp>
 #include <zilk_core/print.hpp>
 
+// Single source of truth for the witness-bug guard flag (default OFF).
+// Also declared in zilk_core/core/trie_zz/mpt.hpp with the same #ifndef guard;
+// whichever header is parsed first defines it, so the values MUST match.
+#ifndef USE_HASH_KEY
+#define USE_HASH_KEY 0
+#endif
+
 namespace evmone::state {
 struct StateDiff;
 }
@@ -94,6 +101,12 @@ class DirectState : public BlockState {
     Account* find_or_create_pre_account_slow(const evmc::address& addr);
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
     void reserve_block_maps_() noexcept;
+
+#if USE_HASH_KEY
+    // Witness-bug fallback; see USE_HASH_KEY note in trie_zz/mpt.hpp.
+    mutable std::vector<std::unique_ptr<Account>> recovered_accounts_;
+    const Account* recover_account_from_nodestore(const evmc::address& addr) const;
+#endif
 
   public:
     explicit DirectState(std::span<uint8_t> prestate_bytes) noexcept;
@@ -243,6 +256,9 @@ class DirectState : public BlockState {
     }
 
     const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept { return created_accounts_; }
+#if USE_HASH_KEY
+    const std::vector<std::unique_ptr<Account>>& recovered_accounts() const noexcept { return recovered_accounts_; }
+#endif
 
     void set_multi_block(bool v) noexcept { multi_block_ = v; }
 
@@ -308,6 +324,11 @@ DirectState::find_pre_account(const evmc::address& addr) const noexcept {
 DirectState::find_pre_account_unchecked(const evmc::address& addr) const noexcept {
     if (auto b = pre_state_map_.find<20, 0, &addr_key8>(addr.bytes))
         return reinterpret_cast<const Account*>(b->data());
+#if USE_HASH_KEY
+    if (const auto* rec = recover_account_from_nodestore(addr)) [[unlikely]] {
+        return rec;
+    }
+#endif
     return nullptr;
 }
 
@@ -315,6 +336,11 @@ DirectState::find_pre_account_unchecked(const evmc::address& addr) const noexcep
 DirectState::find_pre_account_unchecked(const evmc::address& addr) noexcept {
     if (auto b = pre_state_map_.find<20, 0, &addr_key8>(addr.bytes))
         return reinterpret_cast<Account*>(b->data());
+#if USE_HASH_KEY
+    if (const auto* rec = recover_account_from_nodestore(addr)) [[unlikely]] {
+        return const_cast<Account*>(rec);
+    }
+#endif
     return nullptr;
 }
 

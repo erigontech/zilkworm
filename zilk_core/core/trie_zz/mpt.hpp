@@ -39,6 +39,14 @@ using ::zilkworm::keccak_bytes;
 using ::zilkworm::keccak_bytes32;
 }  // namespace silkworm
 
+// Witness-bug guard: when an accessed account's leaf is in the node-store but
+// its address preimage is missing from `keys`, the addr-keyed prestate map
+// misses and balance reads as 0. With USE_HASH_KEY=1, DirectState falls back to
+// a hashed-key node-store lookup. Default OFF -> compiled away, zero overhead.
+#ifndef USE_HASH_KEY
+#define USE_HASH_KEY 0
+#endif
+
 namespace zilkworm {
 struct nibbles64 {
     uint8_t len{};

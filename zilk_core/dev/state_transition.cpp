@@ -596,6 +596,62 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         }
     }
 
+#if USE_HASH_KEY
+    // Witness-bug fallback: accounts recovered via hashed-key node-store lookup
+    // are absent from addr_hashes(), so they were not emitted above. GridMPT needs
+    // every leaf on a touched branch present as an update. The initial value is
+    // the PRE-state leaf RLP snapshotted at recovery time (acc_rlp_buf); if the
+    // block modified the account, emit its post-state as the current value —
+    // its storage writes live in overflow_slots_ (recovered accounts have no
+    // inline slot region).
+    if (!direct_state.recovered_accounts().empty()) {
+        for (const auto& up : direct_state.recovered_accounts()) {
+            const Account* pa = up.get();
+            const evmc::address addr = *reinterpret_cast<const evmc::address*>(pa->addr);
+            auto& node = acc_updates.emplace_back(keccak_bytes(addr.bytes));
+            node.ext_initial = ByteView{pa->acc_rlp_buf, pa->acc_rlp_len};
+            // Emptiness computed from the recovered copy directly:
+            // is_empty_account(addr) would re-enter account lookup and can
+            // grow recovered_accounts_ while we iterate it.
+            uint8_t bal_or = 0;
+            for (size_t bi = 0; bi < sizeof(pa->balance); ++bi) bal_or |= pa->balance[bi];
+            const bool is_empty = pa->nonce == 0 && bal_or == 0 &&
+                                  ::zilkworm::eq_hash32(pa->code_hash, silkworm::kEmptyHash.bytes);
+            if (pa->deleted || (clear_empty && pa->modified && is_empty)) {
+                // 0x80 current value signals leaf deletion.
+                node.buf[0] = 0x80;
+                node.current_off = 0;
+                node.current_len = 1;
+            } else if (pa->modified) {
+                bytes32 storage_root = std::bit_cast<bytes32>(pa->storage_root);
+                if (mpt::is_zero_quick(storage_root)) {
+                    storage_root = kEmptyRoot;
+                }
+                if (const auto* created_slots = direct_state.overflow_slots_for(addr);
+                    created_slots != nullptr && !created_slots->empty()) {
+                    zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(
+                        created_slots->size(), storage_spill);
+                    for (const auto& [k, v] : *created_slots) {
+                        auto& sn = storage_updates.emplace_back(keccak_cache(k));
+                        sn.current_off = 40;
+                        sn.current_len = static_cast<uint8_t>(rlp::encode_into_small(
+                            sn.buf + 40, zeroless_view(ByteView{v.bytes, 32})));
+                    }
+                    std::sort(storage_updates.data(),
+                              storage_updates.data() + storage_updates.size());
+                    storage_trie.reset(storage_root);
+                    storage_root = storage_trie.calc_root_from_updates(
+                        {storage_updates.data(), storage_updates.size()});
+                }
+                node.current_off = 0;
+                node.current_len = pa->rlp_into(node.buf + 0, storage_root);
+            }
+            // else: unmodified — read-only anchor (initial only).
+        }
+        std::sort(acc_updates.begin(), acc_updates.end());
+    }
+#endif
+
     // acc_updates already sorted: merge of two sorted hash sequences.
     auto prev_root = direct_state.read_header(header.number - 1, header.parent_hash)->state_root;
     mpt::GridMPT<true> acc_trie(direct_state, prev_root);
