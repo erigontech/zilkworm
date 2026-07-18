@@ -48,6 +48,11 @@ RUN make z6m_guest
 WORKDIR /build/prover/prover_airbender
 RUN cargo build --release
 
+# Native build of the witness->flat-bundle converter the fetcher shells out to
+WORKDIR /build
+RUN cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --target json_witness_to_flat_bundle -j$(nproc)
+
 # ═══════════════════════════════════════════════════════════════════════
 # Target: airbender — runtime image with airbender GPU prover
 # ═══════════════════════════════════════════════════════════════════════
@@ -60,8 +65,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 RUN mkdir -p /home/ubuntu && chown 1000:1000 /home/ubuntu
 
 COPY --from=airbender-builder /build/prover/prover_airbender/target/release/z6m_prover_airbender /usr/local/bin/
+COPY --from=airbender-builder /build/build/zilk_core/dev/cli/json_witness_to_flat_bundle /usr/local/bin/
 COPY --from=airbender-builder --chown=1000:1000 /build/prover/guest_airbender/build/z6m_guest.bin /opt/z6m/z6m_guest.bin
 COPY --from=airbender-builder --chown=1000:1000 /build/prover/guest_airbender/build/z6m_guest.text /opt/z6m/z6m_guest.text
+
+ENV Z6M_FLAT_BUNDLE_BUILDER=/usr/local/bin/json_witness_to_flat_bundle
 
 USER 1000
 WORKDIR /home/ubuntu

@@ -42,6 +42,10 @@ set_target_properties(silkworm_dev PROPERTIES
 if (EXISTS "${SW_INC_INSTALL}")
   target_include_directories(z6m_guest PRIVATE "${SW_INC_INSTALL}")
 endif()
+# evmc headers are no longer exported by the subbuild install (EVMC folded
+# into evmone); include them straight from the submodule.
+target_include_directories(z6m_guest PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/../../third_party/evmone/evmc/include")
 # FetchContent deps live in the zilkworm build tree, not the install prefix.
 target_include_directories(z6m_guest SYSTEM PRIVATE
   "${SW_BIN}/_deps/nlohmann_json-src/include"

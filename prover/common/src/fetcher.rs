@@ -474,15 +474,17 @@ const BUILDER_PATH: &str = concat!(
 /// Spawn json_witness_to_flat_bundle, pipe `input` to its stdin, and return
 /// the stdout bytes.
 fn run_json_witness_to_flat_bundle(input: &[u8]) -> Result<Vec<u8>> {
-    let mut child = Command::new(BUILDER_PATH)
+    let builder_path = std::env::var("Z6M_FLAT_BUNDLE_BUILDER")
+        .unwrap_or_else(|_| BUILDER_PATH.to_string());
+    let mut child = Command::new(&builder_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .wrap_err_with(|| {
             format!(
-                "spawn {} (run `make json_witness_to_flat_bundle` to build it)",
-                BUILDER_PATH
+                "spawn {} (run `make json_witness_to_flat_bundle` to build it, or set Z6M_FLAT_BUNDLE_BUILDER)",
+                builder_path
             )
         })?;
     {
