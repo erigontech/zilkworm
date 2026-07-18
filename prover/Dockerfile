@@ -21,7 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git curl ca-certificates pkg-config \
-    libssl-dev xz-utils \
+    libssl-dev xz-utils python3 patch \
     && rm -rf /var/lib/apt/lists/*
 
 # RISC-V bare-metal GCC for guest cross-compilation
