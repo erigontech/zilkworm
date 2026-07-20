@@ -85,8 +85,8 @@ target_link_libraries(z6m_guest PRIVATE
     "${CMAKE_BINARY_DIR}/zilkworm/zilk_core/core/types_zz/libsilkworm_types_zz.a"
     "${CMAKE_BINARY_DIR}/zilkworm/third_party/libevmone.a"
     "${CMAKE_BINARY_DIR}/zilkworm/deps/src/blst/libblst.a"
-    "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-loader.a"
-    "${CMAKE_BINARY_DIR}/zilkworm-install/lib/libevmc-instructions.a"
+    # evmc loader/instructions libs no longer produced by the subbuild
+    # (EVMC folded into evmone); the baremetal guest never dlopens VMs.
     # libsecp256k1 disabled — using evmone's built-in ecrecover
     # "${CMAKE_BINARY_DIR}/zilkworm/_deps/libsecp256k1-build/lib/libsecp256k1.a"
     c m gcc nosys stdc++
