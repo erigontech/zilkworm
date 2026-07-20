@@ -1,11 +1,10 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-mod ethproofs_client;
 mod service;
 mod stdin_builders;
 
-use crate::ethproofs_client::EthProofsConfig;
+use z6m_common::EthProofsConfig;
 use z6m_common::{fetch_block_and_witness, FetchRequest};
 use crate::service::{
     AppConfig, ExecuteOptions, ProveOptions, ServiceConfig,

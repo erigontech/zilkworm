@@ -240,14 +240,15 @@ namespace {
                 }
                 return Status::kPassed;
             }
-            (void)err;
-            sys_println("ERROR: validation error");
+            sys_println("Validation error");
+            sys_println(std::string(magic_enum::enum_name<ValidationResult>(err)).c_str());
             return Status::kFailed;
         }
 
         if (invalid) {
             sys_println("Invalid block executed successfully");
             sys_println("ERROR: expected exception");
+            sys_println(json_block["expectException"].dump().c_str());
             return Status::kFailed;
         }
 
@@ -291,6 +292,7 @@ namespace {
         const auto config_it{test::kNetworkConfig.find(network)};
         if (config_it == test::kNetworkConfig.end()) {
             sys_println("ERROR: unknown network");
+            sys_println(network.c_str());
             return Status::kSkipped;
         }
         auto genesisRLPStr = json_test["genesisRLP"].get<std::string>();
@@ -327,6 +329,9 @@ namespace {
             std::string expected_hex{json_test["postStateHash"].get<std::string>()};
             if (*state_root != to_bytes32(from_hex(expected_hex).value())) {
                 sys_println("ERROR: postStateHash mismatch");
+                sys_println(to_hex(*state_root).c_str());
+                sys_println("!=");
+                sys_println(expected_hex.c_str());
                 return Status::kFailed;
             }
             return Status::kPassed;

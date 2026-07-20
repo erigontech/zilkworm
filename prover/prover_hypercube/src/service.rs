@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
+use z6m_common::{EthProofsConfig, EthproofsClient};
 use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_mfbd};
 use alloy_provider::{Provider, ProviderBuilder};
 use eyre::{bail, Context, Result};
@@ -496,13 +496,14 @@ impl Z6mProverService {
                     // Read proof bytes back from file
                     let proof_bytes = std::fs::read(&proof_path)?;
 
+                    let verifier_id = sp1_sdk::HashableKey::bytes32(&verifying_key);
                     client
                         .proved(
                             &proof_bytes,
                             opts.block_number,
                             cycle_count,
                             proving_millis,
-                            &verifying_key.clone(),
+                            &verifier_id,
                         )
                         .await;
                 }
