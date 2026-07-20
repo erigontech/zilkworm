@@ -78,6 +78,11 @@ struct Args {
     #[arg(long)]
     rpc_url: Option<String>,
 
+    /// WebSocket URL for newHeads push notifications (optional; the
+    /// fetcher polls the RPC URL when unset)
+    #[arg(long)]
+    ws_url: Option<String>,
+
     /// Use GPU (CUDA) for proving in service mode
     #[arg(long, action = clap::ArgAction::SetTrue)]
     gpu: bool,
@@ -578,6 +583,7 @@ async fn main() -> Result<()> {
             execute_every: args.execute_every,
             post_every: args.post_every,
             rpc_url,
+            ws_url: args.ws_url.clone(),
             save_all_responses: args.save_all_responses,
             data_dir: args.data_dir.clone(),
             output_dir: args.output_dir,

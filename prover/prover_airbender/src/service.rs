@@ -38,6 +38,9 @@ pub struct ServiceConfig {
     pub execute_every: Option<u64>,
     pub post_every: Option<u64>,
     pub rpc_url: String,
+    /// Optional WebSocket endpoint for newHeads push notifications.
+    /// When set, the fetcher wakes on new blocks instead of polling.
+    pub ws_url: Option<String>,
     pub save_all_responses: bool,
     pub data_dir: PathBuf,
     pub output_dir: PathBuf,
@@ -234,6 +237,32 @@ impl AirbenderService {
         let url = Url::parse(&self.config.rpc_url)?;
         let provider = ProviderBuilder::new().connect_http(url);
 
+        // Optional newHeads subscription: wake on push instead of polling.
+        // Any failure falls back to the polling loop below.
+        let mut new_heads = match &self.config.ws_url {
+            Some(ws_url) => {
+                let connect = z6m_common::alloy_provider::WsConnect::new(ws_url.clone());
+                match ProviderBuilder::new().connect_ws(connect).await {
+                    Ok(ws_provider) => match ws_provider.subscribe_blocks().await {
+                        Ok(sub) => {
+                            info!("Subscribed to newHeads via {}", ws_url);
+                            // keep the provider alive alongside the subscription
+                            Some((ws_provider, sub))
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "newHeads subscribe failed; falling back to polling");
+                            None
+                        }
+                    },
+                    Err(err) => {
+                        warn!(error = %err, "WS connect failed; falling back to polling");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
         let mut next_block = if let Some(start) = self.config.start_block {
             start
         } else {
@@ -326,9 +355,26 @@ impl AirbenderService {
             }
 
             next_block = latest + 1;
-            // Tight tip-following: the RPC is a local node, so poll cheaply
-            // and often — poll delay is on the block->proof latency path.
-            sleep(Duration::from_millis(300)).await;
+            // Tip-following: prefer newHeads push (with a safety timeout in
+            // case the subscription stalls); fall back to tight polling —
+            // wake-up delay is on the block->proof latency path.
+            let mut ws_dead = false;
+            if let Some((_, sub)) = new_heads.as_mut() {
+                tokio::select! {
+                    received = sub.recv() => {
+                        if received.is_err() {
+                            warn!("newHeads subscription closed; falling back to polling");
+                            ws_dead = true;
+                        }
+                    }
+                    _ = sleep(Duration::from_secs(2)) => {}
+                }
+            } else {
+                sleep(Duration::from_millis(300)).await;
+            }
+            if ws_dead {
+                new_heads = None;
+            }
         }
 
         // Drop tx so the worker can drain and exit cleanly.
