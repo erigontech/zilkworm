@@ -34,13 +34,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_TOKEN || github.token }}
+          token: ${{ github.token }}
           submodules: false
 
       - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
-          token: ${{ secrets.PAT_TOKEN || github.token }}
+          token: ${{ github.token }}
 
       - name: Symlink cargo target for caching
         run: |
@@ -60,7 +60,7 @@ jobs:
         id: eest-mfbd
         uses: ./.github/actions/prepare-eest-mfbd
         with:
-          token: ${{ secrets.PAT_TOKEN || github.token }}
+          token: ${{ github.token }}
 
       - name: Run EEST tests
         shell: bash

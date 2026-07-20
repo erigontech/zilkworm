@@ -4,10 +4,11 @@
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
 .PHONY: test-fixtures \
-        z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
+        z6m_guest z6m_guest_airbender z6m_prover z6m_prover_airbender \
+        eest-prover-test z6m_eest_convert eest-blockchain-tests \
         execute-block selftest tests eest-mfbd-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
-        sp1-benchmark-corpus sp1-benchmark
+        sp1-benchmark-corpus sp1-benchmark release-artifacts
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -19,8 +20,15 @@ z6m_guest:
 		-DCMAKE_BUILD_TYPE=Release \
 		-DSP1=ON
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
+
 z6m_prover: z6m_guest
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
+
+z6m_guest_airbender:
+	$(MAKE) -C prover/guest_airbender z6m_guest
+
+z6m_prover_airbender: z6m_guest_airbender
+	cd prover/prover_airbender && cargo build --release
 
 test_hc: z6m_prover
 	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp
@@ -145,3 +153,24 @@ sp1-benchmark-corpus:
 # Run the SP1 benchmark. Regenerate the corpus and rebuild the prover first.
 sp1-benchmark: z6m_prover sp1-benchmark-corpus
 	python3 tools/scripts/sp1_benchmark.py --dir $(BENCH_CORPUS_DIR)
+# Stage release artifacts into ./temp/
+RELEASE_DIR := temp
+RELEASE_BINS := \
+	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
+	prover/target/release/z6m_prover:z6m_prover_hypercube \
+	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
+
+release-artifacts:
+	@mkdir -p $(RELEASE_DIR)
+	@names=""; \
+	for pair in $(RELEASE_BINS); do \
+	    src=$${pair%%:*}; dst=$${pair##*:}; \
+	    if [ ! -f "$$src" ]; then echo "missing: $$src" >&2; exit 1; fi; \
+	    cp "$$src" "$(RELEASE_DIR)/$$dst"; \
+	    names="$$names $$dst"; \
+	done; \
+	(cd $(RELEASE_DIR) && sha256sum $$names > SHA256SUMS.txt)
+	@echo "release artifacts staged in $(RELEASE_DIR)/:"
+	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
+	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
+	@cat $(RELEASE_DIR)/SHA256SUMS.txt

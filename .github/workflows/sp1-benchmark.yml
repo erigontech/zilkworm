@@ -45,14 +45,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_TOKEN || github.token }}
+          token: ${{ github.token }}
           submodules: false
           lfs: true
 
       - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
-          token: ${{ secrets.PAT_TOKEN || github.token }}
+          token: ${{ github.token }}
 
       - name: Symlink cargo target for caching
         run: |

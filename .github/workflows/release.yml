@@ -54,8 +54,7 @@ jobs:
       - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
-          token: ${{ secrets.PAT_TOKEN || github.token }}
-          sparse-eest-fixtures: "skip"
+          token: ${{ github.token }}
 
       - name: Verify tag matches PROJECT_VERSION
         shell: bash

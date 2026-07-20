@@ -46,19 +46,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_TOKEN }}
           submodules: false
 
       - name: Init submodules
         uses: ./.github/actions/init-submodules
         with:
-          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Prepare EEST MFBD fixtures
         id: eest-mfbd
         uses: ./.github/actions/prepare-eest-mfbd
         with:
-          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build EEST blockchain tests
         run: |

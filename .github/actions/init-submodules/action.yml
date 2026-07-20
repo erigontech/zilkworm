@@ -11,8 +11,9 @@ description: |
 
 inputs:
   token:
-    description: GitHub token used to authenticate private submodule fetches.
-    required: true
+    description: GitHub token used to authenticate submodule fetches (optional on public repos).
+    required: false
+    default: ""
   extra-depth:
     description: Shallow depth for submodules (empty = full).
     required: false
@@ -29,7 +30,9 @@ runs:
       run: |
         set -euo pipefail
         git config --global --add safe.directory '*'
-        git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+        if [ -n "${TOKEN}" ]; then
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+        fi
 
         # Clean up stale evmone/evmc submodule state (evmc was inlined into evmone).
         # On self-hosted runners with a cached submodule checkout, git refuses to
