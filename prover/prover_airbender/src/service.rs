@@ -326,7 +326,9 @@ impl AirbenderService {
             }
 
             next_block = latest + 1;
-            sleep(Duration::from_secs(2)).await;
+            // Tight tip-following: the RPC is a local node, so poll cheaply
+            // and often — poll delay is on the block->proof latency path.
+            sleep(Duration::from_millis(300)).await;
         }
 
         // Drop tx so the worker can drain and exit cleanly.
@@ -358,43 +360,59 @@ impl AirbenderService {
             }
 
             if item.prove {
-                // Preflight in the JIT before touching the GPU: skip blocks
-                // whose execution fails guest validation instead of letting
-                // the recursion stage abort the process.
-                match self.preflight_block(item.block_number, &item.bundle_path) {
-                    Ok(run) if run.succeeded(self.guest_exit_pc) => {}
-                    Ok(run) => {
-                        error!(
-                            block = item.block_number,
-                            final_pc = format!("0x{:08x}", run.final_pc),
-                            reached_end = run.reached_end,
-                            "Guest validation failed in preflight; skipping prove"
-                        );
-                        let _ = self.persist_proving_log(&ProvingLog {
-                            block_number: item.block_number,
-                            gas_used: 0,
-                            cycle_count: run.cycle_count,
-                            num_proofs: 0,
-                            proving_millis: 0,
-                            message: format!(
-                                "SKIPPED: guest validation failure (final_pc=0x{:08x} reached_end={})",
-                                run.final_pc, run.reached_end
-                            ),
-                        });
-                        continue;
+                // Preflight interprets the block to catch executions that
+                // would make the recursion stage abort the process. By
+                // default it runs CONCURRENTLY with proving and gates proof
+                // persistence/submission instead of proof start: clean
+                // validation failures still produce a valid (discarded)
+                // execution proof, and only trap-class failures — the same
+                // ones that can crash the prover — keep the abort risk,
+                // recovered by the container restart policy. Set
+                // Z6M_SERIAL_PREFLIGHT=1 to restore the safe serial order.
+                let serial_preflight = std::env::var("Z6M_SERIAL_PREFLIGHT").is_ok();
+                let mut preflight_handle = None;
+                if serial_preflight {
+                    match self.preflight_block(item.block_number, &item.bundle_path) {
+                        Ok(run) if run.succeeded(self.guest_exit_pc) => {}
+                        Ok(run) => {
+                            error!(
+                                block = item.block_number,
+                                final_pc = format!("0x{:08x}", run.final_pc),
+                                reached_end = run.reached_end,
+                                "Guest validation failed in preflight; skipping prove"
+                            );
+                            let _ = self.persist_proving_log(&ProvingLog {
+                                block_number: item.block_number,
+                                gas_used: 0,
+                                cycle_count: run.cycle_count,
+                                num_proofs: 0,
+                                proving_millis: 0,
+                                message: format!(
+                                    "SKIPPED: guest validation failure (final_pc=0x{:08x} reached_end={})",
+                                    run.final_pc, run.reached_end
+                                ),
+                            });
+                            continue;
+                        }
+                        Err(err) => {
+                            error!(block = item.block_number, error = %err, "Preflight errored; skipping prove");
+                            let _ = self.persist_proving_log(&ProvingLog {
+                                block_number: item.block_number,
+                                gas_used: 0,
+                                cycle_count: 0,
+                                num_proofs: 0,
+                                proving_millis: 0,
+                                message: format!("SKIPPED: preflight error: {}", err),
+                            });
+                            continue;
+                        }
                     }
-                    Err(err) => {
-                        error!(block = item.block_number, error = %err, "Preflight errored; skipping prove");
-                        let _ = self.persist_proving_log(&ProvingLog {
-                            block_number: item.block_number,
-                            gas_used: 0,
-                            cycle_count: 0,
-                            num_proofs: 0,
-                            proving_millis: 0,
-                            message: format!("SKIPPED: preflight error: {}", err),
-                        });
-                        continue;
-                    }
+                } else {
+                    let svc = Arc::clone(&self);
+                    let bn = item.block_number;
+                    let path = item.bundle_path.clone();
+                    preflight_handle =
+                        Some(tokio::task::spawn_blocking(move || svc.preflight_block(bn, &path)));
                 }
 
                 println!(
@@ -410,7 +428,31 @@ impl AirbenderService {
                     tokio::spawn(async move { c.proving(bn).await; });
                 }
 
-                match self.prove_inner(item.block_number, &item.bundle_path).await {
+                let prove_result = self.prove_inner(item.block_number, &item.bundle_path).await;
+
+                if let Some(handle) = preflight_handle.take() {
+                    let verdict = handle.await;
+                    let ok =
+                        matches!(&verdict, Ok(Ok(run)) if run.succeeded(self.guest_exit_pc));
+                    if !ok {
+                        error!(
+                            block = item.block_number,
+                            "Concurrent preflight failed; discarding proof"
+                        );
+                        let _ = self.persist_proving_log(&ProvingLog {
+                            block_number: item.block_number,
+                            gas_used: 0,
+                            cycle_count: 0,
+                            num_proofs: 0,
+                            proving_millis: 0,
+                            message: "SKIPPED: concurrent preflight failed; proof discarded"
+                                .to_string(),
+                        });
+                        continue;
+                    }
+                }
+
+                match prove_result {
                     Ok((proof_bytes, log)) => {
                         println!(
                             "[{}] Proved block {} gas_used={} cycles={} proofs={} time={}ms",
