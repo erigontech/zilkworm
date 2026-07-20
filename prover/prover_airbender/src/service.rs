@@ -621,13 +621,18 @@ impl AirbenderService {
             // Write proof.bin to output_dir/{block}/proof.bin
             let block_dir = self.config.output_dir.join(block_number.to_string());
             fs::create_dir_all(&block_dir)?;
-            crate::prove::serialize_proof_to_file(&proof, &block_dir.join("proof.bin"));
+            crate::prove::serialize_proof_to_file_enveloped(
+                &proof,
+                self.config.security,
+                &block_dir.join("proof.bin"),
+            );
 
             let gas_used = proof.register_final_values[10].value as u64;
             let (family_proofs, init_proofs, delegation_proofs) = proof.get_proof_counts();
             let total_proofs = family_proofs + init_proofs + delegation_proofs;
 
-            let proof_bytes = crate::prove::serialize_proof_to_bytes(&proof);
+            let proof_bytes =
+                crate::prove::serialize_proof_to_bytes_enveloped(&proof, self.config.security);
             let log = ProvingLog {
                 block_number,
                 gas_used,

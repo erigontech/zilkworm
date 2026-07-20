@@ -717,6 +717,12 @@ async fn main() -> Result<()> {
                 } else {
                     raw
                 };
+                // Strip the EPROOF01 security envelope if present (new format)
+                let decoded = if decoded.starts_with(prove::PROOF_ENVELOPE_MAGIC) {
+                    decoded[prove::PROOF_ENVELOPE_MAGIC.len() + 2..].to_vec()
+                } else {
+                    decoded
+                };
                 let (program_proof, _): (execution_utils::unrolled::UnrolledProgramProof, usize) =
                     bincode2::serde::decode_from_slice(&decoded, bincode2::config::standard())
                         .map_err(|e| eyre!("failed to decode proof: {}", e))?;
@@ -852,7 +858,11 @@ async fn main() -> Result<()> {
                     let (proof, cycles) = prove::gpu_prove(&prover, oracle, block_num);
 
                     fs::create_dir_all(&output_dir)?;
-                    prove::serialize_proof_to_file(&proof, &output_dir.join("proof.bin"));
+                    prove::serialize_proof_to_file_enveloped(
+                        &proof,
+                        security_model(args.security)?,
+                        &output_dir.join("proof.bin"),
+                    );
 
                     let total_wall = wall_start.elapsed();
                     println!(
