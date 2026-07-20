@@ -201,6 +201,21 @@ enum Command {
         setup_dir: Option<PathBuf>,
     },
 
+    /// Benchmark: prove the same block repeatedly with a persistent prover
+    Bench {
+        /// Path to a cached MFBD input file
+        #[arg(long)]
+        file_name: PathBuf,
+
+        /// Number of proving iterations
+        #[arg(long, default_value_t = 5)]
+        iterations: u32,
+
+        /// Path to setup cache dir (needs `setup --until unified`)
+        #[arg(long, default_value = "temp")]
+        setup_dir: PathBuf,
+    },
+
     /// Verify a unified-layer proof against a setup cache
     Verify {
         /// Path to proof.bin (gzip or raw bincode2 UnrolledProgramProof)
@@ -634,6 +649,45 @@ async fn main() -> Result<()> {
 
             let log_file = data_dir.join("executionLogs.log");
             persist_execution_log(&log_file, &log)?;
+        }
+
+        Some(Command::Bench {
+            file_name,
+            iterations,
+            setup_dir,
+        }) => {
+            #[cfg(feature = "gpu")]
+            {
+                use std::time::Instant;
+
+                let cache = prove::load_setup(&setup_dir.join("setup.bin"))?;
+                let t = Instant::now();
+                let prover = prove::create_gpu_prover_from_cache(cache);
+                println!("BENCH gpu init in {:.2?}", t.elapsed());
+                let oracle = build_oracle(&file_name, false)?;
+
+                let mut times = Vec::new();
+                for i in 0..iterations {
+                    let t = Instant::now();
+                    let (_proof, cycles) = prove::gpu_prove(&prover, oracle.clone(), i as u64);
+                    let ms = t.elapsed().as_millis();
+                    times.push(ms);
+                    println!("BENCH iter={} cycles={} time_ms={}", i, cycles, ms);
+                }
+                times.sort();
+                println!(
+                    "BENCH done iters={} min={}ms median={}ms max={}ms",
+                    iterations,
+                    times.first().unwrap_or(&0),
+                    times.get(times.len() / 2).unwrap_or(&0),
+                    times.last().unwrap_or(&0)
+                );
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let _ = (file_name, iterations, setup_dir);
+                return Err(eyre!("bench requires the gpu build"));
+            }
         }
 
         Some(Command::Verify { proof, setup_dir }) => {
