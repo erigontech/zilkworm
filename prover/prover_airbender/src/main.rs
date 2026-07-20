@@ -271,11 +271,13 @@ fn resolve_input_path(
     if block_number == 0 {
         bail!("either --file-name or a nonzero --block-number is required");
     }
-    let path = data_dir
-        .join("blocks")
-        .join(block_number.to_string())
-        .join(format!("unifiedBlockAndStateRlp{}.bin", block_number));
-    Ok(path)
+    let block_dir = data_dir.join("blocks").join(block_number.to_string());
+    let mfbd = block_dir.join(format!("flatWitnessBundle{}.mfbd", block_number));
+    if mfbd.exists() {
+        return Ok(mfbd);
+    }
+    // Legacy pre-MFBD layout.
+    Ok(block_dir.join(format!("unifiedBlockAndStateRlp{}.bin", block_number)))
 }
 
 /// Locate the guest binary base path (without .bin/.text extension).
