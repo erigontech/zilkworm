@@ -41,8 +41,10 @@ WORKDIR /build
 COPY . .
 
 # Build guest binary (C++ → RISC-V), produces .bin and .text
+# USE_HASH_KEY=ON enables node-store account recovery in the guest.
+ARG USE_HASH_KEY=OFF
 WORKDIR /build/prover/guest_airbender
-RUN make z6m_guest
+RUN make z6m_guest USE_HASH_KEY=${USE_HASH_KEY}
 
 # Build Rust GPU prover (gpu is default feature, deps fetched from git)
 WORKDIR /build/prover/prover_airbender
