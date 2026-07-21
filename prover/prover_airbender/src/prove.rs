@@ -314,7 +314,7 @@ fn register_binaries<S: SecurityMarker>(prover: &mut ExecutionProver<S>, cache: 
 #[cfg(feature = "gpu")]
 pub fn create_gpu_prover_from_cache(cache: SetupCache) -> UnrolledProver {
     let mut config = ExecutionProverConfiguration::default();
-    config.replay_worker_threads_count = 8;
+    config.replay_worker_threads_count = std::env::var("Z6M_REPLAY_WORKERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
     config.host_allocators_per_job_count = 96;
     config.host_allocators_per_device_count = 32;
     config.min_free_host_allocators_per_job = 16;

@@ -200,6 +200,17 @@ enum Command {
         #[arg(long)]
         setup_dir: Option<PathBuf>,
     },
+
+    /// Verify a unified-layer proof against a setup cache
+    Verify {
+        /// Path to proof.bin (gzip or raw bincode2 UnrolledProgramProof)
+        #[arg(long)]
+        proof: PathBuf,
+
+        /// Path to setup cache dir (needs `setup --until unified`)
+        #[arg(long, default_value = "temp")]
+        setup_dir: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -623,6 +634,70 @@ async fn main() -> Result<()> {
 
             let log_file = data_dir.join("executionLogs.log");
             persist_execution_log(&log_file, &log)?;
+        }
+
+        Some(Command::Verify { proof, setup_dir }) => {
+            #[cfg(feature = "gpu")]
+            {
+                use execution_utils::unrolled_gpu::UnrolledProverLevel;
+                use flate2::read::GzDecoder;
+                use std::io::Read as _;
+                use std::time::Instant;
+
+                let cache = prove::load_setup(&setup_dir.join("setup.bin"))?;
+                let unified = cache
+                    .level_data
+                    .get(&UnrolledProverLevel::RecursionUnified)
+                    .ok_or_else(|| {
+                        eyre!("setup cache has no unified level; run `setup --until unified`")
+                    })?;
+
+                let raw = fs::read(&proof)
+                    .map_err(|e| eyre!("failed to read {}: {}", proof.display(), e))?;
+                let decoded = if raw.starts_with(&[0x1f, 0x8b]) {
+                    let mut out = Vec::new();
+                    GzDecoder::new(&raw[..])
+                        .read_to_end(&mut out)
+                        .map_err(|e| eyre!("failed to gunzip proof: {}", e))?;
+                    out
+                } else {
+                    raw
+                };
+                let (program_proof, _): (execution_utils::unrolled::UnrolledProgramProof, usize) =
+                    bincode2::serde::decode_from_slice(&decoded, bincode2::config::standard())
+                        .map_err(|e| eyre!("failed to decode proof: {}", e))?;
+
+                let started = Instant::now();
+                let regs = execution_utils::unified_circuit::verify_proof_in_unified_layer(
+                    &program_proof,
+                    &unified.setup,
+                    &unified.compiled_layouts,
+                    false,
+                    cache.security(),
+                )
+                .map_err(|_| eyre!("VERIFIER REJECTED the proof"))?;
+
+                println!("Verifier accepted in {:.2?}", started.elapsed());
+                println!("verifier output[0..8]  = {:08x?}", &regs[..8]);
+                println!("verifier output[8..16] = {:08x?}", &regs[8..]);
+                println!("setup unified chain    = {:08x?}", unified.hash_chain);
+                println!(
+                    "proof chain hash       = {:08x?}",
+                    program_proof.recursion_chain_hash
+                );
+                if regs[8..] == unified.hash_chain {
+                    println!("CHAIN BINDING OK: output[8..16] matches setup hash chain");
+                } else if regs[..8] == unified.hash_chain {
+                    println!("CHAIN BINDING OK: output[0..8] matches setup hash chain");
+                } else {
+                    println!("WARNING: verifier output does not match setup hash chain windows");
+                }
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let _ = (proof, setup_dir);
+                return Err(eyre!("verify requires the gpu build (SetupCache support)"));
+            }
         }
 
         Some(Command::Setup {
