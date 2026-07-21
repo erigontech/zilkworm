@@ -73,8 +73,9 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
 
         std::vector<uint32_t> order(n_buckets);
         for (uint32_t i = 0; i < n_buckets; ++i) order[i] = i;
-        std::sort(order.begin(), order.end(),
-                  [&](uint32_t a, uint32_t b) { return buckets[a].size() > buckets[b].size(); });
+        // stable_sort: equal-sized buckets retain ascending-index order so the CHD seed search is deterministic.
+        std::stable_sort(order.begin(), order.end(),
+                         [&](uint32_t a, uint32_t b) { return buckets[a].size() > buckets[b].size(); });
 
         slot_used.assign(n, false);
         std::vector<uint64_t> displacement_factors(n_buckets, 0);
@@ -286,7 +287,9 @@ std::vector<uint8_t> MphfBuilder<KeySize>::finalize() && {
         data_cur += entry_size(body.size());
     }
 
-    std::ranges::sort(collision_keys_, {}, &MphfCollisionEntry::key);
+    // stable_sort: same-key collisions keep insertion order so the data-section
+    // offsets they were just assigned stay consistent with the sorted index.
+    std::ranges::stable_sort(collision_keys_, {}, &MphfCollisionEntry::key);
     if (n_collisions > 0) {
         std::memcpy(blob.data() + collisions_offset, collision_keys_.data(), collisions_size);
     }

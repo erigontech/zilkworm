@@ -7,7 +7,9 @@ SHELL = /bin/bash
         z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
         execute-block selftest tests eest-mfbd-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
-        sp1-benchmark-corpus sp1-benchmark release-artifacts
+        sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
+        ere-workload-checkout ere-fixtures ere-validate ere-compare \
+        release-artifacts
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -167,3 +169,57 @@ release-artifacts:
 	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
 	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
 	@cat $(RELEASE_DIR)/SHA256SUMS.txt
+# ERE benchmark integration: build the SP1 guest ELF + VK as expected by ere-hosts.
+ERE_BIN_DIR ?= $(CURDIR)/build/ere-bin
+ERE_GUEST_NAME ?= stateless-validator-zilkworm-sp1
+ERE_ELF := $(ERE_BIN_DIR)/$(ERE_GUEST_NAME).elf
+ERE_VK := $(ERE_BIN_DIR)/$(ERE_GUEST_NAME).vk
+DERIVE_VK_BIN := prover/target/release/derive_vk
+
+derive_vk:
+	cargo build --release -p z6m_stateless_validator --bin derive_vk --features vk-derive
+
+ere-bin: z6m_guest derive_vk
+	@mkdir -p $(ERE_BIN_DIR)
+	cp prover/guest_hypercube/build/z6m_guest.elf $(ERE_ELF)
+	SP1_PROVER=mock $(DERIVE_VK_BIN) $(ERE_ELF) $(ERE_VK)
+	@echo "ere-bin staged at $(ERE_BIN_DIR):"
+	@ls -la $(ERE_BIN_DIR)
+
+# ERE benchmark integration: validation/comparison.
+ERE_WORKLOAD_REPO   ?= https://github.com/eth-act/zkevm-benchmark-workload.git
+ERE_WORKLOAD_BRANCH ?= master
+ERE_WORKLOAD_DIR    ?= $(CURDIR)/temp/zkevm-benchmark-workload
+ERE_FIXTURE_FILTER  ?= 10M # scopes generation for tractable local runs. default: 10M-gas fixtures, i.e. the 1077-fixture subset
+ERE_TIMEOUT         ?= 60m
+ERE_FIXTURE_ENV     := EF_TEST_TRIE=default RUST_MIN_STACK=16388608 RUST_LOG=info
+ERE_RUN_ENV         := RUST_LOG=info
+
+ere-workload-checkout:
+	@if [ ! -d "$(ERE_WORKLOAD_DIR)/.git" ]; then \
+	    echo "cloning $(ERE_WORKLOAD_REPO) ($(ERE_WORKLOAD_BRANCH)) into $(ERE_WORKLOAD_DIR)"; \
+	    git clone --branch $(ERE_WORKLOAD_BRANCH) $(ERE_WORKLOAD_REPO) "$(ERE_WORKLOAD_DIR)"; \
+	else \
+	    echo "using existing workload checkout at $(ERE_WORKLOAD_DIR)"; \
+	fi
+
+ere-fixtures: ere-workload-checkout
+	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_FIXTURE_ENV) \
+	    cargo run -p witness-generator-cli --release -- \
+	        tests $(if $(ERE_FIXTURE_FILTER),--include $(ERE_FIXTURE_FILTER))
+
+ere-validate: ere-fixtures
+	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
+	        stateless-validator --execution-client zilkworm
+	python3 $(CURDIR)/tools/ere_compare.py --validate 'zilkworm-*' "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
+
+ere-compare: ere-fixtures
+	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
+	        stateless-validator --execution-client reth
+	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
+	        stateless-validator --execution-client zilkworm
+	python3 $(CURDIR)/tools/ere_compare.py "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
+

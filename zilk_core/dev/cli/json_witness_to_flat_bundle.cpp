@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -321,13 +322,19 @@ int main() {
     }
 
     std::vector<uint8_t> code_store_blob;
-    if (!code_map.empty()) {
+    if (!code_records.empty()) {
+        // Iterate in JSON input order and dedup by hash so the MPHF input sequence is deterministic.
         zilkworm::MphfBuilder<32> cb{zilkworm::kMphfCodeStoreMagic,
                                      zilkworm::kMphfMapVersion};
         std::vector<uint8_t> enc;
-        for (const auto& [ch, code_view] : code_map) {
+        std::unordered_set<evmc::bytes32, zilkworm::witness::NodeHash> seen;
+        seen.reserve(code_records.size());
+        for (const auto& code : code_records) {
+            ByteView v{code.data(), code.size()};
+            evmc::bytes32 ch = keccak_view(v);
+            if (!seen.insert(ch).second) continue;
             enc.clear();
-            zilkworm::FlatKv::encode(enc, ch, code_view);
+            zilkworm::FlatKv::encode(enc, ch, v);
             cb.add(zilkworm::hash_key8(ch), ByteView{enc.data(), enc.size()});
         }
         code_store_blob = std::move(cb).finalize();
@@ -363,6 +370,16 @@ int main() {
         }
     }
 
+    // Optional inputs: fork name and per-block expect_invalid flag.
+    std::string fork_name = "Mainnet";
+    if (const auto it = doc.find("fork"); it != doc.end() && it->is_string()) {
+        fork_name = it->get<std::string>();
+    }
+    std::vector<uint8_t> block_flags;
+    if (const auto it = doc.find("expect_invalid"); it != doc.end() && it->is_boolean() && it->get<bool>()) {
+        block_flags.push_back(zilkworm::kBlockFlagExpectInvalid);
+    }
+
     const silkworm::ByteView block_rlps_arr[] = {
         ByteView{current_block_rlp.data(), current_block_rlp.size()}
     };
@@ -371,7 +388,8 @@ int main() {
         std::span<const silkworm::ByteView>{block_rlps_arr},
         ByteView{ancestors_rlp.data(), ancestors_rlp.size()},
         direct_blob, node_store_blob,
-        std::string_view{"Mainnet"});
+        std::string_view{fork_name},
+        block_flags);
 
     std::vector<uint8_t> envelope;
     envelope.resize(zilkworm::kInputHeaderSizeMFBD + bundle.size());

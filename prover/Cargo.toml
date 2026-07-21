@@ -8,6 +8,7 @@ members = [
     "prover_turbo",
     "guest_turbo",
 ]
+exclude = ["stateless_validator"]
 resolver = "2"
 
 [workspace.dependencies]

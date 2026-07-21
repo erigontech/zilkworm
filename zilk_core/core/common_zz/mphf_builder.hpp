@@ -6,7 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <unordered_map>
+#include <map>
 #include <vector>
 
 #include <zilk_core/core/common/bytes.hpp>
@@ -40,7 +40,8 @@ class MphfBuilder {
   private:
     uint32_t magic_;
     uint32_t version_;
-    std::unordered_map<uint64_t, std::vector<uint8_t>> unique_kv_entries_;
+    // std::map keeps iteration order deterministic (ascending order).
+    std::map<uint64_t, std::vector<uint8_t>> unique_kv_entries_;
     std::vector<MphfCollisionEntry> collision_keys_;
     std::vector<std::vector<uint8_t>> collision_bodies_;
     uint32_t max_retries_override_{0u};
