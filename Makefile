@@ -97,11 +97,11 @@ EEST_MFBD_DIR ?= $(FIXTURES_CACHE)/mfbd-$(EEST_SHA)
 # output bytes (eest_to_flat_bundle.cpp, direct_state_builder.cpp, flat_bundle.*,
 # account.hpp, ...); ninja only relinks it when those change, so the hash is
 # stable across no-op runs and self-heals a stale corpus automatically.
-eest-mfbd-build: z6m_eest_convert test-fixtures
+eest-mfbd-build: z6m_eest_convert
 	@conv_sha=$$(sha256sum "$(EEST_CONVERT_BIN)" | cut -c1-16); \
 	if [ -f "$(EEST_MFBD_DIR)/manifest.json" ] && \
 	   grep -q "\"converter_sha\": *\"$$conv_sha\"" "$(EEST_MFBD_DIR)/manifest.json"; then \
-	    echo "  $(EEST_MFBD_DIR) up to date (converter $$conv_sha); skipping bulk-convert"; \
+	    echo "  $(EEST_MFBD_DIR) up to date (converter $$conv_sha); skipping fixtures fetch + bulk-convert"; \
 	else \
 	    echo "  Regenerating MFBD corpus (converter $$conv_sha)"; \
 	    tools/test-fixtures.sh test-fixtures.json $(FIXTURES_CACHE) $(EEST_KEY); \
@@ -114,10 +114,10 @@ eest-mfbd-build: z6m_eest_convert test-fixtures
 	fi
 
 eest-blockchain-tests: eest-mfbd-build
-	cmake -B build/eest -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+	cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
 		-DEEST_MFBD_DIR=$(EEST_MFBD_DIR)
-	cmake --build build/eest
-	ctest --test-dir build/eest --parallel
+	cmake --build build
+	ctest --test-dir build --parallel
 
 eest-prover-test: z6m_prover eest-mfbd-build
 	prover/target/release/z6m_prover --test-service --test-dir $(EEST_MFBD_DIR)
