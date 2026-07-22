@@ -108,14 +108,15 @@ jobs:
             exit 1
           fi
 
-          if (( failed > 5 )); then
-            echo "Too many failures - ${failed} failed out of ${total}"
+          if (( failed > 0 )); then
+            echo "FAILURE: ${failed} test(s) failed out of ${total}"
             echo "failed" > failed.log
             exit 1
           fi
 
-          if (( failed > 0 )); then
-            echo "WARNING: ${failed} test(s) failed, but within acceptable threshold (<=5)"
-          else
-            echo "SUCCESS: All ${total} tests passed!"
+          if (( exit_code != 0 )); then
+            echo "FAILURE: test command exited ${exit_code} despite 0 parsed failures"
+            exit 1
           fi
+
+          echo "SUCCESS: All ${total} tests passed!"
