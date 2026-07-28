@@ -581,27 +581,25 @@ mod tests {
         assert_eq!(got, fixture);
     }
 
-    #[test]
-    fn fetch_request_accepts_optional_provider() {
-        // Locks the call-site shape: both a plain (HTTP) request and a
-        // provider-injected one construct.
-        let _http = FetchRequest {
-            rpc_url: "http://localhost:8545",
-            block_number: Some(1),
-            data_dir: PathBuf::from("/tmp"),
-            save_all_responses: false,
-            geth: false,
-            force_rebuild: false,
-            provider: None,
-        };
-        let _injected = FetchRequest {
-            rpc_url: "http://localhost:8545",
-            block_number: Some(1),
-            data_dir: PathBuf::from("/tmp"),
-            save_all_responses: false,
-            geth: false,
-            force_rebuild: false,
-            provider: Some(dummy_provider()),
-        };
+    #[tokio::test]
+    async fn fetch_request_provider_injection_routes_rpcs() {
+        // The injected provider must carry the fetch RPCs end-to-end: a
+        // request through the resolved provider consumes the injected mock's
+        // queue, and the garbage `rpc_url` proves the HTTP-from-url arm was
+        // never taken.
+        let asserter = alloy_provider::mock::Asserter::new();
+        asserter.push_success(&7u64);
+        let injected = ProviderBuilder::new()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let provider = resolve_provider(Some(injected), "not a url").expect("injected arm");
+        assert_eq!(
+            provider.get_block_number().await.expect("mocked response"),
+            7
+        );
+        assert!(
+            asserter.read_q().is_empty(),
+            "the RPC must consume the injected mock's queue"
+        );
     }
 }
