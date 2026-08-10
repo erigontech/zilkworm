@@ -11,9 +11,11 @@
 // sidecar ONLY when the slot it lands on is empty — an occupied slot whose embedded key
 // fails the byte comparison is a definitive miss, with no sidecar scan. So the builder owes
 // the lookup one invariant: a key whose body lives in the sidecar must land on an empty
-// slot. `chd_solve` upholds it with an explicit occupancy map, co-spilling any placed key
-// that shares an index with a spilled one (see mphf_builder.cpp). The four spill-invariant
-// cases below were added for that work.
+// slot. `chd_solve` upholds it by scoring each bucket's candidate displacement factors by
+// how many keys the choice would spill: under the cheapest one only the keys that actually
+// collide go to the sidecar, any placed key they displace goes with them, and the index
+// they share is marked `kBlocked` so no later bucket can claim it (see mphf_builder.cpp).
+// The seven spill-invariant cases below were added for that work.
 
 #include <algorithm>
 #include <array>
