@@ -49,7 +49,7 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
     n_buckets_out = n_buckets;
 
     std::vector<std::vector<uint32_t>> buckets;
-    // slot_owner[pos] = key placed at pos, kNoKey when pos is free, kBlocked
+    // slot_owner[pos] = <key placed at pos>, or <kNoKey> when pos is free, kBlocked
     // when pos is reserved empty for a sidecar key. Doubles as the occupancy map
     // the displacement search probes: only kNoKey accepts a placement.
     std::vector<uint32_t> slot_owner;
