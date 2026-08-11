@@ -154,7 +154,7 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
         return std::nullopt;
     }
 
-    if ((hdr->direct_state_off % alignof(PreStateMeta)) != 0) [[unlikely]] {
+    if ((hdr->direct_state_off % 8u) != 0) [[unlikely]] {
         sys_println("load_flat_bundle: direct_state_off misaligned");
         return std::nullopt;
     }

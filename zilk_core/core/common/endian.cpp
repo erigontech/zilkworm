@@ -13,7 +13,7 @@ ByteView to_big_compact(const uint64_t value) {
         return {};
     }
     // thread_local: caller gets ByteView into per-thread scratch.
-    thread_local uint8_t full_be[sizeof(uint64_t)];
+    alignas(8) thread_local uint8_t full_be[sizeof(uint64_t)];
     store_big_u64(&full_be[0], value);
     return zeroless_view(full_be);
 }
@@ -22,7 +22,7 @@ ByteView to_big_compact(const intx::uint256& value) {
     if (!value) {
         return {};
     }
-    thread_local uint8_t full_be[sizeof(intx::uint256)];
+    alignas(8) thread_local uint8_t full_be[sizeof(intx::uint256)];
     intx::be::store(full_be, value);
     return zeroless_view(full_be);
 }
