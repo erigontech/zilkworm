@@ -1,551 +1,141 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Optimized memcpy for rv64im (SP1 zkVM).
-//
-// This is musl libc's memcpy.c compiled to rv64im assembly by clang,
-// embedded as GCC inline assembly.
-//
-// We use pre-compiled assembly rather than plain C because:
-//   1. The shift-merge loops for misaligned copies load from unaligned
-//      offsets (e.g. *(uint64_t*)(s+1)). Clang optimizes these into
-//      loads from the aligned base pointer with negative offsets
-//      (e.g. "ld a7, -24(a1)"), which are valid aligned accesses.
-//      GCC does NOT perform this transformation — it emits unaligned
-//      loads directly, which crash in SP1 (ld/sd require 8-byte alignment).
-//   2. Clang's register allocation for the shift-merge loops is tighter
-//      than what GCC produces from equivalent C.
-//
-// Original source: musl libc src/string/memcpy.c (MIT license).
-// Compiled by: clang --target=riscv64 -march=rv64im -O2 -fno-builtin
-// See also: SP1 crates/zkvm/entrypoint/src/memcpy.s
-//
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2005-2020 Rich Felker, et al.
+// memcpy for the SP1 zkVM. SP1 charges per machine-word memory record rather than per byte and
+// rejects unaligned word access, so this never copies byte by byte: a masked read-modify-write
+// aligns the destination, whole aligned words follow, a second masked write fills the tail.
 
 #include <cstddef>
+#include <cstdint>
 
-extern "C" [[gnu::naked]] void *__wrap_memcpy(
-    void *__restrict /*dest*/, const void *__restrict /*src*/, size_t /*n*/) noexcept
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the word packing assumes little-endian");
+
+namespace
 {
-    __asm__ volatile(
-    // Align src to 8 bytes.
-    "andi a3, a1, 7\n"
-    "beqz a3, .LBBmemcpy0_16\n"
-    "beqz a2, .LBBmemcpy0_5\n"
-    "addi a4, a1, 1\n"
-    "li a5, 1\n"
-    "mv a3, a0\n"
-".LBBmemcpy0_3:\n"  // src alignment loop
-    "lbu a7, 0(a1)\n"
-    "mv a6, a2\n"
-    "addi a1, a1, 1\n"
-    "andi t0, a4, 7\n"
-    "sb a7, 0(a3)\n"
-    "addi a3, a3, 1\n"
-    "addi a2, a2, -1\n"
-    "beqz t0, .LBBmemcpy0_6\n"
-    "addi a4, a4, 1\n"
-    "bne a6, a5, .LBBmemcpy0_3\n"
-    "j .LBBmemcpy0_6\n"
-".LBBmemcpy0_5:\n"
-    "mv a3, a0\n"
-".LBBmemcpy0_6:\n"  // src now aligned, check dst
-    "andi a4, a3, 7\n"
-    "beqz a4, .LBBmemcpy0_17\n"
-".LBBmemcpy0_7:\n"  // dst misaligned — size dispatch
-    "li a5, 64\n"
-    "bgeu a2, a5, .LBBmemcpy0_12\n"
-    "li a4, 32\n"
-    "bgeu a2, a4, .LBBmemcpy0_44\n"
-".LBBmemcpy0_9:\n"
-    "andi a4, a2, 16\n"
-    "bnez a4, .LBBmemcpy0_45\n"
-".LBBmemcpy0_10:\n"
-    "andi a4, a2, 8\n"
-    "bnez a4, .LBBmemcpy0_46\n"
-".LBBmemcpy0_11:\n"
-    "andi a4, a2, 4\n"
-    "bnez a4, .LBBmemcpy0_47\n"
-    "j .LBBmemcpy0_48\n"
-".LBBmemcpy0_12:\n"  // misaligned dispatch via jump table
-    "addi a4, a4, -1\n"
-    "slli a4, a4, 2\n"
-    "lla a5, .LJTI0_0\n"
-    "add a4, a4, a5\n"
-    "lw a5, 0(a4)\n"
-    "ld a4, 0(a1)\n"
-    "jr a5\n"
+/// The unit every access here is done in: one machine word, which is what SP1 bills as one memory
+/// record (8 bytes on rv64, 4 on rv32). may_alias because the words are read out of a byte buffer,
+/// which strict aliasing would otherwise forbid; uintptr_t so the address arithmetic shares a type.
+using word_alias [[gnu::may_alias]] = uintptr_t;
 
-    // --- dst offset 1: 7 preamble bytes, shift 8/56 ---
-".LBBmemcpy0_13:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "srli a7, a4, 24\n"
-    "srli t0, a4, 32\n"
-    "srli t1, a4, 40\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "sb a7, 3(a3)\n"
-    "srli a5, a4, 48\n"
-    "addi a2, a2, -7\n"
-    "sb t0, 4(a3)\n"
-    "sb t1, 5(a3)\n"
-    "sb a5, 6(a3)\n"
-    "addi a3, a3, 7\n"
-    "addi a1, a1, 32\n"
-    "li a5, 32\n"
-".LBBmemcpy0_14:\n"
-    "srli a6, a4, 56\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 8\n"
-    "srli a7, a7, 56\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 8\n"
-    "srli t0, t0, 56\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 8\n"
-    "srli t1, t1, 56\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 8\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_14\n"
-    "addi a1, a1, -25\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
+constexpr auto WORD_SIZE = sizeof(word_alias);
+constexpr auto WORD_BITS = WORD_SIZE * 8;
 
-    // --- src aligned, dst aligned ---
-".LBBmemcpy0_16:\n"
-    "mv a3, a0\n"
-    "andi a4, a0, 7\n"
-    "bnez a4, .LBBmemcpy0_7\n"
-".LBBmemcpy0_17:\n"  // both aligned
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_20\n"
-    "li a4, 31\n"
-".LBBmemcpy0_19:\n"
-    "ld a5, 0(a1)\n"
-    "ld a6, 8(a1)\n"
-    "ld a7, 16(a1)\n"
-    "ld t0, 24(a1)\n"
-    "addi a1, a1, 32\n"
-    "addi a2, a2, -32\n"
-    "sd a5, 0(a3)\n"
-    "sd a6, 8(a3)\n"
-    "sd a7, 16(a3)\n"
-    "sd t0, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "bltu a4, a2, .LBBmemcpy0_19\n"
-".LBBmemcpy0_20:\n"
-    "li a4, 16\n"
-    "bgeu a2, a4, .LBBmemcpy0_23\n"
-    "andi a4, a2, 8\n"
-    "bnez a4, .LBBmemcpy0_24\n"
-".LBBmemcpy0_22:\n"
-    "andi a4, a2, 4\n"
-    "bnez a4, .LBBmemcpy0_25\n"
-    "j .LBBmemcpy0_48\n"
-".LBBmemcpy0_23:\n"
-    "ld a4, 0(a1)\n"
-    "ld a5, 8(a1)\n"
-    "sd a4, 0(a3)\n"
-    "sd a5, 8(a3)\n"
-    "addi a3, a3, 16\n"
-    "addi a1, a1, 16\n"
-    "andi a4, a2, 8\n"
-    "beqz a4, .LBBmemcpy0_22\n"
-".LBBmemcpy0_24:\n"
-    "ld a4, 0(a1)\n"
-    "addi a1, a1, 8\n"
-    "sd a4, 0(a3)\n"
-    "addi a3, a3, 8\n"
-    "andi a4, a2, 4\n"
-    "beqz a4, .LBBmemcpy0_48\n"
-".LBBmemcpy0_25:\n"
-    "lw a4, 0(a1)\n"
-    "addi a1, a1, 4\n"
-    "sw a4, 0(a3)\n"
-    "addi a3, a3, 4\n"
-    "j .LBBmemcpy0_48\n"
+/// Returns the @p len (1..WORD_SIZE-1) bytes at @p s in the low-order bytes of the result, reading
+/// only the one or two aligned words that hold them.
+[[gnu::always_inline]] inline word_alias gather(const uint8_t* s, size_t len) noexcept
+{
+    [[assume(len >= 1 && len < WORD_SIZE)]];
+    const auto addr = reinterpret_cast<uintptr_t>(s);
+    const auto off = addr % WORD_SIZE;
+    const auto* w = reinterpret_cast<const word_alias*>(addr - off);
 
-    // --- dst offset 5: 3 preamble bytes, shift 40/24 ---
-".LBBmemcpy0_26:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "addi a2, a2, -3\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "addi a3, a3, 3\n"
-    "addi a1, a1, 32\n"
-    "li a5, 36\n"
-".LBBmemcpy0_27:\n"
-    "srli a6, a4, 24\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 40\n"
-    "srli a7, a7, 24\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 40\n"
-    "srli t0, t0, 24\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 40\n"
-    "srli t1, t1, 24\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 40\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_27\n"
-    "addi a1, a1, -29\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
+    auto v = w[0] >> (off * 8);
+    if (off + len > WORD_SIZE)  // The range continues into the next word; off > 0 here.
+        v |= w[1] << (WORD_BITS - off * 8);
+    return v;
+}
 
-    // --- dst offset 3: 5 preamble bytes, shift 24/40 ---
-".LBBmemcpy0_29:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "srli a7, a4, 24\n"
-    "srli t0, a4, 32\n"
-    "addi a2, a2, -5\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "sb a7, 3(a3)\n"
-    "sb t0, 4(a3)\n"
-    "addi a3, a3, 5\n"
-    "addi a1, a1, 32\n"
-    "li a5, 34\n"
-".LBBmemcpy0_30:\n"
-    "srli a6, a4, 40\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 24\n"
-    "srli a7, a7, 40\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 24\n"
-    "srli t0, t0, 40\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 24\n"
-    "srli t1, t1, 40\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 24\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_30\n"
-    "addi a1, a1, -27\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
+/// Stores the low-order @p len (1..WORD_SIZE-1) bytes of @p v at @p d, leaving the rest of the
+/// destination word unchanged. The range must stay in one word: d % WORD_SIZE + len <= WORD_SIZE.
+[[gnu::always_inline]] inline void scatter(uint8_t* d, word_alias v, size_t len) noexcept
+{
+    [[assume(len >= 1 && len < WORD_SIZE)]];  // Keeps the len * 8 shift inside the word.
+    const auto addr = reinterpret_cast<uintptr_t>(d);
+    const auto off = addr % WORD_SIZE;
+    auto* w = reinterpret_cast<word_alias*>(addr - off);
 
-    // --- dst offset 4: 4 preamble bytes, shift 32/32 ---
-".LBBmemcpy0_32:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "srli a7, a4, 24\n"
-    "addi a2, a2, -4\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "sb a7, 3(a3)\n"
-    "addi a3, a3, 4\n"
-    "addi a1, a1, 32\n"
-    "li a5, 35\n"
-".LBBmemcpy0_33:\n"
-    "srli a6, a4, 32\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 32\n"
-    "srli a7, a7, 32\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 32\n"
-    "srli t0, t0, 32\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 32\n"
-    "srli t1, t1, 32\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 32\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_33\n"
-    "addi a1, a1, -28\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
+    const auto mask = ((word_alias{1} << (len * 8)) - 1) << (off * 8);
+    w[0] = (w[0] & ~mask) | ((v << (off * 8)) & mask);
+}
 
-    // --- dst offset 2: 6 preamble bytes, shift 16/48 ---
-".LBBmemcpy0_35:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "srli a7, a4, 24\n"
-    "srli t0, a4, 32\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "sb a7, 3(a3)\n"
-    "srli a5, a4, 40\n"
-    "addi a2, a2, -6\n"
-    "sb t0, 4(a3)\n"
-    "sb a5, 5(a3)\n"
-    "addi a3, a3, 6\n"
-    "addi a1, a1, 32\n"
-    "li a5, 33\n"
-".LBBmemcpy0_36:\n"
-    "srli a6, a4, 48\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 16\n"
-    "srli a7, a7, 48\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 16\n"
-    "srli t0, t0, 48\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 16\n"
-    "srli t1, t1, 48\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 16\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_36\n"
-    "addi a1, a1, -26\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
+/// scatter() for a word-aligned @p d (@p len is 1..WORD_SIZE-1), where the mask needs no rotation.
+/// Separate because three quarters of the copies here are under 64 bytes, so the ends dominate.
+[[gnu::always_inline]] inline void scatter_aligned(uint8_t* d, word_alias v, size_t len) noexcept
+{
+    [[assume(len >= 1 && len < WORD_SIZE)]];
+    auto* w = reinterpret_cast<word_alias*>(d);
 
-    // --- dst offset 6: 2 preamble bytes, shift 48/16 ---
-".LBBmemcpy0_38:\n"
-    "srli a5, a4, 8\n"
-    "addi a2, a2, -2\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "addi a3, a3, 2\n"
-    "addi a1, a1, 32\n"
-    "li a5, 37\n"
-".LBBmemcpy0_39:\n"
-    "srli a6, a4, 16\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 48\n"
-    "srli a7, a7, 16\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 48\n"
-    "srli t0, t0, 16\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 48\n"
-    "srli t1, t1, 16\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 48\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_39\n"
-    "addi a1, a1, -30\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
+    const auto mask = (word_alias{1} << (len * 8)) - 1;
+    w[0] = (w[0] & ~mask) | (v & mask);
+}
+}  // namespace
 
-    // --- dst offset 7: 1 preamble byte, shift 56/8 ---
-".LBBmemcpy0_41:\n"
-    "sb a4, 0(a3)\n"
-    "addi a3, a3, 1\n"
-    "addi a2, a2, -1\n"
-    "addi a1, a1, 32\n"
-    "li a5, 38\n"
-".LBBmemcpy0_42:\n"
-    "srli a6, a4, 8\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 56\n"
-    "srli a7, a7, 8\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 56\n"
-    "srli t0, t0, 8\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 56\n"
-    "srli t1, t1, 8\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 56\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_42\n"
-    "addi a1, a1, -31\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
+// Not __restrict, on purpose: __wrap_memmove() forwards forward-copyable overlapping ranges here,
+// and __restrict also lets GCC turn the word loop into a call to memcpy that -Wl,--wrap makes
+// recursive. It costs nothing -- the two spellings compile to an identical opcode mix.
+extern "C" void* __wrap_memcpy(void* dest, const void* src, size_t n) noexcept
+{
+    auto* d = static_cast<uint8_t*>(dest);
+    const auto* s = static_cast<const uint8_t*>(src);
 
-    // --- byte-by-byte tails (32/16/8/4/2/1) ---
-".LBBmemcpy0_44:\n"
-    "lbu a4, 0(a1)\n"  "lbu a5, 1(a1)\n"
-    "lbu a6, 2(a1)\n"  "lbu a7, 3(a1)\n"
-    "lbu t0, 4(a1)\n"  "lbu t1, 5(a1)\n"
-    "lbu t2, 6(a1)\n"  "lbu t3, 7(a1)\n"
-    "sb a4, 0(a3)\n"   "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"   "sb a7, 3(a3)\n"
-    "lbu a4, 8(a1)\n"  "lbu a5, 9(a1)\n"
-    "lbu a6, 10(a1)\n" "lbu a7, 11(a1)\n"
-    "sb t0, 4(a3)\n"   "sb t1, 5(a3)\n"
-    "sb t2, 6(a3)\n"   "sb t3, 7(a3)\n"
-    "lbu t0, 12(a1)\n" "lbu t1, 13(a1)\n"
-    "lbu t2, 14(a1)\n" "lbu t3, 15(a1)\n"
-    "sb a4, 8(a3)\n"   "sb a5, 9(a3)\n"
-    "sb a6, 10(a3)\n"  "sb a7, 11(a3)\n"
-    "lbu a4, 16(a1)\n" "lbu a5, 17(a1)\n"
-    "lbu a6, 18(a1)\n" "lbu a7, 19(a1)\n"
-    "sb t0, 12(a3)\n"  "sb t1, 13(a3)\n"
-    "sb t2, 14(a3)\n"  "sb t3, 15(a3)\n"
-    "lbu t0, 20(a1)\n" "lbu t1, 21(a1)\n"
-    "lbu t2, 22(a1)\n" "lbu t3, 23(a1)\n"
-    "sb a4, 16(a3)\n"  "sb a5, 17(a3)\n"
-    "sb a6, 18(a3)\n"  "sb a7, 19(a3)\n"
-    "lbu a4, 24(a1)\n" "lbu a5, 25(a1)\n"
-    "lbu a6, 26(a1)\n" "lbu a7, 27(a1)\n"
-    "sb t0, 20(a3)\n"  "sb t1, 21(a3)\n"
-    "sb t2, 22(a3)\n"  "sb t3, 23(a3)\n"
-    "lbu t0, 28(a1)\n" "lbu t1, 29(a1)\n"
-    "lbu t2, 30(a1)\n" "lbu t3, 31(a1)\n"
-    "addi a1, a1, 32\n"
-    "sb a4, 24(a3)\n"  "sb a5, 25(a3)\n"
-    "sb a6, 26(a3)\n"  "sb a7, 27(a3)\n"
-    "addi a4, a3, 32\n"
-    "sb t0, 28(a3)\n"  "sb t1, 29(a3)\n"
-    "sb t2, 30(a3)\n"  "sb t3, 31(a3)\n"
-    "mv a3, a4\n"
-    "andi a4, a2, 16\n"
-    "beqz a4, .LBBmemcpy0_10\n"
-".LBBmemcpy0_45:\n"  // 16 bytes
-    "lbu a4, 0(a1)\n"  "lbu a5, 1(a1)\n"
-    "lbu a6, 2(a1)\n"  "lbu a7, 3(a1)\n"
-    "lbu t0, 4(a1)\n"  "lbu t1, 5(a1)\n"
-    "lbu t2, 6(a1)\n"  "lbu t3, 7(a1)\n"
-    "sb a4, 0(a3)\n"   "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"   "sb a7, 3(a3)\n"
-    "lbu a4, 8(a1)\n"  "lbu a5, 9(a1)\n"
-    "lbu a6, 10(a1)\n" "lbu a7, 11(a1)\n"
-    "sb t0, 4(a3)\n"   "sb t1, 5(a3)\n"
-    "sb t2, 6(a3)\n"   "sb t3, 7(a3)\n"
-    "lbu t0, 12(a1)\n" "lbu t1, 13(a1)\n"
-    "lbu t2, 14(a1)\n" "lbu t3, 15(a1)\n"
-    "addi a1, a1, 16\n"
-    "sb a4, 8(a3)\n"   "sb a5, 9(a3)\n"
-    "sb a6, 10(a3)\n"  "sb a7, 11(a3)\n"
-    "addi a4, a3, 16\n"
-    "sb t0, 12(a3)\n"  "sb t1, 13(a3)\n"
-    "sb t2, 14(a3)\n"  "sb t3, 15(a3)\n"
-    "mv a3, a4\n"
-    "andi a4, a2, 8\n"
-    "beqz a4, .LBBmemcpy0_11\n"
-".LBBmemcpy0_46:\n"  // 8 bytes
-    "lbu a4, 0(a1)\n"  "lbu a5, 1(a1)\n"
-    "lbu a6, 2(a1)\n"  "lbu a7, 3(a1)\n"
-    "lbu t0, 4(a1)\n"  "lbu t1, 5(a1)\n"
-    "lbu t2, 6(a1)\n"  "lbu t3, 7(a1)\n"
-    "addi a1, a1, 8\n"
-    "sb a4, 0(a3)\n"   "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"   "sb a7, 3(a3)\n"
-    "addi a4, a3, 8\n"
-    "sb t0, 4(a3)\n"   "sb t1, 5(a3)\n"
-    "sb t2, 6(a3)\n"   "sb t3, 7(a3)\n"
-    "mv a3, a4\n"
-    "andi a4, a2, 4\n"
-    "beqz a4, .LBBmemcpy0_48\n"
-".LBBmemcpy0_47:\n"  // 4 bytes
-    "lbu a4, 0(a1)\n"  "lbu a5, 1(a1)\n"
-    "lbu a6, 2(a1)\n"  "lbu a7, 3(a1)\n"
-    "addi a1, a1, 4\n"
-    "addi t0, a3, 4\n"
-    "sb a4, 0(a3)\n"   "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"   "sb a7, 3(a3)\n"
-    "mv a3, t0\n"
-".LBBmemcpy0_48:\n"  // 2 + 1 bytes
-    "andi a4, a2, 2\n"
-    "bnez a4, .LBBmemcpy0_51\n"
-    "andi a2, a2, 1\n"
-    "bnez a2, .LBBmemcpy0_52\n"
-".LBBmemcpy0_50:\n"
-    "ret\n"
-".LBBmemcpy0_51:\n"
-    "lbu a4, 0(a1)\n"
-    "lbu a5, 1(a1)\n"
-    "addi a1, a1, 2\n"
-    "addi a6, a3, 2\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "mv a3, a6\n"
-    "andi a2, a2, 1\n"
-    "beqz a2, .LBBmemcpy0_50\n"
-".LBBmemcpy0_52:\n"
-    "lbu a1, 0(a1)\n"
-    "sb a1, 0(a3)\n"
-    "ret\n"
-    // Jump table (in .rodata), using pushsection/popsection to stay in .text.
-    ".pushsection .rodata,\"a\",@progbits\n"
-    ".p2align 2, 0x0\n"
-".LJTI0_0:\n"
-    ".word .LBBmemcpy0_13\n"   // offset 1: 7 preamble bytes
-    ".word .LBBmemcpy0_35\n"   // offset 2: 6 preamble bytes
-    ".word .LBBmemcpy0_29\n"   // offset 3: 5 preamble bytes
-    ".word .LBBmemcpy0_32\n"   // offset 4: 4 preamble bytes
-    ".word .LBBmemcpy0_26\n"   // offset 5: 3 preamble bytes
-    ".word .LBBmemcpy0_38\n"   // offset 6: 2 preamble bytes
-    ".word .LBBmemcpy0_41\n"   // offset 7: 1 preamble byte
-    ".popsection\n"
-    );
+    if (n == 0) [[unlikely]]
+        return dest;
+
+    // Head: bring the destination up to a word boundary with one masked write.
+    if (const auto phase = reinterpret_cast<uintptr_t>(d) % WORD_SIZE; phase != 0)
+    {
+        const auto head = WORD_SIZE - phase < n ? WORD_SIZE - phase : n;
+        scatter(d, gather(s, head), head);
+        d += head;
+        s += head;
+        n -= head;
+        if (n == 0)
+            return dest;
+    }
+
+    // Middle: whole aligned destination words. The guard skips a copy shorter than a word (a
+    // seventh of the calls) and keeps the out-of-phase branch from loading a word it would not use.
+    const auto words = n / WORD_SIZE;
+    if (words != 0)
+    {
+        auto* dw = reinterpret_cast<word_alias*>(d);
+        if (const auto phase = reinterpret_cast<uintptr_t>(s) % WORD_SIZE; phase == 0)
+        {
+            const auto* sw = reinterpret_cast<const word_alias*>(s);
+            size_t i = 0;
+            for (; i + 4 <= words; i += 4)  // Unrolled, as the replaced assembly's bulk loop was.
+            {
+                dw[i] = sw[i];
+                dw[i + 1] = sw[i + 1];
+                dw[i + 2] = sw[i + 2];
+                dw[i + 3] = sw[i + 3];
+            }
+            for (; i < words; ++i)
+                dw[i] = sw[i];
+        }
+        else
+        {
+            // Source out of phase: read aligned words and re-lane each pair into one output word.
+            // The last iteration reads the word holding the last copied byte, never one beyond.
+            // Left rolled on purpose -- unrolling it 4x measures +0.3% cycles at these sizes.
+            const auto lo = phase * 8;
+            const auto hi = WORD_BITS - lo;
+            const auto* sw = reinterpret_cast<const word_alias*>(s - phase);
+            auto w0 = sw[0];
+            for (size_t i = 0; i < words; ++i)
+            {
+                const auto w1 = sw[i + 1];
+                dw[i] = (w0 >> lo) | (w1 << hi);
+                w0 = w1;
+            }
+
+            // The loop leaves sw[words] in w0, which is the word the tail's gather() would reload.
+            if (const auto rest = n % WORD_SIZE; rest != 0)
+            {
+                auto v = w0 >> lo;
+                if (phase + rest > WORD_SIZE)  // The tail continues into the next source word.
+                    v |= sw[words + 1] << hi;
+                scatter_aligned(d + words * WORD_SIZE, v, rest);
+            }
+            return dest;
+        }
+    }
+
+    // Tail: the partial last word. The destination is word-aligned by now.
+    if (const auto rest = n % WORD_SIZE; rest != 0)
+    {
+        const auto done = words * WORD_SIZE;
+        scatter_aligned(d + done, gather(s + done, rest), rest);
+    }
+    return dest;
 }

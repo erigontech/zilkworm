@@ -98,7 +98,11 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/account_read_honest_test.cpp
     zilk_core/dev/cli/delegation_clearing_storage_test.cpp
     zilk_core/dev/cli/code_store_collision_len_test.cpp
+    prover/guest_hypercube/src/memcpy_test.cpp
   )
+  # Use the same flags as memcpy.cpp.
+  set_source_files_properties(prover/guest_hypercube/src/memcpy_test.cpp PROPERTIES
+      COMPILE_OPTIONS "-fno-builtin;-O3")
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
   # silkworm_core<->types_zz archive cycle globally; --start-group is GNU-ld-only.
   if(APPLE)

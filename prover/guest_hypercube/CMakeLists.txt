@@ -36,11 +36,17 @@ add_executable(z6m_guest
     src/memmove.cpp
 )
 
+# -fno-builtin: the copy loops must not become memcpy/memmove calls, which -Wl,--wrap makes recurse.
+# -O3: these two are the guest's hot path whatever the build type is set to.
+set_source_files_properties(src/memcpy.cpp src/memmove.cpp PROPERTIES
+    COMPILE_OPTIONS "-fno-builtin;-O3")
+
 target_include_directories(z6m_guest PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/include"
     "${Z6M_ROOT}/third_party/evmone/lib"
     "${Z6M_ROOT}/third_party/evmone/lib/evmone_precompiles"
 )
+
 
 target_link_options(z6m_guest PRIVATE
     -nostdlib
