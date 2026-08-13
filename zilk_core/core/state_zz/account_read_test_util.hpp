@@ -772,6 +772,30 @@ inline void forge_slot_transposition(std::vector<uint8_t>& blob, const evmc::add
     std::swap(slots[mh->index_lookup(addr_key8(a))], slots[mh->index_lookup(addr_key8(b))]);
 }
 
+/// Drops `a`'s HIGHEST-keyed inline storage slot from the serialized pre-state by decrementing
+/// the record's `slot_count` — the cheapest possible witness omission. The inline slots follow
+/// the `Account` POD sorted ascending by key, so the dropped slot is the trailing one and every
+/// other offset in the blob (entry length prefix, following entries, `addr_hashes`) is left
+/// untouched. The account itself stays fully present and reachable, and its `storage_root` is
+/// not edited, so `sanitize()` still rebuilds a cached leaf RLP identical to the pre-state
+/// account-trie value. Returns the dropped slot key, or the zero key if `a` is not
+/// slot-resident in the MPHF (requires no CHD spill, like `forge_slot_transposition`).
+inline evmc::bytes32 forge_drop_highest_slot(std::vector<uint8_t>& blob, const evmc::address& a) {
+    auto* meta = reinterpret_cast<PreStateMeta*>(blob.data());
+    auto* mh = reinterpret_cast<MphfMapHeader*>(blob.data() + meta->prestate_offset);
+    const auto* slots =
+        reinterpret_cast<const uint32_t*>(reinterpret_cast<uint8_t*>(mh) + mh->slot_offsets_offset);
+    const uint32_t off = slots[mh->index_lookup(addr_key8(a))];
+    if (off == 0) return {};
+    auto* acc = reinterpret_cast<Account*>(reinterpret_cast<uint8_t*>(mh) + mh->data_offset + off + 8u);
+    if (!eq_addr20(acc->addr, a.bytes) || acc->slot_count == 0) return {};
+    const auto* slot_base = reinterpret_cast<const Slot*>(acc + 1);
+    const evmc::bytes32 dropped =
+        std::bit_cast<evmc::bytes32>(slot_base[acc->slot_count - 1].key);
+    --acc->slot_count;
+    return dropped;
+}
+
 // ---------------------------------------------------------------------------
 // stdout capture (sys_println writes to std::cout on the host)
 // ---------------------------------------------------------------------------
