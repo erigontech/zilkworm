@@ -242,6 +242,7 @@ class GridMPT {
     nibbles64 search_nibbles_;  // The current key being searched for/inserted
 
     bool last_was_delete_{false};
+    bool last_was_blank_read_{false};
 
     // Node-store lookups go through DirectState::find_node_rlp, which owns
     // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload
@@ -291,6 +292,7 @@ class GridMPT {
         depth_ = 0;
         search_nib_cursor_ = 0;
         last_was_delete_ = false;
+        last_was_blank_read_ = false;
         missing_count_ = 0;
 #ifndef NDEBUG
         failed_ = false;

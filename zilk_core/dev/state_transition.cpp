@@ -550,20 +550,19 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         // Walk pre-state slots even with no SSTORE: binds slot.initial to keccak(key) under pa->storage_root.
         const bool has_pre_slots = !existing_slots.empty();
         const bool has_created = (created_slots != nullptr && !created_slots->empty());
+        const bool has_blank = direct_state.has_blank_slot_read(addr);
         bytes32 storage_root;
 #if USE_HASH_KEY
-        if (has_pre_slots || has_created || rec_count > 0) {
+        if (has_pre_slots || has_created || has_blank || rec_count > 0) {
 #else
-        if (has_pre_slots || has_created) {
+        if (has_pre_slots || has_created || has_blank) {
 #endif
             storage_root = std::bit_cast<bytes32>(pa->storage_root);
+            std::size_t need = existing_slots.size()
+                               + (created_slots != nullptr ? created_slots->size() : 0)
+                               + (has_blank ? direct_state.blank_slots().size() : 0);
 #if USE_HASH_KEY
-            const std::size_t need = existing_slots.size() + rec_count +
-                                     (created_slots != nullptr ? created_slots->size() : 0);
-#else
-            const std::size_t need = existing_slots.size() + (created_slots != nullptr
-                                                                  ? created_slots->size()
-                                                                  : 0);
+            need += rec_count;
 #endif
             zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(need, storage_spill);
             for (const auto& slot : existing_slots) {
@@ -600,6 +599,18 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                 }
             }
 #endif
+
+            if (has_blank) {
+                for (const auto& b : direct_state.blank_slots()) {
+                    if (!zilkworm::eq_addr20(b.addr.bytes, addr.bytes)) continue;
+                    // Continue if already present in created_slots
+                    if (created_slots != nullptr && created_slots->count(b.slot)) continue;
+                    auto& node = storage_updates.emplace_back(keccak_bytes32(b.slot));
+                    // Blank read for read-only assertion
+                    node.buf[0] = 0x80;
+                    node.self_initial_len = 1;
+                }
+            }
             // Raw-key order != keccak(key) order; sort required.
             if (storage_updates.size() > 1) [[likely]] {
                 auto* const data = storage_updates.data();

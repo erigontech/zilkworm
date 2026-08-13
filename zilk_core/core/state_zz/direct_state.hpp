@@ -80,6 +80,11 @@ struct CreatedCodeEntry {
     std::vector<uint8_t> bytes;
 };
 
+struct BlankSlotRead {
+    evmc::address addr;
+    evmc::bytes32 slot;
+};
+
 class DirectState : public BlockState {
   private:
     std::span<uint8_t> prestate_view_;
@@ -95,6 +100,16 @@ class DirectState : public BlockState {
     // materializing an absent record; the observation is logically const.
     mutable FlatHashMap<evmc::address, Account> created_accounts_;
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;
+
+    // Storage slots read while absent from the state (read returns zero)
+    mutable std::vector<BlankSlotRead> blank_slots_;
+
+    [[gnu::always_inline]] inline void record_blank_slot_read(
+        const evmc::address& addr, const evmc::bytes32& key) const noexcept {
+        for (const auto& b : blank_slots_)
+            if (eq_addr20(b.addr.bytes, addr.bytes) && eq_hash32(b.slot.bytes, key.bytes)) return;
+        blank_slots_.push_back(BlankSlotRead{addr, key});
+    }
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
     FlatHashSet<evmc::address> touched_;
@@ -285,6 +300,13 @@ class DirectState : public BlockState {
         return &kv->second;
     }
 #endif
+
+    [[gnu::always_inline]] inline bool has_blank_slot_read(const evmc::address& addr) const noexcept {
+        for (const auto& b : blank_slots_)
+            if (eq_addr20(b.addr.bytes, addr.bytes)) return true;
+        return false;
+    }
+    const std::vector<BlankSlotRead>& blank_slots() const noexcept { return blank_slots_; }
 
     void set_multi_block(bool v) noexcept { multi_block_ = v; }
 
