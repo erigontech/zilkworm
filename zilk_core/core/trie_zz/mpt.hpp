@@ -15,6 +15,7 @@
 #include <evmone_precompiles/keccak.hpp>
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
+#include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
 
@@ -26,10 +27,10 @@ using ::silkworm::Bytes;
 class DirectState;  // node-store lookups go through DirectState::find_node_rlp
 using bytes32 = evmc::bytes32;
 inline bytes32 keccak_bytes(const ByteView x) noexcept {
-    return std::bit_cast<bytes32>(ethash_keccak256(x.data(), x.size()).bytes);
+    return std::bit_cast<bytes32>(silkworm::keccak256(x).bytes);
 }
 inline bytes32 keccak_bytes32(const bytes32& x) noexcept {
-    return std::bit_cast<bytes32>(ethash_keccak256_32(x.bytes));
+    return std::bit_cast<bytes32>(silkworm::keccak256({x.bytes, 32}).bytes);
 }
 }  // namespace zilkworm
 

@@ -254,6 +254,8 @@ int main() {
                        zilkworm::witness::NodeHash> code_map;
     code_map.reserve(code_records.size());
     for (const auto& code : code_records) {
+        // Empty code: guest never looks it up.
+        if (code.empty()) continue;
         ByteView v{code.data(), code.size()};
         code_map.emplace(keccak_view(v), v);
     }

@@ -486,24 +486,6 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
 
     std::vector<mpt::TrieNodeFlat> storage_spill;
 
-    // keccak(slot_key) depends only on key bytes (account- and block-independent),
-    // so entries never go stale. Soft cap bounds memory.
-    static thread_local FlatHashMap<bytes32, bytes32> keccak_cache_map = [] {
-        FlatHashMap<bytes32, bytes32> m;
-        m.reserve(4096);
-        return m;
-    }();
-    if (keccak_cache_map.size() > 16384) [[unlikely]] {
-        keccak_cache_map.clear();
-    }
-    auto keccak_cache = [&](const bytes32& key) [[gnu::always_inline]] -> const bytes32& {
-        auto [it, inserted] = keccak_cache_map.try_emplace(key);
-        if (inserted) [[unlikely]] {
-            it->second = keccak_bytes32(key);
-        }
-        return it->second;
-    };
-
     mpt::GridMPT<true> storage_trie{direct_state, kEmptyRoot};
 
     while (it_existing_hashes != end_it_existing || it_created_hashes != end_created_hashes) {
@@ -570,7 +552,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(need, storage_spill);
             for (const auto& slot : existing_slots) {
                 const auto& key = *reinterpret_cast<const bytes32*>(slot.key);
-                auto& node = storage_updates.emplace_back(keccak_cache(key));
+                auto& node = storage_updates.emplace_back(keccak_bytes32(key));
                 node.self_initial_len = static_cast<uint8_t>(rlp::encode_into_small(
                     node.buf + 0, zeroless_view(ByteView{slot.initial, 32})));
                 if (acc_modified && !zilkworm::eq_hash32(slot.initial, slot.current)) [[unlikely]] {
@@ -581,7 +563,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             }
             if (created_slots != nullptr) {
                 for (const auto& [k, v] : *created_slots) {
-                    auto& node = storage_updates.emplace_back(keccak_cache(k));
+                    auto& node = storage_updates.emplace_back(keccak_bytes32(k));
                     node.current_off = 40;
                     node.current_len = static_cast<uint8_t>(rlp::encode_into_small(
                         node.buf + 40, zeroless_view(ByteView{v.bytes, 32})));
