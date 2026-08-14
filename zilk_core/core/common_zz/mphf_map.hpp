@@ -138,8 +138,7 @@ class MphfMap {
                 uint64_t len; std::memcpy(&len, data_ + off, 8);
                 return std::span<uint8_t>{body, static_cast<size_t>(len)};
             }
-        }
-        if (n_collisions_ > 0) [[unlikely]] {
+        } else if (n_collisions_ > 0) [[unlikely]] {
             const std::span<uint8_t> b = resolve_collision<KeySize, KeyOffset>(k8, key);
             if (!b.empty()) return b;
         }

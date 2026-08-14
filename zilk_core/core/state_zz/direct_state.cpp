@@ -298,7 +298,10 @@ DirectState::DirectState(DirectState&& other) noexcept
 
 evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
                                         const evmc::bytes32& key) const noexcept {
-    if (const auto* pa = find_pre_account_unchecked(addr); pa != nullptr && pa->slot_count > 0) {
+    // Materializing: a storage read must leave the same record an account read
+    // does. Only blob records carry inline slots, so an overlay record (always
+    // slot_count == 0) falls through to overflow_slots_ exactly as before.
+    if (const auto* pa = observe_account_(addr); pa->slot_count > 0) {
         if (pa->deleted) [[unlikely]]
             return {};
         const auto storage_slots = slots_for(*pa);
@@ -319,11 +322,14 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
     return {};
 }
 
-Account* DirectState::find_or_create_pre_account_slow(const evmc::address& addr) {
+// "Not in state" is a materialized record, not a null pointer: the read itself
+// must be provable (non-membership) at root-check time.
+Account* DirectState::materialize_absent_account_(const evmc::address& addr) const {
     Account fresh{};
     std::memcpy(fresh.addr, addr.bytes, 20);
     copy32(fresh.code_hash, kEmptyHash);
     copy32(fresh.storage_root, kEmptyRoot);
+    fresh.deleted = true;
     auto [ins, _] = created_accounts_.emplace(addr, fresh);
     return &ins->second;
 }
@@ -438,19 +444,19 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
 }
 
 intx::uint256 DirectState::get_balance(const evmc::address& addr) const noexcept {
-    const auto* pa = read_account_unchecked(addr);
+    const auto* pa = lookup_account_(addr);
     if (pa == nullptr || pa->deleted) return 0;
     return load_be_u256(pa->balance);
 }
 
 uint64_t DirectState::get_nonce(const evmc::address& addr) const noexcept {
-    const auto* pa = read_account_unchecked(addr);
+    const auto* pa = lookup_account_(addr);
     if (pa == nullptr || pa->deleted) return 0;
     return pa->nonce;
 }
 
 void DirectState::set_balance(const evmc::address& addr, const intx::uint256& value) {
-    auto* pa = find_or_create_pre_account(addr);
+    auto* pa = find_or_create_account(addr);
     revive_if_deleted(addr, *pa);
     bool changed = false;
     if (load_be_u256(pa->balance) != value) {
@@ -466,7 +472,7 @@ void DirectState::set_balance(const evmc::address& addr, const intx::uint256& va
 }
 
 void DirectState::add_to_balance(const evmc::address& addr, const intx::uint256& addend) {
-    auto* pa = find_or_create_pre_account(addr);
+    auto* pa = find_or_create_account(addr);
     revive_if_deleted(addr, *pa);
     const auto cur = load_be_u256(pa->balance);
     bool changed = false;
@@ -483,7 +489,7 @@ void DirectState::add_to_balance(const evmc::address& addr, const intx::uint256&
 }
 
 void DirectState::subtract_from_balance(const evmc::address& addr, const intx::uint256& subtrahend) {
-    auto* pa = find_or_create_pre_account(addr);
+    auto* pa = find_or_create_account(addr);
     revive_if_deleted(addr, *pa);
     const auto cur = load_be_u256(pa->balance);
     bool changed = false;
@@ -500,7 +506,7 @@ void DirectState::subtract_from_balance(const evmc::address& addr, const intx::u
 }
 
 void DirectState::set_nonce(const evmc::address& addr, uint64_t nonce) {
-    auto* pa = find_or_create_pre_account(addr);
+    auto* pa = find_or_create_account(addr);
     revive_if_deleted(addr, *pa);
     bool changed = false;
     if (pa->nonce != nonce) {
@@ -516,7 +522,7 @@ void DirectState::set_nonce(const evmc::address& addr, uint64_t nonce) {
 }
 
 void DirectState::set_code(const evmc::address& addr, ByteView code) {
-    auto* pa = find_or_create_pre_account(addr);
+    auto* pa = find_or_create_account(addr);
     revive_if_deleted(addr, *pa);
 
     if (eip7702::is_code_delegated(code)) {
@@ -569,12 +575,12 @@ void DirectState::destruct(const evmc::address& addr) {
 }
 
 bool DirectState::is_deleted(const evmc::address& addr) const noexcept {
-    const auto* pa = read_account_unchecked(addr);
+    const auto* pa = lookup_account_(addr);
     return pa == nullptr || pa->deleted;
 }
 
 bool DirectState::is_empty_account(const evmc::address& addr) const noexcept {
-    const auto* pa = read_account_unchecked(addr);
+    const auto* pa = lookup_account_(addr);
     if (pa == nullptr || pa->deleted) [[unlikely]]
         return false;
     return pa->nonce == 0 && eq_hash32(pa->code_hash, kEmptyHash.bytes) && load_be_u256(pa->balance) == 0;
@@ -595,7 +601,8 @@ evmc::bytes32 DirectState::account_storage_root(const evmc::address& addr) const
     // values per Yellow-Paper trie semantics.
     std::map<evmc::bytes32, evmc::bytes32> live;
 
-    if (const auto* pa = find_pre_account(addr); pa != nullptr && pa->slot_count > 0) {
+    if (const auto* pa = find_pre_account_unchecked(addr);
+        pa != nullptr && !pa->deleted && pa->slot_count > 0) {
         const auto sl = slots_for(*pa);
         for (uint32_t i = 0; i < pa->slot_count; ++i) {
             const auto k = std::bit_cast<evmc::bytes32>(sl[i].key);
@@ -670,7 +677,7 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
 
 void DirectState::apply_state_diff(const evmone::state::StateDiff& diff) {
     for (const auto& m : diff.modified_accounts) {
-        auto* pa = find_or_create_pre_account(m.addr);
+        auto* pa = find_or_create_account(m.addr);
         revive_if_deleted(m.addr, *pa);
         journal_address_changed(m.addr);
         if (m.code) apply_code_diff(m.addr, *pa, *m.code);

@@ -77,7 +77,9 @@ class DirectState : public BlockState {
     std::span<const AddrHashEntry> addr_hashes_;
     std::span<const BlockHashEntry> block_hashes_;
 
-    FlatHashMap<evmc::address, Account> created_accounts_;
+    // Mutable: read-only accessors memoize "this address was observed" by
+    // materializing an absent record; the observation is logically const.
+    mutable FlatHashMap<evmc::address, Account> created_accounts_;
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
@@ -91,7 +93,16 @@ class DirectState : public BlockState {
     FlatHashSet<evmc::address> changed_addresses_journal_;
     FlatHashMap<evmc::address, FlatHashSet<evmc::bytes32>> changed_storage_journal_;
 
-    Account* find_or_create_pre_account_slow(const evmc::address& addr);
+    [[gnu::always_inline]] inline const Account*
+    lookup_account_(const evmc::address& addr) const noexcept;
+    [[gnu::always_inline]] inline Account*
+    lookup_account_(const evmc::address& addr) noexcept;
+
+    // Never returns nullptr: a total miss leaves a deleted record behind.
+    [[gnu::always_inline]] inline const Account*
+    observe_account_(const evmc::address& addr) const noexcept;
+
+    Account* materialize_absent_account_(const evmc::address& addr) const;
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
     void reserve_block_maps_() noexcept;
 
@@ -115,11 +126,13 @@ class DirectState : public BlockState {
     }
     evmc::bytes32 get_block_hash(BlockNum n) const noexcept;
     [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr) const noexcept {
-        if (const auto* pa = find_pre_account_unchecked(addr); pa != nullptr) {
-            if (pa->deleted) [[unlikely]]
-                return false;
-            if (pa->slot_count > 0) return true;
-        }
+        // Materializing, and overlay-aware: a detached account must not report
+        // "no storage" just because it is missing from the blob map.
+        const Account* pa = observe_account_(addr);
+        if (pa->deleted) [[unlikely]]
+            return false;
+        // Only blob records carry inline slots; overlay records use overflow_slots_.
+        if (pa->slot_count > 0) return true;
         if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end() && !it->second.empty()) return true;
         return false;
     }
@@ -201,19 +214,9 @@ class DirectState : public BlockState {
     }
 
     [[gnu::always_inline]] inline const Account*
-    find_pre_account(const evmc::address& addr) const noexcept;
-    [[gnu::always_inline]] inline Account*
-    find_pre_account(const evmc::address& addr) noexcept;
-
-    [[gnu::always_inline]] inline const Account*
     find_pre_account_unchecked(const evmc::address& addr) const noexcept;
     [[gnu::always_inline]] inline Account*
     find_pre_account_unchecked(const evmc::address& addr) noexcept;
-
-    [[gnu::always_inline]] inline const Account*
-    read_account_unchecked(const evmc::address& addr) const noexcept;
-    [[gnu::always_inline]] inline Account*
-    read_account_unchecked(const evmc::address& addr) noexcept;
 
     [[gnu::always_inline]] inline const Account*
     find_created_account(const evmc::address& addr) const noexcept {
@@ -226,13 +229,6 @@ class DirectState : public BlockState {
         const auto it = created_accounts_.find(addr);
         if (it == created_accounts_.end()) return nullptr;
         return &it->second;
-    }
-
-    [[gnu::always_inline]] inline std::span<const Slot>
-    existing_slots_for(const evmc::address& addr) const noexcept {
-        const auto* pa = find_pre_account(addr);
-        if (pa == nullptr || pa->slot_count == 0) return {};
-        return slots_for(*pa).first(pa->slot_count);
     }
 
     [[gnu::always_inline]] inline const FlatHashMap<evmc::bytes32, evmc::bytes32>*
@@ -268,14 +264,10 @@ class DirectState : public BlockState {
     }
 
     [[gnu::always_inline]] inline Account*
-    find_or_create_pre_account(const evmc::address& addr) {
+    find_or_create_account(const evmc::address& addr) {
         // Unchecked: a deleted blob record is revived in place, never shadowed.
-        if (auto* pa = find_pre_account_unchecked(addr)) return pa;
-        if (!created_accounts_.empty()) [[unlikely]] {
-            if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
-                return &it->second;
-        }
-        return find_or_create_pre_account_slow(addr);
+        if (auto* pa = lookup_account_(addr)) return pa;
+        return materialize_absent_account_(addr);
     }
 
     [[gnu::always_inline]] inline bool
@@ -297,14 +289,6 @@ class DirectState : public BlockState {
 };
 
 [[gnu::always_inline]] inline const Account*
-DirectState::find_pre_account(const evmc::address& addr) const noexcept {
-    const auto* pa = find_pre_account_unchecked(addr);
-    if (pa != nullptr && pa->deleted) [[unlikely]]
-        return nullptr;
-    return pa;
-}
-
-[[gnu::always_inline]] inline const Account*
 DirectState::find_pre_account_unchecked(const evmc::address& addr) const noexcept {
     if (auto b = pre_state_map_.find<20, 0, &addr_key8>(addr.bytes))
         return reinterpret_cast<const Account*>(b->data());
@@ -318,14 +302,6 @@ DirectState::find_pre_account_unchecked(const evmc::address& addr) noexcept {
     return nullptr;
 }
 
-[[gnu::always_inline]] inline Account*
-DirectState::find_pre_account(const evmc::address& addr) noexcept {
-    auto* pa = find_pre_account_unchecked(addr);
-    if (pa != nullptr && pa->deleted) [[unlikely]]
-        return nullptr;
-    return pa;
-}
-
 [[gnu::always_inline]] inline std::optional<ByteView>
 DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
     if (auto b = node_store_map_.find<32, 0, &hash_key8>(node_hash.bytes))
@@ -335,18 +311,9 @@ DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
 
 [[gnu::always_inline]] inline ByteView
 DirectState::read_code(const evmc::address& addr) const noexcept {
-    const Account* pa = find_pre_account_unchecked(addr);
-    if (!pa) {
-        if (!created_accounts_.empty()) [[unlikely]] {
-            if (auto it = created_accounts_.find(addr); it != created_accounts_.end()) {
-                pa = &it->second;
-            } else {
-                return {};
-            }
-        } else {
-            return {};
-        }
-    }
+    // Materializing: system contracts (EIP-4788/2935/7002/7251) reach an account
+    // only through its code, and that read must leave a record all the same.
+    const Account* pa = observe_account_(addr);
     if (pa->deleted) [[unlikely]]
         return {};
 
@@ -380,15 +347,7 @@ DirectState::read_code(const evmc::address& addr) const noexcept {
 }
 
 [[gnu::always_inline]] inline const Account*
-DirectState::read_account(const evmc::address& addr) const noexcept {
-    const auto* pa = read_account_unchecked(addr);
-    if (pa != nullptr && pa->deleted) [[unlikely]]
-        return nullptr;
-    return pa;
-}
-
-[[gnu::always_inline]] inline const Account*
-DirectState::read_account_unchecked(const evmc::address& addr) const noexcept {
+DirectState::lookup_account_(const evmc::address& addr) const noexcept {
     if (const auto* pa = find_pre_account_unchecked(addr)) return pa;
     if (!created_accounts_.empty()) [[unlikely]] {
         if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
@@ -398,15 +357,7 @@ DirectState::read_account_unchecked(const evmc::address& addr) const noexcept {
 }
 
 [[gnu::always_inline]] inline Account*
-DirectState::read_account(const evmc::address& addr) noexcept {
-    auto* pa = read_account_unchecked(addr);
-    if (pa != nullptr && pa->deleted) [[unlikely]]
-        return nullptr;
-    return pa;
-}
-
-[[gnu::always_inline]] inline Account*
-DirectState::read_account_unchecked(const evmc::address& addr) noexcept {
+DirectState::lookup_account_(const evmc::address& addr) noexcept {
     if (auto* pa = find_pre_account_unchecked(addr)) return pa;
     if (!created_accounts_.empty()) [[unlikely]] {
         if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
@@ -415,13 +366,39 @@ DirectState::read_account_unchecked(const evmc::address& addr) noexcept {
     return nullptr;
 }
 
+// The const-callable half of find_or_create_account: records the observation of
+// `addr` without reviving anything, so a read-only access is still provable
+// (non-membership) at root-check time. An existing record — deleted or not — is
+// returned as is.
+[[gnu::always_inline]] inline const Account*
+DirectState::observe_account_(const evmc::address& addr) const noexcept {
+    if (const auto* pa = lookup_account_(addr)) return pa;
+    return materialize_absent_account_(addr);
+}
+
+[[gnu::always_inline]] inline const Account*
+DirectState::read_account(const evmc::address& addr) const noexcept {
+    const auto* pa = lookup_account_(addr);
+    if (pa != nullptr && pa->deleted) [[unlikely]]
+        return nullptr;
+    return pa;
+}
+
+[[gnu::always_inline]] inline Account*
+DirectState::read_account(const evmc::address& addr) noexcept {
+    auto* pa = lookup_account_(addr);
+    if (pa != nullptr && pa->deleted) [[unlikely]]
+        return nullptr;
+    return pa;
+}
+
 class DirectStateView final : public evmone::state::StateView {
   public:
-    explicit DirectStateView(const DirectState& s) noexcept : state_{s} {}
+    explicit DirectStateView(DirectState& s) noexcept : state_{s} {}
 
     std::optional<Account> get_account(const evmc::address& addr) const noexcept override {
-        const auto* pa = state_.read_account(addr);
-        if (pa == nullptr) return std::nullopt;
+        auto* pa = state_.find_or_create_account(addr);
+        if (pa->deleted) return std::nullopt;
         intx::uint256 balance_v;
         std::memcpy(&balance_v, pa->balance, 32);
         return Account{
@@ -442,7 +419,7 @@ class DirectStateView final : public evmone::state::StateView {
     }
 
   private:
-    const DirectState& state_;
+    DirectState& state_;
 };
 
 }  // namespace zilkworm

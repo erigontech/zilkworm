@@ -17,6 +17,7 @@ namespace {
 inline constexpr uint32_t kLambda = 4u;
 inline constexpr uint32_t kMaxDisplacement = 1u << 20;
 inline constexpr uint32_t kMaxSeedRetries = 32u;
+inline constexpr uint32_t kNoKey = UINT32_MAX;  // slot_owner: slot holds no key
 
 // Returns true even with non-empty spill; spilled keys resolve via sidecar.
 bool chd_solve(std::span<const uint64_t> distinct_keys,
@@ -29,8 +30,8 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
                uint32_t max_retries_override,
                uint32_t max_displacement_override) {
     spilled_keys_out.clear();
-    const uint32_t n = static_cast<uint32_t>(distinct_keys.size());
-    if (n == 0) {
+    const uint32_t n_keys = static_cast<uint32_t>(distinct_keys.size());
+    if (n_keys == 0) {
         n_buckets_out = 1;
         displacement_factors_out.assign(1, 0);
         seed_out = 0;
@@ -39,14 +40,16 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
         return true;
     }
 
-    const uint32_t n_buckets = std::max(uint32_t{1}, (n + kLambda - 1) / kLambda);
+    const uint32_t n_buckets = std::max(uint32_t{1}, (n_keys + kLambda - 1) / kLambda);
     n_buckets_out = n_buckets;
 
     std::vector<std::vector<uint32_t>> buckets;
-    std::vector<bool> slot_used;
+    // slot_owner[pos] = key placed at pos, kNoKey when pos is free. Doubles as
+    // the occupancy map the displacement search probes.
+    std::vector<uint32_t> slot_owner;
     std::vector<uint32_t> trial_positions;
 
-    std::vector<uint64_t> z1_cache(n);
+    std::vector<uint64_t> z1_cache(n_keys);
 
     struct Attempt {
         bool set = false;
@@ -63,12 +66,12 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
         const uint64_t seed_factor = seed_try * kMphfGoldenRatio;
 
         buckets.assign(n_buckets, {});
-        for (uint32_t i = 0; i < n; ++i) {
-            const uint64_t z1 = distinct_keys[i] + seed_factor;
-            z1_cache[i] = z1;
+        for (uint32_t key_idx = 0; key_idx < n_keys; ++key_idx) {
+            const uint64_t z1 = distinct_keys[key_idx] + seed_factor;
+            z1_cache[key_idx] = z1;
             const uint64_t h1 = mix64_body(z1);
             const uint32_t b  = fast_mod_u32(static_cast<uint32_t>(h1), n_buckets);
-            buckets[b].push_back(i);
+            buckets[b].push_back(key_idx);
         }
 
         std::vector<uint32_t> order(n_buckets);
@@ -77,9 +80,9 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
         std::stable_sort(order.begin(), order.end(),
                          [&](uint32_t a, uint32_t b) { return buckets[a].size() > buckets[b].size(); });
 
-        slot_used.assign(n, false);
+        slot_owner.assign(n_keys, kNoKey);
         std::vector<uint64_t> displacement_factors(n_buckets, 0);
-        std::vector<uint32_t> idx_for_key(n, UINT32_MAX);
+        std::vector<uint32_t> idx_for_key(n_keys, UINT32_MAX);
         std::vector<uint32_t> spilled_this_try;
 
         for (uint32_t bi : order) {
@@ -99,8 +102,8 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
                 bool collision = false;
                 for (uint32_t key_idx : bucket) {
                     const uint64_t h2  = mix64_body(z1_cache[key_idx] + d_factor);
-                    const uint32_t pos = fast_mod_u32(static_cast<uint32_t>(h2), n);
-                    if (slot_used[pos]) { collision = true; break; }
+                    const uint32_t pos = fast_mod_u32(static_cast<uint32_t>(h2), n_keys);
+                    if (slot_owner[pos] != kNoKey) { collision = true; break; }
                     bool dup = false;
                     for (uint32_t p : trial_positions) {
                         if (p == pos) { dup = true; break; }
@@ -110,7 +113,7 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
                 }
                 if (!collision) {
                     for (size_t pi = 0; pi < trial_positions.size(); ++pi) {
-                        slot_used[trial_positions[pi]] = true;
+                        slot_owner[trial_positions[pi]] = bucket[pi];   // key_idx assigned to the new absolute pos after mix
                         idx_for_key[bucket[pi]] = trial_positions[pi];
                     }
                     displacement_factors[bi] = d_factor;
@@ -122,12 +125,32 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
                 // Bucket overflow: spill its keys; runtime resolves via sidecar memcmp fallback.
                 displacement_factors[bi] = 0;
                 for (uint32_t key_idx : bucket) {
-                    const uint64_t h2 = mix64_body(z1_cache[key_idx]);  // df=0
-                    const uint32_t pos = fast_mod_u32(static_cast<uint32_t>(h2), n);
+                    const uint64_t h2 = mix64_body(z1_cache[key_idx]);  // d_factor=0
+                    const uint32_t pos = fast_mod_u32(static_cast<uint32_t>(h2), n_keys);
                     idx_for_key[key_idx] = pos;
                     spilled_this_try.push_back(key_idx);
                 }
             }
+        }
+
+        // Sidecar invariant: slot_offsets[index_lookup(key)] == 0 for every key
+        // whose body lives in the sidecar.
+        //
+        // A spilled bucket keeps displacement factor 0, so its keys probe the
+        // very index index_lookup() reproduces at runtime — an index a placed
+        // key may already own. MphfMap::find() treats an occupied slot whose
+        // embedded key fails memcmp as a definitive miss and consults the
+        // sidecar only from an empty slot, so such a spilled key would be
+        // unreachable. Spill the slot's owner as well: finalize() writes no
+        // slot for a sidecar body, so the slot stays 0 and both keys resolve
+        // through the sidecar. Placement is injective (slot_owner rejects
+        // taken positions), so clearing the owner frees the index for good.
+        for (size_t si = 0; si < spilled_this_try.size(); ++si) {
+            const uint32_t pos = idx_for_key[spilled_this_try[si]];
+            const uint32_t owner = slot_owner[pos];
+            if (owner == kNoKey) continue;  // free slot, or its owner already co-spilled
+            slot_owner[pos] = kNoKey;
+            spilled_this_try.push_back(owner);
         }
 
         if (spilled_this_try.empty()) {
@@ -152,7 +175,7 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
     if (best.set) {
         sys_println(
             "MphfBuilder: CHD exhausted retry budget, spilling keys into "
-            "collision sidecar (best of 32 attempts)");
+            "collision sidecar (best seed attempt)");
         displacement_factors_out = std::move(best.displacement_factors);
         idx_for_key_out = std::move(best.idx_for_key);
         seed_out = best.seed_try;

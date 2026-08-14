@@ -85,7 +85,9 @@ std::vector<uint8_t> build_flat_bundle(
     hdr->network_off           = static_cast<uint32_t>(network_off);
     hdr->network_size          = static_cast<uint32_t>(network.size());
 
-    std::memcpy(out.data() + genesis_off, genesis_rlp.data(), genesis_rlp.size());
+    if (!genesis_rlp.empty()) {
+        std::memcpy(out.data() + genesis_off, genesis_rlp.data(), genesis_rlp.size());
+    }
 
     const uint64_t n_blocks = static_cast<uint64_t>(block_rlps.size());
     std::memcpy(out.data() + blocks_off, &n_blocks, sizeof(uint64_t));
@@ -100,9 +102,19 @@ std::vector<uint8_t> build_flat_bundle(
         std::memcpy(out.data() + cursor, block_flags.data(), block_flags.size());
     }
 
-    std::memcpy(out.data() + anc_off,    ancestors_rlp.data(),     ancestors_rlp.size());
-    std::memcpy(out.data() + direct_off, direct_state_blob.data(), direct_state_blob.size());
-    std::memcpy(out.data() + node_off,   node_store_blob.data(),   node_store_blob.size());
+    // Skip zero-length sections: an empty ByteView/vector has a null data()
+    // pointer, and memcpy is declared nonnull — passing null (even with size 0)
+    // is UB that a plain -O0/-O2 build no-ops but a UBSan Debug build flags/aborts.
+    // Copying nothing leaves `out` (zero-initialised) byte-identical either way.
+    if (!ancestors_rlp.empty()) {
+        std::memcpy(out.data() + anc_off, ancestors_rlp.data(), ancestors_rlp.size());
+    }
+    if (!direct_state_blob.empty()) {
+        std::memcpy(out.data() + direct_off, direct_state_blob.data(), direct_state_blob.size());
+    }
+    if (!node_store_blob.empty()) {
+        std::memcpy(out.data() + node_off, node_store_blob.data(), node_store_blob.size());
+    }
     if (!network.empty()) {
         std::memcpy(out.data() + network_off, network.data(), network.size());
     }

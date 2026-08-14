@@ -235,15 +235,19 @@ they arise for different reasons.
    the 64-bit fingerprint, so it can only land both keys at one index. One of
    them therefore spills into the `MphfCollisionEntry[]` sidecar. Resolution at
    read time: `MphfMap::find` consults the singleton slot first (memcmp the full
-   key against the key bytes embedded in the body), and on a mismatch walks the
-   sidecar (binary-search by `.key`, then memcmp the full key inside each
-   equal-key entry to disambiguate).
+   key against the key bytes embedded in the body); an *empty* slot dispatches
+   to the sidecar (binary-search by `.key`, then memcmp the full key inside each
+   equal-key entry to disambiguate), while an occupied slot whose embedded key
+   fails the memcmp is a definitive miss (§2.4).
 
 2. **CHD bucket overflow inside the MphfMap builder** — orthogonal to (1).
    Even when every input key has a *unique* fingerprint, CHD may exhaust its
    displacement budget for a particular bucket and "spill" all of that bucket's
-   keys into the same `MphfCollisionEntry[]` sidecar. The sidecar serves both
-   populations interchangeably — the lookup path does not distinguish them.
+   keys into the same `MphfCollisionEntry[]` sidecar. A spilled key's read-time
+   index may already be owned by a key CHD did place, so the builder evicts that
+   owner to the sidecar as well, keeping the shared slot empty (§2.5). The
+   sidecar serves both populations interchangeably — the lookup path does not
+   distinguish them.
 
 See §2.4 for the lookup mechanics, §2.5 for the builder mechanics, and the
 worked example in §2.5 for how each route resolves.
@@ -265,7 +269,8 @@ is self-consistent. The checks it performs (in the order the function runs them)
    hash belongs to the claimed *identity* — that is exactly the gap this binding
    closes. Without it, a witness could hand the EVM the storage of address A
    while claiming it belongs to address B. (Storage slot *keys* are hashed and
-   bound on the read path inside `check_root`, not in `sanitize()`.)
+   bound on the read path inside `check_root`, not in `sanitize()` — and the
+   same is true of MPHF *routing* for account reads; see check 4.)
 
 2. **`addr_hashes` 1-to-1 coverage sweep.** It walks the `addr_hashes` array
    (sorted by `keccak256(addr)`) and requires it strictly increasing (no
@@ -273,9 +278,12 @@ is self-consistent. The checks it performs (in the order the function runs them)
    entry's `entry_offset` resolving to an `Account` whose 20-byte address
    matches, while re-checking `keccak256(addr) == addr_hash` per entry. The
    "exactly once" guarantee rides on the `modified` scratch flag: the body walk
-   stamps `modified = true` on every prestate account, the sweep clears it, and
-   a final pass rejects if any account is still `modified` (never named by
-   `addr_hashes`). Gaps or duplicates fail the sweep.
+   runs first and stamps `modified = true` on every prestate account, the sweep
+   clears it per named entry, and a second body walk rejects if any account is
+   still `modified` (never named by `addr_hashes`). Gaps or duplicates fail the
+   sweep. This proves the `addr_hashes` ↔ walked-body bijection, but it
+   deliberately does **not** constrain the account *read path*, `find(addr)`;
+   see check 4.
 
 3. **Per-Account slot-extent bound.** This bound is enforced at `DirectState`
    construction (via `validate_prestate_layout` / `validate_or_abort`), before
@@ -292,9 +300,111 @@ is self-consistent. The checks it performs (in the order the function runs them)
    i.e. `off + 8 + sizeof(Account) + slot_count*sizeof(Slot) <= data_size`. This
    stops a forged `slot_count` from steering reads out of bounds.
 
+4. **MPHF routing.** This one is enforced at root-check time inside
+   `check_root`, not in `sanitize()`, but it belongs to the same threat model:
+   checks 1 and 2 prove that `addr_hashes` and the walked bodies are in
+   bijection, yet neither constrains where `find(addr)` actually lands — a
+   forged `MphfMapHeader` (e.g. a transposed `slot_offsets[]`) can make
+   `find(addr)` miss an account that the body walk and `addr_hashes` both
+   cover. The enforcement rides on the account read path never returning
+   "nothing". `DirectState::find_or_create_account(addr)` is the single
+   creation-capable lookup: the MPHF blob map first, then the
+   `created_accounts_` overlay, and on a *total* miss it *materializes* a
+   record in `created_accounts_` with `deleted = true`
+   (`materialize_absent_account_`, the cold path). "Account does not exist" is
+   thus a data property (`deleted`) on an always-present record, not a null
+   pointer. `DirectStateView::get_account` (the evmone `StateView` boundary)
+   routes through it and returns `std::nullopt` only when the record says
+   `deleted`, so EVM-visible semantics are unchanged — but `DirectState` now
+   owns a record for every address the EVM ever reads, from the first read.
+
+   The rule is **total miss only**. If either lookup finds a record, that
+   record is returned as it stands, `deleted` included. An honest selfdestruct
+   followed by a later read of the same account in the same block must *not*
+   materialize a twin: `keccak256(addr)` for that account already sits in
+   `addr_hashes`, so a twin would trip the clash check below on a perfectly
+   honest block. (Reviving a deleted record is a separate, explicit step —
+   `revive_if_deleted` — taken only by the mutating accessors.)
+
+   `read_code`, `read_storage` and `has_storage` observe the same way, through
+   `observe_account_` — the const-callable half of `find_or_create_account`,
+   and the reason `created_accounts_` is declared `mutable`. Their return
+   values are unchanged: a `deleted` record yields the same empty code, zero
+   slot value and `false` that a missing record used to. Code reads matter here
+   in their own right, because the system contracts (EIP-4788, EIP-2935,
+   EIP-7002, EIP-7251) reach an account only through its code, so a code read
+   may be the only read an account gets.
+
+   `read_account`, `get_balance`, `get_nonce`, `is_deleted` and
+   `is_empty_account` deliberately do **not** materialize; they resolve through
+   the plain `lookup_account_` and still answer "absent" and "deleted"
+   identically. `check_root_new_block` and `state_root_hash` iterate
+   `created_accounts_` while calling them, and an insert mid-iteration would
+   invalidate the iterator.
+
+   `check_root` then merges the pre-state `addr_hashes` with the created-set
+   hashes and rejects on any overlap ("Created and existing hashes clash") —
+   inside the merge loop, before it computes or compares a root at all. So a
+   routing forgery against an account named by `addr_hashes` is caught even
+   when the victim is only ever *read*: the misrouted read materializes an
+   overlay record whose `keccak256(addr)` collides with the `addr_hashes`
+   entry. Before materialization, only *written* accounts left such a trace.
+
+   `created_accounts_` is routinely non-empty on an honest block. Every
+   precompile the EVM touches lands there — `Host::access_account` calls
+   `get_or_insert` before its `is_precompile` early-out — as does every
+   genuinely new EOA or contract. A populated overlay is therefore never itself
+   a rejection signal; the hash clash is the only discriminator.
+
 Together these bind every byte of state the EVM will read to a verified
 identity and hash, so a malformed or adversarial witness cannot smuggle in
 mismatched accounts, code, or slots and still pass the post-state root check.
+
+Three gaps remain open, and the checks above should not be read as covering
+them:
+
+- **Pure omission.** An account whose leaf exists in the real pre-trie but
+  which is absent from *both* the addr-map and `addr_hashes`, and which the
+  block only reads, is not caught: the materialized `deleted = true` record
+  clashes with nothing and emits no trie update. A non-membership probe against
+  the witness trie was prototyped and removed — real witnesses carry no
+  exclusion-proof nodes for absent-account reads, so there is nothing to prove
+  non-membership against.
+- **Fabricated accounts.** An account present in the addr-map and `addr_hashes`
+  but absent from the real pre-trie is not rejected by a read check. Its
+  read-only update reaches a point in the trie that proves its key absent, and
+  `calc_root_from_updates` inserts a leaf there rather than failing (§3.1).
+- **`check_root_new_block`.** Every block after a bundle's first (§3.1) carries
+  no clash guard at all, and decides leaf inclusion via `is_deleted`, which
+  resolves through `find()` — so it inherits whatever routing the blob's MPHF
+  header dictates.
+
+Both directions of the account-read behaviour are pinned by tests in the
+`zilkworm.tests` target, built on the shared harness
+`zilk_core/core/state_zz/account_read_test_util.hpp`. The harness assembles a
+prestate blob and matching node store, signs real transactions, executes the
+block twice — once honestly, once against a forged bundle — reseals the forged
+header over the *spoofed* execution's `gas_used`, `receipts_root`,
+`logs_bloom` and `state_root`, and captures the guest's stdout so a test can
+assert which check fired:
+
+- `account_read_spoof_test.cpp` forges a bundle by transposing two
+  `slot_offsets` entries and nothing else, then drives eight reads of the
+  victim account through the EVM: `BALANCE`, `EXTCODESIZE`, `EXTCODEHASH`,
+  `EXTCODECOPY`, `STATICCALL`, `DELEGATECALL`, a value-bearing `CALL`, and a
+  `BALANCE` whose result is discarded. Because the header is resealed over the
+  spoofed run, the bundle would verify were it not for the clash check; every
+  case asserts the run is rejected on the clash message specifically, with no
+  "New Root" line ever emitted. The discarded-result case is the sharpest: the
+  forged block is byte-identical to the honest one — same gas, same receipts
+  root, same state root — so nothing but the overlay record distinguishes them.
+- `account_read_honest_test.cpp` pins the other direction, that the check does
+  not over-trigger: an honest read of an address absent from the witness, a
+  block whose only overlay entries are touched precompiles, a control case
+  where a witness-resident read materializes nothing at all, code and storage
+  reads of absent accounts, a selfdestruct followed by a read of the same
+  account (which must leave the overlay empty), and a read of an absent address
+  followed by a `CREATE2` that revives that record in place.
 
 ### 2.4 MphfMap: the minimal perfect hash map
 
@@ -452,15 +562,14 @@ MphfMap::find(const uint8_t (&key)[KeySize]) const noexcept {
     const uint64_t k8  = shorten_key(key);          // 64-bit fingerprint
     const uint32_t idx = index_lookup(k8);
     const uint32_t off = slot_offsets_[idx];
-    if (off != 0) {                                 // singleton slot occupied
+    if (off != 0) [[likely]] {                      // singleton slot occupied
         uint8_t* body = data_ + off + 8u;
-        if (std::memcmp(body + KeyOffset, key, KeySize) == 0) {
+        if (std::memcmp(body + KeyOffset, key, KeySize) == 0) [[likely]] {
             uint64_t len; std::memcpy(&len, data_ + off, 8);
-            return std::span<uint8_t>{body, (size_t)len};
+            return std::span<uint8_t>{body, static_cast<size_t>(len)};
         }
-    }
-    if (n_collisions_ > 0) {                         // sidecar fallback
-        auto b = resolve_collision<KeySize, KeyOffset>(k8, key);
+    } else if (n_collisions_ > 0) [[unlikely]] {    // empty slot → sidecar
+        const std::span<uint8_t> b = resolve_collision<KeySize, KeyOffset>(k8, key);
         if (!b.empty()) return b;
     }
     return std::nullopt;
@@ -469,8 +578,16 @@ MphfMap::find(const uint8_t (&key)[KeySize]) const noexcept {
 
 The `slot_offsets[idx] == 0` value is a **sentinel**: it means "no singleton
 body lives at this index" (recall `data[]` reserves its first 8 bytes precisely
-so a real offset can never be `0`). A zero — or a non-zero slot whose embedded
-key fails the memcmp — dispatches to the sidecar.
+so a real offset can never be `0`). Only a zero slot dispatches to the sidecar;
+a non-zero slot whose embedded key fails the memcmp is a **definitive miss**
+(`std::nullopt`). Absent keys therefore resolve in at most one memcmp, which is
+the common case now that every EVM account read probes the map (§2.3.2).
+
+That is sound only because the builder upholds the matching invariant: **every
+key whose body lives in the sidecar has `slot_offsets[index_lookup(key)] == 0`**.
+Since `find` never reaches the sidecar from an occupied slot, a sidecar key
+whose index were owned by another key's singleton body would be unreachable.
+§2.5 describes how the builder guarantees the slot is empty.
 
 `resolve_collision` (a private member) binary-searches `collisions_` by `.key`,
 then walks the contiguous equal-key cluster, memcmp'ing the full key inside each
@@ -523,8 +640,8 @@ inline uint64_t addr_key8(const uint8_t (&a)[20]) noexcept {
 ```
 
 `for_each<KeySize, KeyOffset>(cb)` iterates every singleton slot (skipping the
-`0` sentinels). It is used by `sanitize()` to sweep the code-store, node-store,
-and addr-map.
+`0` sentinels) and then every sidecar entry, so it visits all bodies. It is
+used by `sanitize()` to sweep the code-store, node-store, and addr-map.
 
 ### 2.5 MphfBuilder: how the sidecar gets populated
 
@@ -540,19 +657,22 @@ same two notions of collision from §2.3.1:
    new one is appended too. This is how distinct-identity, same-fingerprint
    collisions wind up in the sidecar.
 
-2. **CHD spill in `finalize()` (bucket overflow).** `chd_solve` may fail to
-   place every key in its bucket within the displacement budget;
-   bucket-overflowing keys land in `spilled_keys_out` with their index left
-   pointing at a possibly already-used slot. `finalize()` then moves each
-   spilled key's body into `collision_keys_` / `collision_bodies_` exactly like
-   an `add`-time duplicate.
+2. **CHD spill in `chd_solve` (bucket overflow).** `chd_solve` may fail to place
+   every key of a bucket within the displacement budget. It then leaves that
+   bucket's displacement factor at `0` and spills all of the bucket's keys, so
+   their read-time index is whatever `index_lookup` computes with `df = 0` — an
+   index some already-placed key may own. `finalize()` moves each spilled key's
+   body into `collision_keys_` / `collision_bodies_` exactly like an `add`-time
+   duplicate.
 
 After both routes have populated the collision arrays, `finalize()`:
 
 - Writes singleton bodies into `data[]` and sets `slot_offsets[idx] = data_cur`
-  for each non-empty entry. **Spilled keys leave their slot zero-init**, even
-  when the index collides with a non-spilled key's singleton slot — overwriting
-  with `0` would clobber the singleton.
+  for each non-empty entry. **Sidecar keys leave their slot zero-init**: their
+  map entry survives with an emptied body, the loop skips empty bodies, and the
+  blob is zero-filled to begin with, so the slot reads back as a literal `0`.
+  `finalize()` never has to overwrite a slot *with* `0`, because no placed key
+  owns that index by the time it runs (see below).
 - Appends every collision body to `data[]`, recording `offset` and `len` back
   into the corresponding `MphfCollisionEntry`.
 - Sorts `collision_keys_` by `.key` so the read-side `lower_bound` works.
@@ -564,6 +684,46 @@ walks linearly while memcmp'ing the full identity inside each body.
 Each body the converters write is `FlatKv::encode(full_key, payload)` — the full
 verify-key followed by the payload — so the read-path memcmp (at `KeyOffset` 0)
 always has the full key to compare.
+
+#### The sidecar invariant
+
+The read path reaches the sidecar only from an empty slot (§2.4), so the builder
+owes it:
+
+> every key whose body lives in the sidecar has
+> `slot_offsets[index_lookup(key)] == 0`.
+
+The `add()` route gets this for free. A duplicate-fingerprint key remains a key
+of the map — its entry survives with an emptied body, CHD still places it,
+placement is injective so no other key can claim its index, and `finalize()`
+writes no slot for an empty body. The slot stays `0`.
+
+The CHD-spill route has to work for it, because a spilled key's index is
+computed with `df = 0` and may already be owned. `chd_solve` therefore tracks
+slot ownership explicitly in `slot_owner` — the same occupancy map its
+displacement search probes — and, at the end of each seed attempt, walks the
+spilled list and **co-spills**: for each spilled key it looks up the owner of
+the index that key will probe, and if there is one, clears the slot and appends
+that owner to the spilled list as well. Both keys then resolve through the
+sidecar, and the slot they share stays `0`.
+
+The pass runs after the whole placement loop, so it sees the final layout and no
+later bucket can re-occupy a slot it cleared. It cannot cascade: an evicted
+owner's own probe index *is* the slot just cleared, so by the time the walk
+reaches that owner the slot is already free and the walk stops there. Each slot
+therefore clears at most once, and the sidecar grows by at most one entry per
+originally spilled key. Co-spilling happens before the attempt is scored against
+the best one so far, so the seed search still minimises the *total* sidecar size.
+
+Nothing about the wire format changes. `n_keys` still counts distinct keys —
+including those whose bodies live in the sidecar — and still sizes both
+`slot_offsets` and the `index_lookup` codomain; the only observable difference is
+a few more zero entries in `slot_offsets`, which the read path already handles.
+The host-side `entry_offset_for_addr` probe in `direct_state_builder.cpp`, which
+resolves each `AddrHashEntry.entry_offset` while the blob is being assembled,
+still scans the sidecar after an occupied-slot mismatch; under this invariant
+that extra scan can never match, so it agrees with `MphfMap::find` by
+construction.
 
 #### Worked example
 
@@ -582,7 +742,9 @@ place `D`'s bucket:
 After `finalize()`:
 
 - `slot_offsets[idx(A)]` → A's body. `idx(B)` is now zero (B was evicted when C
-  arrived). `idx(D)` is left zero (spilled).
+  arrived). `idx(D)` is left zero (spilled). Had `idx(D)` landed on A's slot
+  instead, `chd_solve` would have co-spilled A too, clearing that slot so both
+  keys resolve through the sidecar.
 - The sidecar holds, sorted by `.key`: `(0x22…, B)`, `(0x22…, C)`, `(0x33…, D)`.
   Note B and C form one equal-key cluster; D is a lone-key cluster that only
   exists because of bucket overflow, not a fingerprint clash.
@@ -732,13 +894,17 @@ trie and every touched storage trie *from scratch* out of the witness
 `node_store`. The flow:
 
 1. Merge the pre-state `addr_hashes` with any newly created accounts into one
-   sorted-by-`addr_hash` sequence.
+   sorted-by-`addr_hash` sequence, rejecting outright — before any root is
+   computed — if the two sets intersect ("Created and existing hashes clash").
+   This is the disjointness check that backstops MPHF routing (§2.3.2, check 4).
 2. For each account, walk its pre-state and newly created slots, caching
    `keccak256(slot_key)` and encoding initial/current values, then drive
    `GridMPT<true>` to recompute that account's storage root over the witness
    nodes (`reset(storage_root)` → `calc_root_from_updates()`).
 3. Re-encode each account leaf (`addr_hash` + account RLP, now carrying the new
-   storage root) into `acc_updates`.
+   storage root) into `acc_updates`. Read-only pre-state accounts
+   (`modified == false`) contribute a check node instead: `initial` set to the
+   cached leaf RLP, `current` left empty.
 4. Drive a `GridMPT` over the account trie (the recompute path constructs it as
    `GridMPT<true>` — `state_transition.cpp` declares `mpt::GridMPT<true>
    acc_trie(direct_state, prev_root)`), seeding from the previous block's
@@ -751,6 +917,18 @@ account layer and every touched storage trie. It is also the *trust anchor* — 
 starts from a `state_root` the parent header committed to and rebuilds forward
 using only nodes whose `keccak256(node_rlp)` `sanitize()` already verified, so a
 correct result proves the post-state without trusting the witness's structure.
+
+An update with empty `current` is a **read check**. When its path resolves to a
+leaf, `calc_root_from_updates` requires that leaf's value to equal `initial`
+("Pre value mismatch in existing leaf") and then stops without inserting
+anything, which binds the pre-state bytes the EVM read to the trie the parent
+header committed to. It does not bind *existence*: if the path instead reaches a
+point that proves the key absent — the empty-trie seed, a branch's nil child, an
+extension divergence, a leaf divergence — the update inserts a leaf there rather
+than failing, which is the fabricated-account gap listed in §2.3.2. Deletions
+(`current = {0x80}`) and genuine inserts (non-empty `current`) follow their own
+paths. All of this lives in the shared `GridMPT` template body, so it applies
+identically to the account layer and every touched storage trie.
 
 **Blocks 1+ — incremental rebuild via HashBuilder (`check_root_new_block`).**
 After block 0, every account already carries a cached leaf RLP
@@ -771,7 +949,10 @@ This works because each account leaf already embeds its current storage root,
 and only accounts the EVM actually changed need their leaf re-encoded; the
 account layer is then re-hashed directly from leaves. It trades the full witness
 walk for a single leaf-to-root pass, which is why it is markedly faster than
-block 0's recompute.
+block 0's recompute. It also performs **no read checks and no clash guard**: the
+leaf rebuild trusts every cached leaf, and it never compares the created set
+against `addr_hashes`. Both guarantees therefore hold only for a bundle's first
+root check (§2.3.2 lists this as an open gap).
 
 | Aspect | Block 0 | Blocks 1+ |
 |---|---|---|
@@ -779,6 +960,7 @@ block 0's recompute.
 | Storage tries | recomputed via witness `node_store` | reused via cached `acc_rlp_buf` |
 | Account trie | `GridMPT` unfold/fold from prev `state_root` | `HashBuilder.add_leaf()` from leaves |
 | Node-store use | heavy (storage + account layers) | none |
+| Read / clash checks | pre-value check on read-only leaves; created vs existing hash clash rejected | none |
 | Relative cost | slower (full witness walk) | faster (leaf hash only) |
 
 ### 3.2 EJSN path
@@ -958,11 +1140,14 @@ rot). This table is the file-level index:
 | `PreStateMeta`, `Slot`, `AddrHashEntry`, `BlockHashEntry` | `zilk_core/core/state_zz/pre_state.hpp` |
 | `Account` (POD + scratch fields) | `zilk_core/core/types_zz/account.hpp` |
 | `DirectState`, `sanitize`, `find_node_rlp`, `validate_prestate_layout` | `zilk_core/core/state_zz/direct_state.{hpp,cpp}` |
+| Never-null account reads: `find_or_create_account`, `observe_account_`, `materialize_absent_account_`, `DirectStateView::get_account` | `zilk_core/core/state_zz/direct_state.{hpp,cpp}` |
 | `MphfMapHeader` + `MphfMap` class + `index_lookup` / `find` / `resolve_collision` | `zilk_core/core/common_zz/mphf_map.hpp` |
-| `MphfBuilder` (host-side construction) | `zilk_core/core/common_zz/mphf_builder.{hpp,cpp}` |
+| `MphfBuilder` (host-side construction), `chd_solve` co-spilling + the sidecar invariant | `zilk_core/core/common_zz/mphf_builder.{hpp,cpp}` |
+| Blob assembly, `entry_offset_for_addr` two-stage probe | `zilk_core/core/state_zz/direct_state_builder.cpp` |
 | `addr_key8` / `hash_key8` | `zilk_core/core/state_zz/direct_state.hpp` |
-| `GridMPT` (storage/account trie recompute) | `GridMPT::unfold_slot` — `zilk_core/core/trie_zz/fold_unfold.hpp`; `GridMPT::init_from_root` — `zilk_core/core/trie_zz/grid_mpt.cpp` |
+| `GridMPT` (storage/account trie recompute) | `GridMPT::unfold_slot` — `zilk_core/core/trie_zz/fold_unfold.hpp`; `GridMPT::init_from_root`, `GridMPT::calc_root_from_updates` — `zilk_core/core/trie_zz/grid_mpt.cpp` |
 | `StateTransition::run` dispatch, `run_one_bundle`, `check_root` / `check_root_new_block` | `zilk_core/dev/state_transition.{hpp,cpp}` |
+| Account-read spoofing / honest-block tests + shared harness | `zilk_core/dev/cli/account_read_spoof_test.cpp`, `zilk_core/dev/cli/account_read_honest_test.cpp`, `zilk_core/core/state_zz/account_read_test_util.hpp` |
 | Native runner | `zilk_core/dev/cli/runner.cpp` |
 | SP1 guest entry | `prover/guest_hypercube/src/main.cpp` |
 | SP1 host stdin builders | `prover/prover_hypercube/src/stdin_builders.rs` |

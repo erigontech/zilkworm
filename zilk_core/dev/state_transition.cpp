@@ -476,11 +476,19 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     mpt::GridMPT<true> storage_trie{direct_state, kEmptyRoot};
 
     while (it_existing_hashes != end_it_existing || it_created_hashes != end_created_hashes) {
-        // Blob and created addr sets are disjoint.
+        // Blob and created addr sets should be disjoint.
+        int cur_cmp = 0;
+        if (it_existing_hashes != end_it_existing && it_created_hashes != end_created_hashes) {
+            cur_cmp = std::memcmp(it_existing_hashes->addr_hash, it_created_hashes->addr_hash, 32);
+            if (cur_cmp == 0) [[unlikely]] {
+                sys_println("Created and existing hashes clash");
+                return false;
+            }
+        }
         const bool has_existing =
             it_created_hashes == end_created_hashes ? true
             : it_existing_hashes == end_it_existing ? false
-                                                    : std::memcmp(it_existing_hashes->addr_hash, it_created_hashes->addr_hash, 32) < 0;
+                                                    : cur_cmp < 0;
         const auto& addr = *reinterpret_cast<const evmc::address*>(
             has_existing ? it_existing_hashes->addr : it_created_hashes->addr);
 
