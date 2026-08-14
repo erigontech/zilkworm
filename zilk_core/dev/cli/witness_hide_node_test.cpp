@@ -18,23 +18,22 @@
 // Setup mirrors a real trie: account W is witnessed, account A's leaf is in
 // the node store but its preimage is missing from the keys (the USE_HASH_KEY
 // witness bug); the storage twin hides slot S2 behind C's storage_root.
-// MissingAccountNode_* keeps the original hiding (leaf_A absent): flag-on halts.
+// The "missing account node" case keeps the original hiding (leaf_A absent): flag-on halts.
 //
 // Flag-on every case passes; flag-off the G-cases FAIL (the documented
-// soundness hole). Deliberately not registered with ctest.
+// soundness hole).
 //
-// Standalone test (no gtest); exit code = failure count, like mphf_map_test.cpp.
+// Catch2 test cases of the zilkworm.tests target, like mphf_map_test.cpp.
 
 #include <array>
 #include <bit>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <print>
-#include <source_location>
 #include <span>
 #include <vector>
 
+#include <catch2/catch_test_macros.hpp>
 #include <evmc/evmc.hpp>
 
 #include <zilk_core/core/common_zz/mphf_builder.hpp>
@@ -59,18 +58,6 @@ using silkworm::ByteView;
 using silkworm::Bytes;
 
 namespace {
-
-int g_failures = 0;
-
-void expect_true(bool cond, const char* msg,
-                 std::source_location loc = std::source_location::current()) {
-    if (!cond) {
-        std::println(stderr, "[FAIL] {}:{}  {}", loc.file_name(), loc.line(), msg);
-        ++g_failures;
-    } else {
-        std::println("[ ok ] {}", msg);
-    }
-}
 
 evmc::address make_addr(uint8_t b0, uint8_t b19) {
     evmc::address a{};
@@ -207,7 +194,9 @@ bytes32 recompute_storage_root(DirectState& direct, const evmc::address& addr,
     return st.calc_root_from_updates({upds.data(), upds.size()});
 }
 
-void HiddenReadOnlyAccount_AcceptedByValidator() {
+}  // namespace
+
+TEST_CASE("witness validation accepts a hidden read-only account", "[witness]") {
     // --- Two accounts with first-nibble-distinct hashed keys -----------------
     const evmc::address W = make_addr(0x11, 0x00);
     evmc::address A = make_addr(0x22, 0x00);
@@ -217,8 +206,7 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
         A = make_addr(0x22, b);
         kA = keccak_addr32(A);
     }
-    expect_true((kW.bytes[0] >> 4) != (kA.bytes[0] >> 4),
-                "S1: W and A hashed keys differ in first nibble (single-branch root)");
+    CHECK((kW.bytes[0] >> 4) != (kA.bytes[0] >> 4));  // S1: W and A hashed keys differ in first nibble (single-branch root)
 
     const uint64_t W_BAL = 1000;
     const uint64_t A_BAL = 5000;  // the 'hidden' funds that exist under prev_root
@@ -228,8 +216,7 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
     // --- prev_root R: canonical root committing to BOTH W and A --------------
     const bytes32 R = hashbuilder_root({{kW, wRlp}, {kA, aRlp}});
     const bytes32 R_without_A = hashbuilder_root({{kW, wRlp}});
-    expect_true(R != R_without_A,
-                "S2: prev_root R provably commits to A (R != root without A)");
+    CHECK(R != R_without_A);  // S2: prev_root R provably commits to A (R != root without A)
 
     // --- Hand-build the trie nodes; confirm they reproduce canonical R -------
     const Bytes leafW_rlp = make_leaf_rlp(kW, wRlp);
@@ -241,14 +228,13 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
     br.set_child(kW.bytes[0] >> 4, ByteView{hashW.bytes, 32});
     br.set_child(kA.bytes[0] >> 4, ByteView{hashA.bytes, 32});
     const Bytes root_rlp{encode_branch(br)};
-    expect_true(keccak_bytes(root_rlp) == R,
-                "S3: hand-built root node hashes to canonical prev_root R");
+    CHECK(keccak_bytes(root_rlp) == R);  // S3: hand-built root node hashes to canonical prev_root R
 
     // --- Build the WITNESS: flat state = {W} only (A omitted) ----------------
     std::vector<DirectState::AccountInfo> accts{make_info(W, 0, W_BAL)};
     std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts(accts, /*block_hashes=*/{}, /*code_store=*/{});
-    expect_true(!prestate.empty(), "S4: prestate blob built");
+    CHECK(!prestate.empty());  // S4: prestate blob built
 
     // --- Node store: {R, leaf_W, leaf_A} — A's leaf IS committed and present,
     //     but its address preimage is missing from the flat keys.
@@ -257,22 +243,20 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
     add_node(nb, hashW, leafW_rlp);
     add_node(nb, hashA, leafA_rlp);
     std::vector<uint8_t> nodestore = std::move(nb).finalize();
-    expect_true(!nodestore.empty(), "S5: node store blob built");
+    CHECK(!nodestore.empty());  // S5: node store blob built
 
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
-    expect_true(direct.sanitize(),
-                "S6: sanitize() ACCEPTS the witness (all present identities hash-bind)");
+    CHECK(direct.sanitize());  // S6: sanitize() ACCEPTS the witness (all present identities hash-bind)
 
     // Node store models the bug: A's leaf present, its preimage absent from keys.
-    expect_true(direct.find_node_rlp(R).has_value(), "S7a: root node present in witness");
-    expect_true(direct.find_node_rlp(hashW).has_value(), "S7b: leaf_W present in witness");
-    expect_true(direct.find_node_rlp(hashA).has_value(),
-                "S7c: leaf_A present in node store (preimage hidden from keys)");
+    CHECK(direct.find_node_rlp(R).has_value());  // S7a: root node present in witness
+    CHECK(direct.find_node_rlp(hashW).has_value());  // S7b: leaf_W present in witness
+    CHECK(direct.find_node_rlp(hashA).has_value());  // S7c: leaf_A present in node store (preimage hidden from keys)
 
     // sanity: W is readable with the right balance.
     const Account* paW = direct.read_account(W);
-    expect_true(paW != nullptr && direct.get_balance(W) == intx::uint256{W_BAL},
-                "S8: witness account W reads back correctly");
+    REQUIRE(paW != nullptr);  // S8: witness account W reads back correctly
+    CHECK(direct.get_balance(W) == intx::uint256{W_BAL});
 
     // Parent header supplies the pre-state root the account walker starts from.
     BlockHeader parent{};
@@ -285,9 +269,6 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
     //     empty/non-existent.
     const Account* paA = direct.read_account(A);
     const intx::uint256 balA = direct.get_balance(A);
-    std::println("    [observed] read_account(A) = {}, get_balance(A) = {}",
-                 paA == nullptr ? "nullptr" : "non-null",
-                 static_cast<uint64_t>(balA[0]));
 
     // (2) Validator core: anchored at the TRUE prev_root R, given only W as a
     //     read-only update (exactly what check_root builds from this flat
@@ -300,29 +281,24 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
     updW.current_len = 0;  // read-only: no SSTORE/no balance change
     GridMPT<true> acc_trie{direct, R};
     const bytes32 reconstructed = acc_trie.calc_root_from_updates({&updW, 1});
-    expect_true(acc_trie.missing_count() == 0,
-                "P1: validator reported NO missing node (witness looks complete)");
+    CHECK(acc_trie.missing_count() == 0);  // P1: validator reported NO missing node (witness looks complete)
 #ifndef NDEBUG
-    expect_true(!acc_trie.failed(),
-                "P1: validator reported NO failure (witness looks complete)");
+    CHECK(!acc_trie.failed());  // P1: validator reported NO failure (witness looks complete)
 #endif
-    expect_true(reconstructed == R,
-                "P2: check_root ACCEPTS — reconstructs true prev_root R without A");
+    CHECK(reconstructed == R);  // P2: check_root ACCEPTS — reconstructs true prev_root R without A
 
     // ====================== REGRESSION GUARD =================================
     // Sound behaviour: a witness whose flat keys omit an account committed by
     // prev_root must NOT let the EVM observe it as empty. USE_HASH_KEY
     // node-store recovery makes this pass; flag-off it FAILS → proves the hole.
-    expect_true(paA != nullptr && balA == intx::uint256{A_BAL},
-                "G1[SECURITY]: account A (committed by prev_root) must be visible "
-                "to the EVM, not read as empty");
+    CHECK(paA != nullptr);  // G1[SECURITY]: account A (committed by prev_root) must be visible to the EVM, not read as empty
+    CHECK(balA == intx::uint256{A_BAL});
 
     // Recovered accounts have empty storage; a slot read must be a clean miss.
-    expect_true(direct.read_storage(A, make_word(0x01)) == bytes32{},
-                "S9: slot read on (recovered) empty-storage account returns 0");
+    CHECK(direct.read_storage(A, make_word(0x01)) == bytes32{});  // S9: slot read on (recovered) empty-storage account returns 0
 }
 
-void HiddenStorageSlot_RecoveredFromNodeStore() {
+TEST_CASE("witness validation recovers a hidden storage slot from the node store", "[witness]") {
     // --- Account C with two slots whose hashed keys split at the first nibble
     const evmc::address C = make_addr(0x33, 0x00);
     const bytes32 S1 = make_word(0x01);
@@ -333,8 +309,7 @@ void HiddenStorageSlot_RecoveredFromNodeStore() {
         S2 = make_word(b);
         kS2 = keccak_bytes32(S2);
     }
-    expect_true((kS1.bytes[0] >> 4) != (kS2.bytes[0] >> 4),
-                "T1: S1 and S2 hashed slot keys differ in first nibble");
+    CHECK((kS1.bytes[0] >> 4) != (kS2.bytes[0] >> 4));  // T1: S1 and S2 hashed slot keys differ in first nibble
 
     const bytes32 V1 = make_word(0xAA);
     const bytes32 V2 = make_word(0xBB);  // the 'hidden' value committed by storage_root
@@ -353,8 +328,7 @@ void HiddenStorageSlot_RecoveredFromNodeStore() {
     br.set_child(kS1.bytes[0] >> 4, ByteView{hashS1.bytes, 32});
     br.set_child(kS2.bytes[0] >> 4, ByteView{hashS2.bytes, 32});
     const Bytes sroot_rlp{encode_branch(br)};
-    expect_true(keccak_bytes(sroot_rlp) == SR,
-                "T2: hand-built storage root node hashes to canonical SR");
+    CHECK(keccak_bytes(sroot_rlp) == SR);  // T2: hand-built storage root node hashes to canonical SR
 
     // --- Flat witness: C carries ONLY S1; storage_root still commits to S2 ---
     DirectState::AccountInfo info = make_info(C, 1, 777);
@@ -362,7 +336,7 @@ void HiddenStorageSlot_RecoveredFromNodeStore() {
     info.storage.push_back({S1, V1});
     std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts({info}, /*block_hashes=*/{}, /*code_store=*/{});
-    expect_true(!prestate.empty(), "T3: prestate blob built");
+    CHECK(!prestate.empty());  // T3: prestate blob built
 
     // --- Node store: complete storage trie {SR, leaf_S1, leaf_S2} ------------
     MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
@@ -370,50 +344,42 @@ void HiddenStorageSlot_RecoveredFromNodeStore() {
     add_node(nb, hashS1, leafS1_rlp);
     add_node(nb, hashS2, leafS2_rlp);
     std::vector<uint8_t> nodestore = std::move(nb).finalize();
-    expect_true(!nodestore.empty(), "T4: node store blob built");
+    CHECK(!nodestore.empty());  // T4: node store blob built
 
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
-    expect_true(direct.sanitize(), "T5: sanitize() ACCEPTS the witness");
+    CHECK(direct.sanitize());  // T5: sanitize() ACCEPTS the witness
 
-    expect_true(direct.read_storage(C, S1) == V1, "T6: witnessed slot S1 reads back");
+    CHECK(direct.read_storage(C, S1) == V1);  // T6: witnessed slot S1 reads back
 
     // --- Case 1: hidden-slot read ---------------------------------------------
     const bytes32 readS2 = direct.read_storage(C, S2);
-    std::println("    [observed] read_storage(C, S2) = 0x..{:02x}", readS2.bytes[31]);
-    expect_true(readS2 == V2,
-                "G2[SECURITY]: slot S2 (committed by storage_root) must be visible "
-                "to the EVM, not read as 0");
+    CHECK(readS2 == V2);  // G2[SECURITY]: slot S2 (committed by storage_root) must be visible to the EVM, not read as 0
 
     // Read-only recompute: anchors alone must reproduce SR.
-    expect_true(recompute_storage_root(direct, C, SR) == SR,
-                "T7: read-only storage recompute reproduces SR");
+    CHECK(recompute_storage_root(direct, C, SR) == SR);  // T7: read-only storage recompute reproduces SR
 
     // --- Case 2: write both the witnessed and the recovered slot -------------
     Account* paC = direct.read_account(C);
-    expect_true(paC != nullptr, "T8: account C readable");
+    REQUIRE(paC != nullptr);  // T8: account C readable
     const bytes32 V1n = make_word(0xA1);
     const bytes32 V2n = make_word(0xB1);
     direct.set_storage_slot(C, *paC, S1, V1n);
     direct.set_storage_slot(C, *paC, S2, V2n);
-    expect_true(direct.read_storage(C, S2) == V2n,
-                "T9: written slot S2 reads back the new value");
+    CHECK(direct.read_storage(C, S2) == V2n);  // T9: written slot S2 reads back the new value
     const bytes32 post1 = hashbuilder_root({{kS1, scalar_rlp(V1n)}, {kS2, scalar_rlp(V2n)}});
-    expect_true(recompute_storage_root(direct, C, SR) == post1,
-                "G3: storage recompute matches oracle after writing recovered slot");
+    CHECK(recompute_storage_root(direct, C, SR) == post1);  // G3: storage recompute matches oracle after writing recovered slot
 
     // --- Case 3: zero-write deletes the recovered slot's leaf ----------------
     direct.set_storage_slot(C, *paC, S2, bytes32{});
-    expect_true(direct.read_storage(C, S2) == bytes32{},
-                "T10: zeroed slot S2 reads back 0");
+    CHECK(direct.read_storage(C, S2) == bytes32{});  // T10: zeroed slot S2 reads back 0
     const bytes32 post2 = hashbuilder_root({{kS1, scalar_rlp(V1n)}});
-    expect_true(recompute_storage_root(direct, C, SR) == post2,
-                "G4: storage recompute matches oracle after zero-write delete");
+    CHECK(recompute_storage_root(direct, C, SR) == post2);  // G4: storage recompute matches oracle after zero-write delete
 }
 
 #if USE_HASH_KEY
 // Blocker regression: account whose ONLY slots are recovered ones, driven
 // through the REAL StateTransition::check_root.
-void RecoveredSlotsOnlyAccount_RealCheckRoot() {
+TEST_CASE("real check_root recomputes storage of an account with only recovered slots", "[witness]") {
     const evmc::address D = make_addr(0x44, 0x00);
     const bytes32 S1 = make_word(0x01);
     bytes32 S2 = make_word(0x02);
@@ -450,7 +416,7 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
     }
     std::vector<uint8_t> prestate = DirectState::build_blob_from_accounts(
         {info, make_info(E, 0, 42)}, /*block_hashes=*/{}, /*code_store=*/{});
-    expect_true(!prestate.empty(), "U1: prestate blob built");
+    CHECK(!prestate.empty());  // U1: prestate blob built
 
     const Bytes dRlp_pre = account_rlp(D, 1, 777, SR);
     const Bytes eRlp = account_rlp(E, 0, 42);
@@ -461,7 +427,7 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
     abr.set_child(kD.bytes[0] >> 4, ByteView{keccak_bytes(leafD_rlp).bytes, 32});
     abr.set_child(kE.bytes[0] >> 4, ByteView{keccak_bytes(leafE_rlp).bytes, 32});
     const Bytes aroot_rlp{encode_branch(abr)};
-    expect_true(keccak_bytes(aroot_rlp) == R, "U2: hand-built account root matches R");
+    CHECK(keccak_bytes(aroot_rlp) == R);  // U2: hand-built account root matches R
 
     MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
     add_node(nb, SR, sroot_rlp);
@@ -471,10 +437,10 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
     add_node(nb, keccak_bytes(leafD_rlp), leafD_rlp);
     add_node(nb, keccak_bytes(leafE_rlp), leafE_rlp);
     std::vector<uint8_t> nodestore = std::move(nb).finalize();
-    expect_true(!nodestore.empty(), "U2b: node store blob built");
+    CHECK(!nodestore.empty());  // U2b: node store blob built
 
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
-    expect_true(direct.sanitize(), "U3: sanitize() ACCEPTS the witness");
+    CHECK(direct.sanitize());  // U3: sanitize() ACCEPTS the witness
 
     BlockHeader parent{};
     parent.number = 1;
@@ -482,9 +448,9 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
     direct.insert_header(parent);
 
     // 'Execution': the only touched slot is the recovered S2.
-    expect_true(direct.read_storage(D, S2) == V2, "U4: hidden slot S2 recovered");
+    CHECK(direct.read_storage(D, S2) == V2);  // U4: hidden slot S2 recovered
     Account* paD = direct.read_account(D);
-    expect_true(paD != nullptr, "U5: account D readable");
+    REQUIRE(paD != nullptr);  // U5: account D readable
     const bytes32 V2n = make_word(0xB2);
     direct.set_storage_slot(D, *paD, S2, V2n);
 
@@ -497,13 +463,12 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
     head.parent_hash = parent.hash();
     head.state_root = R_post;
     silkworm::cmd::state_transition::StateTransition st{std::span<uint8_t>{}};
-    expect_true(st.check_root(direct, head, EVMC_CANCUN),
-                "G5: real check_root keeps recovered-only storage recompute");
+    CHECK(st.check_root(direct, head, EVMC_CANCUN));  // G5: real check_root keeps recovered-only storage recompute
     // Flat/overflow empty, so the merge root is the recovered slot alone.
-    expect_true(direct.account_storage_root(D) == hashbuilder_root({{kS2, scalar_rlp(V2n)}}),
-                "G6: account_storage_root merges written recovered slot");
+    CHECK(direct.account_storage_root(D) == hashbuilder_root({{kS2, scalar_rlp(V2n)}}));  // G6: account_storage_root merges written recovered slot
 }
 
+namespace {
 std::vector<uint8_t> make_code_store(const bytes32& code_hash, const Bytes& code) {
     MphfBuilder<32> cb{kMphfCodeStoreMagic, kMphfMapVersion};
     std::vector<uint8_t> body;
@@ -511,10 +476,11 @@ std::vector<uint8_t> make_code_store(const bytes32& code_hash, const Bytes& code
     cb.add(hash_key8(code_hash), ByteView{body.data(), body.size()});
     return std::move(cb).finalize();
 }
+}  // namespace
 
 // R4 regression: a recovered contract must bind its code from the code store,
 // not execute as empty code.
-void HiddenContractAccount_CodeBoundFromCodeStore() {
+TEST_CASE("a recovered contract binds its code from the code store", "[witness]") {
     const evmc::address W = make_addr(0x66, 0x00);
     evmc::address K = make_addr(0x77, 0x00);
     const bytes32 kW = keccak_addr32(W);
@@ -535,22 +501,22 @@ void HiddenContractAccount_CodeBoundFromCodeStore() {
     br.set_child(kW.bytes[0] >> 4, ByteView{keccak_bytes(leafW_rlp).bytes, 32});
     br.set_child(kK.bytes[0] >> 4, ByteView{keccak_bytes(leafK_rlp).bytes, 32});
     const Bytes root_rlp{encode_branch(br)};
-    expect_true(keccak_bytes(root_rlp) == R, "V1: hand-built account root matches R");
+    CHECK(keccak_bytes(root_rlp) == R);  // V1: hand-built account root matches R
 
     // Flat state = {W}; K's preimage is hidden but its code IS in the code store.
     std::vector<uint8_t> prestate = DirectState::build_blob_from_accounts(
         {make_info(W, 0, 1000)}, /*block_hashes=*/{}, make_code_store(code_hash, code));
-    expect_true(!prestate.empty(), "V2: prestate blob built");
+    CHECK(!prestate.empty());  // V2: prestate blob built
 
     MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
     add_node(nb, R, root_rlp);
     add_node(nb, keccak_bytes(leafW_rlp), leafW_rlp);
     add_node(nb, keccak_bytes(leafK_rlp), leafK_rlp);
     std::vector<uint8_t> nodestore = std::move(nb).finalize();
-    expect_true(!nodestore.empty(), "V3: node store blob built");
+    CHECK(!nodestore.empty());  // V3: node store blob built
 
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
-    expect_true(direct.sanitize(), "V4: sanitize() ACCEPTS the witness");
+    CHECK(direct.sanitize());  // V4: sanitize() ACCEPTS the witness
 
     BlockHeader parent{};
     parent.number = 1;
@@ -558,19 +524,17 @@ void HiddenContractAccount_CodeBoundFromCodeStore() {
     direct.insert_header(parent);
 
     const Account* paK = direct.read_account(K);
-    expect_true(paK != nullptr && std::memcmp(paK->code_hash, code_hash.bytes, 32) == 0,
-                "V5: hidden contract K recovered with its code_hash");
-    expect_true(paK != nullptr && paK->code_store_len == code.size(),
-                "G7: recovered account bound to its code-store entry");
+    REQUIRE(paK != nullptr);
+    CHECK(std::memcmp(paK->code_hash, code_hash.bytes, 32) == 0);  // V5: hidden contract K recovered with its code_hash
+    CHECK(paK->code_store_len == code.size());  // G7: recovered account bound to its code-store entry
     const ByteView got = direct.read_code(K);
-    expect_true(got.size() == code.size() &&
-                    std::memcmp(got.data(), code.data(), code.size()) == 0,
-                "G8[SECURITY]: read_code on recovered contract returns its bytecode");
+    REQUIRE(got.size() == code.size());  // G8[SECURITY]: read_code on recovered contract returns its bytecode
+    CHECK(std::memcmp(got.data(), code.data(), code.size()) == 0);
 }
 #endif
 
 // R6 regression: leaf_A absent, not just preimage.
-void MissingAccountNode_RejectedByValidator() {
+TEST_CASE("witness validation with a missing account node", "[witness]") {
     const evmc::address W = make_addr(0x11, 0x00);
     evmc::address A = make_addr(0x22, 0x00);
     const bytes32 kW = keccak_addr32(W);
@@ -590,7 +554,7 @@ void MissingAccountNode_RejectedByValidator() {
     br.set_child(kW.bytes[0] >> 4, ByteView{hashW.bytes, 32});
     br.set_child(kA.bytes[0] >> 4, ByteView{hashA.bytes, 32});
     const Bytes root_rlp{encode_branch(br)};
-    expect_true(keccak_bytes(root_rlp) == R, "M1: hand-built account root matches R");
+    CHECK(keccak_bytes(root_rlp) == R);  // M1: hand-built account root matches R
 
     // Node store omits leaf_A entirely.
     std::vector<uint8_t> prestate = DirectState::build_blob_from_accounts(
@@ -599,11 +563,12 @@ void MissingAccountNode_RejectedByValidator() {
     add_node(nb, R, root_rlp);
     add_node(nb, hashW, leafW_rlp);
     std::vector<uint8_t> nodestore = std::move(nb).finalize();
-    expect_true(!prestate.empty() && !nodestore.empty(), "M2: witness blobs built");
+    CHECK(!prestate.empty());  // M2: witness blobs built
+    CHECK(!nodestore.empty());
 
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
-    expect_true(direct.sanitize(), "M3: sanitize() ACCEPTS the witness");
-    expect_true(!direct.find_node_rlp(hashA).has_value(), "M4: leaf_A ABSENT from node store");
+    CHECK(direct.sanitize());  // M3: sanitize() ACCEPTS the witness
+    CHECK(!direct.find_node_rlp(hashA).has_value());  // M4: leaf_A ABSENT from node store
 
     BlockHeader parent{};
     parent.number = 1;
@@ -615,8 +580,8 @@ void MissingAccountNode_RejectedByValidator() {
     updW.ext_initial = ByteView{wRlp.data(), wRlp.size()};
     GridMPT<true> acc_trie{direct, R};
     const bytes32 reconstructed = acc_trie.calc_root_from_updates({&updW, 1});
-    expect_true(reconstructed == R && acc_trie.missing_count() == 0,
-                "M5: validator core ACCEPTS — never unfolds the missing leaf");
+    CHECK(reconstructed == R);  // M5: validator core ACCEPTS — never unfolds the missing leaf
+    CHECK(acc_trie.missing_count() == 0);
 
 #if USE_HASH_KEY
     // fatal() exits; observe from a child.
@@ -628,25 +593,18 @@ void MissingAccountNode_RejectedByValidator() {
     }
     int status = 0;
     const bool reaped = pid > 0 && waitpid(pid, &status, 0) == pid;
-    expect_true(reaped && WIFEXITED(status) && WEXITSTATUS(status) == 1,
-                "G9[SECURITY]: recovery walk halts (exit 1) on missing account leaf");
+    REQUIRE(reaped);  // G9[SECURITY]: recovery walk halts (exit 1) on missing account leaf
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 1);
 #else
-    expect_true(direct.read_account(A) != nullptr,
-                "G9[SECURITY]: account A (committed by prev_root) must be visible "
-                "to the EVM, not read as empty");
+    // #138 materializes a record for the blank read, but check_root skips every
+    // deleted created record as created-then-destructed, so A is never folded and
+    // its hidden node never walked. FAILS today → proves the hole.
+    CHECK(direct.read_account(A) == nullptr);
+    DirectStateView view{direct};
+    CHECK(!view.get_account(A).has_value());  // still non-existent to the EVM, by design
+    const Account* recA = direct.find_created_account(A);
+    REQUIRE(recA != nullptr);  // #138 does materialize the blank read
+    CHECK(!recA->deleted);     // G9[SECURITY]: check_root must fold A, not skip it
 #endif
-}
-
-}  // namespace
-
-int main() {
-    HiddenReadOnlyAccount_AcceptedByValidator();
-    HiddenStorageSlot_RecoveredFromNodeStore();
-    MissingAccountNode_RejectedByValidator();
-#if USE_HASH_KEY
-    RecoveredSlotsOnlyAccount_RealCheckRoot();
-    HiddenContractAccount_CodeBoundFromCodeStore();
-#endif
-    std::println("\n{} failure(s)", g_failures);
-    return g_failures == 0 ? 0 : 1;
 }
