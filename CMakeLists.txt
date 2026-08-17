@@ -187,6 +187,9 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/omitted_code_from_create_test.cpp
     zilk_core/dev/cli/flat_bundle_engine_test.cpp
     zilk_core/dev/cli/evmone_delegate_code_read_test.cpp
+    zilk_core/dev/cli/hash_index_test.cpp
+    zilk_core/core/state_zz/hash_state.cpp
+    zilk_core/dev/cli/hash_state_test.cpp
   )
   # The guests' memcpy and friends (prover/guest_common/src/mem_builtins.cpp), built for the host with
   # the guests' code-generation flags: the loops must not be turned into the libc calls the file
