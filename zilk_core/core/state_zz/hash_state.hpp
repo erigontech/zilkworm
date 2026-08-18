@@ -253,6 +253,109 @@ class HashState : public BlockState {
     std::optional<intx::uint256> total_difficulty(uint64_t block_num,
                                                   const evmc::bytes32& block_hash) const noexcept override;
 
+    // --- Write overlay + mutators + address-keyed readers (S2) ------------------------
+    // HashState grows into a full ActiveState WRITE backend here. The built account /
+    // storage caches above stay PRISTINE — the pre-state "before" side. Every write lands
+    // in a copy-on-write OVERLAY (created_accounts_ / overflow_slots_ / created_code_, which
+    // reuse DirectState's container TYPES verbatim so the later DirectState->ActiveState
+    // retype is a drop-in) and every read consults the overlay FIRST, the built cache
+    // second, so a written value shadows the built one. Mutator bodies mirror
+    // direct_state.cpp:337-694 line-for-line EXCEPT for two deliberate divergences, each
+    // documented at its implementation site in hash_state.cpp:
+    //   (a) set_storage_slot RETAINS zero writes (DirectState ERASES them,
+    //       direct_state.cpp:391-397) so the fold can emit them as 0x80 deletes: the
+    //       HashState fold is incremental over prev_root and needs the explicit delete,
+    //       whereas DirectState recomputes each storage root from its live slots.
+    //   (b) apply_code_diff / destruct / revive set a per-account storage_wiped_ flag
+    //       instead of DirectState's in-place inline-slot wipe (the built cache is
+    //       immutable — nothing to wipe in place). A wiped account reads all pre-state slots
+    //       as zero and its storage fold seeds from kEmptyRoot.
+
+    // Address-keyed readers (overlay-then-built). A built-cache miss routes through
+    // get_account / get_storage, so an unprovable miss is recorded fail-closed.
+    const Account* read_account(const evmc::address& addr) const noexcept;
+    evmc::bytes32 read_storage(const evmc::address& addr,
+                               const evmc::bytes32& key) const noexcept;
+    // read_code: resolve the account, then its code_hash -> in-block created-code overlay,
+    // else the witness code store (find_code). FAIL-CLOSED: a non-empty code_hash that
+    // resolves to no bytes bumps unconfirmed_read_count_ — HashState has no sanitize-time
+    // code binding like DirectState (direct_state.cpp:762-777), so the accept gate rejects a
+    // witness that omitted an account's bytecode instead of silently executing empty code.
+    ByteView read_code(const evmc::address& addr) const noexcept;
+    ByteView read_code(const evmc::address& addr, const evmc::bytes32& /*code_hash*/) const noexcept {
+        return read_code(addr);
+    }
+    intx::uint256 get_balance(const evmc::address& addr) const noexcept;
+    uint64_t get_nonce(const evmc::address& addr) const noexcept;
+    bool has_storage(const evmc::address& addr) const noexcept;
+
+    // Mutators — signatures identical to DirectState (direct_state.hpp:140-285).
+    void apply_state_diff(const evmone::state::StateDiff& diff);
+    void set_balance(const evmc::address& addr, const intx::uint256& value);
+    void add_to_balance(const evmc::address& addr, const intx::uint256& addend);
+    void subtract_from_balance(const evmc::address& addr, const intx::uint256& subtrahend);
+    void set_nonce(const evmc::address& addr, uint64_t nonce);
+    void set_code(const evmc::address& addr, ByteView code);
+    void destruct(const evmc::address& addr);
+
+    bool is_dead(const evmc::address& addr) const noexcept;
+    bool is_deleted(const evmc::address& addr) const noexcept;
+    bool is_empty_account(const evmc::address& addr) const noexcept;
+    void destruct_dead_among(const FlatHashSet<evmc::address>& addrs);
+
+    const FlatHashSet<evmc::address>& touched() const noexcept { return touched_; }
+    void clear_touched() noexcept { touched_.clear(); }
+
+    // find_or_create_account: overlay hit -> return it; built hit -> copy-on-write into the
+    // overlay; total miss -> materialize a fresh (deleted) record AND confirm absence down
+    // the account trie (confirm_absent). An unprovable miss (pruned boundary) bumps
+    // unconfirmed_read_count_ so the accept gate rejects, but a usable record is ALWAYS
+    // returned (never null) — the analog of DirectState::materialize_absent_account_.
+    Account* find_or_create_account(const evmc::address& addr);
+
+    [[gnu::always_inline]] inline bool
+    revive_if_deleted(const evmc::address& addr, Account& pa) {
+        if (!pa.deleted) [[likely]]
+            return false;
+        return revive_if_deleted_slow(addr, pa);
+    }
+
+    void set_account_from_diff(Account& pa, uint64_t nonce,
+                               const intx::uint256& balance) noexcept;
+    void set_storage_slot(const evmc::address& addr, Account& pa,
+                          const evmc::bytes32& key, const evmc::bytes32& value);
+    void apply_code_diff(const evmc::address& addr, Account& pa,
+                         const evmc::bytes& code);
+
+    // Single-block slib runs have no cross-block journal; keep the names so the mutators and
+    // apply_state_diff port from DirectState line-for-line (direct_state.cpp:678-694).
+    void journal_address_changed(const evmc::address&) noexcept {}
+    void journal_slot_changed(const evmc::address&, const evmc::bytes32&) noexcept {}
+
+    // Side-effect-free built-cache probe (NO confirm-on-miss) for the mutators and the write
+    // gather — a get_account here would bump unconfirmed_read_count_ on a legitimate miss.
+    [[gnu::always_inline]] inline const Account*
+    find_built_account(const evmc::bytes32& addr_hash) const noexcept {
+        if (auto off = account_index_.find(addr_hash.bytes))
+            return reinterpret_cast<const Account*>(accounts_arena_.data() + *off);
+        return nullptr;
+    }
+
+    // Overlay gather accessors (mirror DirectState hpp:234-241) — read-only views for tests
+    // and the write-set gather.
+    const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept {
+        return created_accounts_;
+    }
+    const FlatHashMap<evmc::bytes32, evmc::bytes32>*
+    overflow_slots_for(const evmc::address& addr) const noexcept {
+        const auto it = overflow_slots_.find(addr);
+        if (it == overflow_slots_.end()) return nullptr;
+        return &it->second;
+    }
+    bool storage_wiped(const evmc::address& addr) const noexcept {
+        return storage_wiped_.contains(addr);
+    }
+
   private:
     // Shared explicit-stack DFS over ONE trie rooted at `root`, the single traversal the
     // account pass and every storage pass run through (no recursion — rv64im-safe). At
@@ -364,9 +467,32 @@ class HashState : public BlockState {
     // Reset by build_state_from_trie so it scopes to the reads following one build.
     mutable std::uint32_t unconfirmed_read_count_{0};
 
-    // TODO(hashstate-slib, next step): created-code cache — the role of
-    // DirectState::created_code_ / created_code_collisions_ for in-block-created code.
-    // Not built here.
+    // --- Write overlay (S2): copy-on-write over the pristine built caches ---------------
+    // Reuses DirectState's container TYPES exactly (direct_state.hpp:82-89) so the later
+    // DirectState->ActiveState retype is a drop-in. Keyed by the 20-byte address (as
+    // DirectState is), while the built caches above are keyed by the 32-byte addr_hash;
+    // reads consult the overlay first, the built cache second.
+    FlatHashMap<evmc::address, Account> created_accounts_;                                  // every written account
+    FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;  // every storage write (zeros RETAINED — divergence a)
+    FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;                                  // in-block created code (fills the old TODO)
+    FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;              // key8-collision spill
+    FlatHashSet<evmc::address> touched_;                                                    // EIP-158 touch set
+    FlatHashSet<evmc::address> delegated_designations_;                                     // EIP-7702 wipe-exemption set
+    // DIVERGENCE (b): per-account storage-wiped marker replacing DirectState's in-place
+    // inline-slot wipe (direct_state.cpp:410-412, :568). A wiped account reads all pre-state
+    // (built-cache) slots as zero and its storage fold seeds from kEmptyRoot.
+    FlatHashSet<evmc::address> storage_wiped_;
+
+    // Non-recording overlay-or-built lookup (the DirectState lookup_account_ analog): NO
+    // materialize, NO confirm. Returns nullptr when the address is in neither store.
+    const Account* lookup_account_(const evmc::address& addr) const noexcept;
+    // Read resolver shared by read_account / read_code / get_balance / get_nonce: overlay hit
+    // (nullptr if deleted), else get_account(keccak(addr)) — which records an unprovable miss.
+    const Account* resolve_for_read_(const evmc::address& addr) const noexcept;
+    // Materialize a fresh (deleted) overlay record for a total miss (DirectState analog,
+    // direct_state.cpp:327-335). Non-const: it writes the overlay.
+    Account* materialize_absent_account_(const evmc::address& addr);
+    bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
 };
 
 // The HashState fold (GridMPT<*, HashState>) drops the pre-value bind + read-only
