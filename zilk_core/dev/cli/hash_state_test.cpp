@@ -30,6 +30,7 @@
 #include <zilk_core/core/rlp/encode.hpp>            // silkworm::rlp::encode (storage-value encode)
 #include <zilk_core/core/common_zz/mphf_map.hpp>  // mix64_body (public)
 #include <zilk_core/core/state_zz/hash_state.hpp>
+#include <zilk_core/core/trie_zz/mpt.hpp>        // GridMPT<DeletionEnabled, StateT>, TrieNodeFlat
 #include <zilk_core/core/trie_zz/rlp_sw.hpp>     // encode_leaf/branch/ext + node types
 #include <zilk_core/core/types_zz/account.hpp>   // Account (leaf-value encode/decode target)
 
@@ -214,11 +215,11 @@ TEST_CASE("HashState code round-trips by code_hash", "[hash_state]") {
 }
 
 // ---------------------------------------------------------------------------
-// derive_state — the standalone account-trie sweep.
+// build_state_from_trie — the standalone account-trie sweep.
 //
 // These tests hand-build small account tries out of the project's own MPT node
 // encoders (encode_leaf/encode_branch/encode_ext, rlp_sw.hpp), add the referenced
-// nodes to the store under their real keccak, then run derive_state(root) and check
+// nodes to the store under their real keccak, then run build_state_from_trie(root) and check
 // the emitted account cache. Using the shared encoders (rather than raw RLP bytes)
 // keeps the fixtures canonical and readable — the same bytes decode_node reads back.
 // ---------------------------------------------------------------------------
@@ -226,7 +227,7 @@ TEST_CASE("HashState code round-trips by code_hash", "[hash_state]") {
 namespace {
 
 // A trie key expressed as 64 nibbles, and the 32-byte addr_hash it packs into (the
-// inverse of the packing derive_state does at a leaf).
+// inverse of the packing build_state_from_trie does at a leaf).
 struct Key {
     std::array<uint8_t, 64> nib{};
     evmc::bytes32 hash() const noexcept {
@@ -288,7 +289,7 @@ void expect_account(const Account* got, const TestAccount& want, const char* who
 // extension. Every real account must land in the cache under its exact addr_hash with
 // correctly-decoded fields; the embedded leaf must be reached inline (no store lookup,
 // so missing_count stays 0); an addr_hash not in the trie must be absent.
-TEST_CASE("HashState derive_state account sweep", "[hash_state]") {
+TEST_CASE("HashState build_state_from_trie account sweep", "[hash_state]") {
     HashState hs;
 
     // --- keys, chosen so their first nibbles land in distinct root-branch slots ---
@@ -327,7 +328,7 @@ TEST_CASE("HashState derive_state account sweep", "[hash_state]") {
     // decode_node rejects an inline-list ext child). The 60-nibble extension pushes the
     // branch deep enough that the leaf's 2-nibble remainder + 1-byte value fit in
     // < 32 bytes, so the leaf is inlined into branch2's RLP rather than hash-referenced.
-    // The leaf is NOT added to the store; derive_state must decode it inline (no lookup,
+    // The leaf is NOT added to the store; build_state_from_trie must decode it inline (no lookup,
     // so missing_count stays 0). Its 1-byte value is not a decodable account (a real
     // account leaf is always > 32 bytes — two 32-byte hashes — hence never embeddable),
     // so it is counted as a reached leaf but never cached. ---
@@ -351,8 +352,8 @@ TEST_CASE("HashState derive_state account sweep", "[hash_state]") {
     const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
 
     // --- derive ---
-    const auto status = hs.derive_state(root_hash);
-    CHECK(status == HashState::DeriveStatus::kOk);
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kOk);
     CHECK(hs.missing_count() == 0u);  // embedded leaf handled inline: no bogus lookup
     CHECK(hs.leaf_count() == 4u);     // A, B, C, and the embedded E were all reached
     CHECK(hs.account_count() == 3u);  // only A, B, C decoded into cached accounts
@@ -374,7 +375,7 @@ TEST_CASE("HashState derive_state account sweep", "[hash_state]") {
 
 // A referenced child hash that is absent from the store must be surfaced as a missing
 // node (missing_count > 0, status kMissingNode) — never a silent skip.
-TEST_CASE("HashState derive_state reports a dangling child ref", "[hash_state]") {
+TEST_CASE("HashState build_state_from_trie reports a dangling child ref", "[hash_state]") {
     HashState hs;
 
     // Root branch whose one child points at a hash that was never add_node'd.
@@ -384,37 +385,37 @@ TEST_CASE("HashState derive_state reports a dangling child ref", "[hash_state]")
     root.set_child(0x3, ByteView{dangling.bytes, 32});
     const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
 
-    const auto status = hs.derive_state(root_hash);
-    CHECK(status == HashState::DeriveStatus::kMissingNode);
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kMissingNode);
     CHECK(hs.missing_count() > 0u);   // observable, not skipped
     CHECK(hs.account_count() == 0u);  // nothing decodable was reachable
 }
 
 // A missing seeding root is the fail-closed case: it is surfaced, never treated as an
 // empty trie.
-TEST_CASE("HashState derive_state reports a missing root", "[hash_state]") {
+TEST_CASE("HashState build_state_from_trie reports a missing root", "[hash_state]") {
     HashState hs;
     evmc::bytes32 never_added{};
     for (int i = 0; i < 32; ++i) never_added.bytes[i] = static_cast<uint8_t>(0x11 + i);
 
-    const auto status = hs.derive_state(never_added);
-    CHECK(status == HashState::DeriveStatus::kMissingNode);
+    const auto status = hs.build_state_from_trie(never_added);
+    CHECK(status == HashState::BuildStatus::kMissingNode);
     CHECK(hs.missing_count() > 0u);
     CHECK(hs.account_count() == 0u);
 }
 
 // The empty trie derives nothing, cleanly.
-TEST_CASE("HashState derive_state on the empty root derives nothing", "[hash_state]") {
+TEST_CASE("HashState build_state_from_trie on the empty root derives nothing", "[hash_state]") {
     HashState hs;
-    const auto status = hs.derive_state(silkworm::kEmptyRoot);
-    CHECK(status == HashState::DeriveStatus::kOk);
+    const auto status = hs.build_state_from_trie(silkworm::kEmptyRoot);
+    CHECK(status == HashState::BuildStatus::kOk);
     CHECK(hs.account_count() == 0u);
     CHECK(hs.leaf_count() == 0u);
     CHECK(hs.missing_count() == 0u);
 }
 
 // ---------------------------------------------------------------------------
-// derive_state — the STORAGE-trie sweep (the sibling pass over each account's
+// build_state_from_trie — the STORAGE-trie sweep (the sibling pass over each account's
 // storage_root). Fixtures are built with the same MPT encoders, and each storage leaf's
 // value is encoded EXACTLY as DirectState stores it: the RLP string of the big-endian,
 // zero-trimmed 32-byte word (direct_state.cpp:627 rlp::encode(zeroless_view(value))).
@@ -461,12 +462,12 @@ namespace {
 }  // namespace
 
 // Full storage sweep: account X carries a real 3-slot storage trie; account Y carries an
-// EMPTY storage_root. After derive_state every one of X's slots is retrievable via
+// EMPTY storage_root. After build_state_from_trie every one of X's slots is retrievable via
 // get_storage under (addr_hash, slot_hash) and decodes to its exact word — including a
 // value RLP-trims to a single byte and one that trims to two. An un-derived slot, a slot
 // looked up under the wrong account, and every lookup against empty-storage Y all read as
 // zero; no storage root here is absent, so missing_count stays 0.
-TEST_CASE("HashState derive_state storage sweep", "[hash_state]") {
+TEST_CASE("HashState build_state_from_trie storage sweep", "[hash_state]") {
     HashState hs;
 
     // --- storage-slot values ---
@@ -515,8 +516,8 @@ TEST_CASE("HashState derive_state storage sweep", "[hash_state]") {
     const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
 
     // --- derive ---
-    const auto status = hs.derive_state(root_hash);
-    CHECK(status == HashState::DeriveStatus::kOk);
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kOk);
     CHECK(hs.missing_count() == 0u);        // every referenced node present
     CHECK(hs.account_count() == 2u);        // X and Y both decoded
     CHECK(hs.storage_count() == 3u);        // X's three slots cached
@@ -541,7 +542,7 @@ TEST_CASE("HashState derive_state storage sweep", "[hash_state]") {
 // A dangling ref reached WHILE walking an included storage trie is fail-closed: the account
 // decodes fine, but the missing storage node surfaces as missing_count > 0 / kMissingNode.
 // (Account Z is the whole account trie — a single 64-nibble leaf as the root.)
-TEST_CASE("HashState derive_state reports a dangling storage-node ref", "[hash_state]") {
+TEST_CASE("HashState build_state_from_trie reports a dangling storage-node ref", "[hash_state]") {
     HashState hs;
 
     // Storage trie root = a branch PRESENT in the store whose one child ref is a hash that
@@ -558,8 +559,8 @@ TEST_CASE("HashState derive_state reports a dangling storage-node ref", "[hash_s
     const LeafNode leafZ = make_leaf(&kZ.nib[0], 64, ByteView{accZ});
     const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_leaf(leafZ)});
 
-    const auto status = hs.derive_state(root_hash);
-    CHECK(status == HashState::DeriveStatus::kMissingNode);
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kMissingNode);
     CHECK(hs.missing_count() > 0u);       // the dangling storage child is surfaced
     CHECK(hs.account_count() == 1u);      // Z itself decoded; the gap is inside its storage
     CHECK(hs.storage_count() == 0u);      // the dangling child yielded no slot
@@ -569,7 +570,7 @@ TEST_CASE("HashState derive_state reports a dangling storage-node ref", "[hash_s
 // a witness legitimately omits the storage trie of an account the block never touches.
 // (This is exactly what keeps the pre-existing account-sweep fixtures — whose accounts all
 // carry bogus non-present storage roots — passing unchanged.)
-TEST_CASE("HashState derive_state skips an absent storage root", "[hash_state]") {
+TEST_CASE("HashState build_state_from_trie skips an absent storage root", "[hash_state]") {
     HashState hs;
 
     // storage_root points at a node that was never added.
@@ -581,10 +582,368 @@ TEST_CASE("HashState derive_state skips an absent storage root", "[hash_state]")
     const LeafNode leafW = make_leaf(&kW.nib[0], 64, ByteView{accW});
     const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_leaf(leafW)});
 
-    const auto status = hs.derive_state(root_hash);
-    CHECK(status == HashState::DeriveStatus::kOk);   // absent storage root != missing node
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kOk);   // absent storage root != missing node
     CHECK(hs.missing_count() == 0u);
     CHECK(hs.account_count() == 1u);
     CHECK(hs.storage_count() == 0u);
     CHECK(hs.storage_slot_count() == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// CHANGE 2 — read-miss confirmation. The build sweep only collects keys actually present in
+// the trie, so a cache miss is either a genuinely-empty key OR one wrongly left out of the
+// witness. get_account / get_storage cannot tell in advance, so on a miss they run a
+// single-path confirmation walk (confirm_absent) down the key's path:
+//   - PROVEN empty (an empty 0x80 branch slot for the key's next nibble, or an ext/leaf whose
+//     path diverges from the key) -> return blank, record nothing.
+//   - a node the walk needs is missing -> NOT confirmed: return blank so a value-returning
+//     caller proceeds, but record an unconfirmed read so the accept gate rejects later.
+// Fixtures are hand-built with the same MPT encoders as the sweep fixtures above.
+// ---------------------------------------------------------------------------
+
+// Account: a present read hits the cache; a genuinely-absent account whose exclusion-path
+// nodes are all in the store reads blank with NO unconfirmed read — proven two ways, via an
+// empty root-branch slot and via a sibling leaf whose path diverges from the probe.
+TEST_CASE("HashState get_account confirmed absent via present exclusion path", "[hash_state]") {
+    HashState hs;
+
+    // Root branch with two present account leaves (slots 0x1 and 0x4).
+    TestAccount aP, aQ;
+    aP.build(101);
+    aQ.build(202);
+    const Key kP = key_with(0x1, 3, 5);
+    const Key kQ = key_with(0x4, 5, 2);
+    const LeafNode leafP = make_leaf(&kP.nib[1], 63, ByteView{aP.leaf_value});
+    const evmc::bytes32 hP = hs.add_node(ByteView{zilkworm::encode_leaf(leafP)});
+    const LeafNode leafQ = make_leaf(&kQ.nib[1], 63, ByteView{aQ.leaf_value});
+    const evmc::bytes32 hQ = hs.add_node(ByteView{zilkworm::encode_leaf(leafQ)});
+    BranchNode root;
+    root.set_child(0x1, ByteView{hP.bytes, 32});
+    root.set_child(0x4, ByteView{hQ.bytes, 32});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+
+    // Present accounts read straight from the cache.
+    expect_account(hs.get_account(kP.hash()), aP, "P");
+    expect_account(hs.get_account(kQ.hash()), aQ, "Q");
+
+    // Absent via an empty root-branch slot (first nibble 0x7 was never populated).
+    const Key kEmptySlot = key_with(0x7, 9, 4);
+    CHECK(hs.get_account(kEmptySlot.hash()) == nullptr);
+
+    // Absent via path divergence: shares slot 0x1 with P but its tail differs from P's leaf.
+    const Key kDiverge = key_with(0x1, 6, 1);
+    REQUIRE_FALSE(eq32(kDiverge.hash(), kP.hash()));
+    CHECK(hs.get_account(kDiverge.hash()) == nullptr);
+
+    // Both misses were PROVEN empty: no unconfirmed read recorded.
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// Account: an absent account whose confirmation walk needs a node the store does not have
+// reads blank (so a value-returning caller proceeds) but records an unconfirmed read.
+TEST_CASE("HashState get_account missing node leaves the read unconfirmed", "[hash_state]") {
+    HashState hs;
+
+    TestAccount aP;
+    aP.build(303);
+    const Key kP = key_with(0x1, 3, 5);
+    const LeafNode leafP = make_leaf(&kP.nib[1], 63, ByteView{aP.leaf_value});
+    const evmc::bytes32 hP = hs.add_node(ByteView{zilkworm::encode_leaf(leafP)});
+
+    // Root branch slot 0x5 references a child hash that was never add_node'd.
+    evmc::bytes32 dangling{};
+    for (int i = 0; i < 32; ++i) dangling.bytes[i] = static_cast<uint8_t>(0xDE - i);
+    BranchNode root;
+    root.set_child(0x1, ByteView{hP.bytes, 32});
+    root.set_child(0x5, ByteView{dangling.bytes, 32});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    // Build follows the dangling ref, so the witness gap is already visible as a missing node.
+    REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kMissingNode);
+    REQUIRE(hs.missing_count() > 0u);
+    REQUIRE(hs.unconfirmed_read_count() == 0u);  // reset by the build; no reads yet
+
+    // The present account still reads from the cache and records nothing.
+    expect_account(hs.get_account(kP.hash()), aP, "P");
+    CHECK(hs.unconfirmed_read_count() == 0u);
+
+    // A key whose path descends through the missing slot cannot be confirmed empty.
+    const Key kMiss = key_with(0x5, 7, 3);
+    CHECK(hs.get_account(kMiss.hash()) == nullptr);  // still blank for the caller
+    CHECK(hs.unconfirmed_read_count() > 0u);         // but recorded as unconfirmed
+}
+
+// Storage: a present slot hits the cache; an absent slot whose exclusion-path nodes are all
+// present reads zero with NO unconfirmed read — proven via an empty slot and via divergence.
+TEST_CASE("HashState get_storage confirmed absent via present exclusion path", "[hash_state]") {
+    HashState hs;
+
+    evmc::bytes32 v1{};
+    v1.bytes[31] = 0x2A;  // trims to a single byte
+    evmc::bytes32 v2{};
+    for (std::size_t i = 0; i < 32; ++i) v2.bytes[i] = static_cast<uint8_t>(0x10u + i);
+
+    // X's storage trie: root branch -> two hash-referenced leaves (slots 0x2 and 0x7).
+    const Key s1 = key_with(0x2, 3, 5);
+    const Key s2 = key_with(0x7, 5, 2);
+    const Bytes ev1 = encode_storage_value(v1);
+    const LeafNode sl1 = make_leaf(&s1.nib[1], 63, ByteView{ev1});
+    const evmc::bytes32 hsl1 = hs.add_node(ByteView{zilkworm::encode_leaf(sl1)});
+    const Bytes ev2 = encode_storage_value(v2);
+    const LeafNode sl2 = make_leaf(&s2.nib[1], 63, ByteView{ev2});
+    const evmc::bytes32 hsl2 = hs.add_node(ByteView{zilkworm::encode_leaf(sl2)});
+    BranchNode sroot;
+    sroot.set_child(0x2, ByteView{hsl1.bytes, 32});
+    sroot.set_child(0x7, ByteView{hsl2.bytes, 32});
+    const evmc::bytes32 storage_root = hs.add_node(ByteView{zilkworm::encode_branch(sroot)});
+
+    // Account X points at that storage trie; X is the whole (single-leaf) account trie.
+    const Key kX = key_with(0x1, 3, 5);
+    const Bytes accX = account_leaf_value(7, storage_root);
+    const LeafNode leafX = make_leaf(&kX.nib[0], 64, ByteView{accX});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_leaf(leafX)});
+
+    REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+    REQUIRE(hs.storage_count() == 2u);
+
+    // Present slots read from the cache.
+    CHECK(eq32(hs.get_storage(kX.hash(), s1.hash()), v1));
+    CHECK(eq32(hs.get_storage(kX.hash(), s2.hash()), v2));
+
+    // Absent via an empty storage-branch slot (first nibble 0x9 unused).
+    const Key sEmpty = key_with(0x9, 4, 3);
+    CHECK(eq32(hs.get_storage(kX.hash(), sEmpty.hash()), evmc::bytes32{}));
+
+    // Absent via path divergence: shares slot 0x2 with s1 but its tail differs.
+    const Key sDiverge = key_with(0x2, 6, 1);
+    REQUIRE_FALSE(eq32(sDiverge.hash(), s1.hash()));
+    CHECK(eq32(hs.get_storage(kX.hash(), sDiverge.hash()), evmc::bytes32{}));
+
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// Storage: a slot whose confirmation walk needs a node the store does not have reads zero
+// but records an unconfirmed read (the storage trie IS included, so the build sees it too).
+TEST_CASE("HashState get_storage missing node leaves the read unconfirmed", "[hash_state]") {
+    HashState hs;
+
+    // X's storage trie root branch is present: one real leaf (slot 0x2) and one dangling
+    // child ref (slot 0x5) whose hash was never add_node'd.
+    evmc::bytes32 vv{};
+    vv.bytes[31] = 0x11;
+    const Key sPresent = key_with(0x2, 3, 5);
+    const Bytes evv = encode_storage_value(vv);
+    const LeafNode slp = make_leaf(&sPresent.nib[1], 63, ByteView{evv});
+    const evmc::bytes32 hslp = hs.add_node(ByteView{zilkworm::encode_leaf(slp)});
+    evmc::bytes32 dangling{};
+    for (int i = 0; i < 32; ++i) dangling.bytes[i] = static_cast<uint8_t>(0xDE - i);
+    BranchNode sroot;
+    sroot.set_child(0x2, ByteView{hslp.bytes, 32});
+    sroot.set_child(0x5, ByteView{dangling.bytes, 32});
+    const evmc::bytes32 storage_root = hs.add_node(ByteView{zilkworm::encode_branch(sroot)});
+
+    const Key kX = key_with(0x1, 3, 5);
+    const Bytes accX = account_leaf_value(7, storage_root);
+    const LeafNode leafX = make_leaf(&kX.nib[0], 64, ByteView{accX});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_leaf(leafX)});
+
+    // Build walks the included storage trie and already sees the dangling child.
+    REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kMissingNode);
+    REQUIRE(hs.missing_count() > 0u);
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    // The present slot still reads from the cache (no confirmation, no record).
+    CHECK(eq32(hs.get_storage(kX.hash(), sPresent.hash()), vv));
+    CHECK(hs.unconfirmed_read_count() == 0u);
+
+    // A slot whose path descends through the missing storage node cannot be confirmed empty.
+    const Key sMiss = key_with(0x5, 7, 3);
+    CHECK(eq32(hs.get_storage(kX.hash(), sMiss.hash()), evmc::bytes32{}));
+    CHECK(hs.unconfirmed_read_count() > 0u);
+}
+
+// Storage: the build-time-skip case is now caught on read. Account W carries a non-empty
+// storage_root whose node was NEVER added; the build legitimately SKIPS that trie (an omitted
+// storage trie is not a missing node), so the build reports clean. A read into it, however,
+// hits the missing storage root during confirmation and is recorded — no longer a silent zero.
+TEST_CASE("HashState get_storage records a read into a build-skipped storage root", "[hash_state]") {
+    HashState hs;
+
+    evmc::bytes32 absent_root{};
+    for (int i = 0; i < 32; ++i) absent_root.bytes[i] = static_cast<uint8_t>(0x50 + i);
+    const Key kW = key_with(0x3, 9, 7);
+    const Bytes accW = account_leaf_value(5, absent_root);
+    const LeafNode leafW = make_leaf(&kW.nib[0], 64, ByteView{accW});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_leaf(leafW)});
+
+    REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);  // build-time skip: NOT counted as a missing node
+    REQUIRE(hs.account_count() == 1u);
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    // A read into that storage trie hits the missing root during confirmation and is recorded.
+    const Key slot = key_with(0x4, 2, 6);
+    CHECK(eq32(hs.get_storage(kW.hash(), slot.hash()), evmc::bytes32{}));
+    CHECK(hs.unconfirmed_read_count() > 0u);
+}
+
+// Storage: reads that need no confirmation at all. An account with the empty storage_root
+// reads every slot as zero, and a slot read against an account absent from the cache reads
+// zero too — neither attempts a confirmation walk, so neither records an unconfirmed read.
+TEST_CASE("HashState get_storage on empty or absent account reads zero without confirming",
+          "[hash_state]") {
+    HashState hs;
+
+    const Key kY = key_with(0x2, 5, 2);
+    const Bytes accY = account_leaf_value(9, silkworm::kEmptyRoot);
+    const LeafNode leafY = make_leaf(&kY.nib[0], 64, ByteView{accY});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_leaf(leafY)});
+
+    REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.account_count() == 1u);
+
+    // Empty storage_root: every slot is zero, no confirmation attempted.
+    const Key slot = key_with(0x6, 3, 1);
+    CHECK(eq32(hs.get_storage(kY.hash(), slot.hash()), evmc::bytes32{}));
+
+    // Account absent from the cache: the slot is zero, no confirmation attempted.
+    const Key kAbsentAddr = key_with(0xB, 7, 4);
+    CHECK(eq32(hs.get_storage(kAbsentAddr.hash(), slot.hash()), evmc::bytes32{}));
+
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// GridMPT fold over HashState — the compile-time-selected shared-trie path.
+//
+// These exercise GridMPT<true, HashState>: the templated GridMPT bound to HashState's
+// node store (state_->find_node_rlp resolves through the HashState open-addressed index),
+// with the pre-value / read-only check compiled out (state_keeps_prevalue_check<HashState>
+// == false). The fold reads nodes only from the node store (add_node), so it runs off the
+// witness directly — build_state_from_trie's account/storage caches are not consulted by
+// the fold.
+//
+// "Expected root" strategy: an equivalence against a hand-computed root, NOT against a
+// DirectState fold. Building a DirectState from raw nodes is impractical here (it reads a
+// serialized MphfMap bundle produced by the host-side flat-bundle builders), so instead we
+// compute the post-write Ethereum trie root directly with the SAME canonical encoders the
+// fold uses internally — encode_line dispatches a branch to encode_branch and a leaf to
+// encode_leaf (rlp_sw.hpp:391-401) — making keccak(encode_branch(post-state root)) a valid
+// oracle for the fold's output.
+// ---------------------------------------------------------------------------
+
+// Change an existing account's value and fold: the recomputed root must equal the
+// independently hand-computed root of the post-write trie.
+TEST_CASE("GridMPT fold over HashState recomputes the post-write account root",
+          "[hash_state][fold]") {
+    HashState hs;
+
+    // --- pre-state: root branch -> two hash-referenced account leaves (A @ slot 0x1, B @ 0x4).
+    TestAccount aA, aB;
+    aA.build(11);
+    aB.build(22);
+    const Key kA = key_with(0x1, 3, 5);
+    const Key kB = key_with(0x4, 5, 2);
+    const LeafNode leafA = make_leaf(&kA.nib[1], 63, ByteView{aA.leaf_value});
+    const evmc::bytes32 hA = hs.add_node(ByteView{zilkworm::encode_leaf(leafA)});
+    const LeafNode leafB = make_leaf(&kB.nib[1], 63, ByteView{aB.leaf_value});
+    const evmc::bytes32 hB = hs.add_node(ByteView{zilkworm::encode_leaf(leafB)});
+    BranchNode root;
+    root.set_child(0x1, ByteView{hA.bytes, 32});
+    root.set_child(0x4, ByteView{hB.bytes, 32});
+    const Bytes root_rlp{zilkworm::encode_branch(root)};
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{root_rlp});
+
+    // Mirror the real accept flow: derive the pre-state before folding. A/B carry bogus
+    // (absent) storage roots, which build legitimately skips -> kOk, missing 0.
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+    expect_account(hs.get_account(kA.hash()), aA, "A");
+    expect_account(hs.get_account(kB.hash()), aB, "B");
+
+    // --- the write: account A -> A2 (distinct seed => distinct leaf value). ---
+    TestAccount aA2;
+    aA2.build(101);
+    REQUIRE(aA2.leaf_value != aA.leaf_value);
+
+    // --- gather the sorted TrieNodeFlat update set the way check_root does
+    // (state_transition.cpp:591-607): key = addr_hash, current_value = new account leaf
+    // RLP staged in buf. HashState update set carries NO initial_value / NO read-only entry
+    // (the pre-value check is compiled out for this instantiation). ---
+    std::vector<zilkworm::TrieNodeFlat> updates;
+    {
+        auto& node = updates.emplace_back(kA.hash());
+        REQUIRE(aA2.leaf_value.size() <= sizeof(node.buf));
+        node.current_off = 0;
+        node.current_len = static_cast<uint8_t>(aA2.leaf_value.size());
+        std::memcpy(node.buf, aA2.leaf_value.data(), aA2.leaf_value.size());
+    }
+    // Single entry -> already in memcmp(key) order (mpt.hpp:202); no sort needed.
+
+    // --- fold over HashState's node store ---
+    zilkworm::GridMPT<true, HashState> acc_trie(hs, prev_root);
+    const evmc::bytes32 new_root =
+        acc_trie.calc_root_from_updates({updates.data(), updates.size()});
+    CHECK(acc_trie.missing_count() == 0u);
+
+    // --- oracle: the post-write trie root, hand-computed with the fold's own encoders. ---
+    const LeafNode leafA2 = make_leaf(&kA.nib[1], 63, ByteView{aA2.leaf_value});
+    const Bytes leafA2_rlp{zilkworm::encode_leaf(leafA2)};  // own before the next encode call
+    const evmc::bytes32 hA2 = keccak32(ByteView{leafA2_rlp});
+    BranchNode post_root;
+    post_root.set_child(0x1, ByteView{hA2.bytes, 32});  // A's leaf hash changed
+    post_root.set_child(0x4, ByteView{hB.bytes, 32});   // B unchanged
+    const Bytes post_root_rlp{zilkworm::encode_branch(post_root)};
+    const evmc::bytes32 expected_root = keccak32(ByteView{post_root_rlp});
+
+    CHECK(eq32(new_root, expected_root));      // HashState fold == hand-computed post-root
+    CHECK_FALSE(eq32(new_root, prev_root));    // the write actually moved the root
+}
+
+// A write whose key descends through a hash ref absent from the node store must make the
+// fold reject: calc_root_from_updates returns {} (zero root) and records the missing node.
+TEST_CASE("GridMPT fold over HashState rejects a missing fold node", "[hash_state][fold]") {
+    HashState hs;
+
+    // Root branch: a present account leaf at slot 0x1, and slot 0x5 referencing a child
+    // hash that was never add_node'd.
+    TestAccount aA;
+    aA.build(7);
+    const Key kA = key_with(0x1, 3, 5);
+    const LeafNode leafA = make_leaf(&kA.nib[1], 63, ByteView{aA.leaf_value});
+    const evmc::bytes32 hA = hs.add_node(ByteView{zilkworm::encode_leaf(leafA)});
+
+    evmc::bytes32 dangling{};
+    for (int i = 0; i < 32; ++i) dangling.bytes[i] = static_cast<uint8_t>(0xDE - i);
+    BranchNode root;
+    root.set_child(0x1, ByteView{hA.bytes, 32});
+    root.set_child(0x5, ByteView{dangling.bytes, 32});
+    const Bytes root_rlp{zilkworm::encode_branch(root)};
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{root_rlp});
+
+    // A write at a key whose first nibble is 0x5 forces the fold to unfold the dangling
+    // child -> find_node_rlp miss -> kMissing -> reject.
+    TestAccount aMiss;
+    aMiss.build(9);
+    const Key kMiss = key_with(0x5, 7, 3);
+    std::vector<zilkworm::TrieNodeFlat> updates;
+    {
+        auto& node = updates.emplace_back(kMiss.hash());
+        REQUIRE(aMiss.leaf_value.size() <= sizeof(node.buf));
+        node.current_off = 0;
+        node.current_len = static_cast<uint8_t>(aMiss.leaf_value.size());
+        std::memcpy(node.buf, aMiss.leaf_value.data(), aMiss.leaf_value.size());
+    }
+
+    zilkworm::GridMPT<true, HashState> acc_trie(hs, prev_root);
+    const evmc::bytes32 new_root =
+        acc_trie.calc_root_from_updates({updates.data(), updates.size()});
+
+    CHECK(acc_trie.missing_count() > 0u);         // the missing node was observed
+    CHECK(eq32(new_root, evmc::bytes32{}));        // reject -> zero root (never equals a header)
 }

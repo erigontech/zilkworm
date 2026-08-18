@@ -50,6 +50,15 @@ option(SILKWORM_FUZZER_SANITIZERS "CLang sanitizer options for fuzzers" OFF)
 option(SILKWORM_USE_MIMALLOC "Enable using mimalloc for dynamic memory management" ON)
 option(SILKWORM_ALLOW_UNUSED_VAR_WARNINGS "Turn unused variable errors into warnings" OFF)
 
+# Compile-time selection of the trie fold's read-side state backend. OFF (default) =>
+# ActiveState is DirectState and the build is byte/behaviour-identical to today. ON =>
+# ActiveState is HashState (the SSZ/slib input path). Defines the Z6M_HASH_STATE macro
+# for all targets created below (zilk_core, zilkworm.tests, ...); see active_state.hpp.
+option(Z6M_HASH_STATE "Use the HashState (SSZ/slib) read-side state backend instead of DirectState" OFF)
+if(Z6M_HASH_STATE)
+  add_compile_definitions(Z6M_HASH_STATE)
+endif()
+
 get_filename_component(SILKWORM_MAIN_DIR . ABSOLUTE)
 set(SILKWORM_MAIN_SRC_DIR "${SILKWORM_MAIN_DIR}/zilk_core")
 

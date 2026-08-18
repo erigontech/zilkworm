@@ -17,7 +17,10 @@
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/rlp/encode.hpp>
-#include <zilk_core/core/state_zz/direct_state.hpp>
+// Backend forward-decls + the ActiveState alias only: GridMPT's node-store calls here are on a
+// dependent const StateT*, so no complete state type is needed; grid_mpt.cpp, where the members
+// are monomorphised, includes the concrete backend headers.
+#include <zilk_core/core/state_zz/active_state.hpp>
 #include <zilk_core/print.hpp>
 
 #include "mpt.hpp"
@@ -104,8 +107,8 @@ namespace rlp = ::silkworm::rlp;
 
 // Decode an MPT node from its into a GridLine and push onto grid
 // Returns false on failure and true on success
-template <bool DeletionEnabled>
-bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned parent_slot_index, unsigned parent_depth) {
+template <bool DeletionEnabled, class StateT>
+bool GridMPT<DeletionEnabled, StateT>::unfold_node_from_rlp(ByteView payload, unsigned parent_slot_index, unsigned parent_depth) {
     // Use the inline fast_decode_header — every ext-child unfold and every
     // direct unfold call lands here, so an out-of-line .cpp call would charge
     // ~256 (3T+C) of jal/jalr per node read.
@@ -184,8 +187,8 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
 // Deletes leaf towards the end of the stack at the given depth
 // Swaps the last child with this position, if of the same parent
 // Use it only if grid_.back() has the current parent
-template <bool DeletionEnabled>
-void GridMPT<DeletionEnabled>::delete_leaf(unsigned depth) {
+template <bool DeletionEnabled, class StateT>
+void GridMPT<DeletionEnabled, StateT>::delete_leaf(unsigned depth) {
     if (depth > 0) {
         GridLine& grid_line = grid_[depth];
         GridLine& parent = grid_[grid_line.parent_depth];
@@ -203,23 +206,23 @@ void GridMPT<DeletionEnabled>::delete_leaf(unsigned depth) {
     delete_line(depth);
 }
 
-template <bool DeletionEnabled>
-void GridMPT<DeletionEnabled>::pop_back() {
+template <bool DeletionEnabled, class StateT>
+void GridMPT<DeletionEnabled, StateT>::pop_back() {
     grid_.pop_back();
     depth_ = grid_.size() - 1;
 }
 
 // Soft delete a line in the middle, hard-delete from the end
-template <bool DeletionEnabled>
-inline void GridMPT<DeletionEnabled>::delete_line(unsigned depth) {
+template <bool DeletionEnabled, class StateT>
+inline void GridMPT<DeletionEnabled, StateT>::delete_line(unsigned depth) {
     if (depth == grid_.size() - 1) {
         grid_.pop_back();
     } else {
         grid_[depth].parent_depth = 0xff;
     }
 }
-template <bool DeletionEnabled>
-inline unsigned GridMPT<DeletionEnabled>::cascade_delete(unsigned depth) {
+template <bool DeletionEnabled, class StateT>
+inline unsigned GridMPT<DeletionEnabled, StateT>::cascade_delete(unsigned depth) {
     while (is_empty(grid_[depth])) {
         auto& grid_line = grid_[depth];
         if (grid_.size() > 1 && depth > 0) {
@@ -252,8 +255,8 @@ inline unsigned GridMPT<DeletionEnabled>::cascade_delete(unsigned depth) {
 }
 
 // Fold line at a given depth and make it phantom or deleted
-template <bool DeletionEnabled>
-inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
+template <bool DeletionEnabled, class StateT>
+inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
     auto& grid_line = grid_[depth];
     if (grid_line.parent_depth == 0xFF) {  // Phantom line
         // Popped once it is the last line (see delete_line); one in the middle stays until then, as popping
@@ -415,8 +418,8 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
 // The saved state the full branch b (hashes_from_witness()) of the line in pool row `row` resumes from, taken
 // out of the pool or of DirectState's table; {.., 0} if neither holds one for b's node that covers only blocks
 // with no dirty slot.
-template <bool DeletionEnabled>
-[[gnu::always_inline]] inline kprefix::Resume GridMPT<DeletionEnabled>::take_resume_full(const BranchNode& b, size_t row) {
+template <bool DeletionEnabled, class StateT>
+[[gnu::always_inline]] inline kprefix::Resume GridMPT<DeletionEnabled, StateT>::take_resume_full(const BranchNode& b, size_t row) {
     if (const unsigned blocks = take_resumable_blocks(b, row); blocks != 0) return {kprefix::pool[row], blocks};
 #if USE_HASH_KEY
     return state_->take_walk_state(b.orig, full_branch_clean_blocks(b));
@@ -431,8 +434,8 @@ template <bool DeletionEnabled>
 // as the resume wants when the node is, as every node a state is saved for is. {nullptr, 0} if there is none.
 // Called only for a branch hashes_from_witness() does not take: fold_line() hashes those through
 // take_resume_full(), from the node itself.
-template <bool DeletionEnabled>
-inline kprefix::Resume GridMPT<DeletionEnabled>::take_resume_encoded(const BranchNode& b, size_t row) {
+template <bool DeletionEnabled, class StateT>
+inline kprefix::Resume GridMPT<DeletionEnabled, StateT>::take_resume_encoded(const BranchNode& b, size_t row) {
     if (b.mask == 0 || b.orig == nullptr || (reinterpret_cast<uintptr_t>(b.orig) & 7) != 0 ||
         b.orig_size < kprefix::kBlock || !b.same_layout_as_orig()) {
         return {nullptr, 0};
@@ -453,8 +456,8 @@ inline kprefix::Resume GridMPT<DeletionEnabled>::take_resume_encoded(const Branc
 }
 
 // Make a leaf of path after cursor of current search key
-template <bool DeletionEnabled>
-inline LeafNode GridMPT<DeletionEnabled>::make_cur_leaf(ByteView value_rlp) {
+template <bool DeletionEnabled, class StateT>
+inline LeafNode GridMPT<DeletionEnabled, StateT>::make_cur_leaf(ByteView value_rlp) {
     LeafNode l{};
     l.parent_slot = search_nibbles_[search_nib_cursor_];
     l.path.len = 64 - (search_nib_cursor_ + 1);
@@ -468,8 +471,8 @@ inline LeafNode GridMPT<DeletionEnabled>::make_cur_leaf(ByteView value_rlp) {
 // Displaces the subtree chain starting at from_depth by cascading swaps along
 // first-child pointers. Frees the slot at from_depth (marked phantom) and
 // returns the new depth where the original node ended up.
-template <bool DeletionEnabled>
-unsigned GridMPT<DeletionEnabled>::move_line(unsigned from_depth) {
+template <bool DeletionEnabled, class StateT>
+unsigned GridMPT<DeletionEnabled, StateT>::move_line(unsigned from_depth) {
     GridLine cache{grid_[from_depth]};
     grid_[from_depth].parent_depth = 0xFF;  // Mark slot as phantom
 
@@ -527,9 +530,9 @@ unsigned GridMPT<DeletionEnabled>::move_line(unsigned from_depth) {
     return result_depth;
 }
 
-template <bool DeletionEnabled>
+template <bool DeletionEnabled, class StateT>
 template <typename NodeType>
-inline bool GridMPT<DeletionEnabled>::insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node) {
+inline bool GridMPT<DeletionEnabled, StateT>::insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node) {
     Kind kind;
     unsigned consumed;
     if constexpr (std::is_same_v<std::decay_t<NodeType>, LeafNode>) {
@@ -554,8 +557,8 @@ inline bool GridMPT<DeletionEnabled>::insert_line(unsigned parent_slot, unsigned
     return true;
 }
 
-template <bool DeletionEnabled>
-inline void GridMPT<DeletionEnabled>::link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, unsigned parent_depth) {
+template <bool DeletionEnabled, class StateT>
+inline void GridMPT<DeletionEnabled, StateT>::link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, unsigned parent_depth) {
     if (depth > 0) {
         auto& parent = grid_[parent_depth];
         line.consumed += parent.consumed;
@@ -571,8 +574,8 @@ inline void GridMPT<DeletionEnabled>::link_to_parent(GridLine& line, unsigned de
     }
 }
 
-template <bool DeletionEnabled>
-inline GridLine* GridMPT<DeletionEnabled>::emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, unsigned consumed_init) {
+template <bool DeletionEnabled, class StateT>
+inline GridLine* GridMPT<DeletionEnabled, StateT>::emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, unsigned consumed_init) {
     if (parent_slot >= 16) {
         failed_ = true;
         return nullptr;
@@ -589,8 +592,8 @@ inline GridLine* GridMPT<DeletionEnabled>::emplace_line(Kind kind, unsigned pare
     return &grid_.back();
 }
 
-template <bool DeletionEnabled>
-inline bool GridMPT<DeletionEnabled>::has_room(unsigned lines) {
+template <bool DeletionEnabled, class StateT>
+inline bool GridMPT<DeletionEnabled, StateT>::has_room(unsigned lines) {
     if (grid_.size() + lines <= kMaxLines) [[likely]] {
         return true;
     }
@@ -600,9 +603,9 @@ inline bool GridMPT<DeletionEnabled>::has_room(unsigned lines) {
 }
 
 /// Create and insert a new line at the given target_depth
-template <bool DeletionEnabled>
+template <bool DeletionEnabled, class StateT>
 template <typename NodeType>
-inline bool GridMPT<DeletionEnabled>::insert_line_at(unsigned target_depth, unsigned parent_slot, unsigned parent_depth, NodeType&& node) {
+inline bool GridMPT<DeletionEnabled, StateT>::insert_line_at(unsigned target_depth, unsigned parent_slot, unsigned parent_depth, NodeType&& node) {
     if (parent_slot >= 16) {
         failed_ = true;
         return false;
@@ -630,10 +633,10 @@ inline bool GridMPT<DeletionEnabled>::insert_line_at(unsigned target_depth, unsi
     return true;
 }
 
-template <bool DeletionEnabled>
+template <bool DeletionEnabled, class StateT>
 template <typename NodeType>
 // Cast a given GridLine to a node of NodeType
-inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& node) {
+inline bool GridMPT<DeletionEnabled, StateT>::transform_line(GridLine& line, NodeType&& node) {
     // extract parent_consumed info from existing line's consumed var
     unsigned parent_consumed = line.consumed;  // cumulative
     if (line.kind == kExt) {
@@ -683,8 +686,8 @@ inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& 
 // guess like any other: fold_line() uses a state only if no slot in the blocks it covers changed. A walk whose
 // updates only read (snap_ clear: check_root's walk of an unmodified account's storage) saves none, as no
 // fold of it hashes anything.
-template <bool DeletionEnabled>
-inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
+template <bool DeletionEnabled, class StateT>
+inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot) {
     if (slot > 15) [[unlikely]] {
         failed_ = true;
         sys_println("{\"err\":\"slot > 15\"}");
