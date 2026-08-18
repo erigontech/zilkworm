@@ -58,7 +58,12 @@ namespace zilkworm {
     return a ^ s;
 }
 
-class HashState {
+// Derives from silkworm::BlockState (as DirectState does, direct_state.hpp:69) so it can
+// later stand in as ActiveState for the block-running code that receives the state as a
+// `const BlockState&` (rule sets, header validation). The three BlockState virtuals plus
+// the header/blockhash store below give HashState the block-header side of that interface,
+// mirroring DirectState verbatim so the eventual retype is a drop-in.
+class HashState : public BlockState {
   public:
     // Outcome of a build_state_from_trie sweep. kOk = the sweep ran and every node it needed
     // was either present or a legitimate PRUNED BOUNDARY (a bare hash ref into an untouched
@@ -215,6 +220,39 @@ class HashState {
     // every read either hit the cache or was confirmed genuinely empty (fail-closed).
     std::uint32_t unconfirmed_read_count() const noexcept { return unconfirmed_read_count_; }
 
+    // --- silkworm::BlockState interface + BLOCKHASH store ------------------------------
+    // The block-header side of the state interface, mirroring DirectState so a later retype
+    // of the execution surface from DirectState& to ActiveState& (== HashState under
+    // -DZ6M_HASH_STATE) is a drop-in: identical signatures throughout. HashState holds the
+    // witness ancestor headers here; a later step wires the parser to feed them in.
+    //
+    // TODO(hashstate-slib, runner glue): populate these from the parsed witness headers
+    // (StatelessInputView::headers, slib_input.hpp:74) + the genesis header — S1 adds only
+    // the storage and the methods, not the population.
+
+    // Record a header under its keccak hash and keep created_block_hashes_ sorted ascending
+    // by block number for the log-n BLOCKHASH lookup. Verbatim DirectState::insert_header
+    // (direct_state.cpp:703-722).
+    void insert_header(const BlockHeader& header);
+
+    // BLOCKHASH(n): sorted lookup in created_block_hashes_ (the inserted witness / genesis
+    // ancestors), all-zero bytes32 on a miss. Mirrors DirectState::get_block_hash
+    // (direct_state.cpp:818-840) MINUS the witness block_hashes_ span branch (:819-828):
+    // HashState has no such span — the slib witness supplies ancestor headers as RLP that
+    // the runner decodes and insert_header's, so created_block_hashes_ alone covers it.
+    evmc::bytes32 get_block_hash(BlockNum n) const noexcept;
+
+    // read_header: the header cached under `block_hash`, else nullopt (block_num is unused,
+    // exactly as in DirectState). read_body / total_difficulty are the DirectState stubs:
+    // always false / always nullopt — the slib path needs neither
+    // (direct_state.cpp:696-701, :724-730).
+    std::optional<BlockHeader> read_header(BlockNum block_num,
+                                           const evmc::bytes32& block_hash) const noexcept override;
+    [[nodiscard]] bool read_body(BlockNum block_num, const evmc::bytes32& block_hash,
+                                 BlockBody& out) const noexcept override;
+    std::optional<intx::uint256> total_difficulty(uint64_t block_num,
+                                                  const evmc::bytes32& block_hash) const noexcept override;
+
   private:
     // Shared explicit-stack DFS over ONE trie rooted at `root`, the single traversal the
     // account pass and every storage pass run through (no recursion — rv64im-safe). At
@@ -302,6 +340,13 @@ class HashState {
     // HashIndex empty-bucket sentinel, 0).
     std::vector<std::uint8_t> storage_arena_;
     HashIndex<64, &storage_key8> storage_index_;
+
+    // Block-header store (the BlockState side), mirroring DirectState (direct_state.hpp:87-88):
+    // headers_ answers read_header keyed by the header's keccak hash; created_block_hashes_ is
+    // kept sorted ascending by block number for the BLOCKHASH lookup in get_block_hash. Both
+    // are populated by insert_header (the runner glue feeds it the witness ancestor headers).
+    FlatHashMap<evmc::bytes32, BlockHeader> headers_;
+    std::vector<BlockHashEntry> created_block_hashes_;
 
     // The account-trie root the last build_state_from_trie ran from, stored so a read miss can
     // seed a confirm_absent walk down the account trie (the storage passes confirm against each

@@ -288,6 +288,90 @@ void expect_account(const Account* got, const TestAccount& want, const char* who
 
 }  // namespace
 
+// S1: HashState provides the block-header side of the state interface (the silkworm::
+// BlockState base) mirroring DirectState. insert_header records a header under its keccak
+// hash (read_header) and in a block-number-sorted table (get_block_hash / BLOCKHASH);
+// read_body and total_difficulty are the DirectState stubs. Headers are inserted out of
+// order to exercise insert_header's sorted-insertion into created_block_hashes_, and one
+// header is the genesis (number 0).
+TEST_CASE("HashState header store: read_header / get_block_hash round-trip", "[hash_state]") {
+    HashState hs;
+
+    auto make_header = [](uint64_t number, uint8_t tag) {
+        silkworm::BlockHeader h;
+        h.number = number;
+        h.gas_limit = 30'000'000;
+        h.parent_hash.bytes[0] = tag;  // perturb content so each header's RLP hash is unique
+        return h;
+    };
+
+    const silkworm::BlockHeader genesis = make_header(0, 0x00);  // genesis insert
+    const silkworm::BlockHeader h10 = make_header(10, 0xAA);
+    const silkworm::BlockHeader h3 = make_header(3, 0xBB);
+    const silkworm::BlockHeader h7 = make_header(7, 0xCC);
+
+    // Out-of-order insertion; created_block_hashes_ must stay sorted internally.
+    hs.insert_header(h10);
+    hs.insert_header(genesis);
+    hs.insert_header(h7);
+    hs.insert_header(h3);
+
+    // read_header: keyed by the header's keccak hash; the passed block_num is ignored (as in
+    // DirectState), so it resolves purely from the hash.
+    for (const auto* h : {&genesis, &h3, &h7, &h10}) {
+        auto got = hs.read_header(h->number, h->hash());
+        REQUIRE(got.has_value());
+        CHECK(got->number == h->number);
+        CHECK(eq32(got->hash(), h->hash()));
+    }
+
+    // read_header on a hash that was never inserted misses (keccak never yields 0x99||0..0).
+    evmc::bytes32 unknown{};
+    unknown.bytes[0] = 0x99;
+    CHECK_FALSE(hs.read_header(999, unknown).has_value());
+
+    // get_block_hash: the BLOCKHASH lookup returns each inserted header's hash by number.
+    CHECK(eq32(hs.get_block_hash(0), genesis.hash()));
+    CHECK(eq32(hs.get_block_hash(3), h3.hash()));
+    CHECK(eq32(hs.get_block_hash(7), h7.hash()));
+    CHECK(eq32(hs.get_block_hash(10), h10.hash()));
+
+    // Numbers that were never inserted return the all-zero sentinel (below, between, above).
+    CHECK(eq32(hs.get_block_hash(5), evmc::bytes32{}));
+    CHECK(eq32(hs.get_block_hash(11), evmc::bytes32{}));
+
+    // read_body and total_difficulty are the DirectState stubs (unused by the slib path).
+    silkworm::BlockBody body{};
+    CHECK_FALSE(hs.read_body(3, h3.hash(), body));
+    CHECK_FALSE(hs.total_difficulty(3, h3.hash()).has_value());
+}
+
+// insert_header on an existing block number overwrites the BLOCKHASH entry in place (last
+// write wins) while read_header retains BOTH headers under their distinct hashes — the
+// DirectState in-place-update branch (direct_state.cpp:714-715).
+TEST_CASE("HashState header store: same-number reinsert updates blockhash in place",
+          "[hash_state]") {
+    HashState hs;
+
+    silkworm::BlockHeader a;
+    a.number = 5;
+    a.parent_hash.bytes[0] = 0x11;
+    silkworm::BlockHeader b;
+    b.number = 5;  // same number, different content -> different hash
+    b.parent_hash.bytes[0] = 0x22;
+    REQUIRE_FALSE(eq32(a.hash(), b.hash()));
+
+    hs.insert_header(a);
+    CHECK(eq32(hs.get_block_hash(5), a.hash()));
+
+    hs.insert_header(b);
+    CHECK(eq32(hs.get_block_hash(5), b.hash()));  // in-place overwrite, no duplicate entry
+
+    // headers_ is keyed by hash, so BOTH headers remain resolvable via read_header.
+    CHECK(hs.read_header(5, a.hash()).has_value());
+    CHECK(hs.read_header(5, b.hash()).has_value());
+}
+
 // The full sweep: a root branch with two direct account leaves, one account behind an
 // extension, and one embedded (<32-byte) inline non-account leaf behind a long
 // extension. Every real account must land in the cache under its exact addr_hash with
