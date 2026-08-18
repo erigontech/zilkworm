@@ -683,7 +683,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     std::vector<uint64_t> absent_order;
     std::vector<bytes32> absent_keys;
 
-    mpt::GridMPT<true> storage_trie{direct_state, kEmptyRoot};
+    zilkworm::GridMPT<true, DirectState> storage_trie{direct_state, kEmptyRoot};
 
     // A deleted or recreated account leaves none of its witness slots in the post-state.
     for (const auto& wiped : direct_state.wiped_storage()) {
@@ -953,7 +953,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         pre_state_root_ = prev_root;
         pre_root_set_ = true;
     }
-    mpt::GridMPT<true> acc_trie(direct_state, prev_root);
+    zilkworm::GridMPT<true, DirectState> acc_trie(direct_state, prev_root);
     auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
     sys_println(("New Root: " + to_hex(new_root)).c_str());
     // A failed walk returns a zero root, which would match a header committing to one.
