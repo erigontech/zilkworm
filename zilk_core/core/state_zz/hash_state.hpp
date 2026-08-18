@@ -495,6 +495,45 @@ class HashState : public BlockState {
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
 };
 
+// HashStateView — the per-transaction evmone read view over HashState, mirroring
+// DirectStateView (direct_state.hpp:395-423) METHOD-FOR-METHOD so the S4 retype from
+// DirectStateView to ActiveStateView (active_state.hpp) is a drop-in: same
+// evmone::state::StateView interface, same body with DirectState -> HashState. HashState's
+// address-keyed readers (S2) hash the 20-byte address / 32-byte slot INTERNALLY, so the view
+// forwards them RAW — identical to DirectStateView, which never hashes anything either. The
+// balance is read with a plain memcpy (native-endian): HashState::Account::balance stores the
+// intx byte layout verbatim (hash_state.cpp:521-530 load/store_be_u256 are memcpy), the same
+// convention DirectState uses (direct_state.cpp:203-212), so the mirror is byte-correct.
+class HashStateView final : public evmone::state::StateView {
+  public:
+    explicit HashStateView(HashState& s) noexcept : state_{s} {}
+
+    std::optional<Account> get_account(const evmc::address& addr) const noexcept override {
+        auto* pa = state_.find_or_create_account(addr);
+        if (pa->deleted) return std::nullopt;
+        intx::uint256 balance_v;
+        std::memcpy(&balance_v, pa->balance, 32);
+        return Account{
+            .nonce = pa->nonce,
+            .balance = balance_v,
+            .code_hash = std::bit_cast<evmc::bytes32>(pa->code_hash),
+            .has_storage = state_.has_storage(addr),
+        };
+    }
+
+    evmc::bytes get_account_code(const evmc::address& addr) const noexcept override {
+        const auto bv = state_.read_code(addr);
+        return evmc::bytes{bv.data(), bv.size()};
+    }
+
+    evmc::bytes32 get_storage(const evmc::address& addr, const evmc::bytes32& key) const noexcept override {
+        return state_.read_storage(addr, key);
+    }
+
+  private:
+    HashState& state_;
+};
+
 // The HashState fold (GridMPT<*, HashState>) drops the pre-value bind + read-only
 // short-circuit: HashState's accept update set carries no initial_value and no
 // read-only entries (reads are bound to prev_root at derive time). This specialises
