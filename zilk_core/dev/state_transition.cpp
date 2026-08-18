@@ -35,6 +35,15 @@
 #include <zilk_core/core/types_zz/flat_bundle.hpp>
 #include <zilk_core/print.hpp>
 
+#ifdef Z6M_HASH_STATE
+// The slib runner arm (S6): parse blocks[i].statelessInputBytes -> HashState -> execute ->
+// gather -> accept. These headers are HashState-only (each guarded so the DirectState build
+// pulls in nothing from them).
+#include <zilk_core/core/state_zz/hash_state.hpp>      // HashState, HashStateView
+#include <zilk_core/core/state_zz/slib_input.hpp>      // run_slib, SlibRunResult
+#include <zilk_core/dev/check_root_hashstate.hpp>      // check_root_hashstate gather overload
+#endif
+
 namespace silkworm::cmd::state_transition {
 
 StateTransition::StateTransition(std::span<uint8_t> envelope) noexcept
@@ -320,14 +329,201 @@ namespace {
     // https://ethereum-tests.readthedocs.io/en/latest/test_types/blockchain_tests.html
     RunResults blockchain_test(const nlohmann::json& json_test) {
 #ifdef Z6M_HASH_STATE
-        // Under the HashState build, Blockchain binds ActiveState==HashState and cannot accept
-        // the DirectState this arm builds from `pre`. The slib arm (parse
-        // blocks[i].statelessInputBytes -> HashState -> execute -> check_root_hashstate) lands
-        // in S6; S4's gate is only that the flag-ON tree compiles and links, so reject here
-        // (fail-closed) rather than run the DirectState path below.
-        (void)json_test;
-        sys_println("ERROR: blockchain_test slib arm not yet wired (Z6M_HASH_STATE)");
-        return Status::kFailed;
+        // === S6 slib arm: per-block statelessInputBytes -> HashState -> execute -> accept. ===
+        // Under the HashState build, Blockchain binds ActiveState==HashState. Instead of
+        // building a DirectState from `pre`, each block's own witness (blocks[i].
+        // statelessInputBytes, schema_id 0x1501) reconstructs the pre-state trie into a fresh
+        // HashState (run_slib = parse + build_state_from_trie), the block runs over it, and the
+        // S5 gather overload (check_root_hashstate) decides acceptance by folding the block's
+        // writes over prev_root. The DirectState body (the #else) stays byte-identical.
+        const auto network{json_test["network"].get<std::string>()};
+        const auto config_it{test::kNetworkConfig.find(network)};
+        if (config_it == test::kNetworkConfig.end()) {
+            sys_println("ERROR: unknown network (slib arm)");
+            return Status::kSkipped;
+        }
+        const ChainConfig& config = config_it->second;
+
+        // Genesis block: the Blockchain ctor input (it insert_header's the genesis header,
+        // blockchain.cpp:105) and, for block 0, the prev-state root anchor
+        // (genesisBlockHeader.stateRoot the witness is built against).
+        auto genesis_rlp_opt = from_hex(json_test["genesisRLP"].get<std::string>());
+        if (!genesis_rlp_opt) {
+            sys_println("ERROR: bad genesisRLP hex (slib arm)");
+            return Status::kFailed;
+        }
+        Bytes genesis_rlp{std::move(*genesis_rlp_opt)};
+        ByteView genesis_view{genesis_rlp};
+        Block genesis_block;
+        if (!rlp::decode(genesis_view, genesis_block)) {
+            sys_println("Failure to decode genesisRLP");
+            return Status::kFailed;
+        }
+
+        // prev_root: block 0 anchors to the genesis state root; each accepted block advances it.
+        evmc::bytes32 prev_root = genesis_block.header.state_root;
+
+        size_t block_index = 0;
+        for (const auto& json_block : json_test["blocks"]) {
+            // 1. A block without statelessInputBytes cannot run the slib path -> ctest SKIP (2).
+            if (!json_block.contains("statelessInputBytes")) {
+                sys_println("SKIP: block lacks statelessInputBytes");
+                return Status::kSkipped;
+            }
+
+            // 2. Decode the witness blob. Kept alive for the whole block iteration: run_slib's
+            //    decoded ByteViews (headers, public_keys, node/code spans) view INTO it.
+            auto blob_opt = from_hex(json_block["statelessInputBytes"].get<std::string>());
+            if (!blob_opt) {
+                sys_println("ERROR: bad statelessInputBytes hex");
+                return Status::kFailed;
+            }
+            const Bytes blob{std::move(*blob_opt)};
+
+            // 3. Fresh HashState per block (each block carries its own witness). Parse the blob
+            //    (feeds add_node/add_code) + build the pre-state caches from the witness trie,
+            //    anchored at prev_root.
+            ::zilkworm::HashState hs;
+            const auto slib =
+                ::zilkworm::run_slib(ByteView{blob.data(), blob.size()}, hs, prev_root);
+            if (!slib) {
+                sys_println("ERROR: run_slib failed (malformed StatelessInputBytes)");
+                return Status::kFailed;
+            }
+            if (slib->status != ::zilkworm::HashState::BuildStatus::kOk) {
+                // Absent seeding ACCOUNT root (B2) — the one gap that is never a legitimate
+                // witness omission. Fail-closed.
+                sys_println("ERROR: build_state_from_trie missing seeding root");
+                return Status::kFailed;
+            }
+
+            // 4. Feed the witness ancestor headers so BLOCKHASH resolves (the analog of
+            //    run_one_bundle's ancestor loop, st.cpp:345-347; headers arrive as RLP here).
+            for (const ByteView hdr_rlp : slib->input.headers) {
+                BlockHeader ancestor;
+                ByteView hv{hdr_rlp};
+                if (!rlp::decode(hv, ancestor)) {
+                    sys_println("ERROR: witness header RLP decode failed");
+                    return Status::kFailed;
+                }
+                hs.insert_header(ancestor);
+            }
+
+            // 5. Blockchain over the HashState-backed ActiveState (ctor insert_header's genesis).
+            Blockchain blockchain{hs, config, genesis_block};
+
+            // 6. Execute the block — the same RLP decode + size gates + expectException matching
+            //    run_json_block uses (st.cpp:179-233), but check_state_root=false: the HashState
+            //    accept is the S5 gather fold (step 7), not the Yellow-Paper state_root_hash().
+            const bool invalid{json_block.contains("expectException")};
+            const std::string expectation =
+                invalid ? json_block["expectException"].get<std::string>() : std::string{};
+            const auto check_strict = [&](std::optional<ValidationResult> got) -> bool {
+                if (!got.has_value()) return strict_exception_match_pre_insert(expectation);
+                return strict_exception_match(*got, expectation);
+            };
+            const auto fail_strict = [&](std::string_view rejection_mode) {
+                sys_println(std::format("STRICT: rejected via {} but expected {}",
+                                        rejection_mode, expectation).c_str());
+            };
+
+            std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
+            if (!rlp) {
+                if (invalid) {
+                    if (!check_strict(std::nullopt)) {
+                        fail_strict("bad-hex");
+                        return Status::kFailed;
+                    }
+                    ++block_index;
+                    continue;  // expected-invalid correctly rejected: chain does not advance.
+                }
+                sys_println("Failure to read hex");
+                return Status::kFailed;
+            }
+
+            Block block;
+            ByteView view{*rlp};
+
+            constexpr size_t MAX_BLOCK_SIZE = 10 * 1024 * 1024;   // EIP-7934 CL gossip cap.
+            constexpr size_t SAFETY_MARGIN = 2 * 1024 * 1024;     // EIP-7934 beacon margin.
+            constexpr size_t MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN;
+            if (view.size() > MAX_RLP_BLOCK_SIZE) {
+                if (invalid) {
+                    if (!check_strict(std::nullopt)) {
+                        fail_strict("oversize-block");
+                        return Status::kFailed;
+                    }
+                    ++block_index;
+                    continue;
+                }
+                return Status::kSkipped;
+            }
+
+            if (!rlp::decode(view, block)) {
+                if (invalid) {
+                    if (!check_strict(std::nullopt)) {
+                        fail_strict("rlp-decode");
+                        return Status::kFailed;
+                    }
+                    ++block_index;
+                    continue;
+                }
+                sys_println("Failure to decode RLP");
+                return Status::kFailed;
+            }
+            // Only after decode: the fork gate needs the block's number/timestamp.
+            if (rlp->size() > kMaxRlpBlockSize &&
+                config.revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
+                if (invalid) {
+                    ++block_index;
+                    continue;
+                }
+                sys_println("Block exceeded kMaxRlpBlockSize");
+                return Status::kFailed;
+            }
+
+            if (ValidationResult err{blockchain.insert_block(block, /*check_state_root=*/false)};
+                err != ValidationResult::kOk) {
+                if (invalid) {
+                    if (!check_strict(err)) {
+                        fail_strict(magic_enum::enum_name<ValidationResult>(err));
+                        return Status::kFailed;
+                    }
+                    ++block_index;
+                    continue;  // expected-invalid correctly rejected.
+                }
+                sys_println(std::format("ERROR: validation error at block {}: {} ({})",
+                                        block_index, magic_enum::enum_name(err),
+                                        magic_enum::enum_integer(err))
+                                .c_str());
+                return Status::kFailed;
+            }
+            if (invalid) {
+                sys_println("Invalid block executed successfully");
+                sys_println("ERROR: expected exception");
+                return Status::kFailed;
+            }
+
+            // 7. Accept via the S5 gather overload: gather this block's writes from the HashState
+            //    overlay, fold them over prev_root, require the recomputed root to match the
+            //    header AND both witness-completeness counters (missing / unconfirmed reads) to
+            //    be zero. (The overload prints the recomputed root itself.)
+            if (!::zilkworm::check_root_hashstate(hs, prev_root, block.header.state_root)) {
+                sys_println(std::format(
+                                "ERROR: HashState accept failed at block {}: expected state_root {}",
+                                block_index, to_hex(block.header.state_root))
+                                .c_str());
+                sys_println(std::format("  missing_count={} unconfirmed_read_count={}",
+                                        hs.missing_count(), hs.unconfirmed_read_count())
+                                .c_str());
+                return Status::kFailed;
+            }
+
+            // 8. Accepted: advance the anchor to this block's post-state root for the next block.
+            prev_root = block.header.state_root;
+            ++block_index;
+        }
+        return Status::kPassed;
 #else
         const auto network{json_test["network"].get<std::string>()};
         const auto config_it{test::kNetworkConfig.find(network)};
