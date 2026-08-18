@@ -14,13 +14,17 @@
 #include <zilk_core/core/chain/config.hpp>
 #include <zilk_core/core/protocol/rule_set.hpp>
 #include <zilk_core/core/protocol/validation.hpp>
+#include <zilk_core/core/state_zz/active_state.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
+#ifdef Z6M_HASH_STATE
+#include <zilk_core/core/state_zz/hash_state.hpp>
+#endif
 #include <zilk_core/core/types/block.hpp>
 #include <zilk_core/core/types/receipt.hpp>
 #include <zilk_core/core/types/transaction.hpp>
 
-using ::zilkworm::DirectState;
-using ::zilkworm::DirectStateView;
+using ::zilkworm::ActiveState;
+using ::zilkworm::ActiveStateView;
 
 namespace silkworm {
 
@@ -30,7 +34,7 @@ class ExecutionProcessor {
     ExecutionProcessor& operator=(const ExecutionProcessor&) = delete;
 
     ExecutionProcessor(const Block& block, protocol::RuleSet& rule_set,
-                       DirectState& direct, const ChainConfig& config);
+                       ActiveState& direct, const ChainConfig& config);
 
     ~ExecutionProcessor();
 
@@ -67,7 +71,7 @@ class ExecutionProcessor {
     // EIP-7928 (Amsterdam): block-level access list under construction.
     evmone::state::BalBuilder bal_builder_{};
     size_t tx_index_{0};
-    DirectState& direct_;
+    ActiveState& direct_;
     protocol::RuleSet& rule_set_;
     const Block& block_;
     const ChainConfig& config_;

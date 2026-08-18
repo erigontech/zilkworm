@@ -131,7 +131,7 @@ constexpr evmc::address kChildren[]{
 
 namespace silkworm {
 
-void transfer_dao_balances(DirectState& direct) {
+void transfer_dao_balances(ActiveState& direct) {
     for (const evmc::address& address : kChildren) {
         const auto bal = direct.get_balance(address);
         direct.add_to_balance(kWithdraw, bal);

@@ -23,9 +23,9 @@ class MergeRuleSet : public RuleSet {
 
     ValidationResult validate_ommers(const Block& block, const BlockState& state) override;
 
-    void initialize(const Block& block, DirectState& direct) override;
+    void initialize(const Block& block, ActiveState& direct) override;
 
-    ValidationResult finalize(DirectState& direct, const Block& block) override;
+    ValidationResult finalize(ActiveState& direct, const Block& block) override;
 
     evmc::address get_beneficiary(const BlockHeader& header) override;
 

@@ -32,7 +32,7 @@ namespace {
 }  // namespace
 
 ExecutionProcessor::ExecutionProcessor(const Block& block, protocol::RuleSet& rule_set,
-                                       DirectState& direct, const ChainConfig& config)
+                                       ActiveState& direct, const ChainConfig& config)
     : direct_{direct},
       rule_set_{rule_set},
       block_{block},
@@ -74,7 +74,7 @@ evmc::bytes32 ExecutionProcessor::get_block_hash_for_evm(int64_t block_num) cons
 }
 
 void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& receipt) noexcept {
-    DirectStateView evm1_state_view{direct_};
+    ActiveStateView evm1_state_view{direct_};
     BlockHashes evm1_block_hashes{*this};
 
     evmone::state::Transaction evm1_txn{
@@ -178,7 +178,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     // Block-start system calls (EIP-4788 beacon roots, EIP-2935 history storage)
     {
-        DirectStateView state_view{direct_};
+        ActiveStateView state_view{direct_};
         BlockHashes block_hashes{*this};
         auto diff = evmone::state::system_call_block_start(
             state_view, evm1_block_, block_hashes, rev, vm_);
@@ -255,7 +255,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
                 return ValidationResult::kRequestsProcessingFailure;
         }
 
-        DirectStateView state_view{direct_};
+        ActiveStateView state_view{direct_};
         BlockHashes block_hashes{*this};
         auto block_end_result = evmone::state::system_call_block_end(
             state_view, evm1_block_, block_hashes, rev, vm_);

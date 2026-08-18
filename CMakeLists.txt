@@ -159,12 +159,7 @@ if(BUILD_TESTING)
     zilk_core/core/state_zz/block_hash_cache_test.cpp
     zilk_core/core/trie_zz/unfold_hash_copy_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
-    zilk_core/dev/cli/addr_hash_orphan_test.cpp
-    zilk_core/dev/cli/account_read_spoof_test.cpp
-    zilk_core/dev/cli/account_read_honest_test.cpp
-    zilk_core/dev/cli/delegation_clearing_storage_test.cpp
     zilk_core/dev/cli/direct_state_handle_test.cpp
-    zilk_core/dev/cli/code_store_collision_len_test.cpp
     zilk_core/dev/cli/storage_host_path_test.cpp
     zilk_core/dev/cli/call_frame_result_test.cpp
     zilk_core/dev/cli/word_layout_test.cpp
@@ -201,6 +196,16 @@ if(BUILD_TESTING)
     zilk_core/core/state_zz/slib_input.cpp
     zilk_core/dev/cli/hash_state_test.cpp
   )
+  # These drive block execution over a DirectState witness; the flag-ON processor takes HashState.
+  if(NOT Z6M_HASH_STATE)
+    target_sources(zilkworm.tests PRIVATE
+      zilk_core/dev/cli/addr_hash_orphan_test.cpp
+      zilk_core/dev/cli/account_read_spoof_test.cpp
+      zilk_core/dev/cli/account_read_honest_test.cpp
+      zilk_core/dev/cli/delegation_clearing_storage_test.cpp
+      zilk_core/dev/cli/code_store_collision_len_test.cpp
+    )
+  endif()
   # The guests' memcpy and friends (prover/guest_common/src/mem_builtins.cpp), built for the host with
   # the guests' code-generation flags: the loops must not be turned into the libc calls the file
   # replaces. The guests are built with -mstrict-align, where a misaligned word access traps but x86

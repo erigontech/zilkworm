@@ -9,10 +9,14 @@
 
 #include <evmc/evmc.h>
 #include <zilk_core/core/protocol/rule_set.hpp>
+#include <zilk_core/core/state_zz/active_state.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
+#ifdef Z6M_HASH_STATE
+#include <zilk_core/core/state_zz/hash_state.hpp>
+#endif
 #include <zilk_core/core/types/receipt.hpp>
 
-using ::zilkworm::DirectState;
+using ::zilkworm::ActiveState;
 
 namespace silkworm::protocol {
 
@@ -28,7 +32,7 @@ class Blockchain {
      * In the beginning the state must have the genesis allocation.
      * Later on the state may only be modified by the created instance of Blockchain.
      */
-    Blockchain(DirectState& direct, const ChainConfig& config, const Block& genesis_block);
+    Blockchain(ActiveState& direct, const ChainConfig& config, const Block& genesis_block);
 
     // Not copyable nor movable
     Blockchain(const Blockchain&) = delete;
@@ -42,7 +46,7 @@ class Blockchain {
 
     void prime_state_with_genesis(const Block& genesis_block);
 
-    DirectState& direct_;
+    ActiveState& direct_;
     const ChainConfig& config_;
     RuleSetPtr rule_set_;
     std::vector<Receipt> receipts_;
