@@ -102,16 +102,21 @@ if(BUILD_TESTING)
     zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp
     zilk_core/core/trie_zz/encode_branch_patch_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
-    zilk_core/dev/cli/addr_hash_orphan_test.cpp
-    zilk_core/dev/cli/account_read_spoof_test.cpp
-    zilk_core/dev/cli/account_read_honest_test.cpp
-    zilk_core/dev/cli/delegation_clearing_storage_test.cpp
-    zilk_core/dev/cli/code_store_collision_len_test.cpp
     zilk_core/dev/cli/hash_index_test.cpp
     zilk_core/core/state_zz/hash_state.cpp
     zilk_core/core/state_zz/slib_input.cpp
     zilk_core/dev/cli/hash_state_test.cpp
   )
+  # These drive block execution over a DirectState witness; the flag-ON processor takes HashState.
+  if(NOT Z6M_HASH_STATE)
+    target_sources(zilkworm.tests PRIVATE
+      zilk_core/dev/cli/addr_hash_orphan_test.cpp
+      zilk_core/dev/cli/account_read_spoof_test.cpp
+      zilk_core/dev/cli/account_read_honest_test.cpp
+      zilk_core/dev/cli/delegation_clearing_storage_test.cpp
+      zilk_core/dev/cli/code_store_collision_len_test.cpp
+    )
+  endif()
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
   # silkworm_core<->types_zz archive cycle globally; --start-group is GNU-ld-only.
   if(APPLE)

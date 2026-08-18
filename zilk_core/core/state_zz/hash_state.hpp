@@ -356,6 +356,15 @@ class HashState : public BlockState {
         return storage_wiped_.contains(addr);
     }
 
+    // Compile-compat stub (§2f), mirroring DirectState::state_root_hash()
+    // (direct_state.hpp:160 / direct_state.cpp:638). The slib accept path uses
+    // check_root_hashstate (an incremental fold over prev_root), never the Yellow-Paper
+    // full-trie root, and always passes check_state_root=false into Blockchain, so this is
+    // never executed on the HashState path. It exists only so blockchain.cpp:95 compiles
+    // under the DirectState->ActiveState retype; returning nullopt is fail-closed (a caller
+    // that ever reaches it gets kWrongStateRoot).
+    std::optional<evmc::bytes32> state_root_hash() const { return std::nullopt; }
+
   private:
     // Shared explicit-stack DFS over ONE trie rooted at `root`, the single traversal the
     // account pass and every storage pass run through (no recursion — rv64im-safe). At

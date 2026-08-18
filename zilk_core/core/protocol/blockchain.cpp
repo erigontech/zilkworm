@@ -9,7 +9,7 @@
 
 namespace silkworm::protocol {
 
-Blockchain::Blockchain(DirectState& direct, const ChainConfig& config, const Block& genesis_block)
+Blockchain::Blockchain(ActiveState& direct, const ChainConfig& config, const Block& genesis_block)
     : direct_{direct}, config_{config}, rule_set_{rule_set_factory(config)} {
     prime_state_with_genesis(genesis_block);
 }

@@ -179,7 +179,11 @@ namespace {
         return strict_exception_match(kPreInsertReject, expectation);
     }
 
-    Status run_json_block(const nlohmann::json& json_block, Blockchain& blockchain, DirectState& direct) {
+    // [[maybe_unused]]: under Z6M_HASH_STATE the DirectState blockchain_test arm that calls
+    // this is compiled out (the slib arm replaces it, S6), leaving this helper defined but
+    // unreferenced — which -Werror=unused-function would reject. It still compiles cleanly
+    // under the flag (Blockchain / DirectState remain complete types), so keep it for S6.
+    [[maybe_unused]] Status run_json_block(const nlohmann::json& json_block, Blockchain& blockchain, DirectState& direct) {
         bool invalid{json_block.contains("expectException")};
         const std::string expectation = invalid ? json_block["expectException"].get<std::string>() : std::string{};
 
@@ -315,6 +319,16 @@ namespace {
 
     // https://ethereum-tests.readthedocs.io/en/latest/test_types/blockchain_tests.html
     RunResults blockchain_test(const nlohmann::json& json_test) {
+#ifdef Z6M_HASH_STATE
+        // Under the HashState build, Blockchain binds ActiveState==HashState and cannot accept
+        // the DirectState this arm builds from `pre`. The slib arm (parse
+        // blocks[i].statelessInputBytes -> HashState -> execute -> check_root_hashstate) lands
+        // in S6; S4's gate is only that the flag-ON tree compiles and links, so reject here
+        // (fail-closed) rather than run the DirectState path below.
+        (void)json_test;
+        sys_println("ERROR: blockchain_test slib arm not yet wired (Z6M_HASH_STATE)");
+        return Status::kFailed;
+#else
         const auto network{json_test["network"].get<std::string>()};
         const auto config_it{test::kNetworkConfig.find(network)};
         if (config_it == test::kNetworkConfig.end()) {
@@ -360,10 +374,21 @@ namespace {
             return Status::kPassed;
         }
         return Status::kPassed;
+#endif  // Z6M_HASH_STATE
     }
 }  // namespace
 
 std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle& bundle) {
+#ifdef Z6M_HASH_STATE
+    // The MFBD flat-bundle path is DirectState-only: FlatBundle::direct is a DirectState and
+    // Blockchain binds ActiveState==HashState under the flag, so this arm cannot execute. It
+    // is disabled under Z6M_HASH_STATE (the slib path runs through blockchain_test's slib arm,
+    // S6); reject fail-closed.
+    (void)bundle;
+    sys_println("ERROR: flat-bundle (MFBD) path disabled under Z6M_HASH_STATE");
+    failed_ = true;
+    return {0, false};
+#else
     if (!bundle.direct.sanitize()) {
         sys_println("ERROR: Witness sanitize failed (identity↔hash mismatch)");
         failed_ = true;
@@ -445,6 +470,7 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         cumulative_gas += block.header.gas_used;
     }
     return {cumulative_gas, true};
+#endif  // Z6M_HASH_STATE
 }
 
 bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
@@ -884,6 +910,13 @@ uint64_t StateTransition::run_ejsn() {
 }
 
 uint64_t StateTransition::run_mfbd() {
+#ifdef Z6M_HASH_STATE
+    // MFBD is the DirectState flat-bundle path (see run_one_bundle); disabled under the
+    // HashState build. Reject early rather than parse bundles that cannot execute.
+    sys_println("ERROR: MFBD path disabled under Z6M_HASH_STATE");
+    failed_ = true;
+    return kRunFailure;
+#else
     auto align8 = [](size_t v) noexcept { return (v + 7u) & ~size_t{7u}; };
 
     if (envelope_.size() < ::zilkworm::kInputHeaderSizeMFBD) [[unlikely]] {
@@ -924,6 +957,7 @@ uint64_t StateTransition::run_mfbd() {
     if (n_bundles == 0)
         return kRunSkipped;
     return cumulative_gas;
+#endif  // Z6M_HASH_STATE
 }
 
 }  // namespace silkworm::cmd::state_transition
