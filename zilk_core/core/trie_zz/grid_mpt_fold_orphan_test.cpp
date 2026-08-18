@@ -83,7 +83,7 @@ TEST_CASE("GridMPT: ext-split fold bug", "[trie][gridmpt]") {
     DirectState ds{std::span<uint8_t>{empty_state_blob}, std::span<uint8_t>{empty_nodes}};
 
     const bytes32 expected = hashbuilder_root({updates.data(), updates.size()});
-    GridMPT<true> grid{ds, silkworm::kEmptyRoot};
+    GridMPT<true, DirectState> grid{ds, silkworm::kEmptyRoot};
     const bytes32 got = grid.calc_root_from_updates({updates.data(), updates.size()});
 
 #ifndef NDEBUG

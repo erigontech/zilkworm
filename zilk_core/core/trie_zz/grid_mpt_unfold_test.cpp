@@ -48,7 +48,7 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized extension child", "[trie][g
     std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
     DirectState direct{std::span<uint8_t>{prestate}};
-    GridMPT<false> trie{direct, silkworm::kEmptyRoot};
+    GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
 
     const Bytes node = ext_node(/*child_len=*/60000);
     CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
