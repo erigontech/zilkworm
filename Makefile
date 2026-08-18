@@ -18,6 +18,7 @@ endif
         z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
         execute-block selftest tests eest-mfbd-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
+        eest-zkevm-tests zkevm-fixtures \
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
         ere-workload-checkout ere-fixtures ere-validate ere-compare \
         release-artifacts
@@ -141,6 +142,60 @@ tests-json: z6m_prover
 	prover/target/release/z6m_prover --test-service \
 		--test-dir $(EEST_JSON_DIR)/$(TESTS_SUBDIR) \
 		--execution-log-dir $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
+
+# tests-zkevm StatelessInputBytes fixtures. These are ordinary blockchain_test
+# JSON cases except that blocks[0] carries a `statelessInputBytes` hex field —
+# the SSZ/slib stateless input the HashState read-side backend consumes. Sourced
+# from the ethereum/execution-specs release `tests-zkevm@v0.8.0` (asset
+# fixtures_zkevm.tar.gz, ~524 MiB), a sibling corpus to the pinned eest_stable one.
+ZKEVM_RELEASE_TAG  := tests-zkevm@v0.8.0
+ZKEVM_RELEASE_REPO := ethereum/execution-specs
+ZKEVM_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_stateless/fixtures
+ZKEVM_JSON_DIR ?= $(ZKEVM_FIXTURES_DIR)/blockchain_tests
+
+# Download + extract the tests-zkevm fixtures. Mirrors eest-mfbd-build's
+# fixtures fetch (staged .tmp dir, `fixtures/blockchain_tests` allowlist, skip
+# when already present) but via `gh release download` instead of the
+# sha256-pinned test-fixtures.json manifest: the 524 MiB tarball has not been
+# fetched/pinned yet, and adding an unverifiable entry to test-fixtures.json
+# would break `make test-fixtures`, which verifies every manifest key. Once the
+# tarball is pinned this can move to the manifest idiom like eest_stable.
+zkevm-fixtures:
+	@dst="$(FIXTURES_CACHE)/zkevm_stateless"; \
+	tarball="$(FIXTURES_CACHE)/fixtures_zkevm.tar.gz"; \
+	if [ -d "$$dst/fixtures/blockchain_tests" ]; then \
+	    echo "  zkevm fixtures present at $$dst; skipping download"; \
+	else \
+	    mkdir -p "$(FIXTURES_CACHE)"; \
+	    echo "  downloading $(ZKEVM_RELEASE_TAG) fixtures_zkevm.tar.gz (~524 MiB) from $(ZKEVM_RELEASE_REPO)"; \
+	    gh release download '$(ZKEVM_RELEASE_TAG)' --repo $(ZKEVM_RELEASE_REPO) \
+	        -p 'fixtures_zkevm.tar.gz' -D "$(FIXTURES_CACHE)" --clobber; \
+	    echo "  extracting fixtures/blockchain_tests"; \
+	    rm -rf "$$dst.tmp" "$$dst"; mkdir -p "$$dst.tmp"; \
+	    tar --no-same-owner --no-same-permissions -xzf "$$tarball" -C "$$dst.tmp" fixtures/blockchain_tests; \
+	    mv "$$dst.tmp" "$$dst"; \
+	    echo "  zkevm fixtures ready at $$dst"; \
+	fi
+
+# Run the tests-zkevm StatelessInputBytes cases the same way eest-blockchain-tests
+# runs its corpus: configure -> build -> ctest, where each fixture file becomes a
+# `state_transition <path>` ctest case. Differences from eest-blockchain-tests:
+#   * points at the raw zkevm blockchain_test JSON (EEST_JSON_DIR, like the
+#     eest-blockchain-tests-json sibling) rather than pre-converted MFBD — the
+#     slib/HashState path reads statelessInputBytes straight from the JSON, so no
+#     eest_to_flat_bundle conversion step applies.
+#   * builds with -DZ6M_HASH_STATE=ON so ActiveState is the HashState (SSZ/slib)
+#     backend that consumes statelessInputBytes, in its own build/zkevm tree
+#     (the flag differs from the shared `build` tree used by the other targets).
+# NOTE: the slib/HashState parser that decodes `statelessInputBytes` and wires it
+# into execution is still being built, so this harness will not pass end-to-end
+# until that path lands — it is the runner scaffolding for it.
+eest-zkevm-tests: zkevm-fixtures
+	cmake -B build/zkevm -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+		-DZ6M_HASH_STATE=ON \
+		-DEEST_JSON_DIR=$(ZKEVM_JSON_DIR)
+	cmake --build build/zkevm
+	ctest --test-dir build/zkevm --parallel
 
 # SP1 benchmark corpus: flat MFBD bundles converted from the raw mainnet
 # witness blocks under $(BENCH_SRC_DIR)/<N>/unifiedBlockAndStateRlp<N>.bin.
