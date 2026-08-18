@@ -49,16 +49,18 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <span>
 #include <vector>
 
 #include <evmc/evmc.hpp>
 
-#include <zilk_core/core/common/util.hpp>          // silkworm::zeroless_view
+#include <zilk_core/core/common/util.hpp>          // silkworm::zeroless_view, silkworm::to_hex
 #include <zilk_core/core/rlp/encode.hpp>           // silkworm::rlp::encode_into_small
 #include <zilk_core/core/state_zz/hash_state.hpp>
 #include <zilk_core/core/trie_zz/mpt.hpp>          // GridMPT<bool, StateT>, TrieNodeFlat, is_zero_quick, kEmptyRoot, keccak_bytes[32]
 #include <zilk_core/core/types_zz/account.hpp>     // Account::rlp_into
+#include <zilk_core/print.hpp>                      // sys_println (recomputed-root diagnostic)
 
 namespace zilkworm {
 
@@ -144,6 +146,13 @@ struct HashStateAccountWrite {
     GridMPT<true, HashState> acc_trie(hash_state, prev_root);
     const evmc::bytes32 new_root =
         acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
+
+    // Recomputed-root diagnostic, symmetric with StateTransition::check_root's
+    // sys_println("New Root: ...") (state_transition.cpp:646): surfaces the folded root for
+    // the accept decision (the first true end-to-end signal in the slib runner arm). Purely
+    // observational — the accept gate below is unchanged.
+    sys_println(std::format("New Root (hashstate): {}",
+                            silkworm::to_hex(ByteView{new_root.bytes, 32})));
 
     // Accept iff the recomputed root matches the header AND the witness was complete AND
     // every read was resolved. The pre-value / read-only check check_root runs inside the
