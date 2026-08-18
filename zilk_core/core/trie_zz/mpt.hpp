@@ -17,6 +17,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/state_zz/active_state.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
 
@@ -25,7 +26,11 @@ using ::silkworm::kEmptyRoot;
 using ::silkworm::ByteView;
 using ::silkworm::Bytes;
 
-class DirectState;  // node-store lookups go through DirectState::find_node_rlp
+// The node-store backend is selected at compile time via the defaulted GridMPT
+// template parameter StateT (default ActiveState, from active_state.hpp above).
+// Node-store lookups go through StateT::find_node_rlp, whose signature is identical
+// on both backends (DirectState / HashState). Forward decls + the ActiveState alias
+// come from active_state.hpp so mpt.hpp needs no heavy state header.
 using bytes32 = evmc::bytes32;
 inline bytes32 keccak_bytes(const ByteView x) noexcept {
     return std::bit_cast<bytes32>(silkworm::keccak256(x).bytes);
@@ -231,7 +236,7 @@ struct TrieNodeFlat {
 // If there are more keys to insert, find a common divergence point
 // and insert the new key there before folding further.
 // More unfolding and folding needed for this or more keys
-template <bool DeletionEnabled = false>
+template <bool DeletionEnabled = false, class StateT = ActiveState>
 class GridMPT {
     unsigned depth_{0};              // The current depth we are visiting
     unsigned search_nib_cursor_{0};  // The position in the current search key
@@ -243,10 +248,12 @@ class GridMPT {
 
     bool last_was_delete_{false};
 
-    // Node-store lookups go through DirectState::find_node_rlp, which owns
-    // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload
-    // slice directly, and lets us drop the bundle blob span from GridMPT.
-    const DirectState* state_{nullptr};
+    // Node-store lookups go through StateT::find_node_rlp (DirectState owns the
+    // cached MphfMapHeader pointer + slot_offsets and returns the FlatKv payload
+    // slice directly; HashState resolves through its open-addressed node index).
+    // Either way the seam returns the RLP slice directly and lets us drop the
+    // bundle blob span from GridMPT.
+    const StateT* state_{nullptr};
     std::vector<bytes32> embedded_rlp_copies_;  // To store owned copies of embedded node RLPs to survive next loop
 
     // Diagnostic — incremented every time unfold_slot or the ext-child path
@@ -262,8 +269,8 @@ class GridMPT {
     LeafNode make_cur_leaf(ByteView value_rlp);
 
     // Shared by the constructor and reset(): if previous_root_hash is
-    // non-empty, look it up via DirectState::find_node_rlp and unfold onto
-    // grid_[0]. Defined in grid_mpt.cpp to keep the DirectState include out
+    // non-empty, look it up via StateT::find_node_rlp and unfold onto
+    // grid_[0]. Defined in grid_mpt.cpp to keep the concrete state include out
     // of mpt.hpp.
     void init_from_root(bytes32 previous_root_hash);
 
@@ -274,7 +281,7 @@ class GridMPT {
     GridLine* emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, unsigned consumed_init);
 
   public:
-    GridMPT(const DirectState& state, bytes32 previous_root_hash)
+    GridMPT(const StateT& state, bytes32 previous_root_hash)
         : prev_root_{previous_root_hash},
           grid_{},
           state_{&state} {

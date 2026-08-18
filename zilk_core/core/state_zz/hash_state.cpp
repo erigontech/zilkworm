@@ -111,7 +111,7 @@ void HashState::emit_slot_(const evmc::bytes32& account_key, const evmc::bytes32
 // kind that must be revisited (it fans out to <=16 children). Extensions and leaves are
 // consumed inline in descend_() as the sweep walks down, so they never occupy a frame.
 namespace {
-struct DeriveFrame {
+struct WalkFrame {
     BranchNode branch;    // the decoded branch at this position
     nibbles64 path;       // nibble path from the root down to (not including) this branch's children
     std::uint8_t next_slot;  // next child slot (0..15) to visit, left to right
@@ -121,15 +121,15 @@ struct DeriveFrame {
 template <class EmitLeaf>
 bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
     // Look up the seeding root by hash. Absence is REPORTED to the caller (return false),
-    // never counted here: derive_state applies the fail-closed policy per trie kind (an
-    // absent account root is fail-closed; an absent storage root is a legitimate omission).
+    // never counted here: build_state_from_trie applies the fail-closed policy per trie kind
+    // (an absent account root is fail-closed; an absent storage root is a legitimate omission).
     auto root_rlp = find_node_rlp(root);
     if (!root_rlp) return false;
 
     // Explicit stack, sized past the 64-nibble max trie depth so it never reallocates
-    // during a well-formed sweep. That keeps every DeriveFrame (and the ByteViews into a
+    // during a well-formed sweep. That keeps every WalkFrame (and the ByteViews into a
     // frame's embedded child bytes) stable across a push in descend().
-    std::vector<DeriveFrame> stack;
+    std::vector<WalkFrame> stack;
     stack.reserve(128);
 
     // Chase down from a node's RLP at `path`: strip the outer list header, decode it,
@@ -161,7 +161,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
                 // path.len <= 63 (its children land at <= 64). Reject a malformed deeper
                 // branch: it has no room for a child nibble (would overflow nibbles64).
                 if (path.len >= 64) return;
-                stack.push_back(DeriveFrame{std::move(branch), path, 0});
+                stack.push_back(WalkFrame{std::move(branch), path, 0});
                 return;
             }
 
@@ -241,10 +241,15 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
     return true;
 }
 
-HashState::DeriveStatus HashState::derive_state(const evmc::bytes32& prev_root) {
+HashState::BuildStatus HashState::build_state_from_trie(const evmc::bytes32& prev_root) {
     missing_count_ = 0;
     leaf_count_ = 0;
     storage_slot_count_ = 0;
+    // Reset the read-miss counter and remember the account-trie root so a later read miss
+    // can seed confirm_absent. The reads that a caller runs after this build accumulate into
+    // unconfirmed_read_count_ until the next build clears it again.
+    unconfirmed_read_count_ = 0;
+    prev_root_ = prev_root;
 
     // (addr_hash, storage_root) for every derived account carrying a non-empty storage
     // trie, captured during the account pass so the storage passes can run once it ends.
@@ -282,7 +287,123 @@ HashState::DeriveStatus HashState::derive_state(const evmc::bytes32& prev_root) 
         });
     }
 
-    return missing_count_ > 0 ? DeriveStatus::kMissingNode : DeriveStatus::kOk;
+    return missing_count_ > 0 ? BuildStatus::kMissingNode : BuildStatus::kOk;
+}
+
+// Single-path confirmation walk — see the header for the full contract. It intentionally
+// mirrors sweep()'s descend() one node at a time, but keeps only ONE position (no stack, no
+// emit): the target's own nibbles pick the single child to follow at every branch.
+bool HashState::confirm_absent(const evmc::bytes32& root,
+                               const evmc::bytes32& target_hash) const noexcept {
+    // The empty trie holds nothing, so every key is provably absent below it. (kEmptyRoot's
+    // node is never in the store, so without this the fetch below would read as a missing
+    // node and wrongly fail to confirm.)
+    if (root == silkworm::kEmptyRoot) return true;
+
+    const nibbles64 target = nibbles64::from_bytes32(target_hash);  // 64 nibbles
+    unsigned consumed = 0;  // target nibbles matched on the way down so far
+
+    auto cur = find_node_rlp(root);
+    if (!cur) return false;  // seeding root missing -> cannot confirm absence
+    ByteView node_rlp = *cur;
+
+    // Stable backing for an embedded (<32-byte) inline child, whose bytes live inside the
+    // transient decoded node and would dangle once the loop re-decodes. memmove (not memcpy)
+    // because an ext's embedded child view can overlap this same buffer across iterations.
+    std::array<std::uint8_t, 33> embedded{};
+
+    while (true) {
+        // Strip the outer list header exactly as descend() does (rlp::decode_header, the
+        // size-safe helper that also handles <8-byte embedded nodes).
+        auto oh = rlp::decode_header(node_rlp);
+        if (!oh || !oh->list) return false;  // malformed node -> cannot confirm
+        const ByteView list = node_rlp.substr(0, oh->payload_length);
+
+        BranchNode branch;
+        bool is_leaf = false;
+        std::array<std::uint8_t, 64> np{};
+        std::uint8_t plen = 0;
+        ByteView second{};
+        const Kind kind = decode_node(list, branch, is_leaf, np, plen, second);
+        if (kind == kInvalid) return false;  // undecodable -> cannot confirm
+
+        if (kind == kBranch) {
+            if (consumed >= 64) return false;  // no nibble left to index a branch (malformed)
+            const unsigned s = target.nib[consumed];
+            // Empty child slot (decode_node's child_len == 0, i.e. the RLP 0x80 marker): the
+            // target's next nibble leads nowhere -> proven absent.
+            if (branch.child_len[s] == 0) return true;
+            ++consumed;
+            if (branch.child_len[s] == 32) {  // 32-byte hash ref -> resolve through the store
+                evmc::bytes32 h;
+                const std::uint8_t* hsrc = branch.child_ptr[s] ? branch.child_ptr[s]
+                                                               : branch.child[s].bytes;
+                std::memcpy(h.bytes, hsrc, 32);
+                auto child = find_node_rlp(h);
+                if (!child) return false;  // needed node missing -> cannot confirm
+                node_rlp = *child;
+                continue;
+            }
+            // Embedded (<32-byte) inline child: its RLP lives in the parent's child bytes; copy
+            // it out to stable storage before the loop re-decodes and destroys `branch`.
+            const std::uint8_t len = branch.child_len[s];
+            std::memmove(embedded.data(), branch.child[s].bytes, len);
+            node_rlp = ByteView{embedded.data(), len};
+            continue;
+        }
+
+        // kExtOrLeaf: match this node's own path nibbles against the target's remainder.
+        const unsigned remaining = 64u - consumed;
+        const unsigned overlap = plen < remaining ? plen : remaining;
+        for (unsigned i = 0; i < overlap; ++i) {
+            if (target.nib[consumed + i] != np[i]) return true;  // path diverges -> proven absent
+        }
+        if (plen > remaining) return true;  // node path outlasts the key -> divergence -> absent
+        consumed += plen;
+
+        if (is_leaf) {
+            // Whole leaf path matched. Exactly consuming the key (consumed == 64) means the key
+            // is PRESENT (not proven absent); a shorter leaf leaves the key hanging past a
+            // terminal node (absent). A present key here is a cache-miss anomaly, so fail-closed.
+            return consumed == 64 ? false : true;
+        }
+
+        // Extension: descend into its single child (hash ref -> store; embedded -> stable copy).
+        if (second.size() == 32) {
+            evmc::bytes32 h;
+            std::memcpy(h.bytes, second.data(), 32);
+            auto child = find_node_rlp(h);
+            if (!child) return false;  // needed node missing -> cannot confirm
+            node_rlp = *child;
+            continue;
+        }
+        const std::size_t len = second.size();
+        std::memmove(embedded.data(), second.data(), len);
+        node_rlp = ByteView{embedded.data(), len};
+    }
+}
+
+void HashState::note_account_miss_(const evmc::bytes32& addr_hash) const noexcept {
+    // Cache miss on an account. If confirm_absent can prove the key empty in the account trie
+    // the blank read is correct and nothing is recorded; otherwise a node the walk needed was
+    // missing (or the key is unexpectedly present), so the read is unconfirmed — record it.
+    if (!confirm_absent(prev_root_, addr_hash)) ++unconfirmed_read_count_;
+}
+
+void HashState::note_storage_miss_(const evmc::bytes32& addr_hash,
+                                   const evmc::bytes32& slot_hash) const noexcept {
+    // A storage slot is zero unless its account exists AND carries a non-empty storage trie.
+    auto aoff = account_index_.find(addr_hash.bytes);
+    if (!aoff) return;  // account not cached -> slot is zero, no storage trie to confirm against
+    evmc::bytes32 sroot;
+    std::memcpy(sroot.bytes,
+                reinterpret_cast<const Account*>(accounts_arena_.data() + *aoff)->storage_root, 32);
+    if (sroot == silkworm::kEmptyRoot) return;  // empty storage trie -> slot is zero, no walk
+
+    // Confirm against the account's own storage_root. This is where a storage root the build
+    // skipped (its node never added) is caught: find_node_rlp misses inside confirm_absent, so
+    // it returns false and the read is recorded rather than passed off as a silent zero.
+    if (!confirm_absent(sroot, slot_hash)) ++unconfirmed_read_count_;
 }
 
 evmc::bytes32 HashState::add_node(ByteView rlp) {
