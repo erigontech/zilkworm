@@ -60,12 +60,15 @@ namespace zilkworm {
 
 class HashState {
   public:
-    // Outcome of a build_state_from_trie sweep. kOk = the whole account trie was walked and
-    // every referenced node was present. kMissingNode = at least one node a path
-    // needed (a referenced child hash, or the seeding root) was absent from the store;
-    // the sweep still emits everything reachable, but the gap is recorded in
-    // missing_count_ so the accept gate can hard-reject it (fail-closed, never silent —
-    // see hashstate_design.md §2.2 "Fail-closed rule").
+    // Outcome of a build_state_from_trie sweep. kOk = the sweep ran and every node it needed
+    // was either present or a legitimate PRUNED BOUNDARY (a bare hash ref into an untouched
+    // subtree that a real EIP-8025 partial witness omits — see build_state_from_trie).
+    // kMissingNode = the seeding ACCOUNT root itself was absent (B2), the one gap that is
+    // never a legitimate omission; the sweep still emits everything reachable, but that gap
+    // is recorded in missing_count_ so the accept gate can hard-reject it (fail-closed, never
+    // silent — see hashstate_design.md §2.2 "Fail-closed rule"). A pruned child boundary does
+    // NOT set this; witness completeness for pruned parts is enforced at read time
+    // (confirm_absent -> unconfirmed_read_count_) and at fold time (a non-matching root).
     enum class BuildStatus : std::uint8_t { kOk, kMissingNode };
 
     // Sizes are best-effort hints for the open-addressed tables (~2x -> load factor
@@ -130,8 +133,11 @@ class HashState {
     // sites in the .cpp, not inside sweep): an absent ACCOUNT root is a missing node (B2,
     // the anchor of everything). An absent STORAGE root is NOT — a witness legitimately
     // omits the storage trie of an account the block never touches, so it is skipped, not
-    // counted. A dangling ref reached WHILE walking an included trie (account or storage)
-    // always bumps missing_count_. missing_count_ accumulates across all passes.
+    // counted. A hash-ref child reached WHILE walking an included trie (account or storage)
+    // whose node is absent is a PRUNED BOUNDARY — the EIP-8025 partial-witness case — so the
+    // sweep stops there WITHOUT bumping missing_count_; it materializes exactly the touched
+    // leaves that are included. missing_count_ therefore flags ONLY a broken account root,
+    // never a pruned subtree.
     BuildStatus build_state_from_trie(const evmc::bytes32& prev_root);
 
     // Account-cache lookup keyed by the 32-byte trie path (addr_hash == keccak256(addr)).
@@ -197,8 +203,10 @@ class HashState {
     // Storage leaves reached across all storage passes of the last sweep (diagnostic,
     // parallel to leaf_count_ but for the storage tries).
     std::uint32_t storage_slot_count() const noexcept { return storage_slot_count_; }
-    // Referenced nodes (child hash refs or the seeding root) a sweep found ABSENT from
-    // the store. > 0 means the witness was incomplete — the accept gate must reject.
+    // Genuinely broken seeding ACCOUNT root the last sweep found ABSENT from the store (B2).
+    // > 0 means the anchor of the whole witness was missing — the accept gate must reject.
+    // A pruned CHILD boundary (a bare hash ref into an omitted subtree) is NOT counted here;
+    // it is caught at read time (unconfirmed_read_count_) or fold time (non-matching root).
     std::uint32_t missing_count() const noexcept { return missing_count_; }
     // Read misses (get_account / get_storage) whose confirmation walk could NOT prove the
     // key absent because a node it needed was missing from the store. Reset by
@@ -211,8 +219,9 @@ class HashState {
     // Shared explicit-stack DFS over ONE trie rooted at `root`, the single traversal the
     // account pass and every storage pass run through (no recursion — rv64im-safe). At
     // each leaf it calls emit_leaf(path_packed_to_bytes32, leaf_value_ByteView); the
-    // caller's emit decides how to decode/cache that leaf (account vs slot). A dangling
-    // child ref reached WHILE walking bumps missing_count_. Returns false iff `root`
+    // caller's emit decides how to decode/cache that leaf (account vs slot). A hash-ref child
+    // reached WHILE walking whose node is absent is a PRUNED BOUNDARY: the sweep stops that
+    // descent WITHOUT bumping missing_count_ (partial-witness rule). Returns false iff `root`
     // itself was absent from the node store (the caller decides whether that is
     // fail-closed — see build_state_from_trie), true if the sweep ran. Defined in the .cpp;
     // only instantiated there (from build_state_from_trie's two emit lambdas).

@@ -109,6 +109,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/code_store_collision_len_test.cpp
     zilk_core/dev/cli/hash_index_test.cpp
     zilk_core/core/state_zz/hash_state.cpp
+    zilk_core/core/state_zz/slib_input.cpp
     zilk_core/dev/cli/hash_state_test.cpp
   )
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the

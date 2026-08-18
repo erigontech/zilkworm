@@ -820,6 +820,14 @@ StateTransition::Result StateTransition::run() {
                 gas = run_mfbd();
                 break;
             default:
+                // TODO(hashstate-slib, next step): the "default path" is a StatelessInput
+                // blob (schema_id 0x1501, on-wire big-endian prefix 15 01) — detect it here
+                // (envelope_[0] == 0x15 && envelope_[1] == 0x01) and dispatch to a run_slib()
+                // that parses it into a HashState (zilk_core/core/state_zz/slib_input.hpp,
+                // parse_stateless_input + build_state_from_trie) and executes the block. The
+                // parser + build front-end already exist and are unit-tested; wiring in full
+                // block execution over HashState is the remaining step, so for now this path
+                // still rejects (no behavior change to the MFBD/EJSN guests).
                 sys_println("ERROR: unsupported input magic");
                 failed_ = true;
                 break;
