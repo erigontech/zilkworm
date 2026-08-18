@@ -33,6 +33,7 @@
 #include <zilk_core/core/trie_zz/mpt.hpp>        // GridMPT<DeletionEnabled, StateT>, TrieNodeFlat
 #include <zilk_core/core/trie_zz/rlp_sw.hpp>     // encode_leaf/branch/ext + node types
 #include <zilk_core/core/types_zz/account.hpp>   // Account (leaf-value encode/decode target)
+#include <zilk_core/dev/check_root_hashstate.hpp>  // check_root_hashstate + HashStateAccountWrite
 
 using zilkworm::Account;
 using zilkworm::BranchNode;
@@ -946,4 +947,244 @@ TEST_CASE("GridMPT fold over HashState rejects a missing fold node", "[hash_stat
 
     CHECK(acc_trie.missing_count() > 0u);         // the missing node was observed
     CHECK(eq32(new_root, evmc::bytes32{}));        // reject -> zero root (never equals a header)
+}
+
+// ---------------------------------------------------------------------------
+// check_root_hashstate — the HashState accept check (check_root_hashstate.hpp).
+//
+// The additive sibling of StateTransition::check_root: it folds ONLY a block's writes
+// over a HashState whose caches were built from the pre-state trie, recomputes the
+// post-state root with the same GridMPT<true, HashState> fold, and accepts iff
+//   new_root == header_state_root && missing_count() == 0 && unconfirmed_read_count() == 0.
+// The pre-value / read-only check is compiled out for HashState; the two counts replace
+// it. The write set is supplied as INPUT (HashStateAccountWrite), shaped like check_root's
+// internal update set. "Expected root" is hand-computed with the fold's own canonical
+// encoders (encode_leaf/encode_branch), the same oracle strategy the fold tests above use.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using zilkworm::HashStateAccountWrite;
+
+// Build an Account POD with distinct, fully-decodable fields from `seed` and a chosen
+// storage_root — the object check_root_hashstate re-encodes the account leaf from via
+// rlp_into(buf, root). Field pattern matches account_leaf_value so leaves agree byte-for-byte.
+Account make_test_account(uint64_t seed, const evmc::bytes32& storage_root) {
+    Account a{};
+    a.nonce = seed;
+    const uint64_t bal = 0xAABBCCDD00000000ULL + seed;
+    std::memcpy(a.balance, &bal, sizeof(bal));
+    for (std::size_t i = 0; i < 32; ++i)
+        a.code_hash[i] = static_cast<uint8_t>(0xC0u + i + seed);
+    std::memcpy(a.storage_root, storage_root.bytes, 32);
+    return a;
+}
+
+}  // namespace
+
+// ACCEPT: two touched accounts — A changes an account FIELD (nonce), X changes a STORAGE
+// SLOT (so the per-account storage fold runs). check_root_hashstate must recompute exactly
+// the independently hand-computed post-state root and accept it.
+TEST_CASE("check_root_hashstate accepts writes that recompute the header root",
+          "[hash_state][accept]") {
+    HashState hs;
+
+    // --- X's pre-state storage trie: root branch -> three hash-referenced 63-nibble leaves.
+    evmc::bytes32 v1{};  // full 32 bytes
+    for (std::size_t i = 0; i < 32; ++i) v1.bytes[i] = static_cast<uint8_t>(0xF1u - i);
+    evmc::bytes32 v2{};  v2.bytes[31] = 0x2A;                 // trims to one byte
+    evmc::bytes32 v3{};  v3.bytes[30] = 0x81; v3.bytes[31] = 0xFF;  // trims to two bytes
+
+    const Key s1 = key_with(0x2, 3, 5);
+    const Key s2 = key_with(0x7, 5, 2);
+    const Key s3 = key_with(0xE, 7, 1);
+    const Bytes ev1 = encode_storage_value(v1);
+    const LeafNode sleaf1 = make_leaf(&s1.nib[1], 63, ByteView{ev1});
+    const evmc::bytes32 hs1 = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf1)});
+    const Bytes ev2 = encode_storage_value(v2);
+    const LeafNode sleaf2 = make_leaf(&s2.nib[1], 63, ByteView{ev2});
+    const evmc::bytes32 hs2 = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf2)});
+    const Bytes ev3 = encode_storage_value(v3);
+    const LeafNode sleaf3 = make_leaf(&s3.nib[1], 63, ByteView{ev3});
+    const evmc::bytes32 hs3 = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf3)});
+    BranchNode sroot;
+    sroot.set_child(0x2, ByteView{hs1.bytes, 32});
+    sroot.set_child(0x7, ByteView{hs2.bytes, 32});
+    sroot.set_child(0xE, ByteView{hs3.bytes, 32});
+    const evmc::bytes32 sroot_X = hs.add_node(ByteView{zilkworm::encode_branch(sroot)});
+
+    // --- account trie: root branch -> A (@0x1, absent/skipped storage) and X (@0x2, sroot_X).
+    evmc::bytes32 absent_root{};  // never add_node'd; build legitimately skips A's storage
+    for (int i = 0; i < 32; ++i) absent_root.bytes[i] = static_cast<uint8_t>(0x50 + i);
+
+    const Key kA = key_with(0x1, 3, 5);
+    const Key kX = key_with(0x2, 5, 2);
+    const Account accA = make_test_account(11, absent_root);
+    const Account accX = make_test_account(7, sroot_X);
+    const Bytes leafA_val = accA.rlp(absent_root);
+    const Bytes leafX_val = accX.rlp(sroot_X);
+    const LeafNode leafA = make_leaf(&kA.nib[1], 63, ByteView{leafA_val});
+    const evmc::bytes32 hA = hs.add_node(ByteView{zilkworm::encode_leaf(leafA)});
+    const LeafNode leafX = make_leaf(&kX.nib[1], 63, ByteView{leafX_val});
+    const evmc::bytes32 hX = hs.add_node(ByteView{zilkworm::encode_leaf(leafX)});
+    BranchNode root;
+    root.set_child(0x1, ByteView{hA.bytes, 32});
+    root.set_child(0x2, ByteView{hX.bytes, 32});
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    // Mirror the real accept flow: derive the pre-state before folding. missing/unconfirmed 0.
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    // --- writes: A's nonce -> 101 (field change); X's slot s1 -> v1_new (storage change). ---
+    evmc::bytes32 v1_new{};
+    for (std::size_t i = 0; i < 32; ++i) v1_new.bytes[i] = static_cast<uint8_t>(0x20u + i);
+    REQUIRE_FALSE(eq32(v1_new, v1));
+
+    const Account accA2 = make_test_account(101, absent_root);  // A's storage unchanged
+
+    std::vector<zilkworm::TrieNodeFlat> x_storage;  // sorted (single entry); must outlive the call
+    {
+        const Bytes ev = encode_storage_value(v1_new);
+        auto& n = x_storage.emplace_back(s1.hash());
+        n.current_off = 0;
+        n.current_len = static_cast<uint8_t>(ev.size());
+        std::memcpy(n.buf, ev.data(), ev.size());
+    }
+
+    std::vector<HashStateAccountWrite> writes;                  // sorted by addr_hash: A (0x18..) < X (0x27..)
+    writes.push_back({kA.hash(), absent_root, {}, &accA2});
+    writes.push_back({kX.hash(), sroot_X,
+                      std::span<const zilkworm::TrieNodeFlat>{x_storage}, &accX});
+
+    // --- oracle: post-write root, hand-computed with the fold's own encoders. ---
+    // A' leaf (new nonce, storage unchanged).
+    const Bytes leafA2_val = accA2.rlp(absent_root);
+    const LeafNode leafA2 = make_leaf(&kA.nib[1], 63, ByteView{leafA2_val});
+    const evmc::bytes32 hA2 = keccak32(ByteView{zilkworm::encode_leaf(leafA2)});
+    // X's new storage root: s1 leaf value changed, s2/s3 unchanged.
+    const Bytes ev1_new = encode_storage_value(v1_new);
+    const LeafNode sleaf1_new = make_leaf(&s1.nib[1], 63, ByteView{ev1_new});
+    const evmc::bytes32 hs1_new = keccak32(ByteView{zilkworm::encode_leaf(sleaf1_new)});
+    BranchNode sroot_new;
+    sroot_new.set_child(0x2, ByteView{hs1_new.bytes, 32});
+    sroot_new.set_child(0x7, ByteView{hs2.bytes, 32});
+    sroot_new.set_child(0xE, ByteView{hs3.bytes, 32});
+    const Bytes sroot_new_rlp{zilkworm::encode_branch(sroot_new)};
+    const evmc::bytes32 sroot_X_new = keccak32(ByteView{sroot_new_rlp});
+    REQUIRE_FALSE(eq32(sroot_X_new, sroot_X));  // the storage write moved X's storage root
+    // X' account leaf re-encoded with the new storage root (X's fields unchanged).
+    const Bytes leafX2_val = accX.rlp(sroot_X_new);
+    const LeafNode leafX2 = make_leaf(&kX.nib[1], 63, ByteView{leafX2_val});
+    const evmc::bytes32 hX2 = keccak32(ByteView{zilkworm::encode_leaf(leafX2)});
+    // post-state account root.
+    BranchNode post_root;
+    post_root.set_child(0x1, ByteView{hA2.bytes, 32});
+    post_root.set_child(0x2, ByteView{hX2.bytes, 32});
+    const Bytes post_root_rlp{zilkworm::encode_branch(post_root)};
+    const evmc::bytes32 expected_root = keccak32(ByteView{post_root_rlp});
+    REQUIRE_FALSE(eq32(expected_root, prev_root));  // the writes moved the account root
+
+    // ACCEPT: recomputed root == header root, both counts zero.
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, writes, expected_root));
+
+    // REJECT on a tampered header root: same writes, one flipped byte.
+    evmc::bytes32 bad_root = expected_root;
+    bad_root.bytes[0] = static_cast<uint8_t>(bad_root.bytes[0] ^ 0xFF);
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, writes, bad_root));
+}
+
+// REJECT on unconfirmed read: a build-skipped storage root is read after the build, leaving
+// unconfirmed_read_count() > 0 while missing_count() stays 0. The SAME writes + correct root
+// accept BEFORE the read and reject AFTER it — the count is the only thing that changed, so
+// the accept gate rejects even though the root matches.
+TEST_CASE("check_root_hashstate rejects when a read was left unconfirmed",
+          "[hash_state][accept]") {
+    HashState hs;
+
+    evmc::bytes32 absent_root{};  // W's storage_root; its node is never add_node'd
+    for (int i = 0; i < 32; ++i) absent_root.bytes[i] = static_cast<uint8_t>(0x50 + i);
+
+    // Whole account trie is a single 64-nibble leaf (account W).
+    const Key kW = key_with(0x3, 9, 7);
+    const Account accW = make_test_account(5, absent_root);
+    const Bytes leafW_val = accW.rlp(absent_root);
+    const LeafNode leafW = make_leaf(&kW.nib[0], 64, ByteView{leafW_val});
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_leaf(leafW)});
+
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);              // build-time skip: NOT a missing node
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    // Write: W's nonce -> 55 (storage unchanged; absent_root carried through).
+    const Account accW2 = make_test_account(55, absent_root);
+    std::vector<HashStateAccountWrite> writes;
+    writes.push_back({kW.hash(), absent_root, {}, &accW2});
+
+    // Oracle: single-leaf trie root == keccak(encode_leaf(new leaf)).
+    const Bytes leafW2_val = accW2.rlp(absent_root);
+    const LeafNode leafW2 = make_leaf(&kW.nib[0], 64, ByteView{leafW2_val});
+    const evmc::bytes32 expected_root = keccak32(ByteView{zilkworm::encode_leaf(leafW2)});
+
+    // Baseline: with both counts still zero and the correct root, it ACCEPTS.
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, writes, expected_root));
+
+    // Read into W's build-skipped storage trie: confirmation hits the absent root -> unconfirmed.
+    const Key slot = key_with(0x4, 2, 6);
+    (void)hs.get_storage(kW.hash(), slot.hash());
+    REQUIRE(hs.unconfirmed_read_count() > 0u);
+    REQUIRE(hs.missing_count() == 0u);
+
+    // Same writes, same (correct) root -> now REJECTS purely on the unconfirmed read.
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, writes, expected_root));
+}
+
+// REJECT on missing node: the pre-state witness has a dangling child ref, so
+// build_state_from_trie leaves missing_count() > 0. A write that does NOT descend through the
+// gap folds to a real root (computed here with a raw GridMPT), yet feeding that exact root as
+// the header still rejects — the incomplete witness alone fails the gate.
+TEST_CASE("check_root_hashstate rejects when the witness has a missing node",
+          "[hash_state][accept]") {
+    HashState hs;
+
+    // Root branch: present account P @ slot 0x1, dangling child ref @ slot 0x5.
+    const Key kP = key_with(0x1, 3, 5);
+    const Account accP = make_test_account(303, silkworm::kEmptyRoot);  // empty storage: no storage pass
+    const Bytes leafP_val = accP.rlp(silkworm::kEmptyRoot);
+    const LeafNode leafP = make_leaf(&kP.nib[1], 63, ByteView{leafP_val});
+    const evmc::bytes32 hP = hs.add_node(ByteView{zilkworm::encode_leaf(leafP)});
+    evmc::bytes32 dangling{};
+    for (int i = 0; i < 32; ++i) dangling.bytes[i] = static_cast<uint8_t>(0xDE - i);
+    BranchNode root;
+    root.set_child(0x1, ByteView{hP.bytes, 32});
+    root.set_child(0x5, ByteView{dangling.bytes, 32});
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kMissingNode);
+    REQUIRE(hs.missing_count() > 0u);               // dangling child observed at build
+    REQUIRE(hs.unconfirmed_read_count() == 0u);     // reset by the build; no reads
+
+    // Write: P's nonce -> 3030 (path is slot 0x1, never touches the dangling slot 0x5).
+    const Account accP2 = make_test_account(3030, silkworm::kEmptyRoot);
+    std::vector<HashStateAccountWrite> writes;
+    writes.push_back({kP.hash(), silkworm::kEmptyRoot, {}, &accP2});
+
+    // Independently fold the SAME single-account update with a raw GridMPT to get the exact
+    // post-write root; this fold path does not touch slot 0x5, so it succeeds cleanly.
+    std::vector<zilkworm::TrieNodeFlat> acc_updates;
+    {
+        const Bytes v = accP2.rlp(silkworm::kEmptyRoot);
+        auto& n = acc_updates.emplace_back(kP.hash());
+        n.current_off = 0;
+        n.current_len = static_cast<uint8_t>(v.size());
+        std::memcpy(n.buf, v.data(), v.size());
+    }
+    zilkworm::GridMPT<true, HashState> probe(hs, prev_root);
+    const evmc::bytes32 folded = probe.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
+    REQUIRE(probe.missing_count() == 0u);           // the fold path itself hit no missing node
+    REQUIRE_FALSE(eq32(folded, evmc::bytes32{}));    // a real root, not the reject sentinel
+
+    // Feeding the exact folded root as the header, the accept STILL fails on the witness gap.
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, writes, folded));
 }
