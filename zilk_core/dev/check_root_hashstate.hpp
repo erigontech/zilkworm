@@ -22,9 +22,13 @@
 //     accept  <=>  new_root == header_state_root
 //                  && hash_state.missing_count()          == 0
 //                  && hash_state.unconfirmed_read_count() == 0
-// i.e. the recomputed root matches the header AND the witness contained every node the
-// build/fold needed AND every read either hit the cache or was proven genuinely empty
-// (fail-closed — see hash_state.hpp:200-208).
+// i.e. the recomputed root matches the header AND the seeding account root was present
+// (missing_count() now flags ONLY a broken root — a real EIP-8025 partial witness prunes
+// untouched subtrees to bare hash refs, which the build treats as legitimate boundaries)
+// AND every read either hit the cache or was proven genuinely empty (fail-closed — see
+// hash_state.hpp:200-208). A write whose fold must descend into a pruned boundary is still
+// caught without a fourth condition: GridMPT cannot unfold the absent node, so it recomputes
+// a non-matching (zero) root and new_root == header_state_root fails.
 //
 // The write set is an INPUT here (HashStateAccountWrite below), shaped the way check_root
 // shapes its internal update set (sorted mpt::TrieNodeFlat). Wiring the write set from

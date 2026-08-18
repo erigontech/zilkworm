@@ -182,8 +182,10 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
                 evmc::bytes32 h;
                 std::memcpy(h.bytes, second.data(), 32);
                 auto child = find_node_rlp(h);
-                if (!child) {  // dangling ext-child ref — record, do not silently skip
-                    ++missing_count_;
+                if (!child) {
+                    // PRUNED BOUNDARY: this extension points into a pruned subtree (same rule
+                    // as the branch-child case below). Stop descending; do NOT bump
+                    // missing_count_ — a pruned child is not a missing node.
                     return;
                 }
                 node_rlp = *child;
@@ -226,8 +228,16 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
                                            : stack[top].branch.child[s].bytes;
             std::memcpy(h.bytes, hsrc, 32);
             auto child = find_node_rlp(h);
-            if (!child) {  // dangling child ref — witness incomplete, surface it
-                ++missing_count_;
+            if (!child) {
+                // PRUNED BOUNDARY (EIP-8025 partial witness). A real StatelessInputBytes
+                // witness carries only the state the block touches and prunes every untouched
+                // subtree to a bare 32-byte hash ref. A child hash-ref whose node is absent
+                // from the store is exactly that boundary — NOT an incomplete witness — so do
+                // NOT descend and do NOT bump missing_count_ (which now flags only a genuinely
+                // broken seeding root, never a pruned child). Completeness is enforced later:
+                // at read time confirm_absent turns a read that needs a pruned node into an
+                // unconfirmed read, and at fold time a write over a boundary recomputes a
+                // non-matching root. Keep sweeping the branch's other children.
                 continue;
             }
             descend(*child, child_path);
@@ -276,9 +286,11 @@ HashState::BuildStatus HashState::build_state_from_trie(const evmc::bytes32& pre
     // --- storage passes ---
     // One sibling sweep per derived account, rooted at its storage_root. An absent storage
     // root is NOT fail-closed: a witness legitimately omits the storage trie of an account
-    // the block never touches, so sweep() == false is skipped, not counted. A dangling ref
-    // reached WHILE walking an included storage trie still bumps missing_count_ (inside
-    // sweep), accumulating with the account pass.
+    // the block never touches, so sweep() == false is skipped, not counted. A hash-ref child
+    // reached WHILE walking an included storage trie whose node is absent is a PRUNED BOUNDARY
+    // (the same partial-witness rule sweep() applies to the account trie): the sweep stops
+    // there without bumping missing_count_. So missing_count_ after the storage passes still
+    // reflects only a broken account root, never a pruned subtree.
     for (const auto& pr : storage_roots) {
         const evmc::bytes32 account_key = pr.first;
         const evmc::bytes32 sroot = pr.second;
