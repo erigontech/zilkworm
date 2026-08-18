@@ -30,6 +30,24 @@ using ActiveState = HashState;
 using ActiveState = DirectState;
 #endif
 
+// The evmone per-transaction read VIEW over the active backend, selected the same way as
+// ActiveState above: DirectStateView by default, HashStateView under Z6M_HASH_STATE. Its
+// only consumer is the ExecutionProcessor, which constructs one per transaction and per
+// system-call round; the S4 retype flips processor.cpp from DirectStateView to
+// ActiveStateView with no other change. Kept here beside ActiveState (rather than in
+// processor.hpp) so all backend selection lives in one place; a forward declaration is
+// enough for the alias — any TU that actually constructs the view already includes the
+// defining header (direct_state.hpp / hash_state.hpp) for the complete type, so this stays
+// dependency-free exactly like the ActiveState alias.
+class DirectStateView;
+class HashStateView;
+
+#ifdef Z6M_HASH_STATE
+using ActiveStateView = HashStateView;
+#else
+using ActiveStateView = DirectStateView;
+#endif
+
 // Does the trie fold keep the pre-value / read-only check for this backend?
 //
 // DirectState (and any un-specialised backend) => yes: the DirectState update set

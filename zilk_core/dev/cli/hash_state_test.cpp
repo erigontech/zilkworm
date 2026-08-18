@@ -48,6 +48,7 @@ using zilkworm::Bytes;
 using zilkworm::ExtensionNode;
 using zilkworm::HashIndex;
 using zilkworm::HashState;
+using zilkworm::HashStateView;
 using zilkworm::hash_key8;
 using zilkworm::LeafNode;
 using zilkworm::nibbles64;
@@ -1980,4 +1981,140 @@ TEST_CASE("HashState subtract_from_balance and add_to_balance", "[hash_state]") 
     CHECK(hs.get_balance(addr) == intx::uint256{750});
     hs.add_to_balance(addr, intx::uint256{50});
     CHECK(hs.get_balance(addr) == intx::uint256{800});
+}
+
+// ---------------------------------------------------------------------------
+// S3 — HashStateView: the per-transaction evmone read view over HashState.
+//
+// HashStateView mirrors DirectStateView (direct_state.hpp:395-423) method-for-method over the
+// same evmone::state::StateView interface, forwarding to the S2 address-keyed readers. These
+// cases confirm the forwarding is faithful: a present account's fields + storage + code come
+// through, has_storage reflects the storage_root, and empty/absent keys give the right blank
+// results — all off the pristine built cache the address-keyed readers hash into internally.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Build a single-slot storage trie keyed by keccak256(slot_key) (the trie path the
+// address-keyed read_storage hashes to): a branch root -> one hash-referenced 63-nibble leaf
+// hanging under the slot-hash's first nibble, mirroring the storage-sweep fixture above.
+// Returns the storage root so an account leaf can point at it.
+[[nodiscard]] evmc::bytes32 add_single_storage_slot(HashState& hs, const evmc::bytes32& slot_key,
+                                                    const evmc::bytes32& word) {
+    const auto snib = nibbles_of(keccak_slot(slot_key));
+    const Bytes ev = encode_storage_value(word);
+    const LeafNode sleaf = make_leaf(&snib[1], 63, ByteView{ev});
+    const evmc::bytes32 hleaf = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf)});
+    BranchNode sroot;
+    sroot.set_child(snib[0], ByteView{hleaf.bytes, 32});
+    return hs.add_node(ByteView{zilkworm::encode_branch(sroot)});
+}
+
+// An account-leaf RLP ([nonce, balance, storage_root, code_hash]) with FULLY chosen fields —
+// account_leaf_value hard-codes a synthetic (non-empty) code_hash, but the view's code and
+// empty-account cases need a real code_hash (keccak of the added code) or the empty hash.
+[[nodiscard]] Bytes account_leaf_full(uint64_t nonce, uint64_t balance_lo,
+                                       const evmc::bytes32& storage_root,
+                                       const evmc::bytes32& code_hash) {
+    Account acc{};
+    acc.nonce = nonce;
+    std::memcpy(acc.balance, &balance_lo, sizeof(balance_lo));  // native-endian, rest zero
+    std::memcpy(acc.code_hash, code_hash.bytes, 32);
+    return acc.rlp(storage_root);
+}
+
+}  // namespace
+
+// A present account reachable through the built cache: the view surfaces its nonce / balance /
+// code_hash / has_storage, forwards get_account_code to the real witness code, forwards
+// get_storage to the derived slot, and reads an untouched slot as zero — all with no
+// unconfirmed read (every key is present in the witness).
+TEST_CASE("HashStateView forwards a present account, storage, and code", "[hash_state][view]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0x40);
+
+    // Real code -> its keccak is the account's code_hash, so read_code resolves via find_code.
+    const Bytes code = {0x60, 0x00, 0x60, 0x00, 0xF3};  // PUSH1 0 PUSH1 0 RETURN
+    const evmc::bytes32 chash = hs.add_code(ByteView{code});
+
+    // One storage slot in the account's own storage trie.
+    evmc::bytes32 slot_key{};
+    for (std::size_t i = 0; i < 32; ++i) slot_key.bytes[i] = static_cast<uint8_t>(0x10u + i);
+    evmc::bytes32 word{};
+    for (std::size_t i = 0; i < 32; ++i) word.bytes[i] = static_cast<uint8_t>(0xA0u + i);
+    const evmc::bytes32 storage_root = add_single_storage_slot(hs, slot_key, word);
+
+    const uint64_t balance_lo = 0x0102030405060708ULL;
+    const Bytes leaf_val = account_leaf_full(11, balance_lo, storage_root, chash);
+    const evmc::bytes32 root = add_single_account(hs, addr, leaf_val);
+    REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+
+    HashStateView view{hs};
+
+    const auto acc = view.get_account(addr);
+    REQUIRE(acc.has_value());
+    CHECK(acc->nonce == 11u);
+    CHECK(acc->balance == intx::uint256{balance_lo});
+    CHECK(eq32(acc->code_hash, chash));
+    CHECK(acc->has_storage);  // non-empty storage_root
+
+    const auto code_out = view.get_account_code(addr);
+    REQUIRE(code_out.size() == code.size());
+    CHECK(std::memcmp(code_out.data(), code.data(), code.size()) == 0);
+
+    CHECK(eq32(view.get_storage(addr, slot_key), word));  // derived slot forwarded
+
+    evmc::bytes32 absent_slot{};
+    for (std::size_t i = 0; i < 32; ++i) absent_slot.bytes[i] = static_cast<uint8_t>(0xDDu - i);
+    CHECK(eq32(view.get_storage(addr, absent_slot), evmc::bytes32{}));  // untouched slot -> zero
+
+    CHECK(hs.unconfirmed_read_count() == 0u);  // every read hit or was confirmed empty
+}
+
+// A live account with the empty storage_root and the empty code hash: the view reports it
+// present, has_storage=false, empty code, and every slot zero — none of which is a fault.
+TEST_CASE("HashStateView reports a live empty account", "[hash_state][view]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0x50);
+
+    const Bytes leaf_val = account_leaf_full(3, 500, silkworm::kEmptyRoot, silkworm::kEmptyHash);
+    const evmc::bytes32 root = add_single_account(hs, addr, leaf_val);
+    REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+
+    HashStateView view{hs};
+
+    const auto acc = view.get_account(addr);
+    REQUIRE(acc.has_value());
+    CHECK(acc->nonce == 3u);
+    CHECK(acc->balance == intx::uint256{500});
+    CHECK(eq32(acc->code_hash, silkworm::kEmptyHash));
+    CHECK_FALSE(acc->has_storage);  // empty storage_root, no overlay slot
+
+    CHECK(view.get_account_code(addr).empty());  // empty code_hash -> empty, no fail-closed bump
+
+    evmc::bytes32 any_slot{};
+    any_slot.bytes[31] = 0x07;
+    CHECK(eq32(view.get_storage(addr, any_slot), evmc::bytes32{}));
+
+    CHECK(hs.unconfirmed_read_count() == 0u);  // empty storage_root needs no confirmation walk
+}
+
+// An address absent from a complete witness: get_account materializes a deleted record, so the
+// view returns nullopt, and the empty-trie confirmation proves absence (no unconfirmed read).
+TEST_CASE("HashStateView returns nullopt for a confirmed-absent account", "[hash_state][view]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+
+    HashStateView view{hs};
+    const evmc::address absent = s2_addr(0x60);
+
+    CHECK_FALSE(view.get_account(absent).has_value());  // materialized deleted -> nullopt
+    CHECK(view.get_account_code(absent).empty());
+    evmc::bytes32 any_slot{};
+    any_slot.bytes[31] = 0x01;
+    CHECK(eq32(view.get_storage(absent, any_slot), evmc::bytes32{}));
+
+    CHECK(hs.unconfirmed_read_count() == 0u);  // empty trie proves every key absent
 }
