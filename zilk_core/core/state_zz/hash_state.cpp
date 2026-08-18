@@ -3,6 +3,7 @@
 
 #include "hash_state.hpp"
 
+#include <algorithm>  // std::lower_bound (insert_header / get_block_hash)
 #include <array>
 #include <bit>
 #include <cstring>
@@ -444,6 +445,63 @@ evmc::bytes32 HashState::add_code(ByteView code) {
     std::memcpy(code_arena_.data() + off + sizeof(len), code.data(), code.size());
     code_index_.insert(h.bytes, off);
     return h;
+}
+
+// --- silkworm::BlockState interface + BLOCKHASH store ---------------------------------
+// Near-verbatim copies of DirectState (direct_state.cpp:696-730, :818-840) so a later
+// retype of the execution surface to ActiveState is a drop-in. See hash_state.hpp for the
+// per-method contract and the one divergence (no witness block_hashes_ span in get_block_hash).
+
+std::optional<BlockHeader> HashState::read_header(BlockNum,
+                                                  const evmc::bytes32& block_hash) const noexcept {
+    const auto it = headers_.find(block_hash);
+    if (it == headers_.end()) return std::nullopt;
+    return it->second;
+}
+
+void HashState::insert_header(const BlockHeader& header) {
+    headers_[header.hash()] = header;
+
+    // created_block_hashes_ kept sorted ascending for log-n BLOCKHASH lookup.
+    const uint64_t block_num = header.number;
+    const auto h = header.hash();
+    auto it = std::lower_bound(created_block_hashes_.begin(),
+                               created_block_hashes_.end(), block_num,
+                               [](const BlockHashEntry& e, uint64_t n) {
+                                   return e.block_number < n;
+                               });
+    if (it != created_block_hashes_.end() && it->block_number == block_num) {
+        std::memcpy(it->block_hash, h.bytes, 32);
+    } else {
+        BlockHashEntry e{};
+        e.block_number = block_num;
+        std::memcpy(e.block_hash, h.bytes, 32);
+        created_block_hashes_.insert(it, e);
+    }
+}
+
+bool HashState::read_body(BlockNum, const evmc::bytes32&, BlockBody&) const noexcept {
+    return false;
+}
+
+std::optional<intx::uint256> HashState::total_difficulty(uint64_t,
+                                                         const evmc::bytes32&) const noexcept {
+    return std::nullopt;
+}
+
+evmc::bytes32 HashState::get_block_hash(BlockNum n) const noexcept {
+    // No witness block_hashes_ span here (see hash_state.hpp): created_block_hashes_ alone.
+    if (!created_block_hashes_.empty()) {
+        const auto it = std::lower_bound(created_block_hashes_.begin(),
+                                         created_block_hashes_.end(), n,
+                                         [](const BlockHashEntry& e, BlockNum k) {
+                                             return e.block_number < k;
+                                         });
+        if (it != created_block_hashes_.end() && it->block_number == n) {
+            return std::bit_cast<evmc::bytes32>(it->block_hash);
+        }
+    }
+    return {};
 }
 
 }  // namespace zilkworm
