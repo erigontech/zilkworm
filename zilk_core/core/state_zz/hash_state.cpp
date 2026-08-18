@@ -10,10 +10,14 @@
 #include <utility>
 #include <vector>
 
+#include <intx/intx.hpp>
+
+#include <evmone/test/state/state_diff.hpp>         // evmone::state::StateDiff (apply_state_diff)
 #include <evmone_precompiles/keccak.hpp>
-#include <zilk_core/core/common/empty_hashes.hpp>  // silkworm::kEmptyRoot
+#include <zilk_core/core/common/empty_hashes.hpp>  // silkworm::kEmptyHash / kEmptyRoot
 #include <zilk_core/core/common/util.hpp>           // silkworm::keccak256(ByteView)
 #include <zilk_core/core/rlp/decode.hpp>            // rlp::decode_header (free helper)
+#include <zilk_core/core/types/transaction.hpp>     // silkworm::eip7702::is_code_delegated
 #include <zilk_core/core/types_zz/account.hpp>      // Account, decode_trie_account
 
 // The standalone DFS mirrors the DECODE logic of GridMPT::unfold_node_from_rlp
@@ -502,6 +506,433 @@ evmc::bytes32 HashState::get_block_hash(BlockNum n) const noexcept {
         }
     }
     return {};
+}
+
+// --- Write overlay + mutators + address-keyed readers (S2) ----------------------------
+// Copy-on-write over the PRISTINE built caches: every write lands in the overlay
+// (created_accounts_ / overflow_slots_ / created_code_) and a read sees overlay-then-built.
+// Bodies mirror direct_state.cpp:337-694 line-for-line except the two divergences marked
+// DIVERGENCE(a)/(b). See hash_state.hpp for the design rationale.
+
+namespace {
+
+namespace eip7702 = ::silkworm::eip7702;
+
+// Balance is stored native-endian (Account::balance, account.hpp:28; see
+// direct_state.cpp:203-212). memcpy in/out preserves the intx::uint256 byte layout.
+inline void store_be_u256(uint8_t (&out)[32], const intx::uint256& v) noexcept {
+    std::memcpy(out, &v, 32);
+}
+inline intx::uint256 load_be_u256(const uint8_t (&in)[32]) noexcept {
+    intx::uint256 v;
+    std::memcpy(&v, in, 32);
+    return v;
+}
+inline void copy32(uint8_t (&dst)[32], const evmc::bytes32& src) noexcept {
+    std::memcpy(dst, src.bytes, 32);
+}
+// keccak256(addr) — the 32-byte account-trie path that keys the built account cache.
+inline evmc::bytes32 addr_hash_of(const evmc::address& addr) noexcept {
+    return std::bit_cast<evmc::bytes32>(silkworm::keccak256(ByteView{addr.bytes, 20}));
+}
+// keccak256(slot key) — the storage-trie path that keys the built storage cache.
+inline evmc::bytes32 slot_hash_of(const evmc::bytes32& key) noexcept {
+    return std::bit_cast<evmc::bytes32>(silkworm::keccak256(ByteView{key.bytes, 32}));
+}
+
+}  // namespace
+
+// Non-recording overlay-or-built probe (DirectState::lookup_account_ analog,
+// direct_state.cpp:349-357): overlay first, then the built cache, no confirm side effect.
+const Account* HashState::lookup_account_(const evmc::address& addr) const noexcept {
+    if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
+        return &it->second;
+    return find_built_account(addr_hash_of(addr));
+}
+
+// Read resolver: overlay hit (nullptr if deleted) else the RECORDING built-cache read path
+// (get_account -> note_account_miss_), so an address-keyed read of a pruned account is
+// recorded fail-closed rather than silently returning a wrong-empty.
+const Account* HashState::resolve_for_read_(const evmc::address& addr) const noexcept {
+    if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
+        return it->second.deleted ? nullptr : &it->second;
+    return get_account(addr_hash_of(addr));
+}
+
+const Account* HashState::read_account(const evmc::address& addr) const noexcept {
+    return resolve_for_read_(addr);
+}
+
+evmc::bytes32 HashState::read_storage(const evmc::address& addr,
+                                      const evmc::bytes32& key) const noexcept {
+    // Overlay slot first: a written value — INCLUDING a retained zero (divergence a) —
+    // shadows the built (pre-state) value.
+    if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end()) {
+        if (auto kv = it->second.find(key); kv != it->second.end())
+            return kv->second;
+    }
+    // A wiped account reads every pre-state slot as zero (divergence b).
+    if (storage_wiped_.contains(addr)) [[unlikely]]
+        return {};
+    // Built storage cache: get_storage records an unprovable miss (note_storage_miss_).
+    return get_storage(addr_hash_of(addr), slot_hash_of(key));
+}
+
+ByteView HashState::read_code(const evmc::address& addr) const noexcept {
+    const Account* pa = resolve_for_read_(addr);
+    if (pa == nullptr || pa->deleted) [[unlikely]]
+        return {};
+    if (eq_hash32(pa->code_hash, kEmptyHash.bytes)) return {};  // empty code — not a fault
+
+    const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa->code_hash);
+
+    // In-block created code (set via set_code / apply_code_diff): the code_store_offset
+    // sentinel, resolved through created_code_ (verbatim direct_state.cpp:332-344).
+    if (pa->code_store_offset == kCreatedCodeOffset) [[unlikely]] {
+        const uint64_t k8 = hash_key8(h);
+        if (auto it = created_code_.find(k8); it != created_code_.end() &&
+                std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
+            return ByteView{it->second.bytes.data(), it->second.bytes.size()};
+        }
+        if (auto cit = created_code_collisions_.find(h); cit != created_code_collisions_.end()) {
+            return ByteView{cit->second.data(), cit->second.size()};
+        }
+        // Created-code marker with no stored bytes (should not happen) -> fail-closed.
+        ++unconfirmed_read_count_;
+        return {};
+    }
+
+    // Witness code store (built accounts and set_code dedup hits): resolve by code_hash.
+    const ByteView cv = find_code(h);
+    if (cv.empty()) {
+        // FAIL-CLOSED: a derived account carries a code_hash whose bytes the witness omitted.
+        // DirectState guarantees presence via sanitize (direct_state.cpp:762-777); HashState
+        // has no such binding, so record the gap for the accept gate instead of silently
+        // executing empty code.
+        ++unconfirmed_read_count_;
+        return {};
+    }
+    return cv;
+}
+
+intx::uint256 HashState::get_balance(const evmc::address& addr) const noexcept {
+    const Account* pa = resolve_for_read_(addr);  // nullptr also covers deleted
+    if (pa == nullptr) return 0;
+    return load_be_u256(pa->balance);
+}
+
+uint64_t HashState::get_nonce(const evmc::address& addr) const noexcept {
+    const Account* pa = resolve_for_read_(addr);
+    if (pa == nullptr) return 0;
+    return pa->nonce;
+}
+
+bool HashState::has_storage(const evmc::address& addr) const noexcept {
+    const Account* pa = lookup_account_(addr);  // non-recording is enough here
+    if (pa == nullptr || pa->deleted) [[unlikely]]
+        return false;
+    // A live (non-zero) overlay slot means storage exists. Zero writes are RETAINED
+    // (divergence a), so a bare non-empty test would misreport — scan for a live value.
+    if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end()) {
+        for (const auto& [k, v] : it->second)
+            if (!evmc::is_zero(v)) return true;
+    }
+    // Built pre-state storage, unless wiped (divergence b).
+    if (storage_wiped_.contains(addr)) return false;
+    return !eq_hash32(pa->storage_root, kEmptyRoot.bytes);
+}
+
+// "Not in state" is a materialized (deleted) overlay record, not a null pointer — verbatim
+// DirectState::materialize_absent_account_ (direct_state.cpp:327-335) over the overlay.
+Account* HashState::materialize_absent_account_(const evmc::address& addr) {
+    Account fresh{};
+    std::memcpy(fresh.addr, addr.bytes, 20);
+    copy32(fresh.code_hash, kEmptyHash);
+    copy32(fresh.storage_root, kEmptyRoot);
+    fresh.deleted = true;
+    auto [ins, _] = created_accounts_.emplace(addr, fresh);
+    return &ins->second;
+}
+
+Account* HashState::find_or_create_account(const evmc::address& addr) {
+    // Overlay hit (DirectState lookup finding a created record) — deleted or not.
+    if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
+        return &it->second;
+    const evmc::bytes32 h = addr_hash_of(addr);
+    // Built hit -> copy-on-write into the overlay (the built cache stays pristine).
+    if (const Account* built = find_built_account(h)) {  // side-effect-free: no confirm
+        Account copy = *built;
+        std::memcpy(copy.addr, addr.bytes, 20);          // the build leaves addr zero (hpp:152)
+        auto [ins, _] = created_accounts_.emplace(addr, copy);
+        return &ins->second;
+    }
+    // Total miss: materialize a fresh (deleted) record and CONFIRM absence down the account
+    // trie. A miss that cannot be proven empty (a pruned boundary) bumps
+    // unconfirmed_read_count_ so the accept gate rejects; a usable record is returned either
+    // way (never null).
+    Account* pa = materialize_absent_account_(addr);
+    if (!confirm_absent(prev_root_, h)) ++unconfirmed_read_count_;
+    return pa;
+}
+
+// Caller guarantees pa.deleted; reset to a fresh account (DirectState:356-369).
+bool HashState::revive_if_deleted_slow(const evmc::address& addr, Account& pa) {
+    pa.deleted = false;
+    copy32(pa.code_hash, kEmptyHash);
+    copy32(pa.storage_root, kEmptyRoot);
+    pa.slot_count = 0;
+    pa.code_store_len = 0;
+    pa.code_store_offset = 0;
+    pa.nonce = 0;
+    store_be_u256(pa.balance, intx::uint256{0});
+    overflow_slots_.erase(addr);
+    // DIVERGENCE (b): the built pre-state slots must now read zero (the DirectState in-place
+    // slot_count=0 wipe has no analog on the immutable built cache).
+    storage_wiped_.insert(addr);
+    pa.modified = true;
+    pa.acc_rlp_sroot_off = 0;
+    return true;
+}
+
+void HashState::set_account_from_diff(Account& pa, uint64_t nonce,
+                                      const intx::uint256& balance) noexcept {
+    bool changed = false;
+    if (pa.nonce != nonce) {
+        pa.nonce = nonce;
+        changed = true;
+    }
+    if (load_be_u256(pa.balance) != balance) {
+        store_be_u256(pa.balance, balance);
+        changed = true;
+    }
+    if (changed) {
+        pa.modified = true;
+        pa.acc_rlp_sroot_off = 0;  // invalidate the RLP cache — force re-encode
+    }
+}
+
+void HashState::set_storage_slot(const evmc::address& addr, Account& pa,
+                                 const evmc::bytes32& key, const evmc::bytes32& value) {
+    pa.modified = true;
+    // HashState has no inline blob slots; every write lands in the overlay. DIVERGENCE (a):
+    // a zero write is RETAINED (DirectState erases it, direct_state.cpp:391-397) so the fold
+    // emits it as a 0x80 delete — the incremental fold over prev_root needs the explicit
+    // delete, whereas DirectState recomputes each storage root from its live slots.
+    overflow_slots_[addr][key] = value;
+}
+
+void HashState::apply_code_diff(const evmc::address& addr, Account& pa,
+                                const evmc::bytes& code) {
+    const ByteView code_view{code.data(), code.size()};
+    const bool is_delegated = eip7702::is_code_delegated(code_view);
+
+    // Wipe storage on contract creation unless the new code is a delegation or the address
+    // was already a delegation target (mirrors direct_state.cpp:406-415). DIVERGENCE (b):
+    // set the storage_wiped_ flag + drop overlay slots instead of the in-place inline-slot
+    // wipe (the built cache is immutable).
+    if (!is_delegated && !delegated_designations_.contains(addr)) {
+        overflow_slots_.erase(addr);
+        storage_wiped_.insert(addr);
+    }
+    if (is_delegated) {
+        delegated_designations_.insert(addr);
+    }
+
+    const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(code_view));
+    std::memcpy(pa.code_hash, h.bytes, 32);
+    pa.code_store_len = static_cast<uint32_t>(code.size());
+
+    // Dedup against the WITNESS code store via find_code — the HashState analog of
+    // DirectState's code_store_map_.find (direct_state.cpp:424-427). Otherwise stash in
+    // created_code_ keyed by key8(hash), spilling key8 collisions into
+    // created_code_collisions_ (verbatim direct_state.cpp:428-440).
+    if (!find_code(h).empty()) {
+        pa.code_store_offset = 0;  // resolvable via find_code(code_hash) in read_code
+    } else {
+        pa.code_store_offset = kCreatedCodeOffset;
+        const uint64_t k8 = hash_key8(h);
+        if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
+            it->second.full_hash = h;
+            it->second.bytes.assign(code.begin(), code.end());
+        } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
+            // Exact dedup hit (same hash, possibly different addr). Skip insert.
+        } else {
+            if (auto [cit, cins] = created_code_collisions_.try_emplace(h); cins) {
+                cit->second.assign(code.begin(), code.end());
+            }
+        }
+    }
+
+    pa.modified = true;
+    pa.acc_rlp_sroot_off = 0;
+}
+
+void HashState::set_balance(const evmc::address& addr, const intx::uint256& value) {
+    auto* pa = find_or_create_account(addr);
+    revive_if_deleted(addr, *pa);
+    bool changed = false;
+    if (load_be_u256(pa->balance) != value) {
+        store_be_u256(pa->balance, value);
+        changed = true;
+    }
+    if (changed) {
+        pa->modified = true;
+        pa->acc_rlp_sroot_off = 0;
+        journal_address_changed(addr);
+    }
+    touched_.insert(addr);
+}
+
+void HashState::add_to_balance(const evmc::address& addr, const intx::uint256& addend) {
+    auto* pa = find_or_create_account(addr);
+    revive_if_deleted(addr, *pa);
+    const auto cur = load_be_u256(pa->balance);
+    bool changed = false;
+    if (addend != 0) {
+        store_be_u256(pa->balance, cur + addend);
+        changed = true;
+    }
+    if (changed) {
+        pa->modified = true;
+        pa->acc_rlp_sroot_off = 0;
+        journal_address_changed(addr);
+    }
+    touched_.insert(addr);
+}
+
+void HashState::subtract_from_balance(const evmc::address& addr, const intx::uint256& subtrahend) {
+    auto* pa = find_or_create_account(addr);
+    revive_if_deleted(addr, *pa);
+    const auto cur = load_be_u256(pa->balance);
+    bool changed = false;
+    if (subtrahend != 0) {
+        store_be_u256(pa->balance, cur - subtrahend);
+        changed = true;
+    }
+    if (changed) {
+        pa->modified = true;
+        pa->acc_rlp_sroot_off = 0;
+        journal_address_changed(addr);
+    }
+    touched_.insert(addr);
+}
+
+void HashState::set_nonce(const evmc::address& addr, uint64_t nonce) {
+    auto* pa = find_or_create_account(addr);
+    revive_if_deleted(addr, *pa);
+    bool changed = false;
+    if (pa->nonce != nonce) {
+        pa->nonce = nonce;
+        changed = true;
+    }
+    if (changed) {
+        pa->modified = true;
+        pa->acc_rlp_sroot_off = 0;
+        journal_address_changed(addr);
+    }
+    touched_.insert(addr);
+}
+
+void HashState::set_code(const evmc::address& addr, ByteView code) {
+    auto* pa = find_or_create_account(addr);
+    revive_if_deleted(addr, *pa);
+
+    if (eip7702::is_code_delegated(code)) {
+        delegated_designations_.insert(addr);
+    }
+    const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(code));
+    bool changed = false;
+    if (std::memcmp(pa->code_hash, h.bytes, 32) != 0) {
+        std::memcpy(pa->code_hash, h.bytes, 32);
+        changed = true;
+    }
+    pa->code_store_len = static_cast<uint32_t>(code.size());
+
+    if (!find_code(h).empty()) {
+        pa->code_store_offset = 0;  // resolvable via find_code(code_hash) in read_code
+    } else {
+        pa->code_store_offset = kCreatedCodeOffset;
+        const uint64_t k8 = hash_key8(h);
+        if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
+            it->second.full_hash = h;
+            it->second.bytes.assign(code.begin(), code.end());
+        } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
+            // Exact dedup hit. Skip.
+        } else {
+            if (auto [cit, cins] = created_code_collisions_.try_emplace(h); cins) {
+                cit->second.assign(code.begin(), code.end());
+            }
+        }
+    }
+
+    if (changed) {
+        pa->modified = true;
+        pa->acc_rlp_sroot_off = 0;
+        journal_address_changed(addr);
+    }
+    touched_.insert(addr);
+}
+
+void HashState::destruct(const evmc::address& addr) {
+    // The built cache is immutable, so mark the overlay record deleted (copy-on-write a
+    // deleted marker if the account exists only in the built cache) so read_account sees it
+    // gone. If it exists in neither store there is nothing to mask (mirrors
+    // direct_state.cpp:566-570).
+    if (auto it = created_accounts_.find(addr); it != created_accounts_.end()) {
+        it->second.deleted = true;
+    } else if (const Account* built = find_built_account(addr_hash_of(addr))) {
+        Account copy = *built;
+        std::memcpy(copy.addr, addr.bytes, 20);
+        copy.deleted = true;
+        created_accounts_.emplace(addr, copy);
+    }
+    overflow_slots_.erase(addr);
+    // DIVERGENCE (b): the built pre-state slots must now read zero (DirectState zeroes the
+    // blob slot_count in place, direct_state.cpp:568; HashState cannot mutate the built cache).
+    storage_wiped_.insert(addr);
+    touched_.insert(addr);
+    journal_address_changed(addr);
+}
+
+bool HashState::is_deleted(const evmc::address& addr) const noexcept {
+    const auto* pa = lookup_account_(addr);
+    return pa == nullptr || pa->deleted;
+}
+
+bool HashState::is_empty_account(const evmc::address& addr) const noexcept {
+    const auto* pa = lookup_account_(addr);
+    if (pa == nullptr || pa->deleted) [[unlikely]]
+        return false;
+    return pa->nonce == 0 && eq_hash32(pa->code_hash, kEmptyHash.bytes) &&
+           load_be_u256(pa->balance) == 0;
+}
+
+bool HashState::is_dead(const evmc::address& addr) const noexcept {
+    return is_deleted(addr) || is_empty_account(addr);
+}
+
+void HashState::destruct_dead_among(const FlatHashSet<evmc::address>& addrs) {
+    for (const auto& addr : addrs) {
+        if (is_dead(addr)) destruct(addr);
+    }
+}
+
+void HashState::apply_state_diff(const evmone::state::StateDiff& diff) {
+    for (const auto& m : diff.modified_accounts) {
+        auto* pa = find_or_create_account(m.addr);
+        revive_if_deleted(m.addr, *pa);
+        journal_address_changed(m.addr);
+        if (m.code) apply_code_diff(m.addr, *pa, *m.code);
+        set_account_from_diff(*pa, m.nonce, m.balance);
+        for (const auto& [k, v] : m.modified_storage) {
+            journal_slot_changed(m.addr, k);
+            set_storage_slot(m.addr, *pa, k, v);
+        }
+    }
+    for (const auto& a : diff.deleted_accounts) {
+        journal_address_changed(a);
+        destruct(a);
+    }
 }
 
 }  // namespace zilkworm

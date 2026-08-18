@@ -23,6 +23,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <intx/intx.hpp>
+
+#include <evmone/test/state/state_diff.hpp>        // evmone::state::StateDiff (apply_state_diff test)
 #include <evmone_precompiles/keccak.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>  // silkworm::kEmptyRoot
 #include <zilk_core/core/common/util.hpp>           // silkworm::keccak256(ByteView), zeroless_view
@@ -1608,4 +1611,373 @@ TEST_CASE("slib rejects malformed StatelessInputBytes blobs", "[hash_state][slib
         b.push_back(0x00);  // one stray trailing byte -> pk region size % 65 != 0
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
+}
+
+// ---------------------------------------------------------------------------
+// S2 — the write overlay + mutators + address-keyed readers.
+//
+// These drive the copy-on-write overlay HashState grows on top of its pristine built
+// account/storage caches. The address-keyed readers hash the address internally, so any
+// fixture that must be reached THROUGH the built cache is keyed by the REAL keccak256(addr)
+// path (add_single_account / keccak_addr / nibbles_of); overlay-only scenarios use any real
+// address on an empty-trie HashState (build_state_from_trie(kEmptyRoot) first so a fresh
+// account's confirm_absent proves absence and records nothing). Each of the two deliberate
+// divergences from DirectState gets a dedicated case:
+//   (a) a zero storage write is RETAINED, not erased (see the storage read-back case);
+//   (b) apply_code_diff/destruct/revive set a storage_wiped_ flag (see the wipe cases).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A real 20-byte address with a distinct byte pattern seeded from `tag`.
+[[nodiscard]] evmc::address s2_addr(std::uint8_t tag) {
+    evmc::address a{};
+    for (int i = 0; i < 20; ++i) a.bytes[i] = static_cast<std::uint8_t>(tag + 7 * i + 1);
+    return a;
+}
+
+// The trie path an address / slot key hashes to (== keccak256 of its bytes).
+[[nodiscard]] evmc::bytes32 keccak_addr(const evmc::address& a) { return keccak32(ByteView{a.bytes, 20}); }
+[[nodiscard]] evmc::bytes32 keccak_slot(const evmc::bytes32& k) { return keccak32(ByteView{k.bytes, 32}); }
+
+// The full 64-nibble trie path of a 32-byte hash.
+[[nodiscard]] std::array<std::uint8_t, 64> nibbles_of(const evmc::bytes32& h) {
+    std::array<std::uint8_t, 64> n{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        n[2 * i] = static_cast<std::uint8_t>(h.bytes[i] >> 4);
+        n[2 * i + 1] = static_cast<std::uint8_t>(h.bytes[i] & 0xF);
+    }
+    return n;
+}
+
+// Add a single-leaf account trie at keccak256(addr) with `leaf_val`; return the root hash
+// (caller runs build_state_from_trie). Makes the account reachable through the built cache by
+// the address-keyed readers, which hash the address internally.
+[[nodiscard]] evmc::bytes32 add_single_account(HashState& hs, const evmc::address& addr,
+                                               const Bytes& leaf_val) {
+    const auto path = nibbles_of(keccak_addr(addr));
+    const LeafNode leaf = make_leaf(path.data(), 64, ByteView{leaf_val});
+    return hs.add_node(ByteView{zilkworm::encode_leaf(leaf)});
+}
+
+}  // namespace
+
+// Balance and nonce set + overwrite on a brand-new overlay account (empty pre-state).
+TEST_CASE("HashState set/overwrite balance and nonce on a new overlay account", "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0x10);
+
+    hs.set_balance(addr, intx::uint256{100});
+    CHECK(hs.get_balance(addr) == intx::uint256{100});
+    hs.set_balance(addr, intx::uint256{250});  // overwrite
+    CHECK(hs.get_balance(addr) == intx::uint256{250});
+
+    hs.set_nonce(addr, 7);
+    CHECK(hs.get_nonce(addr) == 7u);
+    hs.set_nonce(addr, 9);  // overwrite
+    CHECK(hs.get_nonce(addr) == 9u);
+
+    // The write left an overlay record the read sees (not the absent built cache).
+    CHECK(hs.read_account(addr) != nullptr);
+    CHECK(hs.created_accounts().find(addr) != hs.created_accounts().end());
+    // Confirmed-absent creation on the empty trie records no unconfirmed read.
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// Balance is stored native-endian (the DirectState memcpy layout, direct_state.cpp:203-212).
+TEST_CASE("HashState stores balance native-endian", "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0x20);
+
+    intx::uint256 big = intx::uint256{0x1122334455667788ULL};
+    big = (big << 128) | intx::uint256{0x99AABBCCDDEEFF00ULL};
+    hs.set_balance(addr, big);
+    CHECK(hs.get_balance(addr) == big);  // round-trips through the overlay
+
+    const auto& ca = hs.created_accounts();
+    auto it = ca.find(addr);
+    REQUIRE(it != ca.end());
+    std::uint8_t expect[32];
+    std::memcpy(expect, &big, 32);  // native-endian byte image of the intx value
+    CHECK(std::memcmp(it->second.balance, expect, 32) == 0);
+}
+
+// A write to a BUILT account copies it into the overlay and the read sees the write shadow
+// the pre-state value.
+TEST_CASE("HashState write to a built account shadows the pre-state value", "[hash_state]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0x30);
+    const Bytes leaf_val = account_leaf_value(5, silkworm::kEmptyRoot);  // nonce 5, bal ..+5
+    const evmc::bytes32 root = add_single_account(hs, addr, leaf_val);
+    REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+
+    const std::uint64_t built_bal = 0xAABBCCDD00000000ULL + 5;
+    CHECK(hs.get_nonce(addr) == 5u);
+    CHECK(hs.get_balance(addr) == intx::uint256{built_bal});
+    CHECK(hs.unconfirmed_read_count() == 0u);  // present built account -> hit, no record
+
+    hs.set_balance(addr, intx::uint256{9999});
+    hs.set_nonce(addr, 42);
+    CHECK(hs.get_balance(addr) == intx::uint256{9999});  // overlay shadows built
+    CHECK(hs.get_nonce(addr) == 42u);
+    CHECK(hs.created_accounts().find(addr) != hs.created_accounts().end());
+}
+
+// Storage: a nonzero write reads back; a ZERO write is RETAINED in the overlay (divergence a)
+// — DirectState would erase it — so it stays available as a pending 0x80 delete for the fold.
+TEST_CASE("HashState storage write read-back and zero-write retention (divergence a)",
+          "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0x40);
+    hs.set_balance(addr, intx::uint256{1});  // bring the account alive in the overlay
+    Account* pa = hs.find_or_create_account(addr);
+
+    evmc::bytes32 key1{};
+    key1.bytes[31] = 0x01;
+    evmc::bytes32 val1{};
+    for (int i = 0; i < 32; ++i) val1.bytes[i] = static_cast<std::uint8_t>(0x30 + i);
+    hs.set_storage_slot(addr, *pa, key1, val1);
+    CHECK(eq32(hs.read_storage(addr, key1), val1));  // nonzero read-back
+
+    evmc::bytes32 key0{};
+    key0.bytes[31] = 0x02;
+    hs.set_storage_slot(addr, *pa, key0, evmc::bytes32{});  // write zero
+    CHECK(eq32(hs.read_storage(addr, key0), evmc::bytes32{}));
+
+    const auto* slots = hs.overflow_slots_for(addr);
+    REQUIRE(slots != nullptr);
+    auto z = slots->find(key0);
+    REQUIRE(z != slots->end());  // RETAINED, not erased (the divergence)
+    CHECK(eq32(z->second, evmc::bytes32{}));
+    CHECK(slots->find(key1) != slots->end());
+}
+
+// destruct removes an account; revive-after-destruct in the same block restores it fresh.
+TEST_CASE("HashState destruct removes an account; revive-after-destruct restores it",
+          "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0x50);
+
+    hs.set_balance(addr, intx::uint256{1000});
+    hs.set_nonce(addr, 3);
+    CHECK(hs.get_balance(addr) == intx::uint256{1000});
+
+    hs.destruct(addr);
+    CHECK(hs.read_account(addr) == nullptr);          // gone
+    CHECK(hs.get_balance(addr) == intx::uint256{0});  // gone -> zero
+    CHECK(hs.is_deleted(addr));
+
+    hs.set_balance(addr, intx::uint256{2000});  // revive in the same block
+    CHECK(hs.read_account(addr) != nullptr);
+    CHECK(hs.get_balance(addr) == intx::uint256{2000});
+    CHECK(hs.get_nonce(addr) == 0u);  // nonce reset by revive
+    CHECK_FALSE(hs.is_deleted(addr));
+}
+
+// EIP-158: a touched account left empty (0 nonce / 0 balance / empty code) is cleared by
+// destruct_dead_among over the touched set.
+TEST_CASE("HashState EIP-158 destruct_dead_among clears a touched empty account", "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0x60);
+
+    hs.add_to_balance(addr, intx::uint256{0});  // touch, leaving a 0/0/empty account
+    CHECK(hs.read_account(addr) != nullptr);     // present but empty
+    CHECK(hs.is_empty_account(addr));
+    CHECK(hs.is_dead(addr));
+
+    hs.destruct_dead_among(hs.touched());
+    CHECK(hs.read_account(addr) == nullptr);  // EIP-158 cleared it
+    CHECK(hs.is_deleted(addr));
+    CHECK(hs.unconfirmed_read_count() == 0u);  // empty-trie confirms the creation absent
+}
+
+// read_code FAIL-CLOSED: a derived account carries a non-empty code_hash whose bytes the
+// witness omitted (find_code misses) -> read blank AND bump unconfirmed_read_count_.
+TEST_CASE("HashState read_code fail-closed when the witness omitted the code", "[hash_state]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0x70);
+    // make_test_account's code_hash is 0xC0+i+seed (non-empty); the code is never add_code'd.
+    const Account acc = make_test_account(3, silkworm::kEmptyRoot);
+    const Bytes leaf_val = acc.rlp(silkworm::kEmptyRoot);
+    const evmc::bytes32 root = add_single_account(hs, addr, leaf_val);
+    REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    const ByteView code = hs.read_code(addr);
+    CHECK(code.empty());
+    CHECK(hs.unconfirmed_read_count() > 0u);  // omitted code recorded (no silent empty-code)
+}
+
+// set_code stashes in-block created code; read_code resolves it, no fail-closed bump.
+TEST_CASE("HashState set_code then read_code resolves in-block created code", "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0x80);
+    const Bytes code = {0x60, 0x01, 0x60, 0x02, 0x01};
+    hs.set_code(addr, ByteView{code.data(), code.size()});
+    const ByteView got = hs.read_code(addr);
+    REQUIRE(got.size() == code.size());
+    CHECK(std::memcmp(got.data(), code.data(), code.size()) == 0);
+    CHECK(hs.unconfirmed_read_count() == 0u);  // created code resolves cleanly
+}
+
+// find_or_create_account on a CONFIRMED-ABSENT key (empty trie): a fresh, usable record and
+// NO unconfirmed read.
+TEST_CASE("HashState find_or_create_account on a confirmed-absent key is fresh, no unconfirmed",
+          "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0x90);
+
+    Account* pa = hs.find_or_create_account(addr);
+    REQUIRE(pa != nullptr);  // never null
+    CHECK(pa->deleted);      // materialized fresh (a subsequent write revives it)
+    CHECK(hs.unconfirmed_read_count() == 0u);  // the empty trie proves absence
+}
+
+// find_or_create_account on a PRUNED-BOUNDARY key: a usable record is still returned, but the
+// unprovable miss bumps unconfirmed_read_count_ so the accept gate rejects.
+TEST_CASE("HashState find_or_create_account on a pruned-boundary key is usable but unconfirmed",
+          "[hash_state]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0xA0);
+    const evmc::bytes32 ah = keccak_addr(addr);
+    const std::uint8_t first = static_cast<std::uint8_t>(ah.bytes[0] >> 4);
+    const std::uint8_t other = static_cast<std::uint8_t>((first + 1) & 0xF);
+
+    // A present leaf at another root-branch slot so the root itself exists in the store.
+    const Key kP = key_with(other, 3, 5);
+    const Bytes accP = account_leaf_value(1, silkworm::kEmptyRoot);
+    const LeafNode leafP = make_leaf(&kP.nib[1], 63, ByteView{accP});
+    const evmc::bytes32 hP = hs.add_node(ByteView{zilkworm::encode_leaf(leafP)});
+
+    // A dangling (pruned) child ref at the slot the address's path descends into.
+    evmc::bytes32 dangling{};
+    for (int i = 0; i < 32; ++i) dangling.bytes[i] = static_cast<std::uint8_t>(0xDE - i);
+    BranchNode root;
+    root.set_child(first, ByteView{dangling.bytes, 32});
+    root.set_child(other, ByteView{hP.bytes, 32});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);           // pruned boundary, not a missing node
+    REQUIRE(hs.unconfirmed_read_count() == 0u);  // reset by the build
+
+    Account* pa = hs.find_or_create_account(addr);
+    REQUIRE(pa != nullptr);                   // never null, even at a pruned boundary
+    CHECK(hs.unconfirmed_read_count() > 0u);  // confirm_absent could not prove absence
+}
+
+// apply_code_diff contract creation WIPES pre-state storage via the storage_wiped_ flag
+// (divergence b): the pre-state slot reads zero afterwards and has_storage goes false.
+TEST_CASE("HashState apply_code_diff wipes storage on contract creation (divergence b)",
+          "[hash_state]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0xB0);
+
+    // Pre-state: a real account carrying a 1-slot storage trie.
+    evmc::bytes32 slot_key{};
+    slot_key.bytes[31] = 0xAB;
+    evmc::bytes32 slot_val{};
+    slot_val.bytes[31] = 0x77;
+    const Bytes ev = encode_storage_value(slot_val);
+    const auto spath = nibbles_of(keccak_slot(slot_key));
+    const LeafNode sleaf = make_leaf(spath.data(), 64, ByteView{ev});
+    const evmc::bytes32 sroot = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf)});
+    const Bytes accv = account_leaf_value(5, sroot);
+    const auto apath = nibbles_of(keccak_addr(addr));
+    const LeafNode aleaf = make_leaf(apath.data(), 64, ByteView{accv});
+    const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_leaf(aleaf)});
+    REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+
+    CHECK(eq32(hs.read_storage(addr, slot_key), slot_val));  // pre-state slot via built cache
+    CHECK(hs.has_storage(addr));
+
+    Account* pa = hs.find_or_create_account(addr);
+    const Bytes code = {0x60, 0x01};  // plain bytecode, not an EIP-7702 delegation
+    hs.apply_code_diff(addr, *pa, evmc::bytes(code.data(), code.size()));
+
+    CHECK(hs.storage_wiped(addr));                                  // divergence-b flag set
+    CHECK(eq32(hs.read_storage(addr, slot_key), evmc::bytes32{}));  // pre-state slot now zero
+    CHECK_FALSE(hs.has_storage(addr));
+}
+
+// apply_code_diff on an EIP-7702 delegation is EXEMPT from the storage wipe (mirrors
+// direct_state.cpp:409-415): the flag stays clear and pre-state storage is preserved.
+TEST_CASE("HashState apply_code_diff exempts an EIP-7702 delegation from the storage wipe",
+          "[hash_state]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0xC0);
+
+    evmc::bytes32 slot_key{};
+    slot_key.bytes[31] = 0xCD;
+    evmc::bytes32 slot_val{};
+    slot_val.bytes[31] = 0x55;
+    const Bytes ev = encode_storage_value(slot_val);
+    const auto spath = nibbles_of(keccak_slot(slot_key));
+    const LeafNode sleaf = make_leaf(spath.data(), 64, ByteView{ev});
+    const evmc::bytes32 sroot = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf)});
+    const Bytes accv = account_leaf_value(6, sroot);
+    const auto apath = nibbles_of(keccak_addr(addr));
+    const LeafNode aleaf = make_leaf(apath.data(), 64, ByteView{accv});
+    const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_leaf(aleaf)});
+    REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+
+    Bytes deleg = {0xef, 0x01, 0x00};  // EIP-7702 delegation prefix
+    for (int i = 0; i < 20; ++i) deleg.push_back(0x11);
+    Account* pa = hs.find_or_create_account(addr);
+    hs.apply_code_diff(addr, *pa, evmc::bytes(deleg.data(), deleg.size()));
+
+    CHECK_FALSE(hs.storage_wiped(addr));                     // delegation exempt from wipe
+    CHECK(eq32(hs.read_storage(addr, slot_key), slot_val));  // storage preserved
+}
+
+// apply_state_diff drives the whole mutation surface: modified account (nonce/balance/storage)
+// then a deleted account.
+TEST_CASE("HashState apply_state_diff applies modified and deleted accounts", "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0xD0);
+
+    evmc::bytes32 skey{};
+    skey.bytes[31] = 0x09;
+    evmc::bytes32 sval{};
+    sval.bytes[31] = 0x42;
+
+    evmone::state::StateDiff diff;
+    evmone::state::StateDiff::Entry e{};
+    e.addr = addr;
+    e.nonce = 4;
+    e.balance = intx::uint256{777};
+    e.modified_storage = {{skey, sval}};
+    diff.modified_accounts.push_back(std::move(e));
+    hs.apply_state_diff(diff);
+
+    CHECK(hs.get_nonce(addr) == 4u);
+    CHECK(hs.get_balance(addr) == intx::uint256{777});
+    CHECK(eq32(hs.read_storage(addr, skey), sval));
+
+    evmone::state::StateDiff del;
+    del.deleted_accounts.push_back(addr);
+    hs.apply_state_diff(del);
+    CHECK(hs.read_account(addr) == nullptr);  // destructed
+}
+
+// subtract_from_balance / add_to_balance arithmetic over the overlay.
+TEST_CASE("HashState subtract_from_balance and add_to_balance", "[hash_state]") {
+    HashState hs;
+    REQUIRE(hs.build_state_from_trie(silkworm::kEmptyRoot) == HashState::BuildStatus::kOk);
+    const evmc::address addr = s2_addr(0xE0);
+    hs.set_balance(addr, intx::uint256{1000});
+    hs.subtract_from_balance(addr, intx::uint256{250});
+    CHECK(hs.get_balance(addr) == intx::uint256{750});
+    hs.add_to_balance(addr, intx::uint256{50});
+    CHECK(hs.get_balance(addr) == intx::uint256{800});
 }
