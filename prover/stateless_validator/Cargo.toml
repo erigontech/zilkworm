@@ -19,11 +19,9 @@ alloy-rpc-types-debug = "2.0"
 anyhow = "1"
 stateless = { git = "https://github.com/paradigmxyz/stateless", rev = "e5480e71a8031641ff471cad9dc482a7a14b32d5", default-features = false }
 
-# EEST statelessInputBytes SSZ decoding. Amsterdam-only per EIP-8025.
-stateless-validator-common = { git = "https://github.com/eth-act/ere-guests", tag = "v0.11.0", package = "stateless-validator-common", default-features = false }
-libssz = { version = "0.2.1", default-features = false, features = ["alloc"] }
-libssz_derive = { package = "libssz-derive", version = "0.2.1" }
-libssz_types = { package = "libssz-types", version = "0.2.1", default-features = false, features = ["alloc"] }
+# Canonical EEST statelessInputBytes decode per EIP-8025 from v0.14.0.
+stateless-validator-common = { git = "https://github.com/eth-act/ere-guests", tag = "v0.14.0", package = "stateless-validator-common", default-features = false, features = ["std"] }
+libssz = { version = "0.2.2", default-features = false, features = ["alloc"] }
 
 # Optional, gated by the `download` feature: fetch the SP1 guest ELF and VK from GitHub Releases.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
