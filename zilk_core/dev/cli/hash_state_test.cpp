@@ -13,10 +13,12 @@
 // index home bucket and confirm each still resolves to its own payload while a third
 // colliding-but-never-added hash misses.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <span>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -2117,4 +2119,214 @@ TEST_CASE("HashStateView returns nullopt for a confirmed-absent account", "[hash
     CHECK(eq32(view.get_storage(absent, any_slot), evmc::bytes32{}));
 
     CHECK(hs.unconfirmed_read_count() == 0u);  // empty trie proves every key absent
+}
+
+// ---------------------------------------------------------------------------
+// S5 — the GATHER overload of check_root_hashstate (check_root_hashstate.hpp): recompute
+// the accept decision from HashState's OWN write overlay, without a hand-supplied span. The
+// overload iterates created_accounts() / overflow_slots_ / storage_wiped_, rebuilds the SAME
+// sorted HashStateAccountWrite set check_root builds from DirectState (state_transition.cpp:
+// 452-609), and delegates to the span-based overload above. These cases drive real writes
+// through the S2 mutators and confirm the gathered decision matches an INDEPENDENT hand-built
+// oracle AND the hand-built span-based version, then that an unconfirmed read still rejects.
+// ---------------------------------------------------------------------------
+
+// The full gather path: a built account's FIELD change, a storage slot SET, a storage slot
+// CLEARED-TO-ZERO, and a freshly CREATED account, all through the mutators. The gather overload
+// must recompute a hand-built post-state root (canonical encoders, no GridMPT) and accept it,
+// reject a tampered root, and decide identically to the hand-built span on the same writes.
+TEST_CASE("check_root_hashstate gather overload reconstructs the overlay write set",
+          "[hash_state][accept]") {
+    HashState hs;
+
+    // --- pre-state: ONE built account B carrying a ONE-slot storage trie (slot s_clear). ---
+    const evmc::address aB = s2_addr(0x11);
+    const uint64_t seedB = 21;
+
+    evmc::bytes32 s_clear{};
+    s_clear.bytes[31] = 0xC1;
+    evmc::bytes32 v_clear_old{};
+    for (int i = 0; i < 32; ++i) v_clear_old.bytes[i] = static_cast<uint8_t>(0x40 + i);
+    const Bytes ev_clear = encode_storage_value(v_clear_old);
+    const auto sclear_path = nibbles_of(keccak_slot(s_clear));
+    const LeafNode sclear_leaf = make_leaf(sclear_path.data(), 64, ByteView{ev_clear});
+    const evmc::bytes32 sr_B_pre = hs.add_node(ByteView{zilkworm::encode_leaf(sclear_leaf)});
+
+    const Account accB = make_test_account(seedB, sr_B_pre);
+    const Bytes leafB_pre_val = accB.rlp(sr_B_pre);
+    const auto aB_path = nibbles_of(keccak_addr(aB));
+    const LeafNode leafB_pre = make_leaf(aB_path.data(), 64, ByteView{leafB_pre_val});
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_leaf(leafB_pre)});
+
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+    CHECK(eq32(hs.read_storage(aB, s_clear), v_clear_old));  // pre-state slot via built cache
+    CHECK(hs.get_nonce(aB) == seedB);
+
+    // --- pick a created account C whose addr_hash starts on a DIFFERENT root-branch nibble than
+    // B, so the post-state account trie is a clean two-leaf branch (hand-computable). ---
+    const uint8_t nibB0 = static_cast<uint8_t>(keccak_addr(aB).bytes[0] >> 4);
+    evmc::address aC{};
+    bool found_c = false;
+    for (int t = 1; t < 256 && !found_c; ++t) {
+        const evmc::address cand = s2_addr(static_cast<uint8_t>(t));
+        if (cand == aB) continue;
+        if (static_cast<uint8_t>(keccak_addr(cand).bytes[0] >> 4) != nibB0) {
+            aC = cand;
+            found_c = true;
+        }
+    }
+    REQUIRE(found_c);
+    const uint8_t nibC0 = static_cast<uint8_t>(keccak_addr(aC).bytes[0] >> 4);
+
+    // --- writes through the S2 mutators. ---
+    const uint64_t newNonceB = 210;
+    hs.set_nonce(aB, newNonceB);  // (1) built-account FIELD change
+
+    evmc::bytes32 s_new{};
+    s_new.bytes[31] = 0x2E;
+    evmc::bytes32 v_new{};
+    for (int i = 0; i < 32; ++i) v_new.bytes[i] = static_cast<uint8_t>(0x90 + i);
+    Account* paB = hs.find_or_create_account(aB);
+    hs.set_storage_slot(aB, *paB, s_new, v_new);             // (2) storage slot SET (non-zero)
+    hs.set_storage_slot(aB, *paB, s_clear, evmc::bytes32{});  // (3) storage slot CLEARED to zero
+
+    const intx::uint256 balC{123456};
+    const uint64_t nonceC = 9;
+    hs.set_balance(aC, balC);  // (4) CREATED account
+    hs.set_nonce(aC, nonceC);
+
+    // The overlay now reflects every write; no read poisoned the fail-closed counters.
+    CHECK(hs.get_nonce(aB) == newNonceB);
+    CHECK(hs.get_balance(aB) == intx::uint256{0xAABBCCDD00000000ULL + seedB});
+    CHECK(eq32(hs.read_storage(aB, s_new), v_new));
+    CHECK(eq32(hs.read_storage(aB, s_clear), evmc::bytes32{}));  // cleared reads zero
+    CHECK(hs.get_balance(aC) == balC);
+    CHECK(hs.get_nonce(aC) == nonceC);
+    REQUIRE(hs.created_accounts().size() == 2u);  // exactly B and C entered the overlay
+    REQUIRE(hs.overflow_slots_for(aB) != nullptr);
+    CHECK(hs.overflow_slots_for(aB)->size() == 2u);  // s_new + s_clear (zero RETAINED)
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+    REQUIRE(hs.missing_count() == 0u);
+
+    // --- INDEPENDENT oracle: hand-compute the post-state root with the canonical encoders. ---
+    // B's new storage trie: s_clear deleted, s_new inserted -> single leaf s_new.
+    const Bytes ev_new = encode_storage_value(v_new);
+    const auto snew_path = nibbles_of(keccak_slot(s_new));
+    const LeafNode snew_leaf = make_leaf(snew_path.data(), 64, ByteView{ev_new});
+    const evmc::bytes32 sr_B_new = keccak32(ByteView{zilkworm::encode_leaf(snew_leaf)});
+    REQUIRE_FALSE(eq32(sr_B_new, sr_B_pre));  // the storage writes moved B's storage root
+
+    // B' account leaf (nonce changed, storage root folded).
+    Account accB_new = make_test_account(seedB, sr_B_pre);
+    accB_new.nonce = newNonceB;
+    const Bytes leafB_new_val = accB_new.rlp(sr_B_new);
+    const LeafNode leafB_new = make_leaf(&aB_path[1], 63, ByteView{leafB_new_val});
+    const evmc::bytes32 hB_new = keccak32(ByteView{zilkworm::encode_leaf(leafB_new)});
+
+    // C account leaf (created: nonce/balance set, EMPTY code + EMPTY storage root — the case
+    // the gather must seed as kEmptyRoot, not zero).
+    Account accC{};
+    accC.nonce = nonceC;
+    std::memcpy(accC.balance, &balC, 32);  // native-endian, mirroring store_be_u256 (memcpy)
+    std::memcpy(accC.code_hash, silkworm::kEmptyHash.bytes, 32);
+    const Bytes leafC_val = accC.rlp(silkworm::kEmptyRoot);
+    const auto aC_path = nibbles_of(keccak_addr(aC));
+    const LeafNode leafC = make_leaf(&aC_path[1], 63, ByteView{leafC_val});
+    const evmc::bytes32 hC = keccak32(ByteView{zilkworm::encode_leaf(leafC)});
+
+    // post-state account root: a two-child branch (B and C differ on the first nibble).
+    BranchNode post;
+    post.set_child(nibB0, ByteView{hB_new.bytes, 32});
+    post.set_child(nibC0, ByteView{hC.bytes, 32});
+    const Bytes post_rlp{zilkworm::encode_branch(post)};
+    const evmc::bytes32 expected_root = keccak32(ByteView{post_rlp});
+    REQUIRE_FALSE(eq32(expected_root, prev_root));
+
+    // --- (A) the GATHER overload accepts the hand-built root and rejects a tampered one. ---
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, expected_root));
+    evmc::bytes32 bad_root = expected_root;
+    bad_root.bytes[0] = static_cast<uint8_t>(bad_root.bytes[0] ^ 0xFF);
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, bad_root));
+
+    // --- (B) the hand-built span-based version, on the SAME writes, must DECIDE IDENTICALLY. ---
+    std::vector<zilkworm::TrieNodeFlat> b_storage;  // sorted by slot_hash; outlives the calls
+    {
+        auto& n1 = b_storage.emplace_back(keccak_slot(s_new));
+        n1.current_off = 40;
+        n1.current_len = static_cast<uint8_t>(ev_new.size());
+        std::memcpy(n1.buf + 40, ev_new.data(), ev_new.size());
+        auto& n0 = b_storage.emplace_back(keccak_slot(s_clear));
+        n0.current_off = 40;
+        n0.buf[40] = 0x80;  // zero value -> 0x80 delete
+        n0.current_len = 1;
+        std::sort(b_storage.begin(), b_storage.end());
+    }
+    std::vector<HashStateAccountWrite> manual;
+    manual.push_back({keccak_addr(aB), sr_B_pre,
+                      std::span<const zilkworm::TrieNodeFlat>{b_storage}, hs.read_account(aB)});
+    manual.push_back({keccak_addr(aC), silkworm::kEmptyRoot, {}, hs.read_account(aC)});
+    std::sort(manual.begin(), manual.end(),
+              [](const HashStateAccountWrite& a, const HashStateAccountWrite& b) {
+                  return std::memcmp(a.addr_hash.bytes, b.addr_hash.bytes, 32) < 0;
+              });
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, manual, expected_root));   // == gather accept
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, manual, bad_root));  // == gather reject
+}
+
+// A run that leaves unconfirmed_read_count() > 0 must REJECT through the gather overload too:
+// the accept gate is (root match && missing==0 && unconfirmed==0), and the gather delegates to
+// the same gate. Mirror of the span-based unconfirmed case (above), driven end-to-end through a
+// mutator + the gather: the SAME writes + correct root accept BEFORE a build-skipped read and
+// reject AFTER it, with the gather and hand-built span agreeing at both points.
+TEST_CASE("check_root_hashstate gather overload rejects when a read was left unconfirmed",
+          "[hash_state][accept]") {
+    HashState hs;
+
+    evmc::bytes32 absent_root{};  // W's storage_root; its node is never add_node'd
+    for (int i = 0; i < 32; ++i) absent_root.bytes[i] = static_cast<uint8_t>(0x50 + i);
+
+    const evmc::address aW = s2_addr(0x33);
+    const uint64_t seedW = 5;
+    const Account accW = make_test_account(seedW, absent_root);
+    const Bytes leafW_val = accW.rlp(absent_root);
+    const auto aW_path = nibbles_of(keccak_addr(aW));
+    const LeafNode leafW = make_leaf(aW_path.data(), 64, ByteView{leafW_val});
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_leaf(leafW)});
+
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);              // build-time skip of an absent storage root
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    // Write W's nonce (storage untouched; absent_root carried through as the frozen seed).
+    const uint64_t newNonceW = 55;
+    hs.set_nonce(aW, newNonceW);
+
+    // Oracle: single-leaf account trie -> root == keccak(encode_leaf(new W leaf)).
+    Account accW_new = make_test_account(seedW, absent_root);
+    accW_new.nonce = newNonceW;
+    const Bytes leafW2_val = accW_new.rlp(absent_root);
+    const LeafNode leafW2 = make_leaf(aW_path.data(), 64, ByteView{leafW2_val});
+    const evmc::bytes32 expected_root = keccak32(ByteView{zilkworm::encode_leaf(leafW2)});
+
+    // Hand-built span on the same single write (no storage updates -> seed carried as the leaf's
+    // storage_root), for the before/after agreement cross-check.
+    std::vector<HashStateAccountWrite> manual;
+    manual.push_back({keccak_addr(aW), absent_root, {}, hs.read_account(aW)});
+
+    // BEFORE the read: both counters zero, correct root -> gather AND span both ACCEPT.
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, expected_root));            // gather
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, manual, expected_root));    // span (agrees)
+
+    // Read into W's build-skipped storage trie: confirmation hits the absent root -> unconfirmed.
+    evmc::bytes32 probe_slot{};
+    probe_slot.bytes[31] = 0x77;
+    (void)hs.get_storage(keccak_addr(aW), keccak_slot(probe_slot));
+    REQUIRE(hs.unconfirmed_read_count() > 0u);
+    REQUIRE(hs.missing_count() == 0u);
+
+    // AFTER the read: same writes, same (correct) root -> gather AND span both REJECT.
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, expected_root));          // gather
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, manual, expected_root));  // span (agrees)
 }
