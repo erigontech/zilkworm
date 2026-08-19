@@ -106,6 +106,12 @@ class DirectState : public BlockState {
     // Witness-bug fallback; see USE_HASH_KEY note in trie_zz/mpt.hpp.
     mutable std::vector<std::unique_ptr<Account>> recovered_accounts_;
     const Account* recover_account_from_nodestore(const evmc::address& addr) const;
+    // Current values of slots resolved via the node-store fallback (and any
+    // later writes to them). Checked after overflow_slots_ in read_storage;
+    // set_storage_slot writes through so zero-writes don't resurrect the
+    // recovered pre-state value.
+    mutable FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> recovered_slots_;
+    evmc::bytes32 recover_slot_from_nodestore(const Account& pa, const evmc::bytes32& key) const;
 #endif
 
   public:
