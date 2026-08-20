@@ -51,7 +51,7 @@ namespace zilkworm {
 }
 // Find the least common path of current key from the top, with the last key as reference
 template <bool DeletionEnabled>
-inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbles) {
+inline bool GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbles) {
     //================================================
     // The last leaf must have been inserted to a branch, or deleted from it
     //  --> lcp: lowest common point (between the last inserted and new_nibbles) <--
@@ -68,7 +68,7 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
         if (grid_.size() > 0 && is_empty(grid_[0])) {
             delete_line(0);
         }
-        return;
+        return true;
     }
 
     unsigned cur_parent_depth;
@@ -83,16 +83,16 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     }
     if (cur_parent_depth == 0) {
         depth_ = 0;
-        return;
+        return true;
     }
     auto& parent = grid_[cur_parent_depth];
     if (parent.kind != kBranch) {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"seek: parent not branch\"}");
         depth_ = 0;
-        return;
+        // Same class as the cursor check below: an inconsistency was detected,
+        // so refuse rather than let the caller descend from a bogus depth.
+        return false;
     }
     unsigned parent_consumed = parent.consumed;
     size_t lcp = lcp_nibbles(new_nibbles.nib.data(), search_nibbles_.nib.data(), parent_consumed);
@@ -102,7 +102,7 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
             if (last_was_delete_) {
                 depth_ = cur_parent_depth;
                 search_nib_cursor_ = parent_consumed - 1;
-                return;
+                return true;
             }
         }
         // If last was not delete, the logic of splitting a leaf is there in the main loop for updates
@@ -130,11 +130,14 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
         search_nib_cursor_ = parent_consumed;
     }
     if (search_nib_cursor_ > 63) {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"nib_cursor > 63\"}");
+        // The caller indexes search_nibbles_[search_nib_cursor_], and
+        // nibbles64::operator[] is an unchecked std::array subscript over 64
+        // entries. Continuing here reads off the end of the key.
+        return false;
     }
+    return true;
 }
 
 template <bool DeletionEnabled>
@@ -149,7 +152,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
         if (!grid_.empty() && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
             // and it's in a branch, or just a leaf, or nothing (can't be ext -> leaf)
-            seek_with_last_insert(new_nibbles);
+            if (!seek_with_last_insert(new_nibbles)) return {};
         }
 
         if (grid_.empty()) {
@@ -180,9 +183,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     grid_[depth_].modified = true;
                     break;
                 } else if (unfold_res == UnfoldResult::kMissing || unfold_res == UnfoldResult::kUndefined) {
-#ifndef NDEBUG
                     failed_ = true;
-#endif
                     sys_println("ERROR: missing hash ref in node store (witness incomplete)");
                     return {};
                 }
@@ -207,9 +208,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                             auto rlp_opt = state_->find_node_rlp(grid_line.ext.child);
                             if (!rlp_opt) [[unlikely]] {
                                 ++missing_count_;
-#ifndef NDEBUG
                                 failed_ = true;
-#endif
                                 sys_println("ERROR: missing ext child rlp in node store (witness incomplete)");
                                 return {};
                             }
@@ -217,9 +216,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                         }
                         if (!unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_)) [[unlikely]] {
                             ++missing_count_;
-#ifndef NDEBUG
                             failed_ = true;
-#endif
                             sys_println("ERROR: malformed ext child rlp in node store");
                             return {};
                         }
@@ -304,9 +301,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
                     // check pre-value matches
                     if (grid_line.leaf.value != trie_upd.initial_value()) {
-#ifndef NDEBUG
                         failed_ = true;
-#endif
                         sys_println("Pre value mismatch in existing leaf");
                         return {};
                     }
@@ -383,6 +378,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
     if (grid_.empty()) {
         return kEmptyRoot;
     }
+    // Single exit gate. Some sites can only signal by returning a bool an
+    // intermediate caller may ignore; checking the flag here means a detected
+    // inconsistency can never be reported as a root.
+    if (failed_) [[unlikely]] return {};
     auto encoded = encode_line(grid_[0]);
     return keccak_bytes(encoded);
 }
@@ -392,20 +391,14 @@ void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
     if (previous_root_hash != kEmptyRoot) {
         auto rlp = state_->find_node_rlp(previous_root_hash);
         if (!rlp) [[unlikely]] {
-#ifndef NDEBUG
             failed_ = true;
-#endif
             sys_println("{\"err\":\"no_rlp\"}");
             return;
         }
-#ifndef NDEBUG
         if (!unfold_node_from_rlp(*rlp, 0, 0)) [[unlikely]] {
             failed_ = true;
             sys_println("{\"err\":\"init_from_root: malformed root rlp\"}");
         }
-#else
-        unfold_node_from_rlp(*rlp, 0, 0);  // release: return checked via final root compare
-#endif
     }
 }
 

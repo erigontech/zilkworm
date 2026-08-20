@@ -187,6 +187,79 @@ void check_partial_delete(const Bytes32Map& pre, const std::vector<bytes32>& del
     REQUIRE(got == expected);
 }
 
+// A node store missing one node must make the walk REFUSE, not carry on.
+//
+// Every node is omitted in turn, so the test does not need to know which one a
+// given batch depends on. Whatever happens, only two outcomes are acceptable:
+// the node was not needed and the root is correct, or it was needed and the
+// walk reports failure and returns a zero root. Returning a plausible-looking
+// wrong root, or crashing, is what this pins down.
+//
+// Scope, stated honestly: this pins the OUTCOME, and it passes with or without
+// fold_line's early return, because the flag check at calc_root_from_updates'
+// exit enforces the outcome on its own. So it is a regression guard for that
+// gate, not proof that the unsafe continuation is gone -- on tries this small
+// the continuation does not corrupt anything, under ASAN either. The corruption
+// it was found through needed a real mainnet block (574 transactions, a
+// witness-derived node store); see temp/impl/STATUS.md. The early return itself
+// is a fix by inspection: the code after it unconditionally assumes
+// unfold_slot pushed a child line.
+void check_missing_node_is_safe(const Bytes32Map& pre, const std::vector<bytes32>& deleted) {
+    const auto is_deleted = [&deleted](const bytes32& k) {
+        return std::ranges::any_of(deleted, [&k](const bytes32& d) {
+            return std::memcmp(d.bytes, k.bytes, 32) == 0;
+        });
+    };
+
+    Bytes32Map all_nodes;
+    const bytes32 pre_root = hashbuilder_root(pre, &all_nodes);
+
+    Bytes32Map post;
+    for (const auto& [k, v] : pre) {
+        if (!is_deleted(k)) post[k] = v;
+    }
+    const bytes32 expected = hashbuilder_root(post, nullptr);
+
+    size_t refused = 0;
+    for (const auto& [omit, _] : all_nodes) {
+        Bytes32Map nodes = all_nodes;
+        nodes.erase(omit);
+
+        std::vector<uint8_t> prestate =
+            DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
+        std::vector<uint8_t> nodestore = build_node_store(nodes);
+        DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
+
+        std::vector<TrieNodeFlat> updates;
+        updates.reserve(pre.size());
+        for (const auto& [k, v] : pre) {
+            auto& node = updates.emplace_back(k);
+            node.self_initial_len = static_cast<uint8_t>(v.size());
+            std::memcpy(node.buf, v.data(), v.size());
+            if (is_deleted(k)) {
+                node.buf[40] = 0x80;
+                node.current_off = 40;
+                node.current_len = 1;
+            }
+        }
+
+        GridMPT<true> trie{direct, pre_root};
+        const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
+
+        CAPTURE(silkworm::to_hex(omit), silkworm::to_hex(got), trie.failed(),
+                trie.missing_count());
+        if (trie.failed()) {
+            ++refused;
+            CHECK(got == bytes32{});  // refused, rather than inventing a root
+        } else {
+            CHECK(trie.missing_count() == 0);
+            CHECK(got == expected);  // this node was not on the walk
+        }
+    }
+    // The batch must depend on at least one node, or the test proves nothing.
+    CHECK(refused > 0);
+}
+
 }  // namespace
 
 TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmpt]") {
@@ -239,4 +312,24 @@ TEST_CASE("GridMPT<true> single-child branch folds over an unmodified child", "[
                          {key_with_prefix({1, 0, 1}), slot_value_rlp(2)},
                          {key_with_prefix({1, 1, 1}), slot_value_rlp(3)}};
     check_partial_delete(pre, {key_with_prefix({1, 1, 1})});
+}
+
+// Fail-safe: an incomplete node store must not be walked past the point the
+// inconsistency is detected. Same trie and batch as the single-child fold test
+// above, which is the shape that needs to unfold a sibling during a collapse.
+TEST_CASE("GridMPT<true> refuses a walk when the node store is incomplete",
+          "[trie][gridmpt][failsafe]") {
+    const Bytes32Map pre{{key_with_prefix({1, 0, 0}), slot_value_rlp(1)},
+                         {key_with_prefix({1, 0, 1}), slot_value_rlp(2)},
+                         {key_with_prefix({1, 1, 1}), slot_value_rlp(3)}};
+    check_missing_node_is_safe(pre, {key_with_prefix({1, 1, 1})});
+}
+
+TEST_CASE("GridMPT<true> refuses an incomplete store on a deeper trie",
+          "[trie][gridmpt][failsafe]") {
+    const Bytes32Map pre{{key_with_prefix({0xc, 0xf, 1}), slot_value_rlp(1)},
+                         {key_with_prefix({0xc, 0xf, 7}), slot_value_rlp(2)},
+                         {key_with_prefix({0xc, 7, 3}), slot_value_rlp(3)},
+                         {key_with_prefix({1, 0, 0}), slot_value_rlp(4)}};
+    check_missing_node_is_safe(pre, {key_with_prefix({0xc, 0xf, 7})});
 }

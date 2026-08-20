@@ -68,9 +68,7 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
     const uint8_t* const node_begin = payload.data();
     auto hh{fast_decode_header(payload)};
     if (!hh.list) [[unlikely]] {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println(("ERROR: unfold_node_from_rlp Invalid Payload Header, parent_slot_index: "
             + std::to_string(parent_slot_index) 
             + " parent_depth: " + std::to_string(parent_depth)).c_str());
@@ -102,9 +100,7 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
         return true;
     }
     if (kind == kInvalid) [[unlikely]] {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         pop_back();
         return false;
     }
@@ -115,9 +111,7 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
         ExtensionNode ext{nibbles64{plen, path}, {}};
         // Reject an oversized child that would overflow child (a 32-byte bytes32).
         if (second.size() > sizeof(ext.child.bytes)) {
-#ifndef NDEBUG
             failed_ = true;
-#endif
             return false;
         }
         std::copy(second.cbegin(), second.cend(), ext.child.bytes);
@@ -213,28 +207,39 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
             depth_ = depth;
             // TODO optimize by checking it's a branch or not
             if (unfold_slot(non_empty_nib) != UnfoldResult::kSuccess) {  // Needed because if it's a leaf this will get extended.
-#ifndef NDEBUG
                 failed_ = true;
-#endif
                 sys_println("Error: fold_line unexpected error unfolding non_emtpy_nib");
+                // Must return. Everything below assumes unfold_slot pushed the
+                // child line: it reads grid_[depth_] as that child and then
+                // pop_back()s it. On a failed unfold nothing was pushed, so the
+                // old code tested an unrelated line and popped a live one that
+                // sibling lines still referenced through child_depth[] --
+                // observed as malloc/free corruption and a SIGSEGV well away
+                // from here.
+                return;
             }
+            // unfold_slot emplace_back'd a line, which can reallocate grid_ and
+            // dangle the `grid_line` reference bound at function entry. Index
+            // instead of reusing it. (grid_.reserve(66) makes this survivable
+            // today, but the main loop admits depth < 128.)
             ExtensionNode ext{nibbles64{1, {static_cast<uint8_t>(non_empty_nib)}}};
-            if (grid_.back().kind == kBranch) {
-                auto clen = grid_line.branch.child_len[non_empty_nib];
-                const uint8_t* src = (clen == 32 && grid_line.branch.child_ptr[non_empty_nib])
-                                         ? grid_line.branch.child_ptr[non_empty_nib]
-                                         : grid_line.branch.child[non_empty_nib].bytes;
+            if (grid_[depth_].kind == kBranch) {  // depth_ is the child just unfolded
+                auto clen = grid_[depth].branch.child_len[non_empty_nib];
+                const uint8_t* src = (clen == 32 && grid_[depth].branch.child_ptr[non_empty_nib])
+                                         ? grid_[depth].branch.child_ptr[non_empty_nib]
+                                         : grid_[depth].branch.child[non_empty_nib].bytes;
                 ext.child_len = clen;
                 ext.set_child(ByteView{src, clen});
-                transform_line(grid_line, std::move(ext));
-                grid_line.modified = true;
-                grid_line.child_depth[non_empty_nib] = 0;
+                transform_line(grid_[depth], std::move(ext));
+                grid_[depth].modified = true;
+                grid_[depth].child_depth[non_empty_nib] = 0;
                 grid_.pop_back();
                 return;
             }
-            transform_line(grid_line, std::move(ext));
+            const unsigned child_depth = grid_[depth].child_depth[non_empty_nib];
+            transform_line(grid_[depth], std::move(ext));
 
-            fold_line(grid_line.child_depth[non_empty_nib]);  // The extension would get absorbed, if needed, in the next recursion
+            fold_line(child_depth);  // The extension would get absorbed, if needed, in the next recursion
         }
 
         if (grid_.size() > 1) {
@@ -439,9 +444,7 @@ inline void GridMPT<DeletionEnabled>::link_to_parent(GridLine& line, unsigned de
 template <bool DeletionEnabled>
 inline GridLine* GridMPT<DeletionEnabled>::emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, unsigned consumed_init) {
     if (parent_slot >= 16) {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         return nullptr;
     }
     grid_.emplace_back(kind, parent_slot, parent_depth, consumed_init);
@@ -455,9 +458,7 @@ template <bool DeletionEnabled>
 template <typename NodeType>
 inline bool GridMPT<DeletionEnabled>::insert_line_at(unsigned target_depth, unsigned parent_slot, unsigned parent_depth, NodeType&& node) {
     if (parent_slot >= 16) {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         return false;
     }
 
@@ -506,20 +507,18 @@ inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& 
         consumed = node.path.len;
         line.ext = std::move(node);
         if (consumed + parent_consumed > 255) {
-#ifndef NDEBUG
             failed_ = true;
-#endif
             sys_println("{\"err\":\"cast_overflow\"}");
+            return false;  // the cast below would silently truncate the path length
         }
     } else {
         kind = kBranch;
         consumed = 1;
         line.branch = std::move(node);
         if (consumed + parent_consumed > 255) {
-#ifndef NDEBUG
             failed_ = true;
-#endif
             sys_println("{\"err\":\"cast_overflow\"}");
+            return false;  // the cast below would silently truncate the depth
         }
     }
     line.consumed = static_cast<uint8_t>(consumed + parent_consumed);
@@ -534,23 +533,17 @@ inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& 
 template <bool DeletionEnabled>
 inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     if (slot > 15) [[unlikely]] {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"slot > 15\"}");
         return UnfoldResult::kUndefined;
     }
     if (depth_ >= grid_.size()) [[unlikely]] {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"depth >= grid_size\"}");
         return UnfoldResult::kUndefined;
     }
     if (grid_[depth_].kind != kBranch)  [[unlikely]] {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"unfold_not_branch\"}");
         return UnfoldResult::kUndefined;
     }
@@ -558,9 +551,7 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     auto& grid_line = grid_[depth_];
     if (auto s = grid_line.child_depth[slot]; s) {  // Unfolded child exists
         if (s > grid_.size()) [[unlikely]] {
-#ifndef NDEBUG
             failed_ = true;
-#endif
             sys_println("{\"err\":\"child_depth > size\"}");
             return UnfoldResult::kUndefined;
         }
@@ -585,9 +576,7 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         auto rlp_opt = state_->find_node_rlp(ck);
         if (!rlp_opt) [[unlikely]] {
             ++missing_count_;
-#ifndef NDEBUG
             failed_ = true;
-#endif
             sys_println("{\"err\":\"node_store_get_rlp_failed\"}");
             return UnfoldResult::kMissing;
         }
@@ -598,19 +587,15 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         rlp = ByteView{embedded_rlp_copies_.back().bytes, child_len};
     }
     if (rlp.size() == 0) [[unlikely]] {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"rlp_size_0\"}");
         return UnfoldResult::kMissing;
     }
     bool success = unfold_node_from_rlp(rlp, slot, depth_);
     if (success)
         grid_line.child_depth[slot] = depth_;
-#ifndef NDEBUG
     else
         failed_ = true;  // unfold_node_from_rlp already flags; explicit for the sentinel
-#endif
     return success ? UnfoldResult::kSuccess : UnfoldResult::kMissing;
 }
 
