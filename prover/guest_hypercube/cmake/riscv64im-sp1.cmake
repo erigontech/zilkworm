@@ -17,8 +17,10 @@ set(common_flags "-march=rv64im -mabi=lp64 -ffunction-sections -fdata-sections -
 set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
-set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags}" CACHE STRING "" FORCE)
-set(CMAKE_CXX_FLAGS "${common_flags} ${opt_flags} ${no_cxx}" CACHE STRING "" FORCE)
+# Not in common_flags: CMAKE_ASM_FLAGS must not force-include a C header.
+set(bswap_inc "-include ${CMAKE_CURRENT_LIST_DIR}/../bswap_inline.h")
+set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags} ${bswap_inc}" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS "${common_flags} ${opt_flags} ${no_cxx} ${bswap_inc}" CACHE STRING "" FORCE)
 set(CMAKE_ASM_FLAGS "${common_flags}" CACHE STRING "" FORCE)
 
 # Override CMake's default Release flags (-O3 -DNDEBUG) so that the opt_flags
