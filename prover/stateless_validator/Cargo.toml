@@ -19,8 +19,8 @@ alloy-rpc-types-debug = "2.0"
 anyhow = "1"
 stateless = { git = "https://github.com/paradigmxyz/stateless", rev = "e5480e71a8031641ff471cad9dc482a7a14b32d5", default-features = false }
 
-# Canonical EEST statelessInputBytes decode per EIP-8025 from v0.14.0.
-stateless-validator-common = { git = "https://github.com/eth-act/ere-guests", tag = "v0.14.0", package = "stateless-validator-common", default-features = false, features = ["std"] }
+# Canonical EEST statelessInputBytes decode per EIP-8025 from v0.16.0.
+stateless-validator-common = { git = "https://github.com/eth-act/ere-guests", tag = "v0.16.0", package = "stateless-validator-common", default-features = false, features = ["std"] }
 libssz = { version = "0.2.2", default-features = false, features = ["alloc"] }
 
 # Optional, gated by the `download` feature: fetch the SP1 guest ELF and VK from GitHub Releases.
