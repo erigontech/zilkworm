@@ -6265,8 +6265,8 @@ dependencies = [
 
 [[package]]
 name = "stateless-validator-common"
-version = "0.14.0"
-source = "git+https://github.com/eth-act/ere-guests?tag=v0.14.0#65502a0e31c2af1ff410505e5612dcf191250bfc"
+version = "0.16.0"
+source = "git+https://github.com/eth-act/ere-guests?tag=v0.16.0#4826a7bf88c381709d23d612883d0c25eee8813b"
 dependencies = [
  "const-hex",
  "libssz",
