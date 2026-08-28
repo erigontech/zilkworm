@@ -60,8 +60,9 @@ impl StatelessValidatorZilkwormInput {
         // Network label carried in the MFBD; the guest maps it to a hardcoded chain config
         // (chain_id + blob schedule + fork activation) via its kNetworkConfig, so only
         // networks known on both sides are accepted. Selected by the input's chain id.
-        let fork = match si.chain_config.chain_id {
+        let fork = match si.chain_id {
             0x1a62c8cb6 => "glamsterdam-devnet-7",
+            0x1a6a8cc6e => "glamsterdam-devnet-8",
             id => bail!("unknown chain id {id:#x}: no guest-side network config"),
         };
 
@@ -159,7 +160,7 @@ impl StatelessValidatorZilkwormInput {
         public_values.extend_from_slice(&pre_state_root);
         public_values.extend_from_slice(&payload.state_root);
         public_values.extend_from_slice(&payload.block_hash);
-        public_values.extend_from_slice(&si.chain_config.chain_id.to_le_bytes());
+        public_values.extend_from_slice(&si.chain_id.to_le_bytes());
 
         Ok(Self { flat_bundle, public_values })
     }
