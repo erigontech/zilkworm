@@ -169,9 +169,7 @@ impl StatelessValidatorZilkwormInput {
 /// Materialise EIP-7685 `ExecutionRequests` into `[type_byte, data...]` blobs,
 /// as expected by `alloy_eips::eip7685::Requests::requests_hash()`.
 ///
-/// Only the three canonical request types are emitted. EIP-7732 builder
-/// requests (`builder_deposits`/`builder_exits`) are not folded into
-/// `requests_hash` and are omitted; benchmark worst-case blocks carry none.
+/// All request types are emitted in ascending type order.
 fn collect_execution_requests(
     er: &stateless_validator_common::guest::input::new_payload_request::ExecutionRequestsGloas,
 ) -> Result<Vec<Bytes>> {
@@ -179,6 +177,8 @@ fn collect_execution_requests(
     const REQ_TYPE_DEPOSIT: u8 = 0x00;
     const REQ_TYPE_WITHDRAWAL: u8 = 0x01;
     const REQ_TYPE_CONSOLIDATION: u8 = 0x02;
+    const REQ_TYPE_BUILDER_DEPOSIT: u8 = 0x03;  // EIP-8282: Builder Execution Requests
+    const REQ_TYPE_BUILDER_EXIT: u8 = 0x04;     // EIP-8282: Builder Execution Requests
 
     fn encode_typed<T: SszEncode>(items: &[T], ty: u8) -> Option<Bytes> {
         if items.is_empty() {
@@ -201,6 +201,12 @@ fn collect_execution_requests(
         requests.push(b);
     }
     if let Some(b) = encode_typed(&er.consolidations, REQ_TYPE_CONSOLIDATION) {
+        requests.push(b);
+    }
+    if let Some(b) = encode_typed(&er.builder_deposits, REQ_TYPE_BUILDER_DEPOSIT) {
+        requests.push(b);
+    }
+    if let Some(b) = encode_typed(&er.builder_exits, REQ_TYPE_BUILDER_EXIT) {
         requests.push(b);
     }
     Ok(requests)
