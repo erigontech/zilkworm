@@ -143,6 +143,50 @@ void check_delete_all_then_insert(const Bytes32Map& pre, const Bytes32Map& post)
     REQUIRE(got == expected);
 }
 
+// Same, for a batch that deletes only part of the pre trie: every pre leaf is
+// in the batch, `deleted` ones with the 0x80 marker and the rest read back
+// unchanged (initial value, no current), which is how check_root encodes an
+// untouched slot of a modified account. The post trie is the pre trie minus
+// the deleted keys.
+void check_partial_delete(const Bytes32Map& pre, const std::vector<bytes32>& deleted) {
+    const auto is_deleted = [&deleted](const bytes32& k) {
+        return std::ranges::any_of(deleted, [&k](const bytes32& d) {
+            return std::memcmp(d.bytes, k.bytes, 32) == 0;
+        });
+    };
+
+    Bytes32Map nodes;
+    const bytes32 pre_root = hashbuilder_root(pre, &nodes);
+    std::vector<uint8_t> prestate =
+        DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
+    std::vector<uint8_t> nodestore = build_node_store(nodes);
+    DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
+
+    Bytes32Map post;
+    std::vector<TrieNodeFlat> updates;  // pre is sorted already; must never reallocate
+    updates.reserve(pre.size());
+    for (const auto& [k, v] : pre) {
+        auto& node = updates.emplace_back(k);
+        node.self_initial_len = static_cast<uint8_t>(v.size());
+        std::memcpy(node.buf, v.data(), v.size());
+        if (is_deleted(k)) {
+            node.buf[40] = 0x80;
+            node.current_off = 40;
+            node.current_len = 1;
+        } else {
+            post[k] = v;
+        }
+    }
+
+    GridMPT<true> trie{direct, pre_root};
+    const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
+    const bytes32 expected = hashbuilder_root(post, nullptr);
+
+    CAPTURE(silkworm::to_hex(got), silkworm::to_hex(expected));
+    CHECK(trie.missing_count() == 0);
+    REQUIRE(got == expected);
+}
+
 }  // namespace
 
 TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmpt]") {
@@ -180,4 +224,19 @@ TEST_CASE("GridMPT<true> seek cursor after folding a delete-emptied line", "[tri
                          {key_with_prefix({0xc, 0xf, 7}), slot_value_rlp(2)}};
     check_delete_all_then_insert(pre, {{key_with_prefix({0xc, 7}), slot_value_rlp(3)},
                                        {key_with_prefix({0xc, 0xf, 0xf}), slot_value_rlp(4)}});
+}
+
+// A delete leaves its parent branch with a single child, so fold_line turns
+// that branch into an extension over the surviving nibble. The child it keeps
+// is unmodified (read back unchanged), so fold_line returned through its
+// !modified path, which never installed a child ref on the fresh extension:
+// the extension stayed empty, cascade_delete collapsed it, and the walk
+// returned kEmptyRoot for a trie that still holds two leaves.
+TEST_CASE("GridMPT<true> single-child branch folds over an unmodified child", "[trie][gridmpt]") {
+    // ext("1") -> branch{0 -> branch{0,1} (the kept leaves), 1 -> leaf}; the
+    // delete of the "11" leaf leaves that branch with only slot 0.
+    const Bytes32Map pre{{key_with_prefix({1, 0, 0}), slot_value_rlp(1)},
+                         {key_with_prefix({1, 0, 1}), slot_value_rlp(2)},
+                         {key_with_prefix({1, 1, 1}), slot_value_rlp(3)}};
+    check_partial_delete(pre, {key_with_prefix({1, 1, 1})});
 }

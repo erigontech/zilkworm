@@ -233,8 +233,13 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
             // We are applying parent br transformation here to avoid having to store hashed entry to be unfolded again
             // single-child br -> ext
             if (parent.kind == kBranch && parent.branch.has_single_child()) {
-                ExtensionNode ext{
-                    nibbles64{1, {parent.branch.first_set_bit()}}};
+                unsigned kept_nib = parent.branch.first_set_bit();
+                ExtensionNode ext{nibbles64{1, {static_cast<uint8_t>(kept_nib)}}};
+                auto clen = parent.branch.child_len[kept_nib];
+                const uint8_t* src = (clen == 32 && parent.branch.child_ptr[kept_nib])
+                                         ? parent.branch.child_ptr[kept_nib]
+                                         : parent.branch.child[kept_nib].bytes;
+                ext.set_child(ByteView{src, clen});
                 transform_line(parent, std::move(ext));
                 parent.modified = true;
             }
