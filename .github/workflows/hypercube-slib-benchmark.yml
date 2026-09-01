@@ -1,0 +1,123 @@
+name: HyperCube slib Benchmark
+
+# HashState/slib SP1 cycle benchmark on the tests-zkevm-benchmark@v0.8.2
+# (Amsterdam) fixtures. Produces OUR guest cycle numbers; the reth baseline is
+# compared externally via dashboards, so this job only emits + uploads our data.
+#
+# Manual (workflow_dispatch) only, and intentionally NOT wired to push/PR: it is
+# NON-BLOCKING; the build/run step is marked continue-on-error so it never gates
+# CI. It needs the Amsterdam (glamsterdam-devnet-8) EVM support; see
+# docs/slib_benchmark.md.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  slib-benchmark:
+    name: Run slib SP1 Benchmark
+    runs-on: ubuntu-latest
+    environment: ci
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/erigontech/zilkworm-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init -v /tmp/z6m-cargo-cache:/cargo-cache
+    env:
+      CARGO_HOME: /cargo-cache/cargo
+      # `make zkevm-benchmark-fixtures` uses `gh release download`; authenticate it.
+      GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+    steps:
+      - name: Prepare local cargo cache
+        run: |
+          mkdir -p /cargo-cache/cargo /cargo-cache/target
+          rm -rf /cargo-cache/cargo/registry/src
+          cat > /cargo-cache/cargo/config.toml <<'TOML'
+          [net]
+          git-fetch-with-cli = true
+          TOML
+
+      - name: Verify tool versions
+        run: |
+          cmake --version
+          rustc --version
+          riscv-none-elf-gcc --version
+          protoc --version
+          gh --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          submodules: false
+          lfs: true
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
+      - name: Symlink cargo target for caching
+        run: |
+          if [ ! -d prover/target ] && [ -d /cargo-cache/target ]; then
+            ln -s /cargo-cache/target prover/target
+          elif [ -d prover/target ] && [ ! -L prover/target ]; then
+            mv prover/target/* /cargo-cache/target/ 2>/dev/null || true
+            rm -rf prover/target
+            ln -s /cargo-cache/target prover/target
+          fi
+
+      - name: Drop stale build-script artifacts
+        run: rm -rf prover/target/release/build prover/target/release/.fingerprint
+
+      - name: Cache benchmark fixtures
+        uses: actions/cache@v4
+        with:
+          path: test-fixtures-cache/zkevm_benchmark
+          key: zkevm-benchmark-fixtures-tests-zkevm-benchmark-v0.8.2
+
+      # Builds the flag-ON (Z6M_HASH_STATE) guest + prover and runs the benchmark.
+      # continue-on-error: keeping it non-fatal means the artifacts below still
+      # upload even when the run fails.
+      - name: Run slib benchmark
+        id: bench
+        continue-on-error: true
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: make slib-benchmark
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## slib SP1 benchmark"
+            echo ""
+            echo "- Fixtures: tests-zkevm-benchmark@v0.8.2 (Amsterdam)"
+            echo "- Backend: Z6M_HASH_STATE=ON (HashState/slib guest)"
+            echo "- Run step outcome: ${{ steps.bench.outcome }}"
+            echo ""
+            if [ -f temp/slib_benchmark/per_case.csv ]; then
+              echo "Per-case cycle numbers (first 20 rows):"
+              echo '```'
+              head -n 21 temp/slib_benchmark/per_case.csv
+              echo '```'
+            else
+              echo "_No results produced._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload cycle results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slib-benchmark-results
+          path: |
+            temp/slib_benchmark/per_case.csv
+            temp/slib_benchmark/execution.log
+            temp/slib_benchmark/cycle_stats.png
+          if-no-files-found: warn
+          retention-days: 30

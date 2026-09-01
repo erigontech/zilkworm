@@ -21,7 +21,8 @@ endif
         eest-zkevm-tests zkevm-fixtures \
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
         ere-workload-checkout ere-fixtures ere-validate ere-compare \
-        release-artifacts
+        release-artifacts \
+        zkevm-benchmark-fixtures z6m_guest_slib z6m_prover_slib slib-benchmark
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -242,6 +243,121 @@ release-artifacts:
 	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
 	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
 	@cat $(RELEASE_DIR)/SHA256SUMS.txt
+
+# =============================================================================
+# HashState/slib SP1 cycle benchmark (tests-zkevm-benchmark@v0.8.2, Amsterdam)
+# =============================================================================
+#
+# Requires the Amsterdam (glamsterdam-devnet-8) EVM support: the benchmark
+# fixtures are Amsterdam `statelessInputBytes` blocks, so both the guest ELF and
+# the host must carry the full Amsterdam EVM semantics (zilk_core fork plumbing
+# plus the devnet-8 evmone submodule).
+# The reth baseline is produced externally and compared via dashboards; these
+# targets only emit OUR cycle numbers.
+
+# The curated compute benchmark corpus: single heavy Amsterdam blocks packed to
+# fixed 10M/30M/60M gas budgets. Same on-wire schema (0x1501 || SSZ) as the
+# eest-zkevm-tests corpus, only the content differs. Sourced from the
+# ethereum/execution-specs release tests-zkevm-benchmark@v0.8.2 (single asset
+# fixtures_zkevm-benchmark.tar.gz, ~495 MiB). Mirrors the zkevm-fixtures idiom.
+ZKEVM_BENCH_RELEASE_TAG  := tests-zkevm-benchmark@v0.8.2
+ZKEVM_BENCH_RELEASE_REPO := ethereum/execution-specs
+ZKEVM_BENCH_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_benchmark/fixtures
+ZKEVM_BENCH_JSON_DIR ?= $(ZKEVM_BENCH_FIXTURES_DIR)/blockchain_tests
+
+# Download + extract the benchmark fixtures. Idempotent: skips when already
+# present. Same staged-.tmp / blockchain_tests-allowlist / gh-release-download
+# shape as zkevm-fixtures; the tarball is not yet pinned in test-fixtures.json,
+# so it uses `gh release download` rather than the sha256-verified manifest.
+zkevm-benchmark-fixtures:
+	@dst="$(FIXTURES_CACHE)/zkevm_benchmark"; \
+	tarball="$(FIXTURES_CACHE)/fixtures_zkevm-benchmark.tar.gz"; \
+	if [ -d "$$dst/fixtures/blockchain_tests" ]; then \
+	    echo "  zkevm-benchmark fixtures present at $$dst; skipping download"; \
+	else \
+	    mkdir -p "$(FIXTURES_CACHE)"; \
+	    echo "  downloading $(ZKEVM_BENCH_RELEASE_TAG) fixtures_zkevm-benchmark.tar.gz (~495 MiB) from $(ZKEVM_BENCH_RELEASE_REPO)"; \
+	    gh release download '$(ZKEVM_BENCH_RELEASE_TAG)' --repo $(ZKEVM_BENCH_RELEASE_REPO) \
+	        -p 'fixtures_zkevm-benchmark.tar.gz' -D "$(FIXTURES_CACHE)" --clobber; \
+	    echo "  extracting fixtures/blockchain_tests"; \
+	    rm -rf "$$dst.tmp" "$$dst"; mkdir -p "$$dst.tmp"; \
+	    tar --no-same-owner --no-same-permissions -xzf "$$tarball" -C "$$dst.tmp" fixtures/blockchain_tests; \
+	    mv "$$dst.tmp" "$$dst"; \
+	    echo "  zkevm-benchmark fixtures ready at $$dst"; \
+	fi
+
+# The prover embeds a fixed ELF path (prover_hypercube/build.rs -> include_elf!
+# ".../guest_hypercube/build/z6m_guest.elf"), so the slib guest ELF must land
+# there. We build the flag-ON guest in a DEDICATED tree ($(GUEST_SLIB_BUILD)) so
+# the normal OFF build cache is never contaminated with Z6M_HASH_STATE=ON, then
+# stage the ELF at the embed path. (A fresh tree also re-applies the blst SP1
+# patch via its PATCH_COMMAND.)
+GUEST_SLIB_BUILD := prover/guest_hypercube/build-slib
+GUEST_EMBED_ELF  := prover/guest_hypercube/build/z6m_guest.elf
+
+z6m_guest_slib:
+	cmake -S prover/guest_hypercube -B $(GUEST_SLIB_BUILD) \
+		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_hypercube/cmake/riscv64im-sp1.cmake \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSP1=ON \
+		-DZ6M_HASH_STATE=ON
+	cmake --build $(GUEST_SLIB_BUILD) -j$$(nproc)
+	@mkdir -p $(dir $(GUEST_EMBED_ELF))
+	cp $(GUEST_SLIB_BUILD)/z6m_guest.elf $(GUEST_EMBED_ELF)
+
+# Build the prover embedding the slib guest ELF. Uses cargo directly rather than
+# the z6m_prover target, because z6m_prover depends on z6m_guest, which would
+# rebuild the OFF (DirectState) ELF over the staged slib one before embedding.
+z6m_prover_slib: z6m_guest_slib
+	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
+
+# slib benchmark run knobs. (Comments kept on their own lines: a trailing inline
+# comment would leave whitespace in the value and corrupt the paths.)
+SLIB_BENCH_WORK  ?= temp/slib_benchmark
+# one-case-per-file JSONs:
+SLIB_BENCH_CASES ?= $(SLIB_BENCH_WORK)/cases
+# cycle_stats.py-format log:
+SLIB_BENCH_LOG   ?= $(SLIB_BENCH_WORK)/execution.log
+# per-block (per-case) cycles:
+SLIB_BENCH_CSV   ?= $(SLIB_BENCH_WORK)/per_case.csv
+SLIB_PROVER      := prover/target/release/z6m_prover
+
+# Run the HashState/slib guest over every benchmark case and collect cycles.
+# `execute --is-test --file-name` SUMS cycles across all cases in a JSON file, so
+# we first split each fixture into one-case-per-file (slib_split_fixtures.py) and
+# run one prover invocation per case -> one cycle number per block. The prover
+# prints "Executed block N (gas_used=..., cycles=..., prover_gas=..., syscall_count=...)";
+# we rewrite that into the "block N executed, gas_used=..., cycle_count=..., prover_gas=..."
+# line cycle_stats.py parses (with a running index as the synthetic block id, since
+# every benchmark block is chain block 1), and also emit a per-case CSV.
+slib-benchmark: zkevm-benchmark-fixtures z6m_prover_slib
+	@echo "  [slib-benchmark] splitting fixtures into one-case-per-file ..."
+	@rm -rf "$(SLIB_BENCH_CASES)"; mkdir -p "$(SLIB_BENCH_CASES)" "$(SLIB_BENCH_WORK)"
+	python3 tools/scripts/slib_split_fixtures.py \
+		--in "$(ZKEVM_BENCH_JSON_DIR)" --out "$(SLIB_BENCH_CASES)"
+	@echo "  [slib-benchmark] running each case through z6m_prover execute --is-test ..."
+	@: > "$(SLIB_BENCH_LOG)"; \
+	echo "case,gas_used,cycles,prover_gas,syscall_count" > "$(SLIB_BENCH_CSV)"; \
+	i=0; \
+	for f in $$(find "$(SLIB_BENCH_CASES)" -name '*.json' | sort); do \
+	    i=$$((i+1)); name=$$(basename "$$f" .json); \
+	    line=$$($(SLIB_PROVER) execute --is-test --file-name "$$f" 2>/dev/null \
+	        | grep -oE 'Executed block [0-9]+ \(gas_used=[0-9]+, cycles=[0-9]+, prover_gas=[0-9]+, syscall_count=[0-9]+\)') || true; \
+	    if [ -z "$$line" ]; then echo "  WARN: no cycle line for $$name"; continue; fi; \
+	    g=$$(echo "$$line" | grep -oE 'gas_used=[0-9]+'      | cut -d= -f2); \
+	    c=$$(echo "$$line" | grep -oE 'cycles=[0-9]+'        | cut -d= -f2); \
+	    p=$$(echo "$$line" | grep -oE 'prover_gas=[0-9]+'    | cut -d= -f2); \
+	    s=$$(echo "$$line" | grep -oE 'syscall_count=[0-9]+' | cut -d= -f2); \
+	    echo "$$name,$$g,$$c,$$p,$$s" >> "$(SLIB_BENCH_CSV)"; \
+	    echo "block $$i executed, gas_used=$$g, cycle_count=$$c, prover_gas=$$p  # $$name" >> "$(SLIB_BENCH_LOG)"; \
+	    printf '  %-64s cycles=%s gas=%s\n' "$$name" "$$c" "$$g"; \
+	done
+	@echo "  [slib-benchmark] per-case cycles (per block): $(SLIB_BENCH_CSV)"
+	@echo "  [slib-benchmark] summarizing with tools/stats/cycle_stats.py ..."
+	python3 tools/stats/cycle_stats.py --filename "$(SLIB_BENCH_LOG)" \
+		--output "$(SLIB_BENCH_WORK)/cycle_stats.png" --no-display \
+	    || echo "  (cycle_stats.py needs matplotlib+scipy; raw per-case numbers are in $(SLIB_BENCH_CSV))"
+
 # ERE benchmark integration: build the SP1 guest ELF + VK as expected by ere-hosts.
 ERE_BIN_DIR ?= $(CURDIR)/build/ere-bin
 ERE_GUEST_NAME ?= stateless-validator-zilkworm-sp1
