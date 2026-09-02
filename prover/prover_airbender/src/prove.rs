@@ -273,6 +273,25 @@ pub fn save_for_wasm_verifier(cache: &SetupCache, dir: &Path) -> Result<()> {
         layout_bytes.len() as f64 / 1e6
     );
 
+    // Single-file verification key in the security-tagged envelope format
+    // (EVKEY001): the only key format that carries the security level, and
+    // required for 100-bit proofs (the legacy split key is assumed 80-bit).
+    let vk_path = dir.join("vk.bin");
+    let mut vk_bytes =
+        Vec::with_capacity(setup_bytes.len() + layout_bytes.len() + 10);
+    vk_bytes.extend_from_slice(VK_ENVELOPE_MAGIC);
+    vk_bytes.push(ENVELOPE_FORMAT_VERSION);
+    vk_bytes.push(security_wire_bits(cache.security()));
+    vk_bytes.extend_from_slice(&setup_bytes);
+    vk_bytes.extend_from_slice(&layout_bytes);
+    std::fs::write(&vk_path, &vk_bytes)
+        .map_err(|e| eyre!("failed to write {}: {}", vk_path.display(), e))?;
+    log::info!(
+        "WASM verifier key saved to {} ({:.1} MB)",
+        vk_path.display(),
+        vk_bytes.len() as f64 / 1e6
+    );
+
     Ok(())
 }
 
@@ -364,10 +383,45 @@ pub fn gpu_prove(
     prover.prove(batch_id, source)
 }
 
+/// Security-tagged envelope magics used by the matter-labs WASM verifier
+/// (proof_verifier_js): proofs and verification keys carry an 8-byte magic,
+/// a format version, and the security level in bits. Legacy un-enveloped
+/// artifacts are assumed to be 80-bit by the verifier, so 100-bit proofs
+/// MUST be enveloped.
+pub const PROOF_ENVELOPE_MAGIC: &[u8; 8] = b"EPROOF01";
+pub const VK_ENVELOPE_MAGIC: &[u8; 8] = b"EVKEY001";
+const ENVELOPE_FORMAT_VERSION: u8 = 1;
+
+fn security_wire_bits(security: verifier_common::SecurityModel) -> u8 {
+    match security {
+        verifier_common::SecurityModel::Security80 => 80,
+        verifier_common::SecurityModel::Security100 => 100,
+    }
+}
+
 /// Serialize proof in the format expected by the matter-labs WASM verifier:
-/// gzip(bincode 2.x standard config). This is what the
+/// gzip(EPROOF01 envelope + bincode 2.x standard config). This is what the
 /// proof_verifier_js WASM verifier's `deserialize_proof_bytes` consumes,
 /// and what ethproofs.org / dApps that use that verifier expect.
+pub fn serialize_proof_to_bytes_enveloped<T: serde::Serialize>(
+    el: &T,
+    security: verifier_common::SecurityModel,
+) -> Vec<u8> {
+    use std::io::Write;
+    let bin2 = bincode2::serde::encode_to_vec(el, bincode2::config::standard())
+        .expect("failed to encode proof (bincode 2.x)");
+    let mut enveloped = Vec::with_capacity(bin2.len() + 10);
+    enveloped.extend_from_slice(PROOF_ENVELOPE_MAGIC);
+    enveloped.push(ENVELOPE_FORMAT_VERSION);
+    enveloped.push(security_wire_bits(security));
+    enveloped.extend_from_slice(&bin2);
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&enveloped).expect("failed to gzip proof");
+    enc.finish().expect("failed to finish gzip stream")
+}
+
+/// Legacy format: gzip(bincode) without the security envelope. The WASM
+/// verifier treats these as 80-bit proofs.
 pub fn serialize_proof_to_bytes<T: serde::Serialize>(el: &T) -> Vec<u8> {
     use std::io::Write;
     let bin2 = bincode2::serde::encode_to_vec(el, bincode2::config::standard())
@@ -377,9 +431,19 @@ pub fn serialize_proof_to_bytes<T: serde::Serialize>(el: &T) -> Vec<u8> {
     enc.finish().expect("failed to finish gzip stream")
 }
 
-/// Serialize proof to disk in the same gzipped-bincode-2 format as
-/// `serialize_proof_to_bytes` so `proof.bin` files are directly verifiable
-/// by the standard WASM verifier without any conversion step.
+/// Serialize proof to disk in the same gzipped enveloped format as
+/// `serialize_proof_to_bytes_enveloped` so `proof.bin` files are directly
+/// verifiable by the standard WASM verifier without any conversion step.
+pub fn serialize_proof_to_file_enveloped<T: serde::Serialize>(
+    el: &T,
+    security: verifier_common::SecurityModel,
+    path: &Path,
+) {
+    let data = serialize_proof_to_bytes_enveloped(el, security);
+    std::fs::write(path, &data).expect("failed to write proof");
+}
+
+/// Legacy on-disk format without the security envelope.
 pub fn serialize_proof_to_file<T: serde::Serialize>(el: &T, path: &Path) {
     let data = serialize_proof_to_bytes(el);
     std::fs::write(path, &data).expect("failed to write proof");

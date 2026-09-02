@@ -78,6 +78,11 @@ struct Args {
     #[arg(long)]
     rpc_url: Option<String>,
 
+    /// WebSocket URL for newHeads push notifications (optional; the
+    /// fetcher polls the RPC URL when unset)
+    #[arg(long)]
+    ws_url: Option<String>,
+
     /// Use GPU (CUDA) for proving in service mode
     #[arg(long, action = clap::ArgAction::SetTrue)]
     gpu: bool,
@@ -199,6 +204,32 @@ enum Command {
         /// Path to precomputed setup cache (from `setup` command)
         #[arg(long)]
         setup_dir: Option<PathBuf>,
+    },
+
+    /// Benchmark: prove the same block repeatedly with a persistent prover
+    Bench {
+        /// Path to a cached MFBD input file
+        #[arg(long)]
+        file_name: PathBuf,
+
+        /// Number of proving iterations
+        #[arg(long, default_value_t = 5)]
+        iterations: u32,
+
+        /// Path to setup cache dir (needs `setup --until unified`)
+        #[arg(long, default_value = "temp")]
+        setup_dir: PathBuf,
+    },
+
+    /// Verify a unified-layer proof against a setup cache
+    Verify {
+        /// Path to proof.bin (gzip or raw bincode2 UnrolledProgramProof)
+        #[arg(long)]
+        proof: PathBuf,
+
+        /// Path to setup cache dir (needs `setup --until unified`)
+        #[arg(long, default_value = "temp")]
+        setup_dir: PathBuf,
     },
 }
 
@@ -552,6 +583,7 @@ async fn main() -> Result<()> {
             execute_every: args.execute_every,
             post_every: args.post_every,
             rpc_url,
+            ws_url: args.ws_url.clone(),
             save_all_responses: args.save_all_responses,
             data_dir: args.data_dir.clone(),
             output_dir: args.output_dir,
@@ -623,6 +655,115 @@ async fn main() -> Result<()> {
 
             let log_file = data_dir.join("executionLogs.log");
             persist_execution_log(&log_file, &log)?;
+        }
+
+        Some(Command::Bench {
+            file_name,
+            iterations,
+            setup_dir,
+        }) => {
+            #[cfg(feature = "gpu")]
+            {
+                use std::time::Instant;
+
+                let cache = prove::load_setup(&setup_dir.join("setup.bin"))?;
+                let t = Instant::now();
+                let prover = prove::create_gpu_prover_from_cache(cache);
+                println!("BENCH gpu init in {:.2?}", t.elapsed());
+                let oracle = build_oracle(&file_name, false)?;
+
+                let mut times = Vec::new();
+                for i in 0..iterations {
+                    let t = Instant::now();
+                    let (_proof, cycles) = prove::gpu_prove(&prover, oracle.clone(), i as u64);
+                    let ms = t.elapsed().as_millis();
+                    times.push(ms);
+                    println!("BENCH iter={} cycles={} time_ms={}", i, cycles, ms);
+                }
+                times.sort();
+                println!(
+                    "BENCH done iters={} min={}ms median={}ms max={}ms",
+                    iterations,
+                    times.first().unwrap_or(&0),
+                    times.get(times.len() / 2).unwrap_or(&0),
+                    times.last().unwrap_or(&0)
+                );
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let _ = (file_name, iterations, setup_dir);
+                return Err(eyre!("bench requires the gpu build"));
+            }
+        }
+
+        Some(Command::Verify { proof, setup_dir }) => {
+            #[cfg(feature = "gpu")]
+            {
+                use execution_utils::unrolled_gpu::UnrolledProverLevel;
+                use flate2::read::GzDecoder;
+                use std::io::Read as _;
+                use std::time::Instant;
+
+                let cache = prove::load_setup(&setup_dir.join("setup.bin"))?;
+                let unified = cache
+                    .level_data
+                    .get(&UnrolledProverLevel::RecursionUnified)
+                    .ok_or_else(|| {
+                        eyre!("setup cache has no unified level; run `setup --until unified`")
+                    })?;
+
+                let raw = fs::read(&proof)
+                    .map_err(|e| eyre!("failed to read {}: {}", proof.display(), e))?;
+                let decoded = if raw.starts_with(&[0x1f, 0x8b]) {
+                    let mut out = Vec::new();
+                    GzDecoder::new(&raw[..])
+                        .read_to_end(&mut out)
+                        .map_err(|e| eyre!("failed to gunzip proof: {}", e))?;
+                    out
+                } else {
+                    raw
+                };
+                // Strip the EPROOF01 security envelope if present (new format)
+                let decoded = if decoded.starts_with(prove::PROOF_ENVELOPE_MAGIC) {
+                    decoded[prove::PROOF_ENVELOPE_MAGIC.len() + 2..].to_vec()
+                } else {
+                    decoded
+                };
+                let (program_proof, _): (execution_utils::unrolled::UnrolledProgramProof, usize) =
+                    bincode2::serde::decode_from_slice(&decoded, bincode2::config::standard())
+                        .map_err(|e| eyre!("failed to decode proof: {}", e))?;
+
+                let started = Instant::now();
+                let regs = execution_utils::unified_circuit::verify_proof_in_unified_layer(
+                    &program_proof,
+                    &unified.setup,
+                    &unified.compiled_layouts,
+                    false,
+                    cache.security(),
+                )
+                .map_err(|_| eyre!("VERIFIER REJECTED the proof"))?;
+
+                println!("Verifier accepted in {:.2?}", started.elapsed());
+                println!("verifier output[0..8]  = {:08x?}", &regs[..8]);
+                println!("verifier output[8..16] = {:08x?}", &regs[8..]);
+                println!("setup unified chain    = {:08x?}", unified.hash_chain);
+                println!(
+                    "proof chain hash       = {:08x?}",
+                    program_proof.recursion_chain_hash
+                );
+                if regs[8..] == unified.hash_chain {
+                    println!("CHAIN BINDING OK: output[8..16] matches setup hash chain");
+                } else if regs[..8] == unified.hash_chain {
+                    println!("CHAIN BINDING OK: output[0..8] matches setup hash chain");
+                } else {
+                    println!("WARNING: verifier output does not match setup hash chain windows");
+                }
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let _ = (proof, setup_dir);
+                return Err(eyre!("verify requires the gpu build (SetupCache support)"));
+            }
         }
 
         Some(Command::Setup {
@@ -723,7 +864,11 @@ async fn main() -> Result<()> {
                     let (proof, cycles) = prove::gpu_prove(&prover, oracle, block_num);
 
                     fs::create_dir_all(&output_dir)?;
-                    prove::serialize_proof_to_file(&proof, &output_dir.join("proof.bin"));
+                    prove::serialize_proof_to_file_enveloped(
+                        &proof,
+                        security_model(args.security)?,
+                        &output_dir.join("proof.bin"),
+                    );
 
                     let total_wall = wall_start.elapsed();
                     println!(

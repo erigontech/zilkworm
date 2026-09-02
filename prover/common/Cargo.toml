@@ -23,7 +23,7 @@ serde_json = "1.0"
 
 # Heavy / optional deps
 alloy-consensus = { version = "1.0", optional = true }
-alloy-provider = { version = "1.0", features = ["debug-api"], optional = true }
+alloy-provider = { version = "1.0", features = ["debug-api", "ws"], optional = true }
 alloy-rpc-types = { version = "1.0", optional = true }
 alloy-rpc-types-debug = { version = "1.0", optional = true }
 alloy-rlp = { version = "0.3", optional = true }
