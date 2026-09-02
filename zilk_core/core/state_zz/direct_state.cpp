@@ -303,7 +303,8 @@ DirectState::DirectState(DirectState&& other) noexcept
 
 evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
                                         const evmc::bytes32& key) const noexcept {
-    if (const auto* pa = find_pre_account_unchecked(addr); pa != nullptr && pa->slot_count > 0) {
+    const auto* pa = find_pre_account_unchecked(addr);
+    if (pa != nullptr && pa->slot_count > 0) {
         if (pa->deleted) [[unlikely]]
             return {};
         const auto storage_slots = slots_for(*pa);
@@ -321,6 +322,25 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
             return kv->second;
         }
     }
+
+#if USE_HASH_KEY
+    // Witness-bug fallback, storage flavor of recover_account_from_nodestore:
+    // reth's debug_executionWitness includes the storage leaf in the
+    // node-store but omits the slot preimage from the keys list (seen with
+    // read-only slots of EIP-7702-delegated accounts), so the flat slot array
+    // misses and the slot would silently read as 0 - wrong SSTORE gas class
+    // and, if the guest then takes a different branch, a wrong state root.
+    if (pa != nullptr && !pa->deleted) [[unlikely]] {
+        if (auto rit = recovered_slots_.find(addr); rit != recovered_slots_.end()) {
+            if (auto kv = rit->second.find(key); kv != rit->second.end()) {
+                return kv->second;
+            }
+        }
+        const auto v = recover_slot_from_nodestore(*pa, key);
+        recovered_slots_[addr][key] = v;
+        return v;
+    }
+#endif
     return {};
 }
 
@@ -370,6 +390,15 @@ bool DirectState::revive_if_deleted_slow(const evmc::address& addr, Account& pa)
 void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
                                    const evmc::bytes32& key, const evmc::bytes32& value) {
     pa.modified = true;
+#if USE_HASH_KEY
+    // Keep the node-store recovery memo current so a zero-write (which erases
+    // the overflow entry) can't resurrect the recovered pre-state value.
+    if (auto rit = recovered_slots_.find(addr); rit != recovered_slots_.end()) {
+        if (rit->second.find(key) != rit->second.end()) {
+            rit->second.insert_or_assign(key, value);
+        }
+    }
+#endif
     if (pa.slot_count > 0) {
         const auto cap_slots = slots_for(pa);
         const auto begin = cap_slots.begin();
@@ -804,6 +833,90 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
         }
     }
     return nullptr;
+}
+
+evmc::bytes32
+DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::bytes32& key) const {
+    if (!node_store_map_.valid()) return {};
+    const auto root = std::bit_cast<evmc::bytes32>(pa.storage_root);
+    if (root == kEmptyRoot) return {};
+
+    const auto hashed = to_bytes32(keccak256(ByteView{key.bytes, sizeof(key.bytes)}).bytes);
+    const nibbles64 want = nibbles64::from_bytes32(hashed);
+
+    evmc::bytes32 node_hash = root;
+    ByteView node_rlp;
+    std::array<uint8_t, 32> embedded_rlp;  // embedded RLP outlives loop-local BranchNode
+    bool node_is_embedded = false;
+    size_t depth = 0;
+
+    for (unsigned guard = 0; guard < 70; ++guard) {
+        if (!node_is_embedded) {
+            auto rlp = find_node_rlp(node_hash);
+            if (!rlp) return {};  // subtree absent - genuinely unknown, read as 0
+            node_rlp = *rlp;
+        }
+
+        auto outer = silkworm::rlp::decode_header(node_rlp);
+        if (!outer || !outer->list) return {};
+        ByteView nbody = node_rlp.substr(0, outer->payload_length);
+
+        BranchNode br{};
+        ByteView branch_probe = nbody;
+        if (decode_branch(branch_probe, br)) {
+            if (depth >= 64) return {};
+            const uint8_t nib = want[depth];
+            if ((br.mask & (1u << nib)) == 0) return {};  // proven absent - zero
+            const uint8_t clen = br.child_len[nib];
+            ++depth;
+            if (clen == 32) {
+                std::memcpy(node_hash.bytes, br.child_ptr[nib], 32);
+                node_is_embedded = false;
+            } else {
+                std::memcpy(embedded_rlp.data(), br.child[nib].bytes, clen);
+                node_rlp = ByteView{embedded_rlp.data(), clen};
+                node_is_embedded = true;
+            }
+            continue;
+        }
+
+        bool is_leaf = false;
+        std::array<uint8_t, 64> ext_path{};
+        uint8_t plen = 0;
+        ByteView second{};
+        if (!decode_ext_or_leaf(nbody, is_leaf, ext_path, plen, second)) return {};
+        if (depth + plen > 64) return {};
+        for (uint8_t i = 0; i < plen; ++i) {
+            if (want[depth + i] != ext_path[i]) return {};  // diverges - absent
+        }
+        depth += plen;
+
+        if (is_leaf) {
+            if (depth != 64) return {};
+            // Storage leaf value: RLP string of the big-endian value with
+            // leading zeros stripped; left-pad back into 32 bytes.
+            auto vh = silkworm::rlp::decode_header(second);
+            if (!vh || vh->list || vh->payload_length > 32) return {};
+            evmc::bytes32 out{};
+            std::memcpy(out.bytes + (32 - vh->payload_length), second.data(), vh->payload_length);
+            sys_println("USE_HASH_KEY: recovered storage slot of " +
+                        to_hex(ByteView{pa.addr, sizeof(pa.addr)}, true) +
+                        " from node-store (preimage missing from keys)");
+            return out;
+        }
+
+        if (second.size() == 32) {
+            std::memcpy(node_hash.bytes, second.data(), 32);
+            node_is_embedded = false;
+        } else {
+            if (second.size() > embedded_rlp.size()) return {};  // malformed
+            // memmove: second may already alias embedded_rlp
+            std::memmove(embedded_rlp.data(), second.data(), second.size());
+            node_rlp = ByteView{embedded_rlp.data(), second.size()};
+            node_is_embedded = true;
+        }
+    }
+    return {};
 }
 #endif
 
