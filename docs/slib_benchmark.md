@@ -53,6 +53,40 @@ What `make slib-benchmark` does:
 - `temp/slib_benchmark/execution.log` — `cycle_stats.py`-format log.
 - `temp/slib_benchmark/cycle_stats.png` — summary plots.
 
+## Results — full run, tests-zkevm-benchmark@v0.8.2
+
+Completed full run against **tests-zkevm-benchmark@v0.8.2** (the latest release;
+v0.8.3+ do not exist): **3464 cases** (339 fixture files × the 10M/30M/60M
+gas-budget dirs), **3464/3464 guest passed**.
+
+Overall cycle distribution (per case = per block):
+
+| n | min | median | mean | max |
+|---|-----|--------|------|-----|
+| 3464 | 4.04M | 277M | 538M | 16.21B |
+
+Grand total: **1,864,870,513,045 cycles (~1.86T)** — by budget: 10M = 209.53B,
+30M = 562.77B, 60M = 1,092.57B. Median cycles per budget: **119.8M / 319.4M /
+608.4M** (10M / 30M / 60M).
+
+Notable points:
+
+- **Heaviest family: `precompile/p256verify`** (median 5.13B cycles) — there is
+  no SP1 acceleration for P-256 yet, so it runs as pure software.
+- **Largest single block: 16.21B cycles** (a 60M `blake2f` case).
+- **Lightest family: `instruction/log`** (median 37M cycles).
+
+Splitter fix: `tools/scripts/slib_split_fixtures.py` used to truncate output
+filenames at 180 chars, which dropped the distinguishing `value_10M/30M/60M`
+tail of long pytest node ids — the same stem exists in all three budget dirs, so
+655 of the 3464 cases silently overwrote each other. The slug now appends a
+short digest of the full name when truncating, so distinct cases always produce
+distinct files.
+
+> **Comparability caution:** the published reth total of **301.88B cycles** is
+> for the **Osaka convert-first** workload — a different fork and fixture
+> pipeline — and is **not comparable** to these Amsterdam v0.8.2 numbers.
+
 ### Knobs (Makefile variables)
 
 - `ZKEVM_BENCH_JSON_DIR` — override the fixtures dir (default under
