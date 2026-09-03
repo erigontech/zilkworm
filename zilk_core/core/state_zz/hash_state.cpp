@@ -589,30 +589,46 @@ ByteView HashState::read_code(const evmc::address& addr) const noexcept {
     // In-block created code (set via set_code / apply_code_diff): the code_store_offset
     // sentinel, resolved through created_code_ (verbatim direct_state.cpp:332-344).
     if (pa->code_store_offset == kCreatedCodeOffset) [[unlikely]] {
-        const uint64_t k8 = hash_key8(h);
-        if (auto it = created_code_.find(k8); it != created_code_.end() &&
-                std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
-            return ByteView{it->second.bytes.data(), it->second.bytes.size()};
-        }
-        if (auto cit = created_code_collisions_.find(h); cit != created_code_collisions_.end()) {
-            return ByteView{cit->second.data(), cit->second.size()};
-        }
+        if (const ByteView cc = find_created_code_(h); !cc.empty()) [[likely]]
+            return cc;
         // Created-code marker with no stored bytes (should not happen) -> fail-closed.
         ++unconfirmed_read_count_;
         return {};
     }
 
     // Witness code store (built accounts and set_code dedup hits): resolve by code_hash.
-    const ByteView cv = find_code(h);
-    if (cv.empty()) {
-        // FAIL-CLOSED: a derived account carries a code_hash whose bytes the witness omitted.
-        // DirectState guarantees presence via sanitize (direct_state.cpp:762-777); HashState
-        // has no such binding, so record the gap for the accept gate instead of silently
-        // executing empty code.
-        ++unconfirmed_read_count_;
-        return {};
+    if (const ByteView cv = find_code(h); !cv.empty())
+        return cv;
+
+    // Witness store miss. The bytes may still be legitimately DERIVABLE: a contract created
+    // in-block with the SAME code_hash makes an omitted witness code available (EIP-8025
+    // optional proofs — "create same hash then read"). This is exactly what DirectState gets
+    // for free because it always holds the full pre-state; the partial slib witness prunes
+    // such code, so fall back to the in-block created-code overlay before failing.
+    if (const ByteView cc = find_created_code_(h); !cc.empty())
+        return cc;
+
+    // FAIL-CLOSED: a derived account carries a code_hash whose bytes the witness omitted AND
+    // that no in-block creation reproduces. DirectState guarantees presence via sanitize
+    // (direct_state.cpp:762-777); HashState has no such binding, so record the genuine gap for
+    // the accept gate instead of silently executing empty code.
+    ++unconfirmed_read_count_;
+    return {};
+}
+
+// In-block created-code lookup by keccak code_hash (created_code_ + key8-collision spill).
+// Verbatim shape of read_code's former created-code sentinel resolution, factored out so the
+// witness-store-miss fallback can reuse it. Hit -> stored bytes; miss -> empty ByteView.
+ByteView HashState::find_created_code_(const evmc::bytes32& h) const noexcept {
+    const uint64_t k8 = hash_key8(h);
+    if (auto it = created_code_.find(k8); it != created_code_.end() &&
+            std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
+        return ByteView{it->second.bytes.data(), it->second.bytes.size()};
     }
-    return cv;
+    if (auto cit = created_code_collisions_.find(h); cit != created_code_collisions_.end()) {
+        return ByteView{cit->second.data(), cit->second.size()};
+    }
+    return {};
 }
 
 intx::uint256 HashState::get_balance(const evmc::address& addr) const noexcept {

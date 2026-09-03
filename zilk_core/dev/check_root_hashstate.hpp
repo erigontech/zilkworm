@@ -224,15 +224,31 @@ struct HashStateAccountWrite {
         // Live account: gather its storage writes, sorted by slot_hash.
         auto& storage = storage_pool.emplace_back();
         if (const auto* slots = hash_state.overflow_slots_for(addr)) {
+            // A wiped account (contract creation / destruct / revive) has NO pre-state slots
+            // any more, so every zero write over it is a no-op that must be OMITTED.
+            const bool wiped = hash_state.storage_wiped(addr);
             storage.reserve(slots->size());
             for (const auto& [k, v] : *slots) {
-                auto& node = storage.emplace_back(keccak_bytes32(k));
+                const evmc::bytes32 slot_hash = keccak_bytes32(k);
+                // DIVERGENCE (a) fold-up: HashState RETAINS zero writes (DirectState erases
+                // them, direct_state.cpp:391-397). A zero write is a genuine DELETE only when
+                // the slot EXISTED in the pre-state trie and the account was not wiped this
+                // block; then it must fold as a 0x80 delete of that leaf. A zero write to a
+                // slot that never existed is a NO-OP and must be OMITTED — emitting a 0x80 leaf
+                // for it would INSERT a spurious leaf, because grid_mpt.cpp only treats 0x80 as
+                // a delete when the target leaf already exists (grid_mpt.cpp:295,313-324),
+                // otherwise it seeds a leaf on the insert path and corrupts the storage root.
+                if (evmc::is_zero(v) &&
+                    (wiped || !hash_state.find_built_storage(addr_hash, slot_hash)))
+                    continue;
+                auto& node = storage.emplace_back(slot_hash);
                 node.current_off = 40;
                 // Stage the word 8-byte aligned before zeroless_view (evmc::bytes32 is only
                 // alignas(4), but zeroless_view asserts 8-byte alignment on the host and the
                 // rv64im guest forbids unaligned loads — mirrors the test's encode_storage_value
                 // and util.hpp:106). The encoded bytes are identical to check_root's
-                // zeroless_view(ByteView{v.bytes,32}) (state_transition.cpp:585-586).
+                // zeroless_view(ByteView{v.bytes,32}) (state_transition.cpp:585-586); a genuine
+                // zero DELETE that survives the filter encodes as 0x80.
                 alignas(8) uint8_t word[32];
                 std::memcpy(word, v.bytes, 32);
                 node.current_len = static_cast<uint8_t>(silkworm::rlp::encode_into_small(

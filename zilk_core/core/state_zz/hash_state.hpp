@@ -341,6 +341,23 @@ class HashState : public BlockState {
         return nullptr;
     }
 
+    // Side-effect-free built-STORAGE probe (NO confirm-on-miss): true iff the pristine
+    // pre-state storage cache holds a leaf for (addr_hash, slot_hash). The write gather uses
+    // it to tell a genuine slot DELETE (the slot existed pre-state, so a zero write must fold
+    // as a 0x80 delete of that leaf) from a NO-OP zero write (the slot never existed, so it
+    // must be OMITTED — DirectState erases such zeros, direct_state.cpp:391-397). Emitting a
+    // 0x80 leaf for a never-present slot would wrongly INSERT it: grid_mpt.cpp treats 0x80 as a
+    // delete only when the target leaf already exists (grid_mpt.cpp:295,313-324), so an
+    // insert-path 0x80 seeds a spurious leaf and corrupts the recomputed storage root.
+    [[gnu::always_inline]] inline bool
+    find_built_storage(const evmc::bytes32& addr_hash,
+                       const evmc::bytes32& slot_hash) const noexcept {
+        std::uint8_t key[64];
+        std::memcpy(key, addr_hash.bytes, 32);
+        std::memcpy(key + 32, slot_hash.bytes, 32);
+        return storage_index_.find(key).has_value();
+    }
+
     // Overlay gather accessors (mirror DirectState hpp:234-241) — read-only views for tests
     // and the write-set gather.
     const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept {
@@ -491,6 +508,16 @@ class HashState : public BlockState {
     // inline-slot wipe (direct_state.cpp:410-412, :568). A wiped account reads all pre-state
     // (built-cache) slots as zero and its storage fold seeds from kEmptyRoot.
     FlatHashSet<evmc::address> storage_wiped_;
+
+    // In-block created-code lookup by keccak code_hash: the created_code_ overlay plus its
+    // key8-collision spill. Hit -> the stored bytes; miss -> EMPTY ByteView. created_code_ is
+    // keyed by the REAL code hash (full_hash memcmp confirms every hit), so this can never
+    // surface the wrong bytes. Shared by read_code's created-code sentinel path AND its
+    // witness-store-miss fallback: a contract created in-block with the same code_hash makes
+    // an omitted witness code legitimately DERIVABLE (EIP-8025 optional proofs — the
+    // "create same hash then read" case). A non-empty code_hash always maps to non-empty
+    // bytes, so empty unambiguously means miss.
+    ByteView find_created_code_(const evmc::bytes32& code_hash) const noexcept;
 
     // Non-recording overlay-or-built lookup (the DirectState lookup_account_ analog): NO
     // materialize, NO confirm. Returns nullptr when the address is in neither store.
