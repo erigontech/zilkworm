@@ -210,8 +210,16 @@ ERE_WORKLOAD_BRANCH ?= master
 ERE_WORKLOAD_DIR    ?= $(CURDIR)/temp/zkevm-benchmark-workload
 ERE_FIXTURE_FILTER  ?= 10M # scopes generation for tractable local runs. default: 10M-gas fixtures, i.e. the 1077-fixture subset
 ERE_TIMEOUT         ?= 60m
+# Registry hosting ere's prebuilt zkVM images; unset => ere builds them from source.
+ERE_IMAGE_REGISTRY  ?= ghcr.io/eth-act/ere
+# Optional local guest ELF dir; empty => download the published guest from the registry.
+ERE_BIN_PATH        ?=
+# Fixture folder passed to ere-hosts (--input-folder); default: cached devnet-8 batch.
+ERE_INPUT_FOLDER    ?= $(FIXTURES_CACHE)/ere-glamsterdam-devnet-8/eest_batch
+# Opt-in: set non-empty to (re)generate EEST fixtures via witness-generator-cli first.
+ERE_GEN_FIXTURES    ?=
 ERE_FIXTURE_ENV     := EF_TEST_TRIE=default RUST_MIN_STACK=16388608 RUST_LOG=info
-ERE_RUN_ENV         := RUST_LOG=info
+ERE_RUN_ENV         := ERE_IMAGE_REGISTRY=$(ERE_IMAGE_REGISTRY) RUST_LOG=info
 
 ere-workload-checkout:
 	@if [ ! -d "$(ERE_WORKLOAD_DIR)/.git" ]; then \
@@ -226,18 +234,18 @@ ere-fixtures: ere-workload-checkout
 	    cargo run -p witness-generator-cli --release -- \
 	        tests $(if $(ERE_FIXTURE_FILTER),--include $(ERE_FIXTURE_FILTER))
 
-ere-validate: ere-fixtures
+ere-validate: $(if $(ERE_GEN_FIXTURES),ere-fixtures)
 	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
-	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
-	        stateless-validator --execution-client zilkworm
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) \
+	        $(if $(ERE_BIN_PATH),--bin-path $(abspath $(ERE_BIN_PATH)),) stateless-validator --execution-client zilkworm --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	python3 $(CURDIR)/tools/ere_compare.py --validate 'zilkworm-*' "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 
-ere-compare: ere-fixtures
+ere-compare: $(if $(ERE_GEN_FIXTURES),ere-fixtures)
 	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
-	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
-	        stateless-validator --execution-client reth
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) \
+	        stateless-validator --execution-client reth --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
-	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
-	        stateless-validator --execution-client zilkworm
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) \
+	        $(if $(ERE_BIN_PATH),--bin-path $(abspath $(ERE_BIN_PATH)),) stateless-validator --execution-client zilkworm --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	python3 $(CURDIR)/tools/ere_compare.py "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 
