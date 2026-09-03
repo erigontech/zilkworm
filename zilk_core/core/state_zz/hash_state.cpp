@@ -505,6 +505,24 @@ evmc::bytes32 HashState::get_block_hash(BlockNum n) const noexcept {
             return std::bit_cast<evmc::bytes32>(it->block_hash);
         }
     }
+
+    // FAIL-CLOSED on a BLOCKHASH miss. evmone invokes get_block_hash ONLY for an IN-RANGE
+    // ancestor — the blockhash instruction (evmone instructions.hpp:768-777) already clamps
+    // n to [max(N-256,0), N-1] and returns zero itself for anything out of range without
+    // calling us — and the real chain always has that ancestor's hash. A miss here therefore
+    // means the witness OMITTED (or the runner's ancestor-contiguity gate rejected) a REQUIRED
+    // ancestor header, so this BLOCKHASH value is NOT authenticated by the header chain.
+    //
+    // Returning a silent zero was the soundness break: the missing-oldest-ancestor exploit
+    // has the block persist BLOCKHASH(k) (e.g. SSTORE(slot, BLOCKHASH(k))) for an omitted
+    // header k; execution stored the wrong value; the attacker set header.state_root to the
+    // resulting root and the accept gate passed (root matched, both completeness counters were
+    // zero, because a header/blockhash miss touched no state). Record it as an unconfirmed read
+    // — the SAME fail-closed channel get_account/get_storage misses use (mutable, reset by each
+    // build_state_from_trie) — so the accept gate (missing_count()==0 &&
+    // unconfirmed_read_count()==0, check_root_hashstate.hpp:160-162) now rejects. Still return
+    // zero so the value-returning EVM caller proceeds; the rejection is decided at accept time.
+    ++unconfirmed_read_count_;
     return {};
 }
 

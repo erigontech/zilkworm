@@ -1242,6 +1242,74 @@ TEST_CASE("check_root_hashstate rejects when a read was left unconfirmed",
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, writes, expected_root));
 }
 
+// SOUNDNESS REGRESSION — omitted BLOCKHASH ancestor (the missing-oldest-ancestor exploit).
+// A block that reads BLOCKHASH(k) for an IN-RANGE ancestor whose header the witness OMITTED
+// must be REJECTED, even when the recomputed post-state root matches header.state_root.
+// evmone's blockhash instruction (instructions.hpp:768-777) clamps k to [max(N-256,0), N-1]
+// and only then calls host.get_block_hash(k) -> HashState::get_block_hash(k); the real chain
+// always has that ancestor's hash, so a store miss means the witness omitted a required header.
+// PRE-FIX get_block_hash returned a silent zero and left both completeness counters at zero, so
+// a block that persisted BLOCKHASH(k) (SSTORE(slot, BLOCKHASH(k))) with header k omitted and
+// header.state_root set to that forged execution's root was ACCEPTED — the break. POST-FIX the
+// omitted-ancestor read fails closed (bumps unconfirmed_read_count_) and the accept gate
+// rejects. A PRESENT ancestor read still costs nothing, so legitimate partial witnesses (which
+// ship every ancestor they reference) keep validating.
+TEST_CASE("check_root_hashstate rejects a BLOCKHASH read of an omitted in-range ancestor",
+          "[hash_state][accept][blockhash]") {
+    HashState hs;
+
+    // Pre-state: a single-leaf account trie holding account W (empty storage).
+    const Key kW = key_with(0x3, 9, 7);
+    const Account accW = make_test_account(5, silkworm::kEmptyRoot);
+    const Bytes leafW_val = accW.rlp(silkworm::kEmptyRoot);
+    const LeafNode leafW = make_leaf(&kW.nib[0], 64, ByteView{leafW_val});
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_leaf(leafW)});
+
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    // Witness ancestor headers: genesis (0) and one older ancestor (number 5) are shipped, but
+    // the in-range ancestor number 3 is DELIBERATELY OMITTED (the missing-oldest-ancestor shape).
+    auto make_header = [](uint64_t number, uint8_t tag) {
+        silkworm::BlockHeader h;
+        h.number = number;
+        h.gas_limit = 30'000'000;
+        h.parent_hash.bytes[0] = tag;  // unique content -> unique keccak hash
+        return h;
+    };
+    hs.insert_header(make_header(0, 0x00));
+    hs.insert_header(make_header(5, 0x55));
+
+    // The block's write set: bump W's nonce (a real, root-changing write). The block ALSO runs
+    // SSTORE(slot, BLOCKHASH(3)); with header 3 omitted BLOCKHASH yields 0, and a zero write to
+    // a never-present slot folds to nothing, so it never appears in the write set. The attacker
+    // sets header.state_root to exactly this forged execution's root.
+    const Account accW2 = make_test_account(55, silkworm::kEmptyRoot);
+    std::vector<HashStateAccountWrite> writes;
+    writes.push_back({kW.hash(), silkworm::kEmptyRoot, {}, &accW2});
+    const Bytes leafW2_val = accW2.rlp(silkworm::kEmptyRoot);
+    const LeafNode leafW2 = make_leaf(&kW.nib[0], 64, ByteView{leafW2_val});
+    const evmc::bytes32 forged_root = keccak32(ByteView{zilkworm::encode_leaf(leafW2)});
+
+    // Baseline: both counters zero and the forged root matches the fold -> ACCEPT. This is the
+    // exploit's "root matches" precondition (identical pre- and post-fix).
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, writes, forged_root));
+
+    // SAFETY: a PRESENT ancestor read costs nothing — a legitimate BLOCKHASH of a shipped
+    // ancestor (number 5) hits, the counter stays zero, and acceptance still holds.
+    (void)hs.get_block_hash(5);
+    CHECK(hs.unconfirmed_read_count() == 0u);
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, writes, forged_root));
+
+    // EXPLOIT: the block reads BLOCKHASH(3) — an in-range ancestor whose header was omitted.
+    (void)hs.get_block_hash(3);
+
+    // POST-FIX the omitted-ancestor read is recorded, so the SAME forged root is now REJECTED.
+    // PRE-FIX both assertions FAIL: the counter stayed zero and acceptance still returned true.
+    CHECK(hs.unconfirmed_read_count() > 0u);
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, writes, forged_root));
+}
+
 // A PRUNED BOUNDARY in the pre-state is legitimate now (not a missing node), so a write that
 // avoids it ACCEPTS. But a write whose fold MUST descend into the boundary is still caught:
 // GridMPT cannot unfold the absent node, records a missing node, and recomputes a degenerate
