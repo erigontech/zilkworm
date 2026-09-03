@@ -64,6 +64,16 @@ class HashIndex {
     // full (cannot happen at load factor <= 0.5). Returns true on insert/update.
     [[gnu::always_inline]] bool insert(const uint8_t (&key)[KeySize], uint32_t offset) noexcept {
         if (offset == kEmptyOffset) [[unlikely]] return false;
+        // Keep the load factor <= 0.5 by growing BEFORE we might exceed it. The ctor size
+        // is a best-effort HINT (hash_state.hpp:80), not a hard cap: a witness with more
+        // nodes/codes/accounts/slots than the hint (e.g. a state-heavy block) would otherwise
+        // overflow the fixed table, dropping later entries from the index and — worse —
+        // removing the guaranteed free bucket that lets find() terminate on the empty
+        // sentinel. Growth rehashes into a table twice the size, so the table is never full
+        // and every inserted key stays findable regardless of the hint. (A dedupe UPDATE of a
+        // present key does not add an entry, so this may over-grow by at most one doubling —
+        // harmless.)
+        if ((static_cast<uint64_t>(size_) + 1u) * 2u > capacity_) [[unlikely]] grow_();
         uint32_t i = index_of(Key8(key));
         for (uint32_t probes = 0; probes < capacity_; ++probes) {
             Bucket& b = buckets_[i];
@@ -104,6 +114,24 @@ class HashIndex {
         uint8_t key[KeySize];   // full key bytes, compared on every hit
         uint32_t offset{kEmptyOffset};  // 0 == empty
     };
+
+    // Double the table and rehash every occupied bucket into it. Offsets are arena byte
+    // indices, unaffected by the reshuffle (only the bucket a key HOMES to changes), so
+    // callers' stored offsets stay valid. size_ is preserved. Cold: fires only when a
+    // witness outgrows the ctor hint. Not always_inline (out of the hot insert path).
+    void grow_() noexcept {
+        std::vector<Bucket> old = std::move(buckets_);
+        capacity_ <<= 1u;             // power-of-two invariant preserved
+        mask_ = capacity_ - 1u;
+        buckets_.assign(capacity_, Bucket{});  // all empty (offset 0)
+        for (const Bucket& b : old) {
+            if (b.offset == kEmptyOffset) continue;
+            uint32_t i = index_of(Key8(b.key));
+            while (buckets_[i].offset != kEmptyOffset) i = (i + 1u) & mask_;
+            std::memcpy(buckets_[i].key, b.key, KeySize);
+            buckets_[i].offset = b.offset;
+        }
+    }
 
     std::vector<Bucket> buckets_;
     uint32_t capacity_{0};
