@@ -86,7 +86,6 @@ class DirectState : public BlockState {
     FlatHashSet<evmc::address> touched_;
     FlatHashMap<evmc::bytes32, BlockHeader> headers_;
     std::vector<BlockHashEntry> created_block_hashes_;
-    FlatHashSet<evmc::address> delegated_designations_;
 
     bool multi_block_{false};
     // Journal only used for multi-block cases
@@ -114,7 +113,6 @@ class DirectState : public BlockState {
     DirectState(const DirectState&) = delete;
     DirectState& operator=(const DirectState&) = delete;
     DirectState(DirectState&& other) noexcept;
-    DirectState& operator=(DirectState&& other) noexcept;
 
     [[gnu::always_inline]] inline const Account* read_account(const evmc::address& addr) const noexcept;
     [[gnu::always_inline]] inline Account* read_account(const evmc::address& addr) noexcept;
@@ -145,7 +143,6 @@ class DirectState : public BlockState {
     void add_to_balance(const evmc::address& addr, const intx::uint256& addend);
     void subtract_from_balance(const evmc::address& addr, const intx::uint256& subtrahend);
     void set_nonce(const evmc::address& addr, uint64_t nonce);
-    void set_code(const evmc::address& addr, ByteView code);
     void destruct(const evmc::address& addr);
 
     bool is_dead(const evmc::address& addr) const noexcept;

@@ -41,8 +41,8 @@ namespace {
             sys_println("DirectState: blob smaller than PreStateMeta");
             return false;
         }
-        if ((reinterpret_cast<uintptr_t>(blob.data()) % alignof(PreStateMeta)) != 0) [[unlikely]] {
-            sys_println("DirectState: blob start misaligned for PreStateMeta");
+        if ((reinterpret_cast<uintptr_t>(blob.data()) % 8u) != 0) [[unlikely]] {
+            sys_println("DirectState: blob start not 8-byte aligned");
             return false;
         }
 
@@ -254,11 +254,9 @@ void DirectState::reserve_block_maps_() noexcept {
     created_accounts_.reserve(256);
     overflow_slots_.reserve(128);
     created_code_.reserve(64);
-    created_code_collisions_.reserve(0);
     touched_.reserve(512);
     headers_.reserve(256);
     created_block_hashes_.reserve(256);
-    delegated_designations_.reserve(32);
 }
 
 // Rebuilds typed sub-views; blob bytes are caller-owned and pointer-stable.
@@ -281,9 +279,9 @@ DirectState::DirectState(DirectState&& other) noexcept
     overflow_slots_ = std::move(other.overflow_slots_);
     created_code_ = std::move(other.created_code_);
     created_code_collisions_ = std::move(other.created_code_collisions_);
-    delegated_designations_ = std::move(other.delegated_designations_);
     headers_ = std::move(other.headers_);
     created_block_hashes_ = std::move(other.created_block_hashes_);
+    touched_ = std::move(other.touched_);
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
     changed_storage_journal_ = std::move(other.changed_storage_journal_);
     multi_block_ = other.multi_block_;
@@ -400,21 +398,23 @@ void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
 
 void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
                                   const evmc::bytes& code) {
-    const ByteView code_view{code.data(), code.size()};
-    const bool is_delegated = eip7702::is_code_delegated(code_view);
+    if (code.empty()) [[unlikely]] {
+        // Empty = a cleared EIP-7702 delegation; the authority's storage survives it.
+        copy32(pa.code_hash, kEmptyHash);
+        pa.code_store_len = 0;
+        pa.modified = true;
+        pa.acc_rlp_sroot_off = 0;
+        return;
+    }
 
-    // Mirrors processor.cpp:377-385 — wipe storage on contract creation
-    // unless the new code is a delegation or the address was already a
-    // delegation target.
-    if (!is_delegated && !delegated_designations_.contains(addr)) {
+    // Creation is the only transition that wipes storage, and post-London EIP-3541 keeps
+    // deployed code off the 0xef prefix, so it can never look like a designation.
+    if (!eip7702::is_code_delegated(code)) {
         pa.slot_count = 0;
         overflow_slots_.erase(addr);
     }
-    if (is_delegated) {
-        delegated_designations_.insert(addr);
-    }
 
-    const auto h_eth = silkworm::keccak256(code_view);
+    const auto h_eth = silkworm::keccak256(code);
     const auto h = std::bit_cast<evmc::bytes32>(h_eth);
     std::memcpy(pa.code_hash, h.bytes, 32);
     pa.code_store_len = static_cast<uint32_t>(code.size());
@@ -513,48 +513,6 @@ void DirectState::set_nonce(const evmc::address& addr, uint64_t nonce) {
         pa->nonce = nonce;
         changed = true;
     }
-    if (changed) {
-        pa->modified = true;
-        pa->acc_rlp_sroot_off = 0;
-        journal_address_changed(addr);
-    }
-    touched_.insert(addr);
-}
-
-void DirectState::set_code(const evmc::address& addr, ByteView code) {
-    auto* pa = find_or_create_account(addr);
-    revive_if_deleted(addr, *pa);
-
-    if (eip7702::is_code_delegated(code)) {
-        delegated_designations_.insert(addr);
-    }
-    const auto h_eth = silkworm::keccak256(code);
-    const auto h = std::bit_cast<evmc::bytes32>(h_eth);
-    bool changed = false;
-    if (std::memcmp(pa->code_hash, h.bytes, 32) != 0) {
-        std::memcpy(pa->code_hash, h.bytes, 32);
-        changed = true;
-    }
-    pa->code_store_len = static_cast<uint32_t>(code.size());
-
-    if (auto b = code_store_map_.find<32, 0, &hash_key8>(h.bytes)) {
-        pa->code_store_offset = static_cast<uint32_t>(b->data() - code_store_map_.data());
-    } else {
-        pa->code_store_offset = kCreatedCodeOffset;
-        const uint64_t k8 = hash_key8(h);
-        if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
-            it->second.full_hash = h;
-            it->second.bytes.assign(code.begin(), code.end());
-        } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
-            // Exact dedup hit (same hash, possibly different addr). Skip insert.
-        } else {
-            if (auto [cit, cins] = created_code_collisions_.try_emplace(h);
-                cins) {
-                cit->second.assign(code.begin(), code.end());
-            }
-        }
-    }
-
     if (changed) {
         pa->modified = true;
         pa->acc_rlp_sroot_off = 0;

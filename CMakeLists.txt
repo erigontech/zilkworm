@@ -94,6 +94,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/addr_hash_orphan_test.cpp
     zilk_core/dev/cli/account_read_spoof_test.cpp
     zilk_core/dev/cli/account_read_honest_test.cpp
+    zilk_core/dev/cli/delegation_clearing_storage_test.cpp
   )
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
   # silkworm_core<->types_zz archive cycle globally; --start-group is GNU-ld-only.

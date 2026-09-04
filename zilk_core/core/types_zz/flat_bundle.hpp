@@ -39,7 +39,6 @@ struct FlatBundle {
     FlatBundle(const FlatBundle&) = delete;
     FlatBundle& operator=(const FlatBundle&) = delete;
     FlatBundle(FlatBundle&&) noexcept = default;
-    FlatBundle& operator=(FlatBundle&&) noexcept = default;
 
     FlatBundle(std::span<uint8_t> blob_in,
                silkworm::Block&& genesis_in,
