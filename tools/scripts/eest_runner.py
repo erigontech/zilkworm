@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import statistics
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -42,9 +43,25 @@ class ShardResult:
     exit_code: int = -1
     duration_s: float = 0.0
     error: str = ""
+    cycles: List[int] = field(default_factory=list)
+    prover_gas: List[int] = field(default_factory=list)
 
 
 SUMMARY_RE = re.compile(r"Total:\s*(\d+),\s*Passed:\s*(\d+),\s*Failed:\s*(\d+)(?:,\s*Skipped:\s*(\d+))?")
+
+# Per-fixture PASS line from z6m_prover --test-service:
+#   [i/N] PASS <file> (gas_used=…, cycles=…, prover_gas=…, syscall_count=…)
+PASS_CYCLES_RE = re.compile(r"\bPASS\b.*?\bcycles=(\d+),\s*prover_gas=(\d+)")
+
+
+def parse_cycles(output: str) -> Tuple[List[int], List[int]]:
+    """Extract (cycles, prover_gas) from each per-fixture PASS line."""
+    cycles: List[int] = []
+    gas: List[int] = []
+    for m in PASS_CYCLES_RE.finditer(output):
+        cycles.append(int(m.group(1)))
+        gas.append(int(m.group(2)))
+    return cycles, gas
 
 
 def find_git_root() -> Optional[str]:
@@ -250,6 +267,7 @@ def run_shards(prover: str, fixtures_dir: str, shards: List[str],
                 sp.result.passed = passed
                 sp.result.failed = failed
                 sp.result.skipped = skipped
+                sp.result.cycles, sp.result.prover_gas = parse_cycles(output)
 
                 status = "PASS" if failed == 0 and total > 0 else "FAIL"
                 avail = get_available_memory_gb()
@@ -287,6 +305,25 @@ def print_report(results: List[ShardResult]) -> Tuple[int, int, int]:
         print(f"  Skipped: {skipped}")
     if errored:
         print(f"  Errored: {errored} shard(s) had errors")
+
+    # SP1 cycle / prover-gas distribution over passed fixtures
+    cycles = [c for r in results for c in r.cycles]
+    gas = [g for r in results for g in r.prover_gas]
+    if cycles:
+        def _dist(name: str, xs: List[int]):
+            xs = sorted(xs)
+            print(f"  {name:<10} n={len(xs)}  "
+                  f"min={min(xs):,}  median={int(statistics.median(xs)):,}  "
+                  f"mean={int(statistics.mean(xs)):,}  max={max(xs):,}  "
+                  f"total={sum(xs):,}")
+        print(f"\n{'='*70}")
+        print(f"  SP1 EXECUTION METRICS (passed fixtures)")
+        print(f"{'='*70}")
+        _dist("cycles", cycles)
+        if any(gas):
+            _dist("prover_gas", gas)
+        else:
+            print(f"  prover_gas  not computed in this execution mode (all zero)")
 
     # Print failed shards
     fail_shards = [r for r in results if r.failed > 0 or r.error]
