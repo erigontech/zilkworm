@@ -466,6 +466,13 @@ class DirectStateView final : public evmone::state::StateView {
         return state_.read_code(addr);  // ByteView derives from evmc::bytes_view.
     }
 
+    /// Borrowed view into the code store, which lives for the whole block and carries
+    /// FlatKv::kCodePadding trailing zero bytes, so the EVM can execute out of it directly.
+    evmc::bytes_view get_account_code_view(const evmc::address& addr) const noexcept override {
+        const auto bv = state_.read_code(addr);
+        return evmc::bytes_view{bv.data(), bv.size()};
+    }
+
     evmc::bytes32 get_storage(const evmc::address& addr, const evmc::bytes32& key) const noexcept override {
         return state_.read_storage(addr, key);
     }
