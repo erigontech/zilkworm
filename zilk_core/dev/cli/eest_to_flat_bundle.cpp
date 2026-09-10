@@ -366,6 +366,7 @@ std::vector<uint8_t> build_subtest(const nlohmann::json& test,
         for (const auto& [ch, code_bytes] : code_map) {
             enc.clear();
             FlatKv::encode(enc, ch, ByteView{code_bytes.data(), code_bytes.size()});
+            enc.insert(enc.end(), FlatKv::kCodePadding, 0);  // Execute-in-place padding.
             cb.add(::zilkworm::hash_key8(ch), ByteView{enc.data(), enc.size()});
         }
         code_store_blob = std::move(cb).finalize();

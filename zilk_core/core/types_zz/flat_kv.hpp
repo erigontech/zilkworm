@@ -19,6 +19,10 @@ struct FlatKv {
     static constexpr std::size_t kKeySize       = 32;
     static constexpr std::size_t kPayloadOffset = kKeyOffset + kKeySize;
 
+    // Code-store entries carry trailing zero bytes so the EVM can execute straight out of
+    // the bundle; must match evmone::baseline::CODE_PADDING. Not part of the hashed payload.
+    static constexpr std::size_t kCodePadding = 32 + 1;
+
     static void encode(std::vector<uint8_t>& out,
                        const evmc::bytes32& hash,
                        ByteView payload) {

@@ -185,6 +185,7 @@ inline std::vector<uint8_t> build_code_store(
     for (const auto& [code_hash, code] : codes) {
         std::vector<uint8_t> body;
         FlatKv::encode(body, code_hash, ByteView{code.data(), code.size()});
+        body.insert(body.end(), FlatKv::kCodePadding, 0);  // Execute-in-place padding.
         cb.add(hash_key8(code_hash), ByteView{body.data(), body.size()});
     }
     return std::move(cb).finalize();

@@ -508,6 +508,7 @@ std::vector<uint8_t> make_code_store(const bytes32& code_hash, const Bytes& code
     MphfBuilder<32> cb{kMphfCodeStoreMagic, kMphfMapVersion};
     std::vector<uint8_t> body;
     FlatKv::encode(body, code_hash, ByteView{code.data(), code.size()});
+    body.insert(body.end(), FlatKv::kCodePadding, 0);  // Execute-in-place padding.
     cb.add(hash_key8(code_hash), ByteView{body.data(), body.size()});
     return std::move(cb).finalize();
 }

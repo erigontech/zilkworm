@@ -443,12 +443,14 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
         if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
             it->second.full_hash = h;
             it->second.bytes.assign(code.begin(), code.end());
+            it->second.bytes.resize(code.size() + FlatKv::kCodePadding, 0);  // Execute-in-place.
         } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
             // Exact dedup hit (same hash, possibly different addr). Skip insert.
         } else {
             if (auto [cit, cins] = created_code_collisions_.try_emplace(h);
                 cins) {
                 cit->second.assign(code.begin(), code.end());
+                cit->second.resize(code.size() + FlatKv::kCodePadding, 0);  // Execute-in-place.
             }
         }
     }
@@ -798,7 +800,9 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
         // Setting acc->code_store_len is fine here, checked in read_code
         if (auto b = code_store_map_.find<32, 0, &hash_key8>(acc->code_hash)) {
             acc->code_store_offset = static_cast<uint32_t>(b->data() - code_store_map_.data());
-            acc->code_store_len    = static_cast<uint32_t>(b->size() - FlatKv::kPayloadOffset);
+            // sanitize() already rejected entries too short to hold the padding.
+            acc->code_store_len    = static_cast<uint32_t>(
+                b->size() - FlatKv::kPayloadOffset - FlatKv::kCodePadding);
         }
     }
     // Snapshot the pre-state leaf RLP before execution mutates the copy (mutators only clear acc_rlp_sroot_off).
@@ -885,7 +889,18 @@ bool DirectState::sanitize() {
     // SOUNDNESS-CRITICAL: binds each leaf's identity to its trie-key hash.
     bool code_keccak_ok = true;
     code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-        code_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+        // The trailing execute-in-place padding is not part of the hashed code.
+        if (body.size() < FlatKv::kPayloadOffset + FlatKv::kCodePadding) [[unlikely]] {
+            code_keccak_ok = false;
+            return;
+        }
+        // Own the padding rather than trusting it: it is excluded from the code hash,
+        // so a prover could otherwise choose these bytes. Zeroing is cheaper than
+        // rejecting and leaves nothing for a later reader to trust.
+        std::ranges::fill(body.last(FlatKv::kCodePadding), uint8_t{0});
+        const ByteView code{body.data() + FlatKv::kPayloadOffset,
+                            body.size() - FlatKv::kPayloadOffset - FlatKv::kCodePadding};
+        code_keccak_ok &= std::memcmp(silkworm::keccak256(code).bytes, hash_ptr, 32) == 0;
     });
     if (!code_keccak_ok) {
         sys_println("sanitize: code-hash mismatch in witness bundle ");
@@ -908,14 +923,16 @@ bool DirectState::sanitize() {
         if (pa->code_store_len > 0) {
             const auto code_hash = std::bit_cast<evmc::bytes32>(pa->code_hash);
             if (auto b = code_store_map_.find<32, 0, &hash_key8>(code_hash.bytes)) {
-                if (b->size() < FlatKv::kPayloadOffset ||
-                    pa->code_store_len > b->size() - FlatKv::kPayloadOffset) [[unlikely]] {
+                if (b->size() < FlatKv::kPayloadOffset + FlatKv::kCodePadding ||
+                    pa->code_store_len >
+                        b->size() - FlatKv::kPayloadOffset - FlatKv::kCodePadding) [[unlikely]] {
                     sys_println("sanitize: code_len exceeds code store entry size");
                     acc_walk_ok = false;
                     return;
                 }
                 pa->code_store_offset = static_cast<uint32_t>(b->data() - code_store_map_.data());
-                pa->code_store_len    = static_cast<uint32_t>(b->size() - FlatKv::kPayloadOffset);
+                pa->code_store_len    = static_cast<uint32_t>(
+                    b->size() - FlatKv::kPayloadOffset - FlatKv::kCodePadding);
             } else {
                 sys_println("sanitize: code missing for non-zero code_len account");
                 acc_walk_ok = false;

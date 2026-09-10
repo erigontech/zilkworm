@@ -234,6 +234,8 @@ class DirectState : public BlockState {
         return {reinterpret_cast<const Slot*>(&pa + 1),
                 pa.slot_count};
     }
+    /// The code without its padding. FlatKv::kCodePadding zero bytes are allocated
+    /// immediately after the returned end(), so the buffer can be executed in place.
     [[gnu::always_inline]] inline ByteView
     code_for(const Account& pa) const noexcept {
         if (pa.code_store_len == 0) return {};
@@ -375,11 +377,12 @@ DirectState::read_code(const evmc::address& addr) const noexcept {
         const uint64_t k8 = hash_key8(h);
         if (auto it = created_code_.find(k8); it != created_code_.end() &&
                                               std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
-            return ByteView{it->second.bytes.data(), it->second.bytes.size()};
+            return ByteView{it->second.bytes.data(),
+                            it->second.bytes.size() - FlatKv::kCodePadding};
         }
         if (auto cit = created_code_collisions_.find(h);
             cit != created_code_collisions_.end()) {
-            return ByteView{cit->second.data(), cit->second.size()};
+            return ByteView{cit->second.data(), cit->second.size() - FlatKv::kCodePadding};
         }
         return {};
     }

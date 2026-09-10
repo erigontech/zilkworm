@@ -329,6 +329,7 @@ int convert_json_witness(ByteView input, std::vector<uint8_t>& out, std::string&
             if (!seen.insert(ch).second) continue;
             enc.clear();
             zilkworm::FlatKv::encode(enc, ch, v);
+            enc.insert(enc.end(), zilkworm::FlatKv::kCodePadding, 0);  // Execute-in-place padding.
             cb.add(zilkworm::hash_key8(ch), ByteView{enc.data(), enc.size()});
         }
         code_store_blob = std::move(cb).finalize();
