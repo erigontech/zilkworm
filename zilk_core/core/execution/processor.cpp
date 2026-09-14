@@ -236,7 +236,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         // in place and leaves nothing to record. Amsterdam is always
         // post-merge, so the block reward is absent. The withdrawals are applied
         // before the block-end system calls.
-        DirectStateView state_view{direct_};
+        ActiveStateView state_view{direct_};
         const auto fin_diff =
             evmone::state::finalize(state_view, rev, block_.header.beneficiary,
                                     /*block_reward=*/std::nullopt, evm1_block_.ommers,
