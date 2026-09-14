@@ -90,6 +90,10 @@ target_link_libraries(
   PUBLIC evmc intx::intx blst::blst
 )
 
+# evmone's built-in tracers reference std::clog, pulling the standard library stream and
+# locale machinery into the guest. Nothing in z6m enables a tracer, so compile them out.
+target_compile_definitions(evmone PRIVATE EVMONE_TRACING=0)
+
 if(MSVC)
   target_compile_options(evmone PRIVATE /EHsc /w)
 else()
