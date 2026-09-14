@@ -29,7 +29,7 @@ inline bytes32 keccak_bytes(const ByteView x) noexcept {
     return std::bit_cast<bytes32>(ethash_keccak256(x.data(), x.size()).bytes);
 }
 inline bytes32 keccak_bytes32(const bytes32& x) noexcept {
-    return std::bit_cast<bytes32>(ethash_keccak256(x.bytes, 32));
+    return std::bit_cast<bytes32>(ethash_keccak256_32(x.bytes));
 }
 }  // namespace zilkworm
 
