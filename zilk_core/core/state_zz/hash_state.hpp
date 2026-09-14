@@ -557,9 +557,10 @@ class HashStateView final : public evmone::state::StateView {
         };
     }
 
-    evmc::bytes get_account_code(const evmc::address& addr) const noexcept override {
-        const auto bv = state_.read_code(addr);
-        return evmc::bytes{bv.data(), bv.size()};
+    /// Borrowed from the code store, which lives for the whole block, so the EVM can read the
+    /// EIP-7702 delegation prefix without materializing the contract.
+    evmc::bytes_view get_account_code(const evmc::address& addr) const noexcept override {
+        return state_.read_code(addr);  // ByteView derives from evmc::bytes_view.
     }
 
     evmc::bytes32 get_storage(const evmc::address& addr, const evmc::bytes32& key) const noexcept override {

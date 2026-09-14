@@ -277,7 +277,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         // StateDiff the BAL can record; rule_set_.finalize mutates DirectState
         // in place and leaves nothing to record. Amsterdam is always
         // post-merge, so the block reward is absent.
-        DirectStateView state_view{direct_};
+        ActiveStateView state_view{direct_};
         const evmone::state::BalStateView bal_view{state_view, bal_builder_};
         const auto fin_diff =
             evmone::state::finalize(bal_view, rev, block_.header.beneficiary,
