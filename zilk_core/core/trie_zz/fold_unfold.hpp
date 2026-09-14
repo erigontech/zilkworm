@@ -65,6 +65,7 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
     // Use the inline fast_decode_header — every ext-child unfold and every
     // direct unfold call lands here, so an out-of-line .cpp call would charge
     // ~256 (3T+C) of jal/jalr per node read.
+    const uint8_t* const node_begin = payload.data();
     auto hh{fast_decode_header(payload)};
     if (!hh.list) [[unlikely]] {
 #ifndef NDEBUG
@@ -88,6 +89,16 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
 
     Kind kind = decode_node(list, line.branch, is_leaf, path, plen, second);
     if (kind == kBranch) {
+        // emplace_line initializes no union member and decode_node writes only the pre-existing BranchNode fields:
+        // reset the origin fields explicitly.
+        line.branch.orig = nullptr;
+        line.branch.dirty = 0;
+        const auto node_size = static_cast<size_t>(list.data() + list.size() - node_begin);
+        if (node_size >= 32 && node_size <= UINT16_MAX) {
+            line.branch.orig = node_begin;
+            line.branch.orig_size = static_cast<uint16_t>(node_size);
+            line.branch.orig_child_len = line.branch.child_len;
+        }
         return true;
     }
     if (kind == kInvalid) [[unlikely]] {
@@ -417,6 +428,7 @@ inline void GridMPT<DeletionEnabled>::link_to_parent(GridLine& line, unsigned de
         if (parent.kind == kBranch && parent.branch.child_len[parent_slot] == 0) {
             parent.branch.mask |= 1 << parent_slot;
             parent.branch.child_len[parent_slot] = 1;  // Placeholder, update during fold_line
+            parent.branch.dirty |= static_cast<uint16_t>(1u << parent_slot);
         }
         if (parent.kind == kExt && parent.ext.child_len == 0) {
             parent.ext.child_len = 1;  // Placeholder, update during fold_line

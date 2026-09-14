@@ -45,6 +45,14 @@ inline void clear_static_buffer() {
 
 inline const Bytes empty{silkworm::rlp::kEmptyStringCode};
 
+// resize() zero-fills bytes that are overwritten right after; skip it where the library allows.
+inline void resize_uninitialized(Bytes& buf, size_t n) {
+#ifdef __cpp_lib_string_resize_and_overwrite
+    buf.resize_and_overwrite(n, [](uint8_t*, size_t m) noexcept { return m; });
+#else
+    buf.resize(n);
+#endif
+}
 
 inline size_t hp_size(size_t nibbles) noexcept { return 1 + ((nibbles + 1) >> 1); }
 
@@ -84,6 +92,34 @@ inline const Bytes& encode_branch(const BranchNode& b) {
     if (b.mask == 0) {
         return empty;
     }
+    // Same length class in every slot means the witness encoding's layout is unchanged:
+    // copy it into the scratch buffer and rewrite only the dirty slots there. Clean slots
+    // still read (hash) or were copied (embedded) from that encoding, so this matches
+    // the full re-encode byte for byte. The original witness bytes are never written.
+    if (b.orig != nullptr && b.same_layout_as_orig()) {
+        resize_uninitialized(static_buffer, b.orig_size);
+        uint8_t* const out = static_buffer.data();
+        std::memcpy(out, b.orig, b.orig_size);
+        if (b.dirty != 0) {
+            const uint8_t b0 = b.orig[0];
+            uint8_t* p = out + (b0 < 0xf8 ? 1 : 1 + (b0 - 0xf7));  // list header length
+            for (size_t i = 0; i < 16; ++i) {
+                const auto len = b.orig_child_len[i];
+                if (b.dirty & (1u << i)) {
+                    if (len == 0) {
+                        *p = rlp::kEmptyStringCode;
+                    } else if (len == 32) {
+                        *p = 0xa0;
+                        std::memcpy(p + 1, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+                    } else {
+                        std::memcpy(p, b.child[i].bytes, len);
+                    }
+                }
+                p += len == 0 ? 1 : len == 32 ? 33 : len;
+            }
+        }
+        return static_buffer;
+    }
     static_buffer.clear();
     rlp::Header h{.list = true, .payload_length = 0};
     // Calculate payload for 16 children
@@ -102,7 +138,7 @@ inline const Bytes& encode_branch(const BranchNode& b) {
     h.payload_length += rlp::length(b.value);
     rlp::encode_header(static_buffer, h);
     const size_t header_len = static_buffer.size();
-    static_buffer.resize(header_len + h.payload_length);
+    resize_uninitialized(static_buffer, header_len + h.payload_length);
     uint8_t* p = static_buffer.data() + header_len;
 
     for (size_t i = 0; i < 16; ++i) {
