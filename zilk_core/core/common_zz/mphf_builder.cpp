@@ -195,11 +195,11 @@ void MphfBuilder<KeySize>::add(uint64_t key, ByteView body) {
     auto it = unique_kv_entries_.find(key);
     if (it != unique_kv_entries_.end()) {
         if (!it->second.empty()) {
-            collision_keys_.emplace_back(key, 0u, 0u);
+            collision_keys_.emplace_back(key, 0u);
             collision_bodies_.emplace_back(std::move(it->second));
             it->second.clear();
         }
-        collision_keys_.emplace_back(key, 0u, 0u);
+        collision_keys_.emplace_back(key, 0u);
         collision_bodies_.emplace_back(body.begin(), body.end());
         return;
     }
@@ -228,7 +228,7 @@ std::vector<uint8_t> MphfBuilder<KeySize>::finalize() && {
     for (uint32_t i : spilled) {
         auto& body = unique_kv_entries_.at(distinct_keys[i]);
         if (!body.empty()) {
-            collision_keys_.emplace_back(distinct_keys[i], 0u, 0u);
+            collision_keys_.emplace_back(distinct_keys[i], 0u);
             collision_bodies_.emplace_back(std::move(body));
             body.clear();
         }
@@ -304,7 +304,6 @@ std::vector<uint8_t> MphfBuilder<KeySize>::finalize() && {
         const auto& body = collision_bodies_[i];
         const uint64_t body_len = body.size();
         collision_keys_[i].offset = data_cur;
-        collision_keys_[i].len    = static_cast<uint32_t>(body.size());
         std::memcpy(data + data_cur, &body_len, 8);
         std::memcpy(data + data_cur + 8, body.data(), body.size());
         data_cur += entry_size(body.size());

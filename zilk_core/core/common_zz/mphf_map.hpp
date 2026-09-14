@@ -23,7 +23,8 @@ using ::silkworm::Bytes;
 
 // MphfMapHeader: u64 -> bytes minimal perfect hash with collision sidecar.
 // Header layout: displacement_factors[n_buckets]:u64, slot_offsets[n_keys]:u32
-// (0 == collision), collisions:[data_offset:u32]*, data:[len:u64][body]*.
+// (0 == collision), collisions:[key:u64][data_offset:u32][pad:u32]*,
+// data:[len:u64][body]*.
 // Caller verifies membership via key bytes embedded in body.
 inline constexpr uint64_t kMphfGoldenRatio = 0x9E3779B97F4A7C15ull;
 inline constexpr uint32_t kMphfMapVersion = 2u;
@@ -76,7 +77,10 @@ struct alignas(8) MphfMapHeader {
 struct alignas(8) MphfCollisionEntry {
     uint64_t key;
     uint32_t offset;
-    uint32_t len;
+    // No length here on purpose. The entry's length lives in the data-section header
+    // ([len:u64] before the body), which is the range sanitize() hashes; a second copy
+    // could disagree with it and would be trusted for the span handed to the EVM.
+    // The trailing 4 bytes of padding keep sizeof() at 16, so the layout is unchanged.
 };
 
 static_assert(sizeof(MphfMapHeader) == 56);
@@ -180,8 +184,10 @@ class MphfMap {
             [](const MphfCollisionEntry& e, uint64_t kk) noexcept { return e.key < kk; });
         for (; it != collisions_ + n_collisions_ && it->key == k8; ++it) {
             uint8_t* body = data_ + it->offset + 8u;
-            if (std::memcmp(body + KeyOffset, key, KeySize) == 0)
-                return std::span<uint8_t>{body, static_cast<size_t>(it->len)};
+            if (std::memcmp(body + KeyOffset, key, KeySize) == 0) {
+                uint64_t len; std::memcpy(&len, data_ + it->offset, 8);
+                return std::span<uint8_t>{body, static_cast<size_t>(len)};
+            }
         }
         return {};
     }
