@@ -22,10 +22,30 @@ set(common_flags "-march=rv64im -mabi=lp64 -ffunction-sections -fdata-sections -
 # deliberately modest since -flto showed maximum inlining loses badly here).
 # Measured -2.298% guest cycles on the 200-block corpus; see the commit message
 # for the full flag sweep.
+#
+# -mtune=size swaps GCC's RISC-V cost table (optimize_size_tune_info) for
+# rocket's default. The two differ only in int_mul 4->1, int_div 33/65->1,
+# branch_cost 3->1, memory_cost 5->2 and slow_unaligned_access true->false.
+# Rocket's model is wrong for this target: pricing `mul` at four instructions
+# makes GCC strength-reduce multiply-by-constant into shift/add chains, which
+# costs MORE retired instructions and therefore more cycles here.
+#
+# -mstrict-align is REQUIRED, not cosmetic. It is the one field we must not
+# take from the size table: without it GCC merges byte sequences into a 64-bit
+# `ld` on pointers it cannot prove aligned, and SP1's executor rejects
+# unaligned doubleword loads outright -- the guest builds cleanly and then
+# panics on every block with
+#   LD must be aligned to 8 bytes (base=0x1c0000004f, offset=0x10)
+# Against the default tune -mstrict-align is a no-op (rocket is already
+# strict), so it costs nothing and only cancels that one field.
+#
+# Measured -0.340% guest cycles / -0.085% prover gas on the 200-block corpus,
+# better on 200/200 blocks, with gas_used and syscall_count byte-identical.
 set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap \
 -funroll-loops \
 --param inline-unit-growth=100 --param max-inline-insns-auto=60 \
---param large-function-growth=200")
+--param large-function-growth=200 \
+-mtune=size -mstrict-align")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
 # Not in common_flags: CMAKE_ASM_FLAGS must not force-include a C header.
