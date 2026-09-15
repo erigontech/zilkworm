@@ -22,10 +22,22 @@ set(common_flags "-march=rv64im -mabi=lp64 -ffunction-sections -fdata-sections -
 # deliberately modest since -flto showed maximum inlining loses badly here).
 # Measured -2.298% guest cycles on the 200-block corpus; see the commit message
 # for the full flag sweep.
+#
+# -mtune=size swaps GCC's default cost table (rocket's) for one that prices a
+# branch, a mul and a div at one instruction, as SP1 does, instead of 3, 4 and
+# 33/65. GCC then stops if-converting short branches and evaluating both sides
+# of && and ||, and stops expanding multiplication and division by a constant
+# into longer shift/add and multiply-high sequences. -mstrict-align is
+# required: the size table also allows unaligned access, and then GCC merges
+# byte loads into an `ld` on pointers it cannot prove aligned, which SP1
+# rejects on every block ("LD must be aligned to 8 bytes"). With rocket's
+# table the flag changes nothing. Measured -0.470% guest cycles on the
+# 200-block corpus; see the commit message for the share of each price.
 set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap \
 -funroll-loops \
 --param inline-unit-growth=100 --param max-inline-insns-auto=60 \
---param large-function-growth=200")
+--param large-function-growth=200 \
+-mtune=size -mstrict-align")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
 # Not in common_flags: CMAKE_ASM_FLAGS must not force-include a C header.
