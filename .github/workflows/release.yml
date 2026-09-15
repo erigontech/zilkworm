@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build a release for, e.g. v0.1.0-alpha.2
+        description: Existing tag to build a release for, e.g. v0.1.0-alpha.3
         required: true
 
 concurrency:

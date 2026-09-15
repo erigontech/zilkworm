@@ -1,5 +1,143 @@
 # Changelog
 
+## v0.1.0-alpha.3 - MFBD witness format, pre-trie validation and Amsterdam
+
+### Highlights
+
+This release introduces a new witness flat format - the MFBD (MPHF-based Flat Bundle). It dramatically increases the performance of the guest while reducing the memory footprint of witness- and state-related operations. It also introduces several performance enhancements, upgrades to EVMOne, bug fixes and CI changes.
+
+#### MFBD
+
+Rather than passing in a giant blob of SSZ or RLP-encoded byte-string, we create a quasi-Minimal Perfect Hash function on the host for the plain-state and nodes list. This is `reinterpret_cast`ed by the guest as a memory-mapped region directly.
+With some added validations, this provides the guest with a cheap and performant map to access all of the plain and trie-state.
+Several CI enhancements go along with it to transpose EESTs into MFBD and running them through the guest program on all supported architectures. See `docs/flat_witness_bundle.md` for the layout and the CHD construction.
+
+#### GridMPT and Pre-Trie Validation
+
+GridMPT algorithm now augments the pre-trie validation along with the post-trie calculation, playing with the MFBD directly. Instead of creating a separate pass, we execute transactions optimistically while recording empty reads, read-only touches and the modified state. All state touches are lined up and sorted by the hash of the addresses and unfolded for verification, not just the modified state. This ensures a wrong post-state cannot be proven or a pre-state cannot be spoofed that's different from the parent header even with a corrupt witness.
+
+Along with it, a set of GridMPT fixes found while hardening the new path:
+- Out-of-bounds read in the extension-child copy
+- Extension split on fold orphaning the newly created branch
+- Crash in the deletion-enabled trie when deletes empty the trie mid-batch
+- Failures that were previously swallowed inside GridMPT now surface through a `failed` flag and abort the run
+- Single-child branch folding into an extension now installs the child reference
+- Redundant branch copy on fresh decode removed
+
+#### Amsterdam (Glamsterdam devnet-8)
+
+The Amsterdam fork is wired through the chain config, the header rules and block execution, with ZVM1 pointed at the matching upstream picks:
+- EIP-8037: State creation gas cost increase (two-dimensional block gas, EIP-7778 header commitment)
+- EIP-8038: State-access gas cost update
+- EIP-2780: Resource-based intrinsic transaction gas
+- EIP-7928: Block-Level Access Lists (`blockAccessListHash` header field, BAL construction)
+- EIP-7843: `slotNumber` header field
+- EIP-8282: Builder execution requests
+
+Verified against the EEST `tests-glamsterdam-devnet@v8.1.1` corpus: 11908 pass / 1 skip / 0 fail. The HyperCube EEST workflow now runs against this corpus on the release branch.
+
+#### Proof binding
+
+The Hypercube guest now commits the chain id, pre-state root, post-state root and block hash as SP1 public values, so a proof is bound to a specific block and parent state rather than only to the guest program.
+
+#### Tests and Benchmarks
+
+- Catch2 unit tests (`zilkworm.tests`) introduced and run in CI on PRs and pushes
+- EEST fixtures are no longer a git submodule: pinned, sha256-verified release tarballs (`test-fixtures.json`, `make test-fixtures`), currently `tests@v20.0.1`
+- EEST runner requires strict `expectException` matching and the CI job now fails on any fixture failure instead of a threshold
+- Integrated into the ERE zkEVM benchmark workload (previously shipped as `v0.1.0-alpha.2-ere`)
+- `z6m_prover --download-only` to pre-fetch a block range for later execution or proving
+
+#### Cleanup and Fixes
+
+- Clearing an EIP-7702 delegation no longer wipes the authority's storage
+- MFBD collision sidecar entries take their length from the data-section header
+- Restored the SP1 syscall-accelerated ZVM1 lineage (keccak, secp256k1, mulmod, patched blst) after the branch was briefly pointed at a non-SP1 evmone
+- Dropped the v1 EVM host legacy path and the remaining bor code
+- Build on macOS with the xPack RISC-V toolchain auto-detected by the Makefile (first external contribution, thanks @developeruche)
+- Fixed the cargo cache sources for the prover build
+
+#### ZVM1/EVMone changes
+
+ZVM1 (now corresponds to evmone v0.23.0 plus the Amsterdam picks listed above, up from v0.21.0)
+- SP1 ecrecover MSM handles P+Q == infinity instead of panicking on adversarial input
+- EIP-7954: Increase maximum contract size
+- Transaction and RLP decoding moved into the state library, sender recovery from the signature, chain id validation
+- Non-malleable secp256k1 ecrecover mode; sliding-window and fixed-window modexp
+- Journal and account layout slimmed down, EVMC capabilities feature removed
+- Please check the upstream evmone changelog for the full list of changes
+
+### Contributors
+
+| Author | Commits |
+|---|---|
+| Paweł Bylica @chfast | 14 |
+| @canepat | 12 |
+| Somnath Banerjee @somnergy | 11 |
+| Developer Uche @developeruche | 1 |
+
+### Commit Log by Category (38 non-merge commits since v0.1.0-alpha.2)
+
+#### Witness Format, State & Pre-Trie Validation
+
+- `8faa1712` mphf: Take a sidecar entry's length from the data-section header (#173) (Paweł Bylica @chfast)
+- `b71b8523` state: Keep account storage when an EIP-7702 delegation is cleared (#159) (Paweł Bylica @chfast)
+- `7d0a7414` feat: Witness pre-validation and flat-minimally-perfect-hash-function based state management (#90) (Somnath Banerjee @somnergy)
+- `66b9f8dd` direct_state: always create object for empty read and check duplicate addr_hash in check_root (#138) (Somnath Banerjee @somnergy)
+- `eb429442` direct_state: add slot-orphan-collision-swap/read-spoofing and honest-path tests suites (#101) (@canepat)
+- `9d44bace` tools: add debug_executionWitness validation scripts (#102) (@canepat)
+
+#### Merkle Patricia Trie
+
+- `57df9c44` grid_mpt: install the child reference when a single-child branch folds into an extension (#147) (@canepat)
+- `736429b7` trie_zz: Optimize redundant branch copy on new decode in GridMPT (#104) (Somnath Banerjee @somnergy)
+- `6198bb65` trie_zz: propagate swallowed GridMPT failures via failed flag (#134) (@canepat)
+- `98dcb152` GridMPT: fix OOB in extension-child copy (#113) ( )
+- `e258b12d` GridMPT: fix ext-split fold orphaning new branch (#117) (@canepat)
+- `3017c89a` trie: fix GridMPT<true> crash when deletes empty the trie mid-batch (#109) (Paweł Bylica @chfast)
+
+#### Protocol & Core EVM
+
+- `5ecf7eba` evmone: point the submodule at zevmone glamsterdam-devnet-8 (Somnath Banerjee @somnergy)
+- `109b5cba` core, protocol, dev: Amsterdam support (glamsterdam-devnet-8) (Paweł Bylica @chfast)
+- `750576be` core, protocol, dev: Amsterdam support (glamsterdam-devnet-8) (Paweł Bylica @chfast)
+- `fc5cf1a6` dev: enforce the EIP-7934 block RLP size cap on fork-transition networks (#112) (Paweł Bylica @chfast)
+- `2108ccb8` Bump evmone: merge evmone 0.23.0 (#142) (Paweł Bylica @chfast)
+- `cb8d8ae5` core, protocol: drop v1 EVM host legacy path, remove bor (#100) (Somnath Banerjee @somnergy)
+- `3305207b` Adjust merge (Somnath Banerjee @somnergy)
+
+#### Prover & Guest
+
+- `f4c49c20` guest_hypercube: commit pre/post roots, block hash, chain id in PV (#133) (@canepat)
+- `48b3dd54` prover: add --download-only option (#118) (Somnath Banerjee @somnergy)
+- `e40bf2a6` Integrate Zilkworm into the ERE zkEVM benchmark workload (#93) (@canepat)
+- `643efb5c` Fix broken cargo caches sources (#97) (Somnath Banerjee @somnergy)
+
+#### Tests, Benchmarks & EESTs
+
+- `52ccc1a9` test: introduce Catch2 and the zilkworm.tests unit-test target (#107) (Paweł Bylica @chfast)
+- `0a041f7f` eest: replace the archived eest-fixtures submodule with pinned tarballs (#105) (Paweł Bylica @chfast)
+- `419277e4` eest: bump fixtures to tests@v20.0.1 (#106) (Paweł Bylica @chfast)
+- `49647310` state_transition: require strict EEST expectException matching (#94) (Paweł Bylica @chfast)
+- `bf85f2fe` Fix qemu (Somnath Banerjee @somnergy)
+
+#### CI/CD & Workflows
+
+- `e5ae16b2` ci: run the HyperCube EEST job against the Glamsterdam corpus (Paweł Bylica @chfast)
+- `96d5a1a1` ci: trigger HyperCube EEST on evmone submodule bump (#165) (@canepat)
+- `f6a99a27` ci: fail EEST Blockchain Tests on any failure (#120) (Paweł Bylica @chfast)
+- `b91cd3aa` ci: run unit tests (zilkworm.tests) on PRs and main pushes (#116) (Somnath Banerjee @somnergy)
+- `93455153` ci: fix HyperCube EEST Blockchain Tests workflow (#111) (@canepat)
+- `e4544552` ci: fix version discrepancies and credit author in release (#10) (@canepat)
+- `e6c8a57e` ci: add tag-driven release workflow (#9) (@canepat)
+- `c52d6fc9` Fix CI and use ci image for rv* runs (Somnath Banerjee @somnergy)
+
+#### Build System & Tooling
+
+- `4be739ee` Fix failed attempt to `make z6m_guest` and `make z6m_prover` on MacOS (#6) (Developer Uche @developeruche)
+- `1566acef` vscode: add Mac IntelliSense config, fix hardcoded cmake.sourceDirectory (#119) (@canepat)
+
+
 ## v0.1.0-alpha.2 - More performance more testing and more stability
 
 ### Highlights
