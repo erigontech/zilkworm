@@ -9,9 +9,8 @@ use alloy_rpc_types_debug::ExecutionWitness;
 use eyre::{bail, eyre, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, warn};
@@ -308,8 +307,8 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
             block_number, block_ts_ms, now_ms
         );
     }
-    let bundle_bytes = run_json_witness_to_flat_bundle(&witness_input)
-        .wrap_err("json_witness_to_flat_bundle subprocess failed")?;
+    let bundle_bytes = z6m_witness_ffi::json_witness_to_flat_bundle(&witness_input)
+        .wrap_err("witness JSON to flat-bundle conversion failed")?;
     fs::write(&flat_bundle_path, &bundle_bytes)?;
 
     debug!(
@@ -462,39 +461,4 @@ pub fn write_json<T: ?Sized + Serialize>(path: &Path, value: &T) -> Result<()> {
     let writer = BufWriter::new(file);
     serde_json::to_writer_pretty(writer, value)?;
     Ok(())
-}
-
-/// Path to the C++ json_witness_to_flat_bundle binary built by the top-level
-/// Makefile (`make json_witness_to_flat_bundle`).
-const BUILDER_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../build/zilk_core/dev/cli/json_witness_to_flat_bundle"
-);
-
-/// Spawn json_witness_to_flat_bundle, pipe `input` to its stdin, and return
-/// the stdout bytes.
-fn run_json_witness_to_flat_bundle(input: &[u8]) -> Result<Vec<u8>> {
-    let mut child = Command::new(BUILDER_PATH)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .wrap_err_with(|| {
-            format!(
-                "spawn {} (run `make json_witness_to_flat_bundle` to build it)",
-                BUILDER_PATH
-            )
-        })?;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| eyre!("subprocess stdin not piped"))?;
-        stdin.write_all(input)?;
-    }
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!("json_witness_to_flat_bundle exited with {:?}", out.status);
-    }
-    Ok(out.stdout)
 }

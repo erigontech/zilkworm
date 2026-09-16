@@ -7,6 +7,7 @@ members = [
     "prover_hypercube",
     "prover_turbo",
     "guest_turbo",
+    "witness_ffi",
 ]
 exclude = ["stateless_validator"]
 resolver = "2"

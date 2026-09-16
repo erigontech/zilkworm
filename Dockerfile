@@ -100,6 +100,18 @@ RUN set -e; \
     ln -s "${version_dir}.content/bin" /opt/riscv-none-elf-gcc-bin
 ENV PATH="/opt/riscv-none-elf-gcc-bin:${PATH}"
 
+# Native GCC 15 (xpack) — the project-standard compiler for the C++ witness
+# converter that prover/witness_ffi/build.rs compiles into the prover.
+# Noble's stock apt tops out at gcc-14 and this stage can't move to a newer
+# Ubuntu while the runtime stage is 24.04, so use the same xpm mechanism as
+# the riscv toolchain above (pinned: this compiler defines the prover ABI).
+RUN --mount=type=cache,target=/root/.npm \
+    xpm install @xpack-dev-tools/gcc@15.2.0-1.1 --global --verbose
+
+RUN set -e; \
+    version_dir="$(ls -1d /root/.local/xPacks/@xpack-dev-tools/gcc/*/ | head -1)"; \
+    ln -s "${version_dir}.content/bin" /opt/xpack-gcc-bin
+
 # Rust 1.88.0
 ENV CARGO_HOME=/root/.cargo \
     RUSTUP_HOME=/root/.rustup \
@@ -119,7 +131,15 @@ RUN cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
         -DSP1=ON \
     && cmake --build prover/guest_hypercube/build -j"$(nproc)"
 
-# Build prover binary (Rust, embeds guest ELF via build.rs)
+# Build prover binary (Rust, embeds guest ELF via build.rs).
+# CC/CXX point witness_ffi's compiler probe at the xpack gcc-15; its
+# libstdc++ is newer than the runtime image's, so Z6M_STATIC_LIBSTDCXX=1
+# makes build.rs link libstdc++ statically — the prover then runs on stock
+# ubuntu:24.04 (verified: static binary needs only GLIBC <= 2.34; noble
+# ships 2.39).
+ENV CC=/opt/xpack-gcc-bin/gcc \
+    CXX=/opt/xpack-gcc-bin/g++ \
+    Z6M_STATIC_LIBSTDCXX=1
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/src/prover/target \

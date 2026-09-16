@@ -1,0 +1,14 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "z6m_witness_ffi"
+version = "0.1.0"
+edition = "2021"
+links = "z6m_witness_bundle"
+
+[dependencies]
+eyre = "0.6"
+
+[build-dependencies]
+cmake = "0.1"

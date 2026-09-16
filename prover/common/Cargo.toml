@@ -12,7 +12,8 @@ default = ["network"]
 network = ["dep:alloy-consensus", "dep:alloy-provider", "dep:alloy-rpc-types",
            "dep:alloy-rpc-types-debug", "dep:alloy-rlp", "dep:alloy-trie",
            "dep:reqwest", "dep:tokio", "dep:url",
-           "dep:base64", "dep:tracing", "dep:rsp-mpt"]
+           "dep:base64", "dep:tracing", "dep:rsp-mpt",
+           "dep:z6m_witness_ffi"]
 
 [dependencies]
 alloy-eips = { version = "1.0", features = ["serde"] }
@@ -34,3 +35,4 @@ tokio = { version = "1", features = ["full"], optional = true }
 tracing = { version = "0.1", optional = true }
 url = { version = "2.5", optional = true }
 base64 = { version = "0.22", optional = true }
+z6m_witness_ffi = { path = "../witness_ffi", optional = true }
