@@ -567,6 +567,79 @@ void HiddenContractAccount_CodeBoundFromCodeStore() {
                     std::memcmp(got.data(), code.data(), code.size()) == 0,
                 "G8[SECURITY]: read_code on recovered contract returns its bytecode");
 }
+
+// check_root: modified emitted, read-only skipped, destructed deleted.
+void HiddenAccountModified_RealCheckRoot() {
+    const evmc::address W = make_addr(0x88, 0x00);
+    evmc::address A = make_addr(0x99, 0x00);  // hidden, credited
+    evmc::address B = make_addr(0xAA, 0x00);  // hidden, read only
+    const bytes32 kW = keccak_addr32(W);
+    bytes32 kA = keccak_addr32(A);
+    for (uint8_t b = 1; (kW.bytes[0] >> 4) == (kA.bytes[0] >> 4) && b != 0; ++b) {
+        A = make_addr(0x99, b);
+        kA = keccak_addr32(A);
+    }
+    bytes32 kB = keccak_addr32(B);
+    for (uint8_t b = 1; ((kW.bytes[0] >> 4) == (kB.bytes[0] >> 4) ||
+                         (kA.bytes[0] >> 4) == (kB.bytes[0] >> 4)) && b != 0; ++b) {
+        B = make_addr(0xAA, b);
+        kB = keccak_addr32(B);
+    }
+
+    const Bytes wRlp = account_rlp(W, 0, 1000);
+    const Bytes aRlp = account_rlp(A, 0, 5000);
+    const Bytes bRlp = account_rlp(B, 0, 7000);
+    const bytes32 R = hashbuilder_root({{kW, wRlp}, {kA, aRlp}, {kB, bRlp}});
+    const Bytes leafW_rlp = make_leaf_rlp(kW, wRlp);
+    const Bytes leafA_rlp = make_leaf_rlp(kA, aRlp);
+    const Bytes leafB_rlp = make_leaf_rlp(kB, bRlp);
+    BranchNode br{};
+    br.set_child(kW.bytes[0] >> 4, ByteView{keccak_bytes(leafW_rlp).bytes, 32});
+    br.set_child(kA.bytes[0] >> 4, ByteView{keccak_bytes(leafA_rlp).bytes, 32});
+    br.set_child(kB.bytes[0] >> 4, ByteView{keccak_bytes(leafB_rlp).bytes, 32});
+    const Bytes root_rlp{encode_branch(br)};
+    expect_true(keccak_bytes(root_rlp) == R, "X1: hand-built account root matches R");
+
+    // A, B only in the node store.
+    std::vector<uint8_t> prestate = DirectState::build_blob_from_accounts(
+        {make_info(W, 0, 1000)}, /*block_hashes=*/{}, /*code_store=*/{});
+    MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
+    add_node(nb, R, root_rlp);
+    add_node(nb, keccak_bytes(leafW_rlp), leafW_rlp);
+    add_node(nb, keccak_bytes(leafA_rlp), leafA_rlp);
+    add_node(nb, keccak_bytes(leafB_rlp), leafB_rlp);
+    std::vector<uint8_t> nodestore = std::move(nb).finalize();
+    expect_true(!prestate.empty() && !nodestore.empty(), "X2: witness blobs built");
+
+    DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
+    expect_true(direct.sanitize(), "X3: sanitize() ACCEPTS the witness");
+    BlockHeader parent{};
+    parent.number = 1;
+    parent.state_root = R;
+    direct.insert_header(parent);
+
+    // B read only; A credited.
+    expect_true(direct.get_balance(B) == intx::uint256{7000}, "X4: hidden account B recovered");
+    direct.add_to_balance(A, intx::uint256{1});
+    expect_true(direct.recovered_accounts().size() == 2, "X5: both hidden accounts recovered");
+    const Account* paB = direct.find_recovered_account(B);
+    expect_true(paB != nullptr && !direct.recovered_account_modified(*paB),
+                "X6: read-only recovered account is not modified");
+
+    BlockHeader head{};
+    head.number = 2;
+    head.parent_hash = parent.hash();
+    head.state_root = hashbuilder_root({{kW, wRlp}, {kA, account_rlp(A, 0, 5001)}, {kB, bRlp}});
+    silkworm::cmd::state_transition::StateTransition st{std::span<uint8_t>{}};
+    expect_true(st.check_root(direct, head, EVMC_CANCUN),
+                "G10: real check_root folds the modified recovered account");
+
+    // Destructed recovered: pre-trie leaf must be deleted.
+    direct.destruct(A);
+    head.state_root = hashbuilder_root({{kW, wRlp}, {kB, bRlp}});
+    expect_true(st.check_root(direct, head, EVMC_CANCUN),
+                "G11: real check_root deletes the destructed recovered account");
+}
 #endif
 
 // R6 regression: leaf_A absent, not just preimage.
@@ -646,6 +719,7 @@ int main() {
 #if USE_HASH_KEY
     RecoveredSlotsOnlyAccount_RealCheckRoot();
     HiddenContractAccount_CodeBoundFromCodeStore();
+    HiddenAccountModified_RealCheckRoot();
 #endif
     std::println("\n{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
