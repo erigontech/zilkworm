@@ -127,6 +127,7 @@ class DirectState : public BlockState {
         evmc::bytes32 initial;
         evmc::bytes32 current;  // == initial until an SSTORE lands
         bool found;             // false = walk proved absence
+        bool written() const noexcept { return found && current != initial; }
     };
     mutable FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, RecoveredSlot>> recovered_slots_;
     enum class WalkMiss : uint8_t { kAbsent, kInvalid };  // kInvalid halts; see fatal()
@@ -269,6 +270,9 @@ class DirectState : public BlockState {
     const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept { return created_accounts_; }
 #if USE_HASH_KEY
     const std::vector<std::unique_ptr<Account>>& recovered_accounts() const noexcept { return recovered_accounts_; }
+    const Account* find_recovered_account(const evmc::address& addr) const noexcept;
+    // Deleted, fields changed, or slot written.
+    bool recovered_account_modified(const Account& pa) const noexcept;
 
     [[gnu::always_inline]] inline const FlatHashMap<evmc::bytes32, RecoveredSlot>*
     recovered_slots_for(const evmc::address& addr) const noexcept {
