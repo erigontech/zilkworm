@@ -26,3 +26,8 @@ inline void sys_print(std::string_view msg) {
 }
 
 #endif
+
+[[noreturn]] inline void fatal(const char* msg) {
+    sys_println(msg);
+    syscall_halt(1);
+}

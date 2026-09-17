@@ -23,6 +23,8 @@ ELF := $(BUILD_DIR)/z6m_debug
 
 EEST_SHA := $(shell python3 -c "import json;print(json.load(open('$(CURDIR)/../test-fixtures.json'))['eest_stable']['sha256'][:12])" 2>/dev/null)
 EEST_MFBD_DIR ?= $(CURDIR)/../test-fixtures-cache/mfbd-$(EEST_SHA)
+# USE_HASH_KEY=ON enables node-store account recovery.
+USE_HASH_KEY ?= OFF
 
 CMAKE_FLAGS := \
 	-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
@@ -30,6 +32,7 @@ CMAKE_FLAGS := \
 	-DSTART_ASM=$(START_ASM) \
 	-DQEMU_SYSTEM=$(QEMU_SYSTEM) \
 	-DQEMU_DEBUG=ON \
+	-DUSE_HASH_KEY=$(USE_HASH_KEY) \
 	-G "Unix Makefiles" \
 	-Wno-dev
 

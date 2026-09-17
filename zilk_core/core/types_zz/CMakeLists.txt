@@ -28,3 +28,8 @@ silkworm_library(silkworm_types_zz
 )
 
 target_compile_features(silkworm_types_zz PUBLIC cxx_std_23)
+
+# ODR: PUBLIC so every dependent TU agrees.
+if(USE_HASH_KEY)
+  target_compile_definitions(silkworm_types_zz PUBLIC USE_HASH_KEY=1)
+endif()

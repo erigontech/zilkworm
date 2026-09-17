@@ -26,11 +26,14 @@ clean:
 	rm -rf prover/guest_hypercube/build/
 	rm -rf prover/target
 	
+# USE_HASH_KEY=ON enables node-store account recovery.
+USE_HASH_KEY ?= OFF
 z6m_guest:
 	cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
 		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_hypercube/cmake/riscv64im-sp1.cmake \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DSP1=ON
+		-DSP1=ON \
+		-DUSE_HASH_KEY=$(USE_HASH_KEY)
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
 z6m_prover: z6m_guest
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml

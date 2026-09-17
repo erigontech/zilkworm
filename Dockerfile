@@ -125,10 +125,13 @@ WORKDIR /src
 COPY . .
 
 # Build guest ELF (C++23 cross-compiled to rv64im)
+# USE_HASH_KEY=ON enables node-store account recovery.
+ARG USE_HASH_KEY=OFF
 RUN cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
         -DCMAKE_TOOLCHAIN_FILE=/src/prover/guest_hypercube/cmake/riscv64im-sp1.cmake \
         -DCMAKE_BUILD_TYPE=Release \
         -DSP1=ON \
+        -DUSE_HASH_KEY=${USE_HASH_KEY} \
     && cmake --build prover/guest_hypercube/build -j"$(nproc)"
 
 # Build prover binary (Rust, embeds guest ELF via build.rs).

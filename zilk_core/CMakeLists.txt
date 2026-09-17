@@ -20,6 +20,9 @@ if(QEMU_DEBUG)
     include_directories(${SILKWORM_MAIN_DIR}/qemu_runner/src/include)
 endif()
 
+# Applied PUBLIC on silkworm_types_zz (core/types_zz/CMakeLists.txt).
+option(USE_HASH_KEY "Node-store account recovery for witness preimage gaps" OFF)
+
 add_subdirectory(core)
 add_subdirectory(dev)
 

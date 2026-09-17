@@ -204,3 +204,8 @@ namespace sh
     }
 
 } // namespace sh
+
+[[noreturn]] inline void syscall_halt(uint8_t exit_code)
+{
+    sh::exit(exit_code);
+}
