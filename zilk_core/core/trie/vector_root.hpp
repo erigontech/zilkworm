@@ -30,7 +30,7 @@ inline size_t adjust_index_for_rlp(size_t i, size_t len) {
 template <class Value, std::invocable<Bytes&, const Value&> Encoder>
 evmc::bytes32 root_hash(const std::vector<Value>& v, const Encoder& value_encoder) {
     Bytes index_rlp;
-    Bytes value_rlp;
+    Bytes value_rlp[2];  // hb views the pending leaf's buffer
 
     HashBuilder hb;
 
@@ -38,10 +38,11 @@ evmc::bytes32 root_hash(const std::vector<Value>& v, const Encoder& value_encode
         const size_t index{adjust_index_for_rlp(j, v.size())};
         index_rlp.clear();
         rlp::encode(index_rlp, index);
-        value_rlp.clear();
-        std::invoke(value_encoder, value_rlp, v[index]);
+        Bytes& value{value_rlp[j & 1]};
+        value.clear();
+        std::invoke(value_encoder, value, v[index]);
 
-        hb.add_leaf(unpack_nibbles(index_rlp), value_rlp);
+        hb.add_leaf(unpack_nibbles(index_rlp), value);
     }
 
     return hb.root_hash();

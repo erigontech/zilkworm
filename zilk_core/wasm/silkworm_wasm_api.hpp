@@ -49,6 +49,7 @@ SILKWORM_EXPORT void config_set_dao_block(silkworm::ChainConfig* config, uint64_
 SILKWORM_EXPORT void difficulty(intx::uint256* in_out, uint64_t block_num, uint64_t block_timestamp,
                                 uint64_t parent_timestamp, bool parent_has_uncles, const silkworm::ChainConfig* config);
 
+// rlp must outlive the returned object
 SILKWORM_EXPORT silkworm::Transaction* new_transaction(const silkworm::Bytes* rlp);
 SILKWORM_EXPORT void delete_transaction(silkworm::Transaction* x);
 
@@ -65,6 +66,7 @@ SILKWORM_EXPORT intx::uint256* account_balance(silkworm::Account* a);
 
 SILKWORM_EXPORT uint8_t* account_code_hash(silkworm::Account* a);
 
+// rlp must outlive the returned object
 SILKWORM_EXPORT silkworm::Block* new_block(const silkworm::Bytes* rlp);
 SILKWORM_EXPORT void delete_block(silkworm::Block* x);
 

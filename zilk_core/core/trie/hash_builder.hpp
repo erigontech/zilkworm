@@ -34,6 +34,7 @@ class HashBuilder {
     //! The key should be unpacked, i.e. have one nibble per byte.
     //! In addition, a leaf key may not be a prefix of another leaf key
     //! (e.g. leaves with keys 0a0b & 0a0b0005 may not coexist).
+    //! Value is borrowed until the next add_*/root_hash.
     void add_leaf(Bytes nibbled_key, ByteView value);
 
     //! \details Entries (leaves, nodes) must be added in the strictly increasing lexicographic order (by key).
@@ -76,7 +77,7 @@ class HashBuilder {
     ByteView extension_node_rlp(ByteView path, ByteView child_ref);
 
     Bytes key_;                                 // unpacked – one nibble per byte
-    std::variant<Bytes, evmc::bytes32> value_;  // leaf value or node hash
+    std::variant<ByteView, evmc::bytes32> value_;  // leaf value (borrowed) or node hash
     bool is_in_db_trie_{false};
 
     std::vector<uint16_t> groups_;

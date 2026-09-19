@@ -72,7 +72,7 @@ struct UnsignedTransaction {
     uint64_t gas_limit{0};
     std::optional<evmc::address> to{std::nullopt};
     intx::uint256 value{0};
-    Bytes data{};
+    ByteView data{};
 
     std::vector<AccessListEntry> access_list{};  // EIP-2930
 

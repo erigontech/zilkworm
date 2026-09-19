@@ -79,7 +79,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
 
     evmone::state::Transaction evm1_txn{
         .type = static_cast<evmone::state::Transaction::Type>(txn.type),
-        .data = txn.data,
+        .data = Bytes{txn.data},
         .gas_limit = static_cast<int64_t>(txn.gas_limit),
         .max_gas_price = txn.max_fee_per_gas,
         .max_priority_gas_price = txn.max_priority_fee_per_gas,
