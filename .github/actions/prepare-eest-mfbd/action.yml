@@ -1,7 +1,4 @@
-# Copyright 2026 The Zilkworm Authors (modifications)
-# Copyright 2025 The Original Silkworm Authors
-# SPDX-License-Identifier: Apache-2.0
-
+# Copyright 2026 The Zilkworm Authors
 name: EEST MFBD cache + convert
 description: |
   Compute a content-addressed cache key for the converted MFBD fixture tree,
@@ -43,10 +40,15 @@ runs:
       run: |
         # The fixture pin comes from the manifest, no download required.
         eest_sha=$(python3 -c "import json;print(json.load(open('test-fixtures.json'))['${{ inputs.manifest-key }}']['sha256'][:12])")
-        # The C++ converter is the MFBD producer; hash its source so any
-        # change invalidates the cache.
+        # Hash the converter plus the wire-format headers it embeds to key the cache.
         conv_sha=$(sha256sum \
             zilk_core/dev/cli/eest_to_flat_bundle.cpp \
+            zilk_core/core/common_zz/mphf_map.hpp \
+            zilk_core/core/common_zz/mphf_builder.cpp \
+            zilk_core/core/types_zz/flat_bundle.hpp \
+            zilk_core/core/types_zz/account.hpp \
+            zilk_core/core/types_zz/flat_kv.hpp \
+            zilk_core/core/state_zz/pre_state.hpp \
           | sha256sum | cut -c1-12)
         key="mfbd-eest-${eest_sha}-${conv_sha}"
         dir="test-fixtures-cache/mfbd-${eest_sha}"

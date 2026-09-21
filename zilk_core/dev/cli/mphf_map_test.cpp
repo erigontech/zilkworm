@@ -357,11 +357,11 @@ TEST_CASE("MphfMap walkers visit each entry once", "[mphf]") {
     std::vector<std::array<uint8_t, 20>> visited;
     visited.reserve(entries.size());
     MphfMap mm{m};
-    CHECK(mm.for_each<20>([&](const uint8_t* key_ptr, std::span<uint8_t> /*body*/) {
+    mm.for_each<20>([&](const uint8_t* key_ptr, std::span<uint8_t> /*body*/) {
         std::array<uint8_t, 20> a{};
         std::memcpy(a.data(), key_ptr, 20);
         visited.push_back(a);
-    }));
+    });
 
     CHECK(visited.size() == entries.size());
 
@@ -438,7 +438,8 @@ std::vector<CollEntry> build_addr_collision_table(const std::vector<AddrBody>& e
             ce, ce + n_c, k8,
             [](const zilkworm::MphfCollisionEntry& e, uint64_t kk) noexcept { return e.key < kk; });
         for (; it != ce + n_c && it->key == k8; ++it) {
-            if (std::memcmp(data + it->offset + 8u, addr20, 20) == 0) return it->offset;
+            if (std::memcmp(data + it->offset + 8u, addr20, 20) == 0)
+                return static_cast<uint32_t>(it->offset);
         }
         return 0u;
     };
@@ -500,4 +501,106 @@ TEST_CASE("EVM read path finds a spilled singleton", "[mphf]") {
     REQUIRE(stored.has_value());
     REQUIRE(table.empty());
     CHECK(evm_read_path_find(m, table, e.addr.data()) != nullptr);
+}
+
+TEST_CASE("MphfMap collision entries are {u64 key, u64 offset}, 8-aligned, and offsets cannot wrap", "[mphf]") {
+    using zilkworm::MphfCollisionEntry;
+    CHECK(sizeof(MphfCollisionEntry) == 16u);
+    CHECK(alignof(MphfCollisionEntry) == 8u);
+    CHECK(sizeof(MphfCollisionEntry{}.key) == 8u);
+    CHECK(sizeof(MphfCollisionEntry{}.offset) == 8u);
+
+    auto built = build_map(2, 1, 512, 0x900000ULL);
+    REQUIRE_FALSE(built.blob.empty());
+    auto* m = built.header();
+    REQUIRE(reinterpret_cast<uintptr_t>(m) % 8u == 0u);
+    REQUIRE(m->collisions_size > 0);
+    REQUIRE(m->collisions_size % 16u == 0u);
+    REQUIRE(m->collisions_offset % 8u == 0u);
+    const uint32_t n_coll = n_collisions_of(m);
+    const auto* coll = collisions_of(m);
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(m) + m->data_offset;
+    const auto size = static_cast<uint32_t>(built.blob.size());
+    REQUIRE(zilkworm::validate_mphf<20>(std::span<const uint8_t>{built.blob}, 0, size, kTestMphfMagic));
+
+    SECTION("every entry is 8-aligned and resolves through find()") {
+        for (uint32_t i = 0; i < n_coll; ++i) {
+            CAPTURE(i, n_coll);
+            REQUIRE(reinterpret_cast<uintptr_t>(coll + i) % 8u == 0u);
+            REQUIRE(coll[i].offset < m->data_size);
+            uint64_t body_len = 0;
+            std::memcpy(&body_len, data + coll[i].offset, 8);
+            const uint8_t* body = data + coll[i].offset + 8u;
+            std::array<uint8_t, 20> addr{};
+            std::memcpy(addr.data(), body, 20);
+            const auto found = find_body(m, addr);
+            REQUIRE_FALSE(found.empty());
+            CHECK(found.data() == body);
+            CHECK(found.size() == body_len);
+        }
+    }
+
+    SECTION("validate_mphf rejects a collisions_offset that is not 8-aligned") {
+        auto forged = built.blob;
+        auto* fh = reinterpret_cast<MphfMapHeader*>(forged.data());
+        fh->collisions_offset += 4u;
+        CHECK_FALSE(zilkworm::validate_mphf<20>(std::span<const uint8_t>{forged}, 0, size, kTestMphfMagic));
+    }
+
+    SECTION("validate_mphf rejects a data_offset that is not 8-aligned") {
+        auto forged = built.blob;
+        auto* fh = reinterpret_cast<MphfMapHeader*>(forged.data());
+        fh->data_offset += 4u;
+        CHECK_FALSE(zilkworm::validate_mphf<20>(std::span<const uint8_t>{forged}, 0, size, kTestMphfMagic));
+    }
+
+    // The soundness condition in validate_mphf's comment: data[] past every table.
+    SECTION("validate_mphf rejects a data section that overlaps the sidecar") {
+        auto forged = built.blob;
+        auto* fh = reinterpret_cast<MphfMapHeader*>(forged.data());
+        fh->data_offset = fh->collisions_offset;  // 8-aligned and still inside the region
+        CHECK_FALSE(zilkworm::validate_mphf<20>(std::span<const uint8_t>{forged}, 0, size, kTestMphfMagic));
+    }
+
+    auto check_rejected = [&](const std::vector<uint8_t>& forged) {
+        CHECK_FALSE(zilkworm::validate_mphf<20>(std::span<const uint8_t>{forged}, 0, size, kTestMphfMagic));
+    };
+
+    const uint32_t victim = n_coll / 2u;
+    const uint64_t honest_off = coll[victim].offset;
+    auto forge_offset = [&](uint64_t lie) {
+        auto forged = built.blob;
+        std::memcpy(forged.data() + m->collisions_offset + 16u * victim + 8u, &lie, 8);
+        return forged;
+    };
+
+    SECTION("an offset with a set high half is rejected, not truncated to its low half") {
+        check_rejected(forge_offset((uint64_t{1} << 32) | honest_off));
+    }
+
+    SECTION("an offset whose +8 would wrap past zero is rejected") {
+        check_rejected(forge_offset(0xFFFF'FFFF'FFFF'FFF8ull));
+    }
+
+    SECTION("a sidecar entry whose body runs past data_size is rejected") {
+        auto forged = built.blob;
+        const uint64_t lie = m->data_size;  // header says the body fills the arena and more
+        std::memcpy(forged.data() + m->data_offset + honest_off, &lie, 8);
+        check_rejected(forged);
+    }
+
+    SECTION("a slot-routed entry is bounded the same way as a sidecar entry") {
+        const auto* slots = slot_offsets_of(m);
+        uint32_t slot_off = 0;
+        for (uint32_t i = 0; i < m->n_keys && slot_off == 0; ++i) slot_off = slots[i];
+        REQUIRE(slot_off != 0);
+        auto forged = built.blob;
+        const uint64_t lie = m->data_size;
+        std::memcpy(forged.data() + m->data_offset + slot_off, &lie, 8);
+        check_rejected(forged);
+        auto undersized = built.blob;
+        const uint64_t short_len = 19;  // one byte short of the 20-byte key
+        std::memcpy(undersized.data() + m->data_offset + slot_off, &short_len, 8);
+        check_rejected(undersized);
+    }
 }

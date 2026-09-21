@@ -1,27 +1,13 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// A code-store entry carries its length twice:
-//
-//   * the 8-byte data-section header, which MphfMap::for_each() reads -- this is what
-//     DirectState::sanitize() hashes, and (since execute-in-place) what it zeroes the
-//     padding of;
-//   * MphfCollisionEntry::len, which MphfMap::resolve_collision() returns as the span
-//     length for any entry routed through the collision sidecar.
-//
-// For a slot entry both come from the data header, so they cannot disagree. For a sidecar
-// entry they are independent, and nothing cross-checks them: validate_prestate_layout()'s
-// per-entry check covers the address map only, and validates .offset, never .len.
-//
-// A prover can therefore inflate a sidecar entry's len. sanitize() then hashes and zeroes
-// the honest region -- so the code hash still verifies -- while read_code() hands the EVM
-// the authenticated prefix followed by unauthenticated, prover-chosen trailing bytes.
-// Those bytes are executed and are observable through EXTCODESIZE / EXTCODECOPY.
+// A code-store entry's only length is its data-section header; a sidecar entry has none.
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <bit>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -33,10 +19,9 @@ namespace zilkworm {
 namespace {
 
 /// Rebuild a single-key code store so its only entry is reached through the collision
-/// sidecar, adding `extra` to the length the sidecar reports. `extra == 0` yields an
-/// honest sidecar entry, which must still be accepted.
+/// sidecar; `plant` writes header_len + *plant into entry bytes 12..16, the offset high half.
 std::vector<uint8_t> route_via_sidecar(const std::vector<uint8_t>& in, uint64_t key,
-                                       uint32_t extra) {
+                                       std::optional<uint32_t> plant) {
     const auto* h = reinterpret_cast<const MphfMapHeader*>(in.data());
     constexpr uint32_t kEntry = sizeof(MphfCollisionEntry);
     REQUIRE(h->collisions_size == 0);  // the builder placed it in a slot
@@ -63,14 +48,12 @@ std::vector<uint8_t> route_via_sidecar(const std::vector<uint8_t>& in, uint64_t 
     uint64_t header_len = 0;
     std::memcpy(&header_len, out.data() + oh->data_offset + off, 8);
 
-    auto* entry = reinterpret_cast<MphfCollisionEntry*>(out.data() + oh->collisions_offset);
-    entry->key = key;
-    entry->offset = off;
-    // Poke the inflated length into the 4 bytes after `offset` as raw memory, not through a
-    // struct field: those bytes are whatever the bundle's author put there, and a prover
-    // authors them freely. The reader must take its length from the data-section header.
-    const uint32_t lie = static_cast<uint32_t>(header_len) + extra;
-    std::memcpy(out.data() + oh->collisions_offset + 12, &lie, 4);
+    const MphfCollisionEntry entry{key, off};
+    std::memcpy(out.data() + oh->collisions_offset, &entry, kEntry);
+    if (plant) {
+        const uint32_t lie = static_cast<uint32_t>(header_len) + *plant;
+        std::memcpy(out.data() + oh->collisions_offset + 12, &lie, 4);
+    }
     return out;
 }
 
@@ -92,7 +75,7 @@ Bundle make_bundle(const std::vector<uint8_t>& code_store, const bytes32& code_h
 
 }  // namespace
 
-TEST_CASE("a code-store sidecar entry cannot overstate its length",
+TEST_CASE("a length planted in a code-store sidecar entry's offset high half is rejected",
           "[state_zz][direct_state][soundness]") {
     Bytes code;
     for (int i = 0; i < 6; ++i)
@@ -110,24 +93,23 @@ TEST_CASE("a code-store sidecar entry cannot overstate its length",
     }
 
     SECTION("honest sidecar entry is still accepted") {
-        const auto store = route_via_sidecar(honest_store, key, /*extra=*/0);
+        const auto store = route_via_sidecar(honest_store, key, std::nullopt);
+        REQUIRE(validate_mphf<32>(std::span<const uint8_t>{store}, 0,
+                                  static_cast<uint32_t>(store.size()), kMphfCodeStoreMagic));
         auto b = make_bundle(store, code_hash, static_cast<uint32_t>(code.size()));
         DirectState ds{std::span<uint8_t>{b.blob}, std::span<uint8_t>{b.nodestore}};
         REQUIRE(ds.sanitize());
         CHECK(ds.read_code(b.addr).size() == code.size());
     }
 
-    SECTION("a length planted beside a sidecar entry must not affect what is read") {
-        constexpr uint32_t kExtra = 40;  // > kCodePadding, so it reaches past the padding too
-        const auto store = route_via_sidecar(honest_store, key, kExtra);
-        auto b = make_bundle(store, code_hash, static_cast<uint32_t>(code.size()));
-        DirectState ds{std::span<uint8_t>{b.blob}, std::span<uint8_t>{b.nodestore}};
-
-        // The code hash verifies either way: sanitize() hashes the data-header range.
-        // The invariant is that the planted value cannot widen what read_code() serves --
-        // anything past the hashed range was never authenticated.
-        REQUIRE(ds.sanitize());
-        CHECK(ds.read_code(b.addr).size() == code.size());
+    // 0 plants the honest length: a reader still using bytes 12..16 as a length accepts it.
+    // validate_mphf<32> is the check DirectState runs on the code store at construction.
+    for (const uint32_t extra : {0u, 40u}) {
+        DYNAMIC_SECTION("a value planted in the offset high half is rejected (extra=" << extra << ")") {
+            const auto store = route_via_sidecar(honest_store, key, extra);
+            CHECK_FALSE(validate_mphf<32>(std::span<const uint8_t>{store}, 0,
+                                          static_cast<uint32_t>(store.size()), kMphfCodeStoreMagic));
+        }
     }
 }
 

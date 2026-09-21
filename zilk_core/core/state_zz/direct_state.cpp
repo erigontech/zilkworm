@@ -87,38 +87,6 @@ namespace {
             return true;
         };
 
-        if (meta->n_accounts > 0) {
-            if (!bound_bytes(meta->prestate_offset, sizeof(MphfMapHeader),
-                             "DirectState: prestate MphfMapHeader header out of range")) [[unlikely]]
-                return false;
-            if ((meta->prestate_offset % alignof(MphfMapHeader)) != 0) [[unlikely]] {
-                sys_println("DirectState: prestate_offset misaligned");
-                return false;
-            }
-            const auto* m = reinterpret_cast<const MphfMapHeader*>(blob.data() + meta->prestate_offset);
-            if (m->magic != kMphfAddrMapMagic) [[unlikely]] {
-                sys_println("DirectState: prestate MphfMapHeader bad magic");
-                return false;
-            }
-            if (m->version != kMphfMapVersion) [[unlikely]] {
-                sys_println("DirectState: prestate MphfMapHeader bad version");
-                return false;
-            }
-            if (m->n_keys == 0) [[unlikely]] {
-                sys_println("DirectState: prestate MphfMapHeader has zero keys but n_accounts > 0");
-                return false;
-            }
-            if (m->n_buckets == 0) [[unlikely]] {
-                sys_println("DirectState: prestate MphfMapHeader n_buckets == 0");
-                return false;
-            }
-            // displacement_factors[n_buckets] sits at displacement_offset.
-            if (!bound_bytes(static_cast<uint64_t>(meta->prestate_offset) + m->displacement_offset,
-                             static_cast<uint64_t>(m->n_buckets) * 8u,
-                             "DirectState: prestate MphfMapHeader displacement table out of range")) [[unlikely]]
-                return false;
-        }
-
         if (!bound_typed(meta->addr_hashes_offset, meta->n_accounts, sizeof(AddrHashEntry),
                          alignof(AddrHashEntry),
                          "DirectState: addr_hashes section out of range")) [[unlikely]]
@@ -127,53 +95,53 @@ namespace {
                          alignof(BlockHashEntry),
                          "DirectState: block_hashes section out of range")) [[unlikely]]
             return false;
-        if (!bound_bytes(meta->code_store_offset, meta->code_store_size,
-                         "DirectState: code_store section out of range")) [[unlikely]]
-            return false;
-        if (meta->code_store_size > 0 &&
-            (meta->code_store_offset % alignof(MphfMapHeader)) != 0) [[unlikely]] {
-            sys_println("DirectState: code_store_offset misaligned for MphfMapHeader");
-            return false;
-        }
-
+        // The addr map runs from prestate_offset up to addr_hashes_offset; a size-0
+        // region would skip validate_mphf.
         if (meta->n_accounts > 0) {
-            const uint32_t addr_mphf_size =
-                meta->addr_hashes_offset > meta->prestate_offset
-                    ? meta->addr_hashes_offset - meta->prestate_offset
-                    : 0u;
-            if (!validate_mphf<20>(blob, meta->prestate_offset, addr_mphf_size,
+            if (meta->addr_hashes_offset <= meta->prestate_offset) [[unlikely]] {
+                sys_println("DirectState: prestate MphfMap region empty");
+                return false;
+            }
+            if (!validate_mphf<20>(blob, meta->prestate_offset,
+                                   meta->addr_hashes_offset - meta->prestate_offset,
                                    kMphfAddrMapMagic)) [[unlikely]] {
                 return false;
             }
-        }
-        if (meta->code_store_size > 0) {
-            if (!validate_mphf<32>(blob, meta->code_store_offset, meta->code_store_size,
-                                   kMphfCodeStoreMagic)) [[unlikely]] {
+            const auto* m = reinterpret_cast<const MphfMapHeader*>(blob.data() + meta->prestate_offset);
+            if (m->n_keys == 0) [[unlikely]] {
+                sys_println("DirectState: prestate MphfMapHeader has zero keys but n_accounts > 0");
                 return false;
             }
+        }
+        if (!validate_mphf<32>(blob, meta->code_store_offset, meta->code_store_size,
+                               kMphfCodeStoreMagic)) [[unlikely]] {
+            return false;
         }
 
         if (meta->n_accounts > 0) {
             const auto* mhdr = reinterpret_cast<const MphfMapHeader*>(
                 blob.data() + meta->prestate_offset);
             const uint8_t* mbase = reinterpret_cast<const uint8_t*>(mhdr);
-            const uint32_t data_size = mhdr->data_size;
+            const uint8_t* data = mbase + mhdr->data_offset;
             const auto* slot_offsets = reinterpret_cast<const uint32_t*>(
                 mbase + mhdr->slot_offsets_offset);
-            auto check_entry = [&](uint32_t off) -> bool {
+            // Account-specific, on top of validate_mphf<20>: 8-alignment for the in-place
+            // Account, and the Account plus its inline slots must fit in the body its
+            // header declares.
+            auto check_entry = [&](uint64_t off) -> bool {
                 if ((off % alignof(Account)) != 0) [[unlikely]] {
                     sys_println("DirectState: addr-map entry misaligned for Account");
                     return false;
                 }
-                if (static_cast<uint64_t>(off) + 8u + sizeof(Account) > data_size) [[unlikely]] {
-                    sys_println("DirectState: addr-map entry header OOB");
+                uint64_t body_len; std::memcpy(&body_len, data + off, 8);
+                if (body_len < sizeof(Account)) [[unlikely]] {
+                    sys_println("DirectState: addr-map entry body smaller than Account");
                     return false;
                 }
-                const auto* acc = reinterpret_cast<const Account*>(mbase + mhdr->data_offset + off + 8u);
-                const uint64_t slots_end = static_cast<uint64_t>(off) + 8u + sizeof(Account) +
-                                           static_cast<uint64_t>(acc->slot_count) * sizeof(Slot);
-                if (slots_end > data_size) [[unlikely]] {
-                    sys_println("DirectState: addr-map entry slots OOB");
+                const auto* acc = reinterpret_cast<const Account*>(data + off + 8u);
+                const uint64_t slots_bytes = static_cast<uint64_t>(acc->slot_count) * sizeof(Slot);
+                if (slots_bytes > body_len - sizeof(Account)) [[unlikely]] {
+                    sys_println("DirectState: addr-map entry slots exceed body");
                     return false;
                 }
                 return true;
@@ -196,6 +164,21 @@ namespace {
             }
         }
         return true;
+    }
+
+    // The node store is the third MphfMap this class builds. Checked here so every
+    // caller of the constructor is covered, not only load_flat_bundle.
+    bool validate_nodestore_layout(std::span<const uint8_t> ns) noexcept {
+        if (ns.empty()) return true;
+        if ((reinterpret_cast<uintptr_t>(ns.data()) % alignof(MphfMapHeader)) != 0) [[unlikely]] {
+            sys_println("DirectState: node store not 8-byte aligned");
+            return false;
+        }
+        if (ns.size() > UINT32_MAX) [[unlikely]] {
+            sys_println("DirectState: node store larger than an MphfMap region");
+            return false;
+        }
+        return validate_mphf<32>(ns, 0, static_cast<uint32_t>(ns.size()), kMphfNodeStoreMagic);
     }
 
     inline const PreStateMeta* validate_or_abort(std::span<const uint8_t> v) noexcept {
@@ -235,7 +218,7 @@ namespace detail {
 DirectState::DirectState(std::span<uint8_t> prestate_bytes) noexcept
     : DirectState{prestate_bytes, std::span<uint8_t>{}} {}
 
-// validate_or_abort runs validate_prestate_layout before any field is read.
+// Both layouts are validated before any field is read or any MphfMap is built.
 // On failure it aborts; future wiring will route `false` to a 0-gas proof.
 DirectState::DirectState(std::span<uint8_t> prestate_bytes,
                          std::span<uint8_t> nodestore_bytes) noexcept
@@ -250,6 +233,9 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
       addr_hashes_{reinterpret_cast<const AddrHashEntry*>(prestate_view_.data() + pre_state_meta_->addr_hashes_offset), pre_state_meta_->n_accounts},
       block_hashes_{reinterpret_cast<const BlockHashEntry*>(prestate_view_.data() + pre_state_meta_->block_hashes_offset), pre_state_meta_->n_block_hashes} {
     if (!nodestore_bytes.empty()) {
+        if (!validate_nodestore_layout(nodestore_bytes)) [[unlikely]] {
+            std::abort();
+        }
         node_store_map_.reset(reinterpret_cast<MphfMapHeader*>(nodestore_bytes.data()));
     }
     reserve_block_maps_();
@@ -649,18 +635,15 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
 
     if (pre_state_meta_->n_accounts > 0) {
         auto handle = [&](std::span<const uint8_t> body) {
-            if (body.size() < sizeof(Account)) [[unlikely]]
-                return;
-            const auto* pa = reinterpret_cast<const Account*>(body.data());
+            const auto* pa = reinterpret_cast<const Account*>(body.data());  // sized by validate_prestate_layout
             evmc::address addr;
             std::memcpy(addr.bytes, pa->addr, 20);
             emit(addr, *pa);
         };
-        if (!pre_state_map_.for_each<20>(
-                               [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
-                                   handle(std::span<const uint8_t>{body.data(), body.size()});
-                               }))
-            return std::nullopt;
+        pre_state_map_.for_each<20>(
+            [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
+                handle(std::span<const uint8_t>{body.data(), body.size()});
+            });
     }
     for (const auto& [addr, pa] : created_accounts_) {
         emit(addr, pa);
@@ -901,20 +884,18 @@ std::optional<intx::uint256> DirectState::total_difficulty(uint64_t, const evmc:
 bool DirectState::sanitize() {
     // SOUNDNESS-CRITICAL: binds each leaf's identity to its trie-key hash.
     bool code_keccak_ok = true;
-    if (!code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-            code_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
-        }))
-        return false;
+    code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
+        code_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+    });
     if (!code_keccak_ok) {
         sys_println("sanitize: code-hash mismatch in witness bundle ");
         return false;
     }
 
     bool nodes_keccak_ok = true;
-    if (!node_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-            nodes_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
-        }))
-        return false;
+    node_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
+        nodes_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+    });
     if (!nodes_keccak_ok) {
         sys_println("sanitize: node-hash mismatch in witness bundle ");
         return false;
@@ -923,11 +904,7 @@ bool DirectState::sanitize() {
     bool acc_walk_ok = true;
     auto handle_account_body = [&](std::span<uint8_t> body) {
         if (!acc_walk_ok) return;
-        if (body.size() < sizeof(Account)) [[unlikely]] {
-            acc_walk_ok = false;
-            return;
-        }
-        auto* pa = reinterpret_cast<Account*>(body.data());
+        auto* pa = reinterpret_cast<Account*>(body.data());  // sized by validate_prestate_layout
         if (pa->code_store_len > 0) {
             const auto code_hash = std::bit_cast<evmc::bytes32>(pa->code_hash);
             if (auto b = code_store_map_.find<32, 0, &hash_key8>(code_hash.bytes)) {
@@ -950,11 +927,10 @@ bool DirectState::sanitize() {
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
     };
     if (pre_state_meta_->n_accounts > 0) {
-        if (!pre_state_map_.for_each<20>(
-                               [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
-                                   handle_account_body(body);
-                               }))
-            return false;
+        pre_state_map_.for_each<20>(
+            [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
+                handle_account_body(body);
+            });
     }
     if (!acc_walk_ok) return false;
 
@@ -973,11 +949,11 @@ bool DirectState::sanitize() {
 
     bool addr_hash_skipped = false;
     if (pre_state_meta_->n_accounts > 0) {
-        if (!pre_state_map_.for_each<20>(
-                               [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
-                                   auto* pa = reinterpret_cast<Account*>(body.data());
-                                    addr_hash_skipped = pa->modified || addr_hash_skipped;   // Should be all false
-                               })) return false;
+        pre_state_map_.for_each<20>(
+            [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
+                auto* pa = reinterpret_cast<Account*>(body.data());
+                addr_hash_skipped = pa->modified || addr_hash_skipped;   // Should be all false
+            });
     }
     if (addr_hash_skipped) return false;
 

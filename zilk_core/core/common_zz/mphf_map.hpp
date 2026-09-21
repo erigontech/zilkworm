@@ -23,11 +23,12 @@ using ::silkworm::Bytes;
 
 // MphfMapHeader: u64 -> bytes minimal perfect hash with collision sidecar.
 // Header layout: displacement_factors[n_buckets]:u64, slot_offsets[n_keys]:u32
-// (0 == collision), collisions:[key:u64][data_offset:u32][pad:u32]*,
+// (0 == collision), collisions:[key:u64][data_offset:u64]*,
 // data:[len:u64][body]*.
 // Caller verifies membership via key bytes embedded in body.
+// MphfMap reads unchecked: see validate_mphf below for the layout contract.
 inline constexpr uint64_t kMphfGoldenRatio = 0x9E3779B97F4A7C15ull;
-inline constexpr uint32_t kMphfMapVersion = 2u;
+inline constexpr uint32_t kMphfMapVersion = 3u;
 
 // SplitMix64-stage1 mixer.
 [[gnu::always_inline]] inline uint64_t mix64_body(uint64_t z) noexcept {
@@ -74,13 +75,12 @@ struct alignas(8) MphfMapHeader {
     }
 };
 
-struct alignas(8) MphfCollisionEntry {
+struct MphfCollisionEntry {
     uint64_t key;
-    uint32_t offset;
+    uint64_t offset;
     // No length here on purpose. The entry's length lives in the data-section header
     // ([len:u64] before the body), which is the range sanitize() hashes; a second copy
     // could disagree with it and would be trusted for the span handed to the EVM.
-    // The trailing 4 bytes of padding keep sizeof() at 16, so the layout is unchanged.
 };
 
 static_assert(sizeof(MphfMapHeader) == 56);
@@ -99,7 +99,7 @@ class MphfMap {
         h_ = h;
         if (h == nullptr) {
             slot_offsets_ = nullptr; data_ = nullptr; collisions_ = nullptr; displacement_ = nullptr;
-            n_keys_ = n_buckets_ = data_size_ = n_collisions_ = 0; seed_factor_ = 0;
+            n_keys_ = n_buckets_ = n_collisions_ = 0; seed_factor_ = 0;
             return;
         }
         const auto* base = reinterpret_cast<const uint8_t*>(h);
@@ -109,7 +109,6 @@ class MphfMap {
         displacement_ = reinterpret_cast<const uint64_t*>(base + h->displacement_offset);
         n_keys_       = h->n_keys;
         n_buckets_    = h->n_buckets;
-        data_size_    = h->data_size;
         n_collisions_ = h->collisions_size / static_cast<uint32_t>(sizeof(MphfCollisionEntry));
         seed_factor_  = h->seed_factor;
     }
@@ -149,30 +148,21 @@ class MphfMap {
         return std::nullopt;
     }
 
+    // Visits every singleton slot (skipping the 0 sentinels) and then every sidecar entry.
     template <std::size_t KeySize = 32, std::size_t KeyOffset = 0, typename Cb>
-    bool for_each(Cb&& cb) const noexcept {
-        if (h_ == nullptr || n_keys_ == 0) return true;
-        auto emit = [&](uint32_t off) noexcept -> bool {
-            const uint64_t hdr_end = static_cast<uint64_t>(off) + 8u;
-            uint64_t body_len = 0;
-            if (hdr_end <= data_size_) std::memcpy(&body_len, data_ + off, 8);
-            const bool bad = hdr_end + body_len > data_size_ || body_len < KeyOffset + KeySize;
-            if (bad) [[unlikely]] {
-                sys_println("MphfMap: for_each: entry out of range or undersized");
-                return false;
-            }
+    void for_each(Cb&& cb) const noexcept {
+        if (h_ == nullptr || n_keys_ == 0) return;
+        auto apply_cb = [&](uint64_t off) noexcept {
+            uint64_t body_len; std::memcpy(&body_len, data_ + off, 8);
             uint8_t* body = data_ + off + 8u;
             cb(body + KeyOffset, std::span<uint8_t>{body, static_cast<size_t>(body_len)});
-            return true;
         };
         for (uint32_t i = 0; i < n_keys_; ++i) {
             const uint32_t off = slot_offsets_[i];
-            if (off == 0) continue;
-            if (!emit(off)) return false;
+            if (off != 0) apply_cb(off);
         }
         for (uint32_t i = 0; i < n_collisions_; ++i)
-            if (!emit(collisions_[i].offset)) return false;
-        return true;
+            apply_cb(collisions_[i].offset);
     }
 
   private:
@@ -197,11 +187,23 @@ class MphfMap {
     uint8_t*                  data_{nullptr};
     const MphfCollisionEntry* collisions_{nullptr};
     const uint64_t*           displacement_{nullptr};
-    uint32_t n_keys_{0}, n_buckets_{0}, data_size_{0}, n_collisions_{0};
+    uint32_t n_keys_{0}, n_buckets_{0}, n_collisions_{0};
     uint64_t seed_factor_{0};
 };
 
-template <size_t KeySize>
+// The one layout check for an MphfMap region. Every map passes it before an MphfMap
+// is built over it (the DirectState constructor, for the addr map, code store and
+// node store), so find() and for_each() read without re-checking.
+//
+// It checks the header, then each section's bounds and alignment inside the region,
+// then every entry reachable from slot_offsets[] or the sidecar: [len:u64][body]
+// inside data[] with body_len >= KeyOffset + KeySize, the bytes
+// find<KeySize, KeyOffset>() memcmps.
+//
+// Checking once is sound because data[] is the only section written through
+// afterwards (Account scratch, EVM state), and it must start at or past the end of
+// the header and of every table. No later write can rewrite a checked offset.
+template <size_t KeySize, size_t KeyOffset = 0>
 [[nodiscard]] bool validate_mphf(std::span<const uint8_t> base,
                                  uint32_t region_off,
                                  uint32_t region_size,
@@ -267,6 +269,10 @@ template <size_t KeySize>
                                "MphfMapHeader: validate_mphf: slot_offsets out of range");
 
     if (m->collisions_size > 0) {
+        if ((m->collisions_offset % alignof(MphfCollisionEntry)) != 0) [[unlikely]] {
+            sys_println("MphfMapHeader: validate_mphf: collisions_offset misaligned");
+            ok = false;
+        }
         if ((m->collisions_size % sizeof(MphfCollisionEntry)) != 0) [[unlikely]] {
             sys_println("MphfMapHeader: validate_mphf: collisions_size not a MphfCollisionEntry multiple");
             ok = false;
@@ -275,12 +281,57 @@ template <size_t KeySize>
                                    "MphfMapHeader: validate_mphf: collisions out of range");
     }
 
-    if (m->data_size > 0) {
-        ok &= bounds_within_region(m->data_offset, m->data_size,
-                                   "MphfMapHeader: validate_mphf: data region out of range");
+    if ((m->data_offset % alignof(uint64_t)) != 0) [[unlikely]] {
+        sys_println("MphfMapHeader: validate_mphf: data_offset misaligned");
+        ok = false;
     }
+    ok &= bounds_within_region(m->data_offset, m->data_size,
+                               "MphfMapHeader: validate_mphf: data region out of range");
+    // data[] starts at or past the end of the header and of each table.
+    const uint64_t data_lo = m->data_offset;
+    if (data_lo < sizeof(MphfMapHeader) ||
+        data_lo < uint64_t{m->displacement_offset} + uint64_t{m->n_buckets} * 8u ||
+        data_lo < uint64_t{m->slot_offsets_offset} + uint64_t{m->n_keys} * 4u ||
+        (m->collisions_size > 0 &&
+         data_lo < uint64_t{m->collisions_offset} + m->collisions_size)) [[unlikely]] {
+        sys_println("MphfMapHeader: validate_mphf: data section overlaps a preceding section");
+        ok = false;
+    }
+    if (!ok) [[unlikely]] return false;  // the entry walk below dereferences the sections
 
-    return ok;
+    const uint8_t* mbase = base.data() + region_off;
+    const auto* slot_offsets = reinterpret_cast<const uint32_t*>(mbase + m->slot_offsets_offset);
+    const auto* collisions = reinterpret_cast<const MphfCollisionEntry*>(mbase + m->collisions_offset);
+    const uint32_t n_collisions = m->collisions_size / static_cast<uint32_t>(sizeof(MphfCollisionEntry));
+    const uint8_t* data = mbase + m->data_offset;
+    const uint32_t data_size = m->data_size;
+
+    // off is u64 (sidecar) or u32 (slot) but data[] is u32-sized: compare before
+    // adding, since off + 8 can wrap and the high half must not be dropped.
+    auto entry_within_data = [&](uint64_t off) -> bool {
+        if (off > data_size || data_size - off < 8u) [[unlikely]] {
+            sys_println("MphfMapHeader: validate_mphf: entry header out of data region");
+            return false;
+        }
+        uint64_t body_len; std::memcpy(&body_len, data + off, 8);
+        if (body_len > data_size - off - 8u) [[unlikely]] {
+            sys_println("MphfMapHeader: validate_mphf: entry body out of data region");
+            return false;
+        }
+        if (body_len < KeyOffset + KeySize) [[unlikely]] {
+            sys_println("MphfMapHeader: validate_mphf: entry body shorter than its key");
+            return false;
+        }
+        return true;
+    };
+    for (uint32_t i = 0; i < m->n_keys; ++i) {
+        const uint32_t off = slot_offsets[i];
+        if (off != 0 && !entry_within_data(off)) [[unlikely]] return false;
+    }
+    for (uint32_t i = 0; i < n_collisions; ++i) {
+        if (!entry_within_data(collisions[i].offset)) [[unlikely]] return false;
+    }
+    return true;
 }
 
 }  // namespace zilkworm

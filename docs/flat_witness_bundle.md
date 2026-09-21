@@ -124,7 +124,7 @@ A FlatBundle is a POD-mmap-able witness layout. The header is fixed-size
 ```cpp
 struct alignas(8) FlatBundleHeader {
     uint32_t magic;                 // 'FBND' (0x444E4246)
-    uint32_t version;               // 13
+    uint32_t version;               // 14
     uint32_t genesis_rlp_off;       uint32_t genesis_rlp_size;
     uint32_t blocks_rlp_off;        uint32_t blocks_rlp_size;
     uint32_t ancestors_rlp_off;     uint32_t ancestors_rlp_size;
@@ -145,7 +145,7 @@ Sections, in order they typically appear:
 | `node_store` | An MphfMap of MPT proof nodes keyed by 32-byte hash. A peer top-level section, **not** part of `direct_state` (see §2.6). |
 | `network` | UTF-8 string naming the target chain config (e.g. `"Mainnet"`, `"Prague"`, `"Cancun"`). Not null-terminated; size is the section length. `StateTransition::run_one_bundle` looks this up in `silkworm::test::kNetworkConfig` to pick the `ChainConfig`. |
 
-Current wire is `kFlatBundleVersion = 13`. Older bundles fail `load_flat_bundle` validation.
+Current wire is `kFlatBundleVersion = 14`. Older bundles fail `load_flat_bundle` validation.
 
 ### 2.3 `direct_state` internals
 
@@ -287,18 +287,23 @@ is self-consistent. The checks it performs (in the order the function runs them)
 
 3. **Per-Account slot-extent bound.** This bound is enforced at `DirectState`
    construction (via `validate_prestate_layout` / `validate_or_abort`), before
-   `sanitize()` runs, but it belongs to the same threat model: for each addr-map
-   entry it verifies the entry's bytes — len prefix, `Account`, and all inline
-   slots — fit inside the blob. In `validate_prestate_layout`'s `check_entry`:
+   `sanitize()` runs, but it belongs to the same threat model. It is layered:
+   `validate_mphf<20>` first places every addr-map entry's `[len:u64][body]`
+   inside `data[]` with `body_len >= 20` (the generic MphfMap invariant, §2.4),
+   and `validate_prestate_layout`'s `check_entry` then requires the `Account`
+   and all its inline slots to fit inside that body:
 
    ```cpp
-   const uint64_t slots_end = static_cast<uint64_t>(off) + 8u + sizeof(Account) +
-                              static_cast<uint64_t>(acc->slot_count) * sizeof(Slot);
-   if (slots_end > data_size) [[unlikely]] { /* reject: slots OOB */ }
+   uint64_t body_len; std::memcpy(&body_len, data + off, 8);
+   if (body_len < sizeof(Account)) [[unlikely]] { /* reject */ }
+   const auto* acc = reinterpret_cast<const Account*>(data + off + 8u);
+   const uint64_t slots_bytes = static_cast<uint64_t>(acc->slot_count) * sizeof(Slot);
+   if (slots_bytes > body_len - sizeof(Account)) [[unlikely]] { /* reject: slots exceed body */ }
    ```
 
-   i.e. `off + 8 + sizeof(Account) + slot_count*sizeof(Slot) <= data_size`. This
-   stops a forged `slot_count` from steering reads out of bounds.
+   i.e. `sizeof(Account) + slot_count*sizeof(Slot) <= body_len` and, by the
+   MphfMap invariant, `off + 8 + body_len <= data_size`. This stops a forged
+   `slot_count` from steering reads out of bounds, or into a neighbouring entry.
 
 4. **MPHF routing.** This one is enforced at root-check time inside
    `check_root`, not in `sanitize()`, but it belongs to the same threat model:
@@ -415,7 +420,7 @@ separating three things that the name "MphfMap" used to conflate:
 
 - **The conceptual map** — a u64 → bytes minimal-perfect-hash map with a
   collision sidecar.
-- **`MphfMapHeader`** — the 56-byte `alignas(8)` POD *wire header* (version 2)
+- **`MphfMapHeader`** — the 56-byte `alignas(8)` POD *wire header* (version 3)
   that sits at the front of the on-disk section.
 - **`MphfMap`** — a thin C++ *wrapper class* that holds a
   `const MphfMapHeader*` and the derived pointers/scalars, and exposes the
@@ -427,11 +432,11 @@ Both live in `zilk_core/core/common_zz/mphf_map.hpp`.
 #### The wire header
 
 ```cpp
-inline constexpr uint32_t kMphfMapVersion = 2u;
+inline constexpr uint32_t kMphfMapVersion = 3u;
 
 struct alignas(8) MphfMapHeader {  // 56 bytes
     uint32_t magic;
-    uint32_t version;                // kMphfMapVersion = 2
+    uint32_t version;                // kMphfMapVersion = 3
     uint32_t n_keys;
     uint32_t n_buckets;
     uint64_t seed;
@@ -446,12 +451,20 @@ struct alignas(8) MphfMapHeader {  // 56 bytes
     uint32_t index_lookup(uint64_t key) const noexcept;  // see below
 };
 
-struct alignas(8) MphfCollisionEntry {  // 16 bytes
+struct MphfCollisionEntry {  // 16 bytes, natural layout (alignof 8)
     uint64_t key;     // the uint64_t fingerprint the builder was given
-    uint32_t offset;  // offset inside data[] where the body starts
-    uint32_t len;     // body length in bytes
+    uint64_t offset;  // offset inside data[] of the entry's [len:u64][body]
+    // No length: the [len:u64] data-section header is the only copy (see §2.4).
 };
 ```
+
+Two `uint64_t`s in natural layout: every byte of the entry is defined, there is
+no reserved field, and each field is a single aligned `ld` on rv64im. `offset`
+is u64 on the wire but the arena it indexes is u32-sized
+(`MphfMapHeader::data_size`), so a prover can author values no producer emits.
+`validate_mphf` rejects `offset > data_size` *before* adding to it — the sum
+cannot wrap and the high half is never silently dropped — and it is the one
+place that does: `find()` and `for_each()` run only over a validated map.
 
 Physical layout following the header:
 
@@ -485,7 +498,7 @@ class MphfMap {
     std::optional<std::span<uint8_t>> find(const uint8_t (&key)[KeySize]) const noexcept;
 
     template <std::size_t KeySize = 32, std::size_t KeyOffset = 0, typename Cb>
-    bool for_each(Cb&& cb) const noexcept;
+    void for_each(Cb&& cb) const noexcept;
 
  private:
     template <std::size_t KeySize, std::size_t KeyOffset = 0>
@@ -496,7 +509,7 @@ class MphfMap {
     uint8_t*                  data_{nullptr};        // MUTABLE
     const MphfCollisionEntry* collisions_{nullptr};
     const uint64_t*           displacement_{nullptr};
-    uint32_t n_keys_{0}, n_buckets_{0}, data_size_{0}, n_collisions_{0};
+    uint32_t n_keys_{0}, n_buckets_{0}, n_collisions_{0};
     uint64_t seed_factor_{0};
 };
 ```
@@ -601,9 +614,12 @@ MphfMap::resolve_collision(uint64_t k8, const uint8_t (&key)[KeySize]) const noe
     auto it = std::lower_bound(collisions_, collisions_ + n_collisions_, k8,
         [](const MphfCollisionEntry& e, uint64_t kk) noexcept { return e.key < kk; });
     for (; it != collisions_ + n_collisions_ && it->key == k8; ++it) {
+        // it->offset is u64 over a u32 arena; validate_mphf bounded it, no guard here.
         uint8_t* body = data_ + it->offset + 8u;
-        if (std::memcmp(body + KeyOffset, key, KeySize) == 0)
-            return std::span<uint8_t>{body, (size_t)it->len};
+        if (std::memcmp(body + KeyOffset, key, KeySize) == 0) {
+            uint64_t len; std::memcpy(&len, data_ + it->offset, 8);  // the data-section header
+            return std::span<uint8_t>{body, static_cast<size_t>(len)};
+        }
     }
     return {};
 }
@@ -643,6 +659,30 @@ inline uint64_t addr_key8(const uint8_t (&a)[20]) noexcept {
 `0` sentinels) and then every sidecar entry, so it visits all bodies. It is
 used by `sanitize()` to sweep the code-store, node-store, and addr-map.
 
+Neither `find()` nor `for_each()` bounds-checks an entry. The layout invariant
+has one owner, `validate_mphf<KeySize, KeyOffset>`, which every map passes
+once where it is built, in the `DirectState` constructor
+(`validate_prestate_layout` for the addr map and code store,
+`validate_nodestore_layout` for the node store), before an `MphfMap` exists
+over it. Beyond the header and section checks it walks every entry reachable
+from `slot_offsets[]` or the sidecar and requires:
+
+- `offset <= data_size` and `data_size - offset >= 8` (compared before any
+  addition, so a u64 sidecar offset cannot wrap);
+- `body_len <= data_size - offset - 8`, the body lies inside the arena;
+- `body_len >= KeyOffset + KeySize`, the bytes `find()` memcmps exist.
+
+Checking once is only sound if what was checked cannot change afterwards.
+`data[]` is the one section written through after validation (`sanitize()`
+stamps `Account` scratch fields in place, the EVM updates state), so
+`validate_mphf` also requires `data_offset` to lie at or past the end of the
+header, the displacement table, `slot_offsets[]` and the sidecar. Both producers
+already emit `data[]` last; a header that lays it over a table is rejected,
+because a write into a body could otherwise rewrite an offset after its check.
+
+A map that fails is never constructed (the constructor aborts), which is why
+the read paths carry no guard of their own.
+
 ### 2.5 MphfBuilder: how the sidecar gets populated
 
 `MphfBuilder<KeySize>` (`zilk_core/core/common_zz/mphf_builder.{hpp,cpp}`)
@@ -673,13 +713,14 @@ After both routes have populated the collision arrays, `finalize()`:
   blob is zero-filled to begin with, so the slot reads back as a literal `0`.
   `finalize()` never has to overwrite a slot *with* `0`, because no placed key
   owns that index by the time it runs (see below).
-- Appends every collision body to `data[]`, recording `offset` and `len` back
-  into the corresponding `MphfCollisionEntry`.
+- Appends every collision body to `data[]`, recording `offset` back into the
+  corresponding `MphfCollisionEntry`. The body length is written once, into the
+  `[len:u64]` data-section header, which is also what the read path returns.
 - Sorts `collision_keys_` by `.key` so the read-side `lower_bound` works.
 
-The sort makes `MphfCollisionEntry[]` a sorted array of `(key, offset, len)`
-triples, with same-`key` entries forming contiguous clusters that the read path
-walks linearly while memcmp'ing the full identity inside each body.
+The sort makes `MphfCollisionEntry[]` a sorted array of `(key8, offset)` pairs,
+with same-key entries forming contiguous clusters that the read path walks
+linearly while memcmp'ing the full identity inside each body.
 
 Each body the converters write is `FlatKv::encode(full_key, payload)` — the full
 verify-key followed by the payload — so the read-path memcmp (at `KeyOffset` 0)
@@ -777,10 +818,10 @@ It is constructed host-side by the converters (`json_witness_to_flat_bundle`,
 `legacy_to_flat_bundle`, `eest_to_flat_bundle`) from whatever MPT proof nodes
 they observe in the witness JSON / legacy bundle / EEST trie build, then handed
 to `build_flat_bundle` alongside the already-built `direct_state` blob. The two
-are written into adjacent sections of the same `FlatBundle` allocation;
-`load_flat_bundle` validates each section independently (see the
-`validate_mphf<32>` calls in `flat_bundle.cpp` for both `code_store` and
-`node_store`).
+are written into adjacent sections of the same `FlatBundle` allocation.
+`load_flat_bundle` bounds the sections and requires them disjoint; the MphfMap
+layout of each store is validated by `validate_mphf<32>` in the `DirectState`
+constructor, where the maps are built (§2.4).
 
 At runtime the `node_store` is **read-only** — there is no append path. The
 `DirectState` constructor takes the node-store byte window as a separate `span`
@@ -1101,7 +1142,7 @@ QEMU runner, and the SP1 host can all consume unmodified.
 `zilk_core/dev/cli/legacy_to_flat_bundle.cpp`. One-shot converter from the old
 `unifiedBlockAndStateRlp<N>.bin` shape (5 RLP items, in order: genesis block
 [decoded as `genesis_rlp` and passed as the bundle's genesis], current block,
-pre-state, ancestors, pre-trie) to a v13 FlatBundle wrapped in MFBD with
+pre-state, ancestors, pre-trie) to a v14 FlatBundle wrapped in MFBD with
 `n_bundles=1`. The output bundle's `network` section is hardcoded to
 `"Mainnet"`. Self-contained — keeps the legacy decoders out of the main code
 paths. Usage: `legacy_to_flat_bundle <legacy.bin> <flat.bin>`.
@@ -1113,7 +1154,7 @@ document on stdin (the `{block, headers, state, codes, keys}` payload that
 `prover/common/src/fetcher.rs` synthesises from a geth `debug_executionWitness`
 response), walks the witness state trie and per-account storage tries in C++,
 fingerprints addresses, builds the addr-map and node-store MphfMaps, and
-assembles a v13 FlatBundle. The output bundle's `network` section is hardcoded
+assembles a v14 FlatBundle. The output bundle's `network` section is hardcoded
 to `"Mainnet"`. Output is MFBD-wrapped and written to stdout.
 
 ### 8.3 `eest_to_flat_bundle`

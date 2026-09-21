@@ -174,7 +174,9 @@ std::vector<uint8_t> DirectState::build_blob_from_accounts(std::vector<AccountIn
                 entries, entries + n_c, k8,
                 [](const MphfCollisionEntry& e, uint64_t k) noexcept { return e.key < k; });
             for (; it != entries + n_c && it->key == k8; ++it) {
-                if (std::memcmp(data + it->offset + 8u, addr20, 20) == 0) return it->offset;
+                // Fits u32: MphfBuilder assigned this offset from a uint32_t data_cur.
+                if (std::memcmp(data + it->offset + 8u, addr20, 20) == 0)
+                    return static_cast<uint32_t>(it->offset);
             }
         }
         return 0u;

@@ -7,7 +7,6 @@
 
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/rlp/decode.hpp>
-#include <zilk_core/core/common_zz/mphf_map.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/state_zz/pre_state.hpp>
 #include <zilk_core/print.hpp>
@@ -158,11 +157,6 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
         sys_println("load_flat_bundle: direct_state_off misaligned");
         return std::nullopt;
     }
-    if (hdr->node_store_size > 0 &&
-        (hdr->node_store_off % alignof(MphfMapHeader)) != 0) [[unlikely]] {
-        sys_println("load_flat_bundle: node_store_off misaligned");
-        return std::nullopt;
-    }
 
     struct Section { uint32_t off; uint32_t size; const char* name; };
     const Section sections[] = {
@@ -188,15 +182,8 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
         }
     }
 
-    if (hdr->node_store_size > 0) {
-        if (!validate_mphf<32>(
-                std::span<const uint8_t>{blob.data(), blob.size()},
-                hdr->node_store_off,
-                hdr->node_store_size,
-                kMphfNodeStoreMagic)) [[unlikely]] {
-            return std::nullopt;
-        }
-    }
+    // The node-store and direct_state sections are bounded and disjoint here; their
+    // MphfMap layout is validated where the maps are built, in the DirectState constructor.
 
     silkworm::Block genesis;
     {
