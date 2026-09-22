@@ -16,6 +16,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
 
 namespace zilkworm {
 using ::silkworm::ByteView;
@@ -137,7 +138,17 @@ class MphfMap {
         const uint32_t off = slot_offsets_[idx];
         if (off != 0) [[likely]] {
             uint8_t* body = data_ + off + 8u;
-            if (std::memcmp(body + KeyOffset, key, KeySize) == 0) [[likely]] {
+            // Entry offsets are mphf_align8'd, so body (off + 8) is 8-aligned; the
+            // key argument is an evmc_bytes32 (alignas 8) or evmc_address (alignas 4).
+            bool key_match;
+            static_assert(KeyOffset % 4 == 0);
+            if constexpr (KeySize == 32 && KeyOffset % 8 == 0)
+                key_match = eq_bytes32(body + KeyOffset, key);
+            else if constexpr (KeySize == 20)
+                key_match = eq_bytes20_u32(body + KeyOffset, key);
+            else
+                key_match = std::memcmp(body + KeyOffset, key, KeySize) == 0;
+            if (key_match) [[likely]] {
                 uint64_t len; std::memcpy(&len, data_ + off, 8);
                 return std::span<uint8_t>{body, static_cast<size_t>(len)};
             }

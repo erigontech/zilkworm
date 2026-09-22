@@ -297,7 +297,8 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
         const auto storage_slots = slots_for(*pa);
         auto it = std::lower_bound(storage_slots.cbegin(), storage_slots.cend(), key,
                                    [](const Slot& s, const evmc::bytes32& k) {
-                                       return std::memcmp(s.key, k.bytes, 32) < 0;
+                                       // Slot is alignas(8) with key first; bytes32 is alignas(8).
+                                       return lt_bytes32(s.key, k.bytes);
                                    });
         if (it != storage_slots.cend() && eq_hash32(it->key, key.bytes)) {
             return std::bit_cast<evmc::bytes32>(it->current);
@@ -378,7 +379,8 @@ void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
         const auto end = begin + pa.slot_count;
         auto it = std::lower_bound(begin, end, key,
                                    [](const Slot& s, const evmc::bytes32& k) {
-                                       return std::memcmp(s.key, k.bytes, 32) < 0;
+                                       // Slot is alignas(8) with key first; bytes32 is alignas(8).
+                                       return lt_bytes32(s.key, k.bytes);
                                    });
         if (it != end && eq_hash32(it->key, key.bytes)) {
             copy32(it->current, value);
@@ -443,7 +445,7 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
         if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
             it->second.full_hash = h;
             it->second.bytes.assign(code.begin(), code.end());
-        } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
+        } else if (eq_bytes32(it->second.full_hash.bytes, h.bytes)) {
             // Exact dedup hit (same hash, possibly different addr). Skip insert.
         } else {
             if (auto [cit, cins] = created_code_collisions_.try_emplace(h);
@@ -885,7 +887,7 @@ bool DirectState::sanitize() {
     // SOUNDNESS-CRITICAL: binds each leaf's identity to its trie-key hash.
     bool code_keccak_ok = true;
     code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-        code_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+        code_keccak_ok &= eq_bytes32(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr);
     });
     if (!code_keccak_ok) {
         sys_println("sanitize: code-hash mismatch in witness bundle ");
@@ -894,7 +896,7 @@ bool DirectState::sanitize() {
 
     bool nodes_keccak_ok = true;
     node_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-        nodes_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+        nodes_keccak_ok &= eq_bytes32(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr);
     });
     if (!nodes_keccak_ok) {
         sys_println("sanitize: node-hash mismatch in witness bundle ");
@@ -939,7 +941,7 @@ bool DirectState::sanitize() {
     for (const auto& e : addr_hashes_) {
         if (prev_hash != nullptr && std::memcmp(prev_hash, e.addr_hash, 32) >= 0) return false;
         const auto h = silkworm::keccak256(ByteView{e.addr, 20});
-        if (std::memcmp(h.bytes, e.addr_hash, 32) != 0) return false;
+        if (!eq_bytes32(h.bytes, e.addr_hash)) return false;
         if (static_cast<uint64_t>(e.entry_offset) + 8u + sizeof(Account) > data_size) return false;
         auto* pa = account_at_offset(e.entry_offset);
         if (!pa || !eq_addr20(pa->addr, e.addr)) return false;
