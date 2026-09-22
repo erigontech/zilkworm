@@ -261,6 +261,9 @@ class GridMPT {
 
     LeafNode make_cur_leaf(ByteView value_rlp);
 
+    template <typename It>
+    bytes32 calc_root_impl(It updates_it, It updates_end);
+
     // Shared by the constructor and reset(): if previous_root_hash is
     // non-empty, look it up via DirectState::find_node_rlp and unfold onto
     // grid_[0]. Defined in grid_mpt.cpp to keep the DirectState include out
@@ -315,6 +318,9 @@ class GridMPT {
 
     // Main algorithm
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
+    // Same walk over an externally sorted pointer order: lets check_root sort 8-byte pointers
+    // instead of moving 168-byte TrieNodeFlat records.
+    bytes32 calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted);
 
     template <typename NodeType>
     bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node);
