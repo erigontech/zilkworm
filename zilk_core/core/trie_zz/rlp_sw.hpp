@@ -96,7 +96,7 @@ inline const Bytes& encode_branch(const BranchNode& b) {
     // copy it into the scratch buffer and rewrite only the dirty slots there. Clean slots
     // still read (hash) or were copied (embedded) from that encoding, so this matches
     // the full re-encode byte for byte. The original witness bytes are never written.
-    if (b.orig != nullptr && b.same_layout_as_orig()) {
+    if (b.orig != nullptr && (b.uniform ? b.dirty_slots_are_hashes() : b.same_layout_as_orig())) {
         resize_uninitialized(static_buffer, b.orig_size);
         uint8_t* const out = static_buffer.data();
         std::memcpy(out, b.orig, b.orig_size);
@@ -104,7 +104,7 @@ inline const Bytes& encode_branch(const BranchNode& b) {
             const uint8_t b0 = b.orig[0];
             uint8_t* p = out + (b0 < 0xf8 ? 1 : 1 + (b0 - 0xf7));  // list header length
             for (size_t i = 0; i < 16; ++i) {
-                const auto len = b.orig_child_len[i];
+                const auto len = b.uniform ? uint8_t{32} : b.orig_child_len[i];
                 if (b.dirty & (1u << i)) {
                     if (len == 0) {
                         *p = rlp::kEmptyStringCode;
@@ -124,7 +124,7 @@ inline const Bytes& encode_branch(const BranchNode& b) {
     rlp::Header h{.list = true, .payload_length = 0};
     // Calculate payload for 16 children
     for (size_t i = 0; i < 16; ++i) {
-        auto child_len = b.child_len[i];
+        const auto child_len = b.slot_len(static_cast<unsigned>(i));
 
         // No double encoding for embedded node
         h.payload_length += (child_len == 0 || child_len == 32)
@@ -142,16 +142,15 @@ inline const Bytes& encode_branch(const BranchNode& b) {
     uint8_t* p = static_buffer.data() + header_len;
 
     for (size_t i = 0; i < 16; ++i) {
-        auto child_len = b.child_len[i];
+        const auto child_len = b.slot_len(static_cast<unsigned>(i));
         if (child_len == 0) {
             *p++ = rlp::kEmptyStringCode;
         } else if (child_len == 32) {
             *p++ = 0xa0;
-            const uint8_t* href = b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes;
-            std::memcpy(p, href, 32);
+            std::memcpy(p, b.slot_bytes(static_cast<unsigned>(i)), 32);
             p += 32;
         } else {
-            std::memcpy(p, b.child[i].bytes, child_len);
+            std::memcpy(p, b.slot_bytes(static_cast<unsigned>(i)), child_len);
             p += child_len;
         }
     }
@@ -351,6 +350,20 @@ inline bool decode_ext_or_leaf(ByteView payload, bool& is_leaf,
 inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                             bool& is_leaf, std::array<uint8_t, 64>& path,
                             uint8_t& plen, ByteView& second) {
+    // Rigid full branch (16 hash refs, empty value) — the dominant interior-node shape.
+    // Skip materializing the child arrays: clean slots read straight from the witness
+    // bytes via slot_len/slot_bytes (unfold_node_from_rlp records the origin view).
+    if (payload.size() == 529) {
+        bool rigid = payload[528] == rlp::kEmptyStringCode;
+        for (size_t i = 0; i < 16; ++i)
+            rigid &= payload[33 * i] == 0xa0;
+        if (rigid) {
+            out_branch.mask = 0xFFFF;
+            out_branch.value = {};
+            out_branch.uniform = true;
+            return kBranch;
+        }
+    }
     ByteView remaining = payload;
 
     // Element 0
@@ -390,6 +403,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
 
     // Elements 0 and 1 are already decoded; fill them, then decode slots 2..15.
     out_branch.mask = 0;
+    out_branch.uniform = false;
     if (!fill_branch_child(out_branch, 0, e0_start, e0_payload.data(), h0->payload_length)) return kInvalid;
     if (!fill_branch_child(out_branch, 1, e1_start, e1_payload.data(), h1->payload_length)) return kInvalid;
 

@@ -118,6 +118,43 @@ TEST_CASE("encode_branch patch path matches the full re-encode", "[trie][gridmpt
         CHECK(b.child_len != b.orig_child_len);
         CHECK(fast_encode(b) == slow_encode(b));
     }
+    SECTION("uniform witness node: decode skips the arrays, patch and fallback still match") {
+        // Rigid full shape: 16 hash refs + empty value.
+        Bytes inner;
+        for (uint8_t i = 0; i < 16; ++i) {
+            inner.push_back(0xa0);
+            inner.append(32, static_cast<uint8_t>(0x40 + i));
+        }
+        inner.push_back(0x80);
+        Bytes unode;
+        silkworm::rlp::encode_header(unode, {.list = true, .payload_length = inner.size()});
+        unode.append(inner);
+        REQUIRE(unode.size() == 532);
+
+        BranchNode b = unfold(unode);
+        REQUIRE(b.uniform);
+        REQUIRE(b.mask == 0xFFFF);
+
+        // Materialized reference with identical content and no origin view.
+        BranchNode ref;
+        for (unsigned i = 0; i < 16; ++i)
+            ref.set_child(i, ByteView{unode.data() + 4 + 33 * i, 32});
+        ref.value = {};
+        ref.orig = nullptr;
+
+        CHECK(fast_encode(b) == unode);                   // clean re-emit
+        CHECK(fast_encode(b) == Bytes{encode_branch(ref)});
+
+        b.set_child(9, ByteView{new_hash.data(), 32});    // patch path
+        ref.set_child(9, ByteView{new_hash.data(), 32});
+        CHECK(b.dirty_slots_are_hashes());
+        CHECK(fast_encode(b) == Bytes{encode_branch(ref)});
+
+        b.delete_child(3);                                // layout change: slow path via accessors
+        ref.delete_child(3);
+        CHECK_FALSE(b.dirty_slots_are_hashes());
+        CHECK(fast_encode(b) == Bytes{encode_branch(ref)});
+    }
     SECTION("delete then re-add the same slot with a hash: lengths equal again, patch path") {
         BranchNode b = unfold(node);
         b.delete_child(2);

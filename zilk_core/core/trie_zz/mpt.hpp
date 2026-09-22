@@ -81,7 +81,34 @@ struct BranchNode {
     const uint8_t* orig{nullptr};
     uint16_t orig_size{0};
     uint16_t dirty{0};
+    // Set when the witness node has the rigid full shape (16 hash refs, empty value):
+    // decode skips the child arrays and clean slots are served straight from `orig`.
+    bool uniform{false};
     alignas(8) std::array<uint8_t, 16> orig_child_len{};
+
+    inline bool slot_is_lazy(unsigned i) const noexcept {
+        return uniform && ((dirty >> i) & 1) == 0;
+    }
+    // Encoded length class of the slot: 0 empty, 32 hash ref, else embedded incl. header byte.
+    inline uint8_t slot_len(unsigned i) const noexcept {
+        return slot_is_lazy(i) ? uint8_t{32} : child_len[i];
+    }
+    // The hash bytes (len 32) or embedded RLP (len < 32) of the slot. child_ptr is trusted
+    // only for 32-byte refs: placeholder slots (len 1) on branches built in-grid carry an
+    // uninitialized pointer, and dereferencing it is a wild load.
+    inline const uint8_t* slot_bytes(unsigned i) const noexcept {
+        if (slot_is_lazy(i))
+            return orig + 4 + 33 * i;  // rigid shape: f9 02 11, then (a0 + 32 bytes) per slot
+        return (child_len[i] == 32 && child_ptr[i] != nullptr) ? child_ptr[i] : child[i].bytes;
+    }
+    // Uniform origin means every slot was a 32-byte ref: the layout is unchanged iff the
+    // materialized (dirty) slots still are.
+    inline bool dirty_slots_are_hashes() const noexcept {
+        for (unsigned i = 0; i < 16; ++i)
+            if (((dirty >> i) & 1) != 0 && child_len[i] != 32)
+                return false;
+        return true;
+    }
 
     // Layout of the witness encoding is unchanged iff no slot changed length class.
     // Both child_len and orig_child_len arrays must stay 8-aligned.
