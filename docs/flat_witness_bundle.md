@@ -1,5 +1,10 @@
 # Flat Witness Bundle
 
+> The design rationale and the normative verifier requirements for this format
+> are in [mfbd_design_specs.md](mfbd_design_specs.md); this document is the
+> implementation-side layout reference. Where the two differ, the design spec
+> is normative.
+
 The **flat witness bundle** is a flat format for stateless
 Ethereum block execution. A single byte buffer carries everything the guest
 needs to run a block (or a contiguous run of blocks) and verify its post-state
@@ -77,7 +82,7 @@ inline constexpr std::size_t kInputHeaderSizeMFBD = 16;
 inline constexpr std::size_t kInputHeaderSizeEJSN = 8;
 ```
 
-**MFBD** (`Multiple Flat Bundle`) — 16-byte header in little-endian
+**MFBD** (`MPHF-based Flat Bundle`) — 16-byte header in little-endian
 followed by N FlatBundle blobs, each starting at an 8-byte boundary:
 
 ```
