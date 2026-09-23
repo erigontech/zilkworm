@@ -16,14 +16,17 @@ constexpr uint64_t num_words(uint64_t num_bytes) noexcept {
 
 namespace protocol {
 
+    // Both costs depend on the calldata's zero/non-zero split, taken as the non-zero byte count.
+
     // Returns the intrinsic gas of a transaction.
     // Refer to g0 in Section 6.2 "Execution" of the Yellow Paper
     // and EIP-3860 "Limit and meter initcode".
-    intx::uint128 intrinsic_gas(const UnsignedTransaction& txn, evmc_revision rev) noexcept;
+    intx::uint128 intrinsic_gas(const UnsignedTransaction& txn, evmc_revision rev,
+                                size_t non_zero_bytes) noexcept;
 
     // Returns the floor cost (valid since Pectra)
     // Refer to: EIP-7623: Increase calldata cost
-    uint64_t floor_cost(const UnsignedTransaction& txn) noexcept;
+    uint64_t floor_cost(const UnsignedTransaction& txn, size_t non_zero_bytes) noexcept;
 
     // Amsterdam (EIP-2780) resource-based intrinsic gas decomposition.
     // Mirrors evmone's compute_tx_intrinsic_cost_amsterdam
@@ -35,7 +38,7 @@ namespace protocol {
         int64_t regular{0};  // regular-gas component of g0 (EIP-2780/8038)
         int64_t floor{0};    // minimum gas cost (EIP-7623 floor per EIP-7976/7981)
     };
-    TxGasCost amsterdam_tx_gas_cost(const Transaction& txn) noexcept;
+    TxGasCost amsterdam_tx_gas_cost(const Transaction& txn, size_t non_zero_bytes) noexcept;
 
 }  // namespace protocol
 

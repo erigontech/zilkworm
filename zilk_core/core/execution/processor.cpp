@@ -105,6 +105,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     }
 
     const auto rev = revision();
+    const auto non_zero_bytes = txn.data_non_zero_bytes();
 
     // Amsterdam (EIP-2780/8037): g0 is regular gas only - every state-dependent
     // charge moved to the top frame (EELS #3126). The EIP-7623 floor follows the
@@ -112,15 +113,15 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     // budget and the state-gas reservoir itself, from intrinsic_regular_gas.
     evmone::state::TransactionProperties tx_props;
     if (rev >= EVMC_AMSTERDAM) {
-        const auto cost = protocol::amsterdam_tx_gas_cost(txn);
+        const auto cost = protocol::amsterdam_tx_gas_cost(txn, non_zero_bytes);
         tx_props = {.execution_gas_limit = static_cast<int64_t>(txn.gas_limit) - cost.regular,
                     .intrinsic_regular_gas = cost.regular,
                     .min_gas_cost = cost.floor};
     } else {
-        const auto g0 = protocol::intrinsic_gas(txn, rev);
+        const auto g0 = protocol::intrinsic_gas(txn, rev, non_zero_bytes);
         // EIP-7623: Increase calldata cost
         const int64_t floor_cost =
-            rev >= EVMC_PRAGUE ? static_cast<int64_t>(protocol::floor_cost(txn)) : 0;
+            rev >= EVMC_PRAGUE ? static_cast<int64_t>(protocol::floor_cost(txn, non_zero_bytes)) : 0;
         tx_props = {.execution_gas_limit =
                         static_cast<int64_t>(txn.gas_limit - static_cast<uint64_t>(g0)),
                     .min_gas_cost = floor_cost};

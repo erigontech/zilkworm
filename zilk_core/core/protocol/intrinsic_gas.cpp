@@ -4,8 +4,6 @@
 
 #include "intrinsic_gas.hpp"
 
-#include <algorithm>
-
 #include <evmone/constants.hpp>
 #include <evmone/instructions_traits.hpp>
 
@@ -13,7 +11,8 @@
 
 namespace silkworm::protocol {
 
-intx::uint128 intrinsic_gas(const UnsignedTransaction& txn, const evmc_revision rev) noexcept {
+intx::uint128 intrinsic_gas(const UnsignedTransaction& txn, evmc_revision rev,
+                            size_t non_zero_bytes) noexcept {
     intx::uint128 gas{fee::kGTransaction};
 
     const bool contract_creation{!txn.to};
@@ -37,11 +36,9 @@ intx::uint128 intrinsic_gas(const UnsignedTransaction& txn, const evmc_revision 
         return gas;
     }
 
-    const intx::uint128 non_zero_bytes{std::ranges::count_if(txn.data, [](uint8_t c) { return c != 0; })};
     const intx::uint128 non_zero_gas{rev >= EVMC_ISTANBUL ? fee::kGTxDataNonZeroIstanbul : fee::kGTxDataNonZeroFrontier};
-    gas += non_zero_bytes * non_zero_gas;
-    const intx::uint128 zero_bytes{data_len - non_zero_bytes};
-    gas += zero_bytes * fee::kGTxDataZero;
+    gas += intx::uint128{non_zero_bytes} * non_zero_gas;
+    gas += intx::uint128{data_len - non_zero_bytes} * fee::kGTxDataZero;
 
     // EIP-3860: Limit and meter initcode
     if (contract_creation && rev >= EVMC_SHANGHAI) {
@@ -52,13 +49,13 @@ intx::uint128 intrinsic_gas(const UnsignedTransaction& txn, const evmc_revision 
 }
 
 // EIP-7623: Increase calldata cost
-uint64_t floor_cost(const UnsignedTransaction& txn) noexcept {
-    const uint64_t zero_bytes = static_cast<uint64_t>(std::ranges::count(txn.data, 0));
-    const uint64_t non_zero_bytes{txn.data.size() - zero_bytes};
-    return fee::kGTransaction + (zero_bytes + non_zero_bytes * 4) * fee::kTotalCostFloorPerToken;
+uint64_t floor_cost(const UnsignedTransaction& txn, size_t non_zero_bytes) noexcept {
+    const uint64_t non_zero{non_zero_bytes};
+    const uint64_t zero{txn.data.size() - non_zero};
+    return fee::kGTransaction + (zero + non_zero * 4) * fee::kTotalCostFloorPerToken;
 }
 
-TxGasCost amsterdam_tx_gas_cost(const Transaction& txn) noexcept {
+TxGasCost amsterdam_tx_gas_cost(const Transaction& txn, size_t non_zero_bytes) noexcept {
     // Sender cost: ECDSA recovery, the sender's account access and write, block inclusion.
     static constexpr int64_t kTxBaseCost = 12000;
     // Recipient balance write plus the EIP-7708 transfer log performed by a value transfer.
@@ -93,9 +90,9 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn) noexcept {
     const bool is_self_transfer = txn.to && sender && *txn.to == *sender;
     const bool has_value = txn.value != 0;
 
-    const auto zero_bytes = static_cast<int64_t>(std::ranges::count(txn.data, 0));
-    const auto non_zero_bytes = static_cast<int64_t>(txn.data.size()) - zero_bytes;
-    const int64_t num_tokens = 4 * non_zero_bytes + zero_bytes;
+    const auto non_zero = static_cast<int64_t>(non_zero_bytes);
+    const auto zero = static_cast<int64_t>(txn.data.size()) - non_zero;
+    const int64_t num_tokens = 4 * non_zero + zero;
     const int64_t data_cost = num_tokens * kDataTokenStandard;
 
     // Recipient cost depends on the transaction kind. A self-transfer touches nothing. The

@@ -85,6 +85,7 @@
 #include <zilk_core/core/common_zz/mphf_builder.hpp>
 #include <zilk_core/core/common_zz/mphf_map.hpp>
 #include <zilk_core/core/crypto/ecdsa.h>
+#include <zilk_core/core/common_zz/data_byte_count.hpp>
 #include <zilk_core/core/execution/processor.hpp>
 #include <zilk_core/core/protocol/rule_set.hpp>
 #include <zilk_core/core/protocol/validation.hpp>
@@ -681,7 +682,10 @@ inline ShadowRun shadow_execute(const std::vector<uint8_t>& blob_in,
     // carries the block's gas figure.
     r.receipts.resize(block.transactions.size());
     for (std::size_t i = 0; i < block.transactions.size(); ++i) {
-        proc.execute_transaction(block.transactions[i], r.receipts[i]);
+        // Bypasses pre-validation, so publish what it would have computed.
+        const auto& t = block.transactions[i];
+        t.set_data_non_zero_bytes(zilkworm::count_nonzero_bytes(t.data));
+        proc.execute_transaction(t, r.receipts[i]);
     }
     r.receipt = r.receipts.back();
 

@@ -46,6 +46,7 @@
 #include <evmc/evmc.hpp>
 #include <intx/intx.hpp>
 
+#include <zilk_core/core/common_zz/data_byte_count.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/test_util.hpp>
 #include <zilk_core/core/crypto/ecdsa.h>
@@ -290,7 +291,10 @@ ShadowResult shadow_execute(std::vector<uint8_t> blob, std::span<uint8_t> nodest
     auto rs = protocol::rule_set_factory(cfg);
     silkworm::ExecutionProcessor proc{block, *rs, ds, cfg};
     silkworm::Receipt receipt{};
-    proc.execute_transaction(block.transactions[0], receipt);
+    // Bypasses pre-validation, so publish what it would have computed.
+    const auto& t0 = block.transactions[0];
+    t0.set_data_non_zero_bytes(zilkworm::count_nonzero_bytes(t0.data));
+    proc.execute_transaction(t0, receipt);
 
     ShadowResult r{};
     r.gas_used = receipt.cumulative_gas_used;
@@ -549,7 +553,10 @@ ShadowResult shadow_execute_ro(std::vector<uint8_t> blob, std::span<uint8_t> nod
     auto rs = protocol::rule_set_factory(cfg);
     silkworm::ExecutionProcessor proc{block, *rs, ds, cfg};
     silkworm::Receipt receipt{};
-    proc.execute_transaction(block.transactions[0], receipt);
+    // Bypasses pre-validation, so publish what it would have computed.
+    const auto& t0 = block.transactions[0];
+    t0.set_data_non_zero_bytes(zilkworm::count_nonzero_bytes(t0.data));
+    proc.execute_transaction(t0, receipt);
     ShadowResult r{};
     r.gas_used = receipt.cumulative_gas_used;
     static constexpr auto kEncoder = [](Bytes& to, const silkworm::Receipt& rc) { silkworm::rlp::encode(to, rc); };
@@ -709,7 +716,10 @@ ShadowResult shadow_execute_swap(std::vector<uint8_t> blob, std::span<uint8_t> n
     auto rs = protocol::rule_set_factory(cfg);
     silkworm::ExecutionProcessor proc{block, *rs, ds, cfg};
     silkworm::Receipt receipt{};
-    proc.execute_transaction(block.transactions[0], receipt);
+    // Bypasses pre-validation, so publish what it would have computed.
+    const auto& t0 = block.transactions[0];
+    t0.set_data_non_zero_bytes(zilkworm::count_nonzero_bytes(t0.data));
+    proc.execute_transaction(t0, receipt);
     ShadowResult r{};
     r.gas_used = receipt.cumulative_gas_used;
     static constexpr auto kEncoder = [](Bytes& to, const silkworm::Receipt& rc) { silkworm::rlp::encode(to, rc); };
