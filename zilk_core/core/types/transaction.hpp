@@ -5,6 +5,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <intx/intx.hpp>
@@ -164,6 +165,8 @@ class Transaction : public UnsignedTransaction {
     void reset();
 
   private:
+    friend void recover_senders(std::span<const Transaction> txns);
+
     mutable std::optional<evmc::address> sender_{std::nullopt};
     mutable bool sender_recovered_ = false;
 
@@ -206,6 +209,10 @@ class Transaction2 : public UnsignedTransaction2 {
     //     mutable evmc::bytes32 cached_hash_;
     //     mutable ResettableOnceFlag hash_computed_;
 };
+
+//! \brief Recovers the sender of each transaction not yet recovered: the same result as sender(),
+//! with one scalar inversion shared by the whole batch instead of one per signature.
+void recover_senders(std::span<const Transaction> txns);
 
 namespace rlp {
     void encode(Bytes& to, const AccessListEntry&);
