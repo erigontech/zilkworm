@@ -150,7 +150,7 @@ Sections, in order they typically appear:
 | `node_store` | An MphfMap of MPT proof nodes keyed by 32-byte hash. A peer top-level section, **not** part of `direct_state` (see §2.6). |
 | `network` | UTF-8 string naming the target chain config (e.g. `"Mainnet"`, `"Prague"`, `"Cancun"`). Not null-terminated; size is the section length. `StateTransition::run_one_bundle` looks this up in `silkworm::test::kNetworkConfig` to pick the `ChainConfig`. |
 
-Current wire is `kFlatBundleVersion = 14`. Older bundles fail `load_flat_bundle` validation.
+Current wire is `kFlatBundleVersion = 15`. Older bundles fail `load_flat_bundle` validation.
 
 ### 2.3 `direct_state` internals
 
@@ -425,7 +425,7 @@ separating three things that the name "MphfMap" used to conflate:
 
 - **The conceptual map** — a u64 → bytes minimal-perfect-hash map with a
   collision sidecar.
-- **`MphfMapHeader`** — the 56-byte `alignas(8)` POD *wire header* (version 3)
+- **`MphfMapHeader`** — the 56-byte `alignas(8)` POD *wire header* (version 4)
   that sits at the front of the on-disk section.
 - **`MphfMap`** — a thin C++ *wrapper class* that holds a
   `const MphfMapHeader*` and the derived pointers/scalars, and exposes the
@@ -437,11 +437,11 @@ Both live in `zilk_core/core/common_zz/mphf_map.hpp`.
 #### The wire header
 
 ```cpp
-inline constexpr uint32_t kMphfMapVersion = 3u;
+inline constexpr uint32_t kMphfMapVersion = 4u;
 
 struct alignas(8) MphfMapHeader {  // 56 bytes
     uint32_t magic;
-    uint32_t version;                // kMphfMapVersion = 3
+    uint32_t version;                // kMphfMapVersion = 4
     uint32_t n_keys;
     uint32_t n_buckets;
     uint64_t seed;
@@ -554,13 +554,16 @@ uint32_t MphfMap::index_lookup(uint64_t key) const noexcept {
 }
 ```
 
-where `mix64_body` is the SplitMix64 stage-1 mixer and `fast_mod_u32` is
+where `mix64_body` is a two-multiply xorshift mixer (xorshift 30, multiply,
+xorshift 33, multiply; no final xorshift; the constant is a sign-extended 32-bit
+value so rv64im materializes it in two instructions) and `fast_mod_u32` is
 Lemire's multiply-shift reduction (`(x * n) >> 32`):
 
 ```cpp
+inline constexpr uint64_t kMixConstant = 0xFFFFFFFF85EBCA6Bull;  // sign-extended 0x85EBCA6B
 inline uint64_t mix64_body(uint64_t z) noexcept {
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    return z ^ (z >> 31);
+    z = (z ^ (z >> 30)) * kMixConstant;
+    return (z ^ (z >> 33)) * kMixConstant;
 }
 ```
 

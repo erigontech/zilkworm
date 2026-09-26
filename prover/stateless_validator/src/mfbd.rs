@@ -26,7 +26,7 @@ pub const MFBD_HEADER_SIZE: usize = 16;
 
 // FlatBundle inner header.
 const FLAT_BUNDLE_MAGIC: u32 = 0x444E4246; // "FBND"
-const FLAT_BUNDLE_VERSION: u32 = 14;
+const FLAT_BUNDLE_VERSION: u32 = 15;
 const FLAT_BUNDLE_HEADER_SIZE: usize = 56;
 
 // PreStateMeta.
@@ -36,7 +36,7 @@ const PRESTATE_VERSION: u32 = 4;
 const PRESTATE_META_SIZE: usize = 68;
 
 // MphfMapHeader.
-const MPHF_MAP_VERSION: u32 = 3;
+const MPHF_MAP_VERSION: u32 = 4;
 const MPHF_MAP_HEADER_SIZE: usize = 56;
 const MPHF_ADDR_MAP_MAGIC: u32 = 0x4148504D; // "MPHA"
 const MPHF_CODE_STORE_MAGIC: u32 = 0x4348504D; // "MPHC"
@@ -100,10 +100,13 @@ fn hash_key8(h: &[u8; 32]) -> u64 {
 
 // ---------- MPHF builder (CHD with collision sidecar) ----------
 
+// sign-extended 32-bit c: lui+addi only
+const MIX_CONSTANT: u64 = 0xFFFF_FFFF_85EB_CA6B;
+
 #[inline]
 fn mix64_body(z: u64) -> u64 {
-    let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z ^ (z >> 31)
+    let z = (z ^ (z >> 30)).wrapping_mul(MIX_CONSTANT);
+    (z ^ (z >> 33)).wrapping_mul(MIX_CONSTANT)
 }
 
 #[inline]
