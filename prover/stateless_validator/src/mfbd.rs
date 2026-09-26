@@ -102,12 +102,12 @@ fn hash_key8(h: &[u8; 32]) -> u64 {
 // ---------- MPHF builder (CHD with collision sidecar) ----------
 
 // sign-extended 32-bit c: lui+addi only
-const MIX_CONSTANT: u64 = 0xFFFF_FFFF_85EB_CA6B;
+const MPHF_MIX_CONSTANT: u64 = 0xFFFF_FFFF_85EB_CA6B;
 
 #[inline]
 fn mix64_body(z: u64) -> u64 {
-    let z = (z ^ (z >> 30)).wrapping_mul(MIX_CONSTANT);
-    (z ^ (z >> 33)).wrapping_mul(MIX_CONSTANT)
+    let z = (z ^ (z >> 30)).wrapping_mul(MPHF_MIX_CONSTANT);
+    (z ^ (z >> 33)).wrapping_mul(MPHF_MIX_CONSTANT)
 }
 
 #[inline]
@@ -1407,7 +1407,7 @@ mod tests {
         "abababababababababababab00000000",
     );
 
-    // 4 of the 5 keys reach the sidecar, one co-spilled off a slot a spilled key probes.
+    // 4 sidecar keys, 1 co-spilled
     #[test]
     fn chd_spill_path_matches_cpp_builder() {
         let entries: Vec<(u64, Vec<u8>)> = (0..5u64)

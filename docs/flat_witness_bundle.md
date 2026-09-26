@@ -560,10 +560,10 @@ value so rv64im materializes it in two instructions) and `fast_mod_u32` is
 Lemire's multiply-shift reduction (`(x * n) >> 32`):
 
 ```cpp
-inline constexpr uint64_t kMixConstant = 0xFFFFFFFF85EBCA6Bull;  // sign-extended 0x85EBCA6B
+inline constexpr uint64_t kMphfMixConstant = 0xFFFFFFFF85EBCA6Bull;  // sign-extended 0x85EBCA6B
 inline uint64_t mix64_body(uint64_t z) noexcept {
-    z = (z ^ (z >> 30)) * kMixConstant;
-    return (z ^ (z >> 33)) * kMixConstant;
+    z = (z ^ (z >> 30)) * kMphfMixConstant;
+    return (z ^ (z >> 33)) * kMphfMixConstant;
 }
 ```
 
