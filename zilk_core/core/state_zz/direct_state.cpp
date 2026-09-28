@@ -433,8 +433,10 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
 
     // Mirrors processor.cpp:377-385 — wipe storage on contract creation
     // unless the new code is a delegation or the address was already a
-    // delegation target.
-    if (!is_delegated && !delegated_designations_.contains(addr)) {
+    // delegation target. Empty code is an EIP-7702 delegation clear (auth to
+    // 0x0), which must keep storage; delegated_designations_ only knows
+    // delegations set in this block, not ones already in the pre-state.
+    if (!is_delegated && !code.empty() && !delegated_designations_.contains(addr)) {
         pa.slot_count = 0;
         overflow_slots_.erase(addr);
     }
