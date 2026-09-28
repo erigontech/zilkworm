@@ -211,6 +211,10 @@ ERE_TIMEOUT         ?= 60m
 ERE_IMAGE_REGISTRY  ?= ghcr.io/eth-act/ere
 # Optional local guest ELF dir; empty => download the published guest from the registry.
 ERE_BIN_PATH        ?=
+# Temporary while the workload [patch]es ere-guests: its build.rs cannot derive the guest download
+# source from a path dependency, so the reth leg of ere-compare needs the artifact base URL. Taken
+# from the registry of the ere-guests the workload actually resolves (dirname of the reth sp1 elf_url).
+ERE_RETH_ARTIFACT_URL ?= $(shell cd "$(ERE_WORKLOAD_DIR)" 2>/dev/null && cargo metadata --format-version 1 --locked 2>/dev/null | python3 -c 'import json,sys,os;m=json.load(sys.stdin);p=next(p["manifest_path"] for p in m["packages"] if p["name"]=="stateless-validator-downloader");r=json.load(open(os.path.join(os.path.dirname(p),"..","..","artifact-registry.json")));print(next(os.path.dirname(a["elf_url"]) for g in r["stateless_validators"] if g["name"]=="reth" for a in g["artifacts"] if a["zkvm"]=="sp1"))' 2>/dev/null)
 # Fixture folder passed to ere-hosts (--input-folder); default: cached devnet-8 batch.
 ERE_INPUT_FOLDER    ?= $(FIXTURES_CACHE)/ere-glamsterdam-devnet-8/eest_batch
 # Opt-in: set non-empty to (re)generate EEST fixtures via witness-generator-cli first.
@@ -238,11 +242,11 @@ ere-validate: $(if $(ERE_GEN_FIXTURES),ere-fixtures)
 	python3 $(CURDIR)/tools/ere_compare.py --validate 'zilkworm-*' "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 
 ere-compare: $(if $(ERE_GEN_FIXTURES),ere-fixtures)
+	cd "$(ERE_WORKLOAD_DIR)" && url="$(ERE_RETH_ARTIFACT_URL)" && $(ERE_RUN_ENV) \
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) --action estimate-cost \
+	        $${url:+--guest-artifact-base-url $$url} stateless-validator --execution-client reth --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
-	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) \
-	        stateless-validator --execution-client reth --input-folder $(abspath $(ERE_INPUT_FOLDER))
-	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
-	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) \
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) --action estimate-cost \
 	        $(if $(ERE_BIN_PATH),--bin-path $(abspath $(ERE_BIN_PATH)),) stateless-validator --execution-client zilkworm --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	python3 $(CURDIR)/tools/ere_compare.py "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 
