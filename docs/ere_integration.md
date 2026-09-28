@@ -10,7 +10,7 @@ Zilkworm is integrated as a stateless-validation execution client in the [ERE be
 > 🚧 **WIP:** needs revision after landing on public Zilkworm repo.
 
 The current integration targets **Amsterdam / glamsterdam-devnet-8** with the
-**tests-zkevm v0.8.2** stateless schema. The host adapter decodes the canonical
+**tests-zkevm v0.8.2** stateless schema, on **ere v0.17.0 / ere-guests v0.17.1**. The host adapter decodes the canonical
 EEST `statelessInputBytes` into the Zilkworm MFBD envelope; see
 [`prover/stateless_validator`](../prover/stateless_validator).
 
@@ -32,14 +32,14 @@ paths (`../ere-guests_fork`, `../z6m`):
 
 | Repo | Branch (pushed) | Based on | Carries |
 |---|---|---|---|
-| `erigontech/z6m` | `canepat/ere_stateless_input` | `glamsterdam-devnet-8` (`a128f910`) | Guest (`zilk_core` + evmone submodule `a14dfc9b`) and the host adapter `prover/stateless_validator` (SIOB→MFBD). Two commits on top of devnet-8: tests-zkevm v0.8.2 schema support + the EIP-8282 builder-requests fix. |
-| `erigontech/ere-guests` | `canepat/zilkworm_mfbd` | merged `main` (`d5a6451`, includes `jsign-upgrade-v0.8.2`) | The `StatelessValidatorKind::Zilkworm` catalog kind and the `zilkworm` entry in `artifact-registry.json` (sp1, `zkvm_version` v6.4.0; `elf_url` is a `local-dev` placeholder until a real z6m release is published). |
-| `erigontech/zkevm-benchmark-workload` | `canepat/zilkworm_mfbd` | `jsign-specs-8` (`b793c87`) | The `zilkworm` execution client (`ExecutionClient::Zilkworm`, host transform via `from_ere_eest`), the `[patch]` redirecting ere-guests deps to `../ere-guests_fork`, and the z6m host-adapter path dep (`stateless-validator-zilkworm = ../z6m/prover/stateless_validator`). |
+| `erigontech/z6m` | `canepat/ere_stateless_input` | `glamsterdam-devnet-8` (`a128f910`) | Guest (`zilk_core` + evmone submodule `a14dfc9b`) and the host adapter `prover/stateless_validator` (SIOB→MFBD). On top of devnet-8: tests-zkevm v0.8.2 schema, EIP-8282 builder-requests fix, chain id 1 → Amsterdam, ERE make targets/docs/fetch script, `eest_runner` cycle metrics. |
+| `erigontech/ere-guests` | `canepat/zilkworm_mfbd` | `main` (`daec35a`, v0.17.1) | One commit mirroring the Nimbus addition (upstream PR #88): `StatelessValidatorKind::Zilkworm` (catalog ID 4), the `zilkworm` entry in `artifact-registry.json` (sp1, `zkvm_version` v6.4.0), the catalog/downloader/test-crate tests, and the README. `elf_url` is a `local-dev` placeholder until a z6m release is published; the registry and README are updated with that release before upstreaming. |
+| `erigontech/zkevm-benchmark-workload` | `canepat/zilkworm_mfbd` | `master` (`6802450`, ere-guests v0.17.1) | The `zilkworm` execution client (`ExecutionClient::Zilkworm`, host transform via `from_ere_eest`), the `[patch]` redirecting ere-guests deps to `../ere-guests_fork`, the z6m host-adapter path dep (`stateless-validator-zilkworm = ../z6m/prover/stateless_validator`), and the cross-file EEST fixture-name dedup with its regression test. |
 
 The z6m host adapter pins `stateless-validator-common` at ere-guests rev
 `eaa3f46` (tests-zkevm v0.8.2), but the benchmark's workspace `[patch]` overrides
 all ere-guests deps to `../ere-guests_fork`, so the actual crates used are the
-fork's.
+fork's (v0.17.1).
 
 ## Reference environment
 
@@ -48,9 +48,10 @@ fork's.
 | OS | macOS, Darwin 25.5.0, arm64 |
 | Container engine | Docker 29.4.0 |
 | Rust | 1.95.0 (pinned in `rust-toolchain.toml`) |
-| ERE harness | `eth-act/ere` tag `v0.16.2`, image `ghcr.io/eth-act/ere/ere-server-sp1:8961a4e` |
-| SP1 | v6.4.0 (ere v0.16.2 pins `sp1-verifier` v6.4.0) |
-| Guest artifacts | zilkworm `local-dev`, reth `0.1.0-rc.2`, ethrex `26.0.0-rc.2` (all sp1 v6.4.0) |
+| ERE harness | `eth-act/ere` tag `v0.17.0` (rev `5023513`), image `ghcr.io/eth-act/ere/ere-server-sp1:5023513` |
+| ere-guests | `v0.17.1` (via the benchmark `[patch]` to `../ere-guests_fork`) |
+| SP1 | v6.4.0 (ere v0.17.0 pins `sp1-sdk`/`sp1-verifier` v6.4.0) |
+| Guest artifacts | zilkworm `local-dev`, reth `0.1.0-rc.3`, ethrex `27.0.0` (all sp1 v6.4.0) |
 | Fixtures | glamsterdam-devnet-8 block export (Amsterdam), chainId `0x1a6a8cc6e` (7091047534), 644 batches / 6478 blocks (93300..99749) |
 
 The SP1 host runs in an x86_64 container; on Apple Silicon it executes under
@@ -67,7 +68,7 @@ make ere-validate \
     ERE_WORKLOAD_DIR=../zkevm-benchmark-workload_fork \
     ERE_BIN_PATH=build/ere-bin
 
-# Run Zilkworm and Reth and print the cycle comparison
+# Estimate cost (SP1 gas model) for Zilkworm and Reth and print the comparison
 make ere-compare \
     ERE_WORKLOAD_DIR=../zkevm-benchmark-workload_fork \
     ERE_BIN_PATH=build/ere-bin
@@ -84,6 +85,7 @@ ERE_IMAGE_REGISTRY ?= ghcr.io/eth-act/ere   # registry for ere's prebuilt zkVM i
 ERE_WORKLOAD_DIR   ?= temp/zkevm-benchmark-workload   # pass ../zkevm-benchmark-workload_fork
 ERE_INPUT_FOLDER   ?= $(FIXTURES_CACHE)/ere-glamsterdam-devnet-8/eest_batch  # ere-hosts --input-folder
 ERE_BIN_PATH       ?=                        # local guest ELF dir; empty => download the published guest
+ERE_RETH_ARTIFACT_URL ?= <derived from the ere-guests resolved by $(ERE_WORKLOAD_DIR): reth sp1 elf_url dirname>
 ERE_GEN_FIXTURES   ?=                        # non-empty => (re)generate EEST fixtures first (opt-in)
 ERE_TIMEOUT        ?= 60m                    # per-action timeout
 ```
@@ -96,6 +98,21 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
   `$(abspath …)` (the recipe `cd`s into the workload dir first). Empty => the
   target downloads the published guest ELF named in `artifact-registry.json`.
   Build/stage the local guest with `make ere-bin` (outputs `build/ere-bin`).
+- **`ERE_RETH_ARTIFACT_URL`**: base URL of the reth guest artifacts, passed as
+  `--guest-artifact-base-url` on the reth leg of `ere-compare`. Temporary while
+  the workload `[patch]`es ere-guests. Derived at make time by navigating the
+  workload's own dependency graph: `cargo metadata` in `ERE_WORKLOAD_DIR` gives
+  the `manifest_path` of the resolved `stateless-validator-downloader` crate, and
+  the registry that crate embeds sits at `../../artifact-registry.json` from
+  there (the `[patch]` checkout today, the git checkout once upstreamed); the
+  value is the dirname of the reth sp1 `elf_url`. No sibling-folder assumption;
+  override it to point elsewhere. Why it is needed: the benchmark's
+  `build.rs` derives the guest download source (release tag or commit) from the
+  `stateless-validator-downloader` entry's git source in `Cargo.lock`; under the
+  `[patch]` that crate is a path dependency with no git source, so ere-hosts
+  compiles with an unknown download source and its default downloader (ere-guests
+  release assets) bails. The flag bypasses it. If the URL cannot be derived the
+  flag is omitted and the default downloader runs.
 - **`ERE_INPUT_FOLDER`**: the fixture folder passed to `ere-hosts --input-folder`
   (required for `--action execute`). Defaults to the cached devnet-8 first batch;
   point it at a larger extracted set for a full run.
@@ -110,6 +127,22 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
 **skips** any fixture that already has a result there. That silently reuses stale
 results from a previous guest. Both targets therefore pass `--force-rerun`
 unconditionally so validate/compare always re-execute against the current guest.
+
+### Actions and metrics (ere ≥ v0.17)
+
+Since ere v0.17 / benchmark master (#310, #312) the per-fixture record written
+by `--action execute` carries only `output_matched` and `execution_duration`:
+**no cycle count**. Cost data comes from `--action estimate-cost`, which stores
+`cost_estimation.success.cost`, a per-component map (`opcode`, `syscall`,
+`system`) from SP1's estimated prover-cost model, plus `peak_heap_bytes`.
+Accordingly:
+
+- `ere-validate` runs `--action execute` and gates on `output_matched`.
+- `ere-compare` runs `--action estimate-cost` for reth and zilkworm and compares
+  the summed components. Records are merged per fixture file, so a compare run
+  keeps the `execution` block written by a preceding validate run.
+- `tools/ere_compare.py` reports one comparison per metric kind and never sums
+  legacy execution cycles (results from ere ≤ v0.16) with estimated cost.
 
 ## Fixtures: glamsterdam-devnet-8
 
@@ -166,7 +199,36 @@ Full per-fixture metrics live under `$(ERE_WORKLOAD_DIR)/zkevm-metrics/`.
 (`ere_compare.py --validate 'zilkworm-*'`: total 6478, completed 6478,
 output_matched 6478, incomplete 0, mismatched 0). Every block validates,
 including the 17 request-carrying blocks fixed by folding the EIP-8282 builder
-deposit/exit requests (types 0x03/0x04) into `requests_hash`.
+deposit/exit requests (types 0x03/0x04) into `requests_hash`. That full-corpus run
+was on ere v0.16.2; on the v0.17.0 / ere-guests v0.17.1 stack the 10-block
+`eest_batch` smoke re-validates 10/10 (`RESULT: PASS`).
+
+### Estimated cost — glamsterdam-devnet-8 batch (current, `make ere-compare`)
+
+10 blocks (93300..93309), `--action estimate-cost`, SP1 v6.4.0, reth `0.1.0-rc.3`:
+
+| Metric | Value |
+|---|---|
+| Total estimated cost — Reth | 244,559,852,848 |
+| Total estimated cost — Zilkworm | 127,834,309,954 |
+| Ratio Z/R (total) | **0.523** (Reth = 1.91× Zilkworm) |
+| Per-fixture Z/R | median 0.528, min 0.489, max 0.530 |
+| Zilkworm cheaper | 10 / 10 |
+
+Components (Reth / Zilkworm): `opcode` 167,896,301,578 / 74,212,170,226,
+`syscall` 61,924,881,056 / 44,689,339,322, `system` 14,738,670,214 / 8,932,800,406.
+
+### Cycle comparison — tests-zkevm-benchmark v0.8.2 (ere v0.16.2, legacy cycles)
+
+3464 generated fixtures, both clients 3464/3464 `output_matched`:
+
+| Metric | Value |
+|---|---|
+| Total cycles — Reth | 9,012,226,526,812 |
+| Total cycles — Zilkworm | 1,475,310,960,304 |
+| Ratio Z/R (total) | **0.164** (Reth = 6.11× Zilkworm) |
+| Per-fixture Z/R | median 0.663, mean 0.726 |
+| Zilkworm fewer cycles | 3205 / 3464 (93%) |
 
 ### Cycle comparison — historical (Osaka 10M, ere v0.11 / SP1 v6.1)
 
@@ -205,5 +267,5 @@ test_point_evaluation       0.67      test_tx_context       1.74
 
 ## Interpretation
 
-- **Correctness:** Zilkworm produces **100% correct** stateless-validation outputs on the full glamsterdam-devnet-8 corpus (6478/6478).
-> 🚧 - **Efficiency:**  on the historical 10M Osaka fixture set, Zilkworm was ~1.91× more cycle-efficient than Reth overall and won 84% of fixtures. *TBD: we must re-run `make ere-compare` to measure the current Amsterdam stack*.
+- **Correctness:** Zilkworm produces **100% correct** stateless-validation outputs on the full glamsterdam-devnet-8 corpus (6478/6478, ere v0.16.2) and on the generated tests-zkevm-benchmark v0.8.2 corpus (3464/3464); re-validated on the v0.17 stack.
+- **Efficiency:** on the generated v0.8.2 corpus Zilkworm needs 0.164× Reth's cycles overall (93% of fixtures cheaper); on real devnet-8 blocks, estimated prover cost is 0.523× Reth's (10/10 cheaper). The devnet-8 figure is from a 10-block batch; extend `ERE_INPUT_FOLDER` to `all_blocks/` for the full-corpus number.
