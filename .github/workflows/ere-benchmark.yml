@@ -7,6 +7,9 @@ name: ERE Benchmark
 # a public R2 stateless-input catalog. The host adapter (statelessInputBytes -> MFBD) and the guest
 # come from the same z6m revision: the run's ref, or release_tag for guest_source=release.
 on:
+  # Temporary: runs the workflow before it is on the default branch. Drop before merging.
+  push:
+    branches: [canepat/zkevm_benchmark_workflow]
   workflow_dispatch:
     inputs:
       guest_source:
