@@ -97,7 +97,13 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
 - **`ERE_BIN_PATH`** (optional): a relative value is resolved against z6m via
   `$(abspath …)` (the recipe `cd`s into the workload dir first). Empty => the
   target downloads the published guest ELF named in `artifact-registry.json`.
-  Build/stage the local guest with `make ere-bin` (outputs `build/ere-bin`).
+  Build/stage the local guest with `make ere-bin` (outputs
+  `build/ere-bin/stateless-validator-zilkworm-sp1.{elf,vk}`). ere-hosts loads
+  `<bin-path>/stateless-validator-zilkworm-sp1-<SP1 SDK version>.{elf,vk}`, so
+  both targets first run `ere-bin-link`, which symlinks the unversioned files
+  under the version the workload's ere resolves (`tools/ere_workload.py
+  <workload> sp1-sdk-version`, mirroring ere-catalog's build script: currently
+  `v6.4.0`). The VK must exist but ere-hosts does not read it.
 - **`ERE_RETH_ARTIFACT_URL`**: base URL of the reth guest artifacts, passed as
   `--guest-artifact-base-url` on the reth leg of `ere-compare`. Temporary while
   the workload `[patch]`es ere-guests. Derived at make time by navigating the
@@ -105,7 +111,8 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
   the `manifest_path` of the resolved `stateless-validator-downloader` crate, and
   the registry that crate embeds sits at `../../artifact-registry.json` from
   there (the `[patch]` checkout today, the git checkout once upstreamed); the
-  value is the dirname of the reth sp1 `elf_url`. No sibling-folder assumption;
+  value is the dirname of the reth sp1 `elf_url` (`tools/ere_workload.py
+  <workload> reth-artifact-url`). No sibling-folder assumption;
   override it to point elsewhere. Why it is needed: the benchmark's
   `build.rs` derives the guest download source (release tag or commit) from the
   `stateless-validator-downloader` entry's git source in `Cargo.lock`; under the

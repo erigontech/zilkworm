@@ -19,7 +19,7 @@ endif
         execute-block selftest tests eest-mfbd-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
-        ere-workload-checkout ere-fixtures ere-validate ere-compare \
+        ere-workload-checkout ere-fixtures ere-bin-link ere-validate ere-compare \
         release-artifacts
 
 clean: 
@@ -214,7 +214,7 @@ ERE_BIN_PATH        ?=
 # Temporary while the workload [patch]es ere-guests: its build.rs cannot derive the guest download
 # source from a path dependency, so the reth leg of ere-compare needs the artifact base URL. Taken
 # from the registry of the ere-guests the workload actually resolves (dirname of the reth sp1 elf_url).
-ERE_RETH_ARTIFACT_URL ?= $(shell cd "$(ERE_WORKLOAD_DIR)" 2>/dev/null && cargo metadata --format-version 1 --locked 2>/dev/null | python3 -c 'import json,sys,os;m=json.load(sys.stdin);p=next(p["manifest_path"] for p in m["packages"] if p["name"]=="stateless-validator-downloader");r=json.load(open(os.path.join(os.path.dirname(p),"..","..","artifact-registry.json")));print(next(os.path.dirname(a["elf_url"]) for g in r["stateless_validators"] if g["name"]=="reth" for a in g["artifacts"] if a["zkvm"]=="sp1"))' 2>/dev/null)
+ERE_RETH_ARTIFACT_URL ?= $(shell python3 $(CURDIR)/tools/ere_workload.py "$(ERE_WORKLOAD_DIR)" reth-artifact-url 2>/dev/null)
 # Fixture folder passed to ere-hosts (--input-folder); default: cached devnet-8 batch.
 ERE_INPUT_FOLDER    ?= $(FIXTURES_CACHE)/ere-glamsterdam-devnet-8/eest_batch
 # Opt-in: set non-empty to (re)generate EEST fixtures via witness-generator-cli first.
@@ -235,13 +235,19 @@ ere-fixtures: ere-workload-checkout
 	    cargo run -p witness-generator-cli --release -- \
 	        tests $(if $(ERE_FIXTURE_FILTER),--include $(ERE_FIXTURE_FILTER))
 
-ere-validate: $(if $(ERE_GEN_FIXTURES),ere-fixtures)
+# ere-hosts loads <bin-path>/$(ERE_GUEST_NAME)-<SP1 SDK version>.{elf,vk}, the version being the one
+# of the ere the workload resolves; link the unversioned ere-bin outputs under that name.
+ere-bin-link:
+	v=$$(python3 tools/ere_workload.py "$(ERE_WORKLOAD_DIR)" sp1-sdk-version) && \
+	for ext in elf vk; do ln -sf $(ERE_GUEST_NAME).$$ext "$(abspath $(ERE_BIN_PATH))/$(ERE_GUEST_NAME)-$$v.$$ext"; done
+
+ere-validate: $(if $(ERE_GEN_FIXTURES),ere-fixtures) $(if $(ERE_BIN_PATH),ere-bin-link)
 	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
 	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) \
 	        $(if $(ERE_BIN_PATH),--bin-path $(abspath $(ERE_BIN_PATH)),) stateless-validator --execution-client zilkworm --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	python3 $(CURDIR)/tools/ere_compare.py --validate 'zilkworm-*' "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 
-ere-compare: $(if $(ERE_GEN_FIXTURES),ere-fixtures)
+ere-compare: $(if $(ERE_GEN_FIXTURES),ere-fixtures) $(if $(ERE_BIN_PATH),ere-bin-link)
 	cd "$(ERE_WORKLOAD_DIR)" && url="$(ERE_RETH_ARTIFACT_URL)" && $(ERE_RUN_ENV) \
 	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) --action estimate-cost \
 	        $${url:+--guest-artifact-base-url $$url} stateless-validator --execution-client reth --input-folder $(abspath $(ERE_INPUT_FOLDER))
