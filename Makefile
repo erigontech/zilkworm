@@ -166,27 +166,6 @@ sp1-benchmark-corpus:
 sp1-benchmark: z6m_prover sp1-benchmark-corpus
 	python3 tools/scripts/sp1_benchmark.py --dir $(BENCH_CORPUS_DIR)
 
-# Stage release artifacts into ./temp/
-RELEASE_DIR := temp
-RELEASE_BINS := \
-	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
-	prover/target/release/z6m_prover:z6m_prover_hypercube \
-	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
-
-release-artifacts:
-	@mkdir -p $(RELEASE_DIR)
-	@names=""; \
-	for pair in $(RELEASE_BINS); do \
-	    src=$${pair%%:*}; dst=$${pair##*:}; \
-	    if [ ! -f "$$src" ]; then echo "missing: $$src" >&2; exit 1; fi; \
-	    cp "$$src" "$(RELEASE_DIR)/$$dst"; \
-	    names="$$names $$dst"; \
-	done; \
-	(cd $(RELEASE_DIR) && sha256sum $$names > SHA256SUMS.txt)
-	@echo "release artifacts staged in $(RELEASE_DIR)/:"
-	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
-	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
-	@cat $(RELEASE_DIR)/SHA256SUMS.txt
 # ERE benchmark integration: build the SP1 guest ELF + VK as expected by ere-hosts.
 ERE_BIN_DIR ?= $(CURDIR)/build/ere-bin
 ERE_GUEST_NAME ?= stateless-validator-zilkworm-sp1
@@ -259,3 +238,23 @@ ere-compare: $(if $(ERE_GEN_FIXTURES),ere-fixtures) $(if $(ERE_BIN_PATH),ere-bin
 	        $(if $(ERE_BIN_PATH),--bin-path $(abspath $(ERE_BIN_PATH)),) stateless-validator --execution-client zilkworm --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	python3 $(CURDIR)/tools/ere_compare.py "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 
+# Stage release artifacts into ./temp/. The guest VK is derived by ere-bin.
+RELEASE_DIR := temp
+RELEASE_BINS := \
+	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
+	$(ERE_VK):z6m_guest_hypercube.vk \
+	prover/target/release/z6m_prover:z6m_prover_hypercube \
+	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
+
+release-artifacts:
+	@mkdir -p $(RELEASE_DIR)
+	@names=""; \
+	for pair in $(RELEASE_BINS); do \
+	    src=$${pair%%:*}; dst=$${pair##*:}; \
+	    if [ ! -f "$$src" ]; then echo "missing: $$src" >&2; exit 1; fi; \
+	    cp "$$src" "$(RELEASE_DIR)/$$dst"; \
+	    names="$$names $$dst"; \
+	done; \
+	(cd $(RELEASE_DIR) && sha256sum $$names > SHA256SUMS.txt && ls -l $$names SHA256SUMS.txt)
+	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
+	@cat $(RELEASE_DIR)/SHA256SUMS.txt
