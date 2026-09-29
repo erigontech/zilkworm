@@ -202,7 +202,7 @@ To run the general EEST corpus instead, pass `ERE_GEN_FIXTURES=1` (and set
 R2 catalog, mirroring the upstream `eest-r2-stateless-inputs.yml` selection with the
 Zilkworm guest in place of the EEST spec guest.
 
-- **Triggers:** `workflow_dispatch` on any z6m branch, and `workflow_call` from
+- **Triggers:** push to `release/*` branches, `workflow_dispatch` on any branch, and `workflow_call` from
   [`release.yml`](../.github/workflows/release.yml) after a `v*` release is
   published (a release created with `GITHUB_TOKEN` emits no `release` event).
 - **Guest source:** `build` runs `make ere-bin` at the run's ref; `release`
