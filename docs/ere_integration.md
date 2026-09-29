@@ -195,6 +195,33 @@ make ere-validate \
 To run the general EEST corpus instead, pass `ERE_GEN_FIXTURES=1` (and set
 `ERE_INPUT_FOLDER` to the generated tree).
 
+## CI
+
+[`.github/workflows/ere-benchmark.yml`](../.github/workflows/ere-benchmark.yml) runs
+`make ere-validate` (and optionally `make ere-compare`) on the latest batches of an
+R2 catalog, mirroring the upstream `eest-r2-stateless-inputs.yml` selection with the
+Zilkworm guest in place of the EEST spec guest.
+
+- **Triggers:** `workflow_dispatch` on any z6m branch, and `workflow_call`.
+- **Guest source:** `build` runs `make ere-bin` at the run's ref; `release`
+  downloads `z6m_guest_hypercube.{elf,vk}` of `release_tag`, verified against the
+  release `SHA256SUMS.txt`. The host adapter is compiled from the same z6m ref
+  (the release tag in `release` mode), so adapter and guest always match.
+- **Inputs:** `guest_source`, `release_tag`, `catalog_url` (default devnet-8),
+  `batch_count` (default 10), `compare` (default off),
+  `workload_ref` / `ere_guests_ref` (default `canepat/zilkworm_mfbd` on the
+  erigontech forks).
+- **Layout:** `z6m/`, `zkevm-benchmark-workload_fork/` and `ere-guests_fork/` are
+  checked out as siblings, as the workload's path dependency and `[patch]` require.
+  The ere job runs on the runner host: ere-hosts reaches `ere-server-sp1` on
+  `127.0.0.1:4175`.
+- **Output:** the step summary records the three commits, the guest ELF sha256,
+  the block range and the `ere_compare.py` report; `zkevm-metrics/` is uploaded.
+
+Once the zilkworm client and registry entry are upstreamed, the ere-guests
+checkout goes away and the host adapter git dependency is redirected to the z6m
+checkout with `cargo --config 'patch."<zilkworm git url>".z6m_stateless_validator.path=…'`.
+
 ## Results
 
 Full per-fixture metrics live under `$(ERE_WORKLOAD_DIR)/zkevm-metrics/`.
