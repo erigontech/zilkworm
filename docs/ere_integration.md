@@ -169,17 +169,20 @@ batch extracted), `all_blocks/` (all 6478 extracted). See that dir's `README.txt
 ### Download and extract to the cache
 
 Use [`tools/ere-fetch-fixtures.sh`](../tools/ere-fetch-fixtures.sh) — it fetches the
-catalog + manifest, caches the first batch to `eest_batch/`, and with `all`
-downloads every batch (sha256-verified against the catalog) and extracts all 6478
-blocks to `all_blocks/`:
+catalog + manifest, caches the first batch to `eest_batch/`, with `all`
+downloads every batch (sha256-verified against the catalog) and extracts it to
+`all_blocks/`, and with `latest N` extracts only the N latest batches to
+`latest/` (the selection used by CI):
 
 ```sh
-tools/ere-fetch-fixtures.sh          # first batch only (10 blocks, quick smoke)
-tools/ere-fetch-fixtures.sh all      # full corpus (~3 GB download, ~17 GB extracted)
+tools/ere-fetch-fixtures.sh            # first batch only (10 blocks, quick smoke)
+tools/ere-fetch-fixtures.sh latest 10  # 10 latest batches (100 blocks)
+tools/ere-fetch-fixtures.sh all        # full corpus (7247 batches, ~24 GB download as of 2026-09)
 ```
 
-The R2 base URL and cache dir are overridable via `ERE_FIXTURES_BASE` /
-`ERE_FIXTURES_CACHE`. Then run the full corpus through the make target (point
+The catalog kept growing after the 644-batch sweep below. The R2 base URL (catalog
+root, or its `index.html` / `manifest.json` URL) and cache dir are overridable via
+`ERE_FIXTURES_BASE` / `ERE_FIXTURES_CACHE`. Then run the full corpus through the make target (point
 `ERE_INPUT_FOLDER` at the extracted `all_blocks/`):
 
 ```sh

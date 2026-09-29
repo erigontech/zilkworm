@@ -2,13 +2,15 @@
 # ere-fetch-fixtures: download + cache the glamsterdam-devnet-8 EEST stateless
 # fixtures (R2 block export) consumed by the ERE benchmark (make ere-validate).
 #
-# Usage: tools/ere-fetch-fixtures.sh [first|all]
+# Usage: tools/ere-fetch-fixtures.sh [first|all|latest N]
 #   first (default)  catalog + manifest + first batch (10 blocks) -> eest_batch/
 #   all              also every batch, sha256-verified, extracted -> all_blocks/
-#                    (~3 GB download, ~17 GB extracted; all 6478 blocks)
+#                    (~24 GB download for the 7247-batch catalog of 2026-09)
+#   latest N         only the N latest batches, sha256-verified, extracted -> latest/
 #
 # Env overrides:
-#   ERE_FIXTURES_BASE   R2 base URL (default: glamsterdam-devnet-8 export)
+#   ERE_FIXTURES_BASE   R2 catalog root, or its index.html / manifest.json URL
+#                       (default: glamsterdam-devnet-8 export)
 #   ERE_FIXTURES_CACHE  local cache dir (default: test-fixtures-cache/ere-glamsterdam-devnet-8)
 #
 # Run from the repo root. Requires: curl, python3, tar (zstd), shasum.
@@ -16,11 +18,13 @@ set -euo pipefail
 
 MODE="${1:-first}"
 BASE="${ERE_FIXTURES_BASE:-https://pub-760ad8b3dd9547539f829c1ea30f18b5.r2.dev/devnets/glamsterdam-devnet-8}"
+BASE="${BASE%/}"; BASE="${BASE%/index.html}"; BASE="${BASE%/manifest.json}"; BASE="${BASE%/batches.jsonl}"
 CACHE="${ERE_FIXTURES_CACHE:-test-fixtures-cache/ere-glamsterdam-devnet-8}"
 
 case "$MODE" in
     first|all) ;;
-    *) echo "usage: $0 [first|all]" >&2; exit 2 ;;
+    latest) [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo "usage: $0 latest N (N >= 1)" >&2; exit 2; } ;;
+    *) echo "usage: $0 [first|all|latest N]" >&2; exit 2 ;;
 esac
 
 mkdir -p "$CACHE/archives"
@@ -37,6 +41,24 @@ dl_verify_extract() {
     tar --zstd -xf "$f" -C "$dest"
 }
 
+# N latest batches, ordered by (end, start) block like the upstream R2 validator -> latest/.
+if [ "$MODE" = latest ]; then
+    rm -rf "$CACHE/latest"; mkdir -p "$CACHE/latest"
+    first="" last=""
+    while read -r path sha; do
+        dl_verify_extract "$path" "$sha" "$CACHE/latest"
+        echo "  $path"
+        first="${first:-$path}" last="$path"
+    done < <(python3 -c 'import json, sys
+rows = sorted((json.loads(l) for l in open(sys.argv[1]) if l.strip()),
+              key=lambda d: (d["batchEndBlock"], d["batchStartBlock"]))
+for d in rows[-int(sys.argv[2]):]:
+    print(d["path"], d["sha256"][2:])' "$CACHE/batches8.jsonl" "$2")
+    first="${first##*/}" last="${last##*/}" last="${last%.tar.zst}"
+    echo "cached $(find "$CACHE/latest/blockchain_tests" -name '*.json' | wc -l | tr -d ' ') blocks (${first%%-*}..${last#*-}) -> $CACHE/latest"
+    exit 0
+fi
+
 # First batch (10 blocks) -> eest_batch/ (the default ERE_INPUT_FOLDER).
 read -r first_path first_sha < <(python3 -c 'import json, sys
 d = json.loads(next(open(sys.argv[1])))
@@ -47,7 +69,7 @@ echo "cached first batch -> $CACHE/eest_batch"
 
 # Full corpus -> all_blocks/.
 if [ "$MODE" = all ]; then
-    echo "downloading + extracting all batches (~3 GB download, ~17 GB extracted) ..."
+    echo "downloading + extracting all $(wc -l < "$CACHE/batches8.jsonl" | tr -d " ") batches ..."
     rm -rf "$CACHE/all_blocks"; mkdir -p "$CACHE/all_blocks"
     while read -r path sha; do
         dl_verify_extract "$path" "$sha" "$CACHE/all_blocks"
