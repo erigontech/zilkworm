@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.1.0-alpha.4 - ERE stateless-input path and release benchmark
+
+### Highlights
+
+This release lets Zilkworm consume the canonical EEST stateless input used by the ERE zkEVM benchmark, so the same guest validates real Glamsterdam devnet-8 blocks inside `zkevm-benchmark-workload`. Releases now publish the guest verification key and end with an ERE benchmark run against the published guest.
+
+#### ERE stateless input (statelessInputBytes -> MFBD)
+
+The host adapter `prover/stateless_validator` decodes EEST `statelessInputBytes` and translates it into the MFBD envelope consumed by the guest:
+- Decoding via ere-guests `stateless-validator-common`, tracking the tests-zkevm v0.8.2 schema
+- Witness preimage keys derived from the Block-Level Access Lists (EIP-7928) for post-Amsterdam blocks
+- EIP-8282 builder deposit and exit requests folded into `requests_hash`
+- Network selected by chain id: `glamsterdam-devnet-7`, `glamsterdam-devnet-8`, and chain id 1 for the generated EEST benchmark corpus (Amsterdam from genesis)
+- Expected public values (gas used, pre/post-state root, block hash, chain id) derived on the host for comparison with the guest commitment
+
+Rust toolchain bumped to 1.95.0.
+
+#### ERE benchmark integration
+
+- `make ere-bin` builds the guest ELF and derives its SP1 VK in the layout expected by `ere-hosts`; `ere-bin-link` links it under the SP1 SDK version of the ere the workload resolves
+- `make ere-validate` runs the guest through `ere-hosts --action execute` and gates on `output_matched`
+- `make ere-compare` runs `--action estimate-cost` for Zilkworm and Reth and compares SP1 estimated prover cost (`opcode`, `syscall`, `system` components)
+- `tools/ere-fetch-fixtures.sh` downloads and sha256-verifies devnet-8 R2 batches (`first`, `all`, `latest N`)
+- `tools/ere_compare.py` and `tools/compare_ere_benchmarks.py` read the ere v0.17 metrics schema and report legacy cycles and estimated cost separately
+- `tools/scripts/eest_runner.py` reports SP1 cycle and prover-gas distributions
+- See `docs/ere_integration.md` for the details about environment and workflow
+
+Validated with the release guest on the latest 10 devnet-8 batches (blocks 257420..257519): 101 / 101 `output_matched`. Estimated prover cost on blocks 93300..93309 is 0.593x Reth's.
+
+#### CI
+
+- New `ERE Benchmark` workflow: builds the guest at the run's ref or downloads a published release guest (sha256-checked against `SHA256SUMS.txt`), fetches the latest N R2 batches (default 10, matching upstream `eest-r2-stateless-inputs`), and validates; optional cost comparison against Reth
+- Runs on push to `release/*` branches, on `workflow_dispatch`, and from the release workflow
+- Release workflow builds and publishes the guest VK and finishes with an ERE benchmark of the published guest, cost comparison enabled
+
 ## v0.1.0-alpha.3 - MFBD witness format, pre-trie validation and Amsterdam
 
 ### Highlights
