@@ -165,8 +165,10 @@ sp1-benchmark: z6m_prover sp1-benchmark-corpus
 
 # Stage release artifacts into ./temp/
 RELEASE_DIR := temp
-RELEASE_BINS := \
+# Recursive: $(ERE_VK) is defined below.
+RELEASE_BINS = \
 	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
+	$(ERE_VK):z6m_guest_hypercube.vk \
 	prover/target/release/z6m_prover:z6m_prover_hypercube \
 	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
 
@@ -181,7 +183,7 @@ release-artifacts:
 	done; \
 	(cd $(RELEASE_DIR) && sha256sum $$names > SHA256SUMS.txt)
 	@echo "release artifacts staged in $(RELEASE_DIR)/:"
-	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
+	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_guest_hypercube.vk $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
 	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
 	@cat $(RELEASE_DIR)/SHA256SUMS.txt
 # ERE benchmark integration: build the SP1 guest ELF + VK as expected by ere-hosts.
