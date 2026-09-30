@@ -202,13 +202,15 @@ To run the general EEST corpus instead, pass `ERE_GEN_FIXTURES=1` (and set
 R2 catalog, mirroring the upstream `eest-r2-stateless-inputs.yml` selection with the
 Zilkworm guest in place of the EEST spec guest.
 
-- **Triggers:** `workflow_dispatch` on any z6m branch, and `workflow_call`.
+- **Triggers:** `workflow_dispatch` on any z6m branch, and `workflow_call` from
+  [`release.yml`](../.github/workflows/release.yml) after a `v*` release is
+  published (a release created with `GITHUB_TOKEN` emits no `release` event).
 - **Guest source:** `build` runs `make ere-bin` at the run's ref; `release`
   downloads `z6m_guest_hypercube.{elf,vk}` of `release_tag`, verified against the
   release `SHA256SUMS.txt`. The host adapter is compiled from the same z6m ref
   (the release tag in `release` mode), so adapter and guest always match.
 - **Inputs:** `guest_source`, `release_tag`, `catalog_url` (default devnet-8),
-  `batch_count` (default 10), `compare` (default off),
+  `batch_count` (default 10), `compare` (default off; on for releases),
   `workload_ref` / `ere_guests_ref` (default `canepat/zilkworm_mfbd` on the
   erigontech forks).
 - **Layout:** `z6m/`, `zkevm-benchmark-workload_fork/` and `ere-guests_fork/` are
