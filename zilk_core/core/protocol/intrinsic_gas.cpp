@@ -64,7 +64,7 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn) noexcept {
     // Recipient balance write plus the EIP-7708 transfer log performed by a value transfer.
     static constexpr int64_t kTxValueCost = 6000;
     // EIP-8038: CREATE_ACCESS = ACCOUNT_WRITE + COLD_ACCOUNT_ACCESS (12000).
-    static constexpr int64_t kCreateAccess = evmone::instr::create_access_cost_amsterdam;
+    static constexpr int64_t kCreateAccess = evmone::instr::CREATE_ACCESS;
     static constexpr int64_t kDataTokenStandard = 4;
     static constexpr int64_t kDataTokenFloor = 16;
     static constexpr int64_t kInitcodeWordCost = 2;
@@ -74,17 +74,17 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn) noexcept {
     // charged when the transaction touches the prepaid address/slot. COLD_STORAGE_ACCESS is
     // only a rename of COLD_SLOAD_COST, so the storage-key entry is not repriced.
     static constexpr int64_t kAccessListAddressCost =
-        evmone::instr::cold_account_access_cost_amsterdam - evmone::instr::warm_storage_read_cost;
+        evmone::instr::COLD_ACCOUNT_ACCESS_AMSTERDAM - evmone::instr::WARM_ACCESS;
     static constexpr int64_t kAccessListStorageKeyCost =
-        evmone::instr::cold_sload_cost - evmone::instr::warm_storage_read_cost;
+        evmone::instr::COLD_STORAGE_ACCESS - evmone::instr::WARM_ACCESS;
     static constexpr int64_t kPrecompileEcrecover = 3000;
     static constexpr int64_t kAuthTupleBytes = 101;  // chain_id 8 + addr 20 + nonce 8 + v/r/s 65.
     // EIP-8037: EXECUTION_PER_AUTH_BASE_COST = AUTH_TUPLE_BYTES x DATA_TOKEN_FLOOR
     //   + PRECOMPILE_ECRECOVER + COLD_ACCOUNT_ACCESS + 2 x WARM_ACCESS (7816).
     static constexpr int64_t kExecutionPerAuthBaseCost =
         kAuthTupleBytes * kDataTokenFloor + kPrecompileEcrecover +
-        evmone::instr::cold_account_access_cost_amsterdam +
-        2 * evmone::instr::warm_storage_read_cost;
+        evmone::instr::COLD_ACCOUNT_ACCESS_AMSTERDAM +
+        2 * evmone::instr::WARM_ACCESS;
 
     const bool is_create = !txn.to;
     // A tx with an unrecoverable sender is rejected on signature grounds; the
@@ -107,7 +107,7 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn) noexcept {
         recipient_regular = kCreateAccess;
         init_code_gas = kInitcodeWordCost * static_cast<int64_t>(num_words(txn.data.size()));
     } else if (!is_self_transfer) {
-        recipient_regular = evmone::instr::cold_account_access_cost_amsterdam;
+        recipient_regular = evmone::instr::COLD_ACCOUNT_ACCESS_AMSTERDAM;
         if (has_value) recipient_regular += kTxValueCost;
     }
 

@@ -11,7 +11,7 @@ bool silkworm_recover_address(uint8_t out[20], const uint8_t message[32], const 
     const auto hash = std::span<const uint8_t, 32>{message, 32};
     const auto r_bytes = std::span<const uint8_t, 32>{signature, 32};
     const auto s_bytes = std::span<const uint8_t, 32>{signature + 32, 32};
-    const auto opt_address = evmmax::secp256k1::ecrecover(hash, r_bytes, s_bytes,
+    const auto opt_address = evmone::crypto::secp256k1::ecrecover(hash, r_bytes, s_bytes,
                                                           recovery_id != 0);
     if (!opt_address) {
         return false;
