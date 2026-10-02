@@ -200,6 +200,17 @@ template <uint16_t Csr>
     csrs<0x819>(&p);
 }
 
+// Round index cycles sigma's 10 rows.
+inline void blake2b_rounds(uint32_t rounds, uint64_t state[16], const uint64_t input[16]) noexcept
+{
+    Blake2bRoundParams p{0, state, input};
+    for (uint32_t i = 0; i < rounds; ++i)
+    {
+        csrs<0x819>(&p);
+        p.index = p.index == 9 ? 0 : p.index + 1;
+    }
+}
+
 /* ───────── intx helpers (outputs never alias inputs) ───────── */
 
 [[gnu::always_inline]] inline uint256 arith256_mod(
