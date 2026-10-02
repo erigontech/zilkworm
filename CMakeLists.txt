@@ -96,6 +96,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/addr_hash_orphan_test.cpp
     zilk_core/dev/cli/account_read_spoof_test.cpp
     zilk_core/dev/cli/account_read_honest_test.cpp
+    zilk_core/dev/cli/prestate_forgery_test.cpp
     zilk_core/dev/cli/delegation_clearing_storage_test.cpp
     zilk_core/dev/cli/code_store_collision_len_test.cpp
   )
