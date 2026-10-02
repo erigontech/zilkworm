@@ -9,7 +9,7 @@ members = [
     "guest_turbo",
     "witness_ffi",
 ]
-exclude = ["stateless_validator"]
+exclude = ["stateless_validator", "prover_zisk"]
 resolver = "2"
 
 [workspace.dependencies]

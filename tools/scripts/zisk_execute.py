@@ -11,6 +11,10 @@ INPUT_ADDR+8), runs ziskemu on the guest ELF, decodes the 112-byte public
 values from the -o file and compares them byte-for-byte with the native
 runner's `Public Values:` line.
 
+With --prover, each input runs through the z6m_prover_zisk host
+(`execute`, zisk-sdk) instead of ziskemu; its `Public Values:` and
+`cycles=` lines take the place of the .out file and the steps line.
+
 Writes <log-dir>/results.tsv, per-input .out/.log/.native.log files and
 <log-dir>/summary.log. Exits 1 on any MISMATCH or ERROR.
 
@@ -19,6 +23,9 @@ Usage:
         --dir temp/runtime/zisk_corpus --native build/zilk_core/dev/cli/state_transition
     python3 zisk_execute.py --elf prover/guest_zisk/build/z6m_guest.elf \\
         --eest-dir <mfbd>/blockchain_tests --filter cancun -j 16
+    python3 zisk_execute.py --elf prover/guest_zisk/build/z6m_guest.elf \\
+        --dir temp/runtime/zisk_corpus --prover prover/prover_zisk/target/release/z6m_prover_zisk \\
+        -j 2 --threads 7
 """
 
 import argparse
@@ -50,6 +57,8 @@ NATIVE_PV_RE = re.compile(r"Public Values: 0x([0-9a-fA-F]{224})\b")
 NATIVE_GAS_RE = re.compile(r"^Cumulative Gas Used: (\d+)", re.M)
 NATIVE_FAIL_RE = re.compile(r"^FAIL: ", re.M)
 NATIVE_SKIP_RE = re.compile(r"^SKIP: ", re.M)
+PROVER_ERROR_RE = re.compile(r"^Error: (.+)$", re.M)
+PROVER_STEPS_RE = re.compile(r"^(?:Executed|FAILED|SKIPPED) block \d+ \(.*?cycles=(\d+)", re.M)
 
 
 @dataclass
@@ -193,6 +202,31 @@ def run_zisk(args, inp: Input, res: Result, env: Dict[str, str]) -> str:
     return ""
 
 
+def run_prover(args, inp: Input, res: Result, env: Dict[str, str]) -> str:
+    """Run `z6m_prover_zisk execute` on one input; return an error reason or ''."""
+    cmd = [args.prover, "--elf", args.elf, "execute", "--file-name", inp.path,
+           "--data-dir", os.path.join(args.log_dir, "prover")]
+    rc, text = run_logged(cmd, os.path.join(args.log_dir, inp.name + ".log"),
+                          args.timeout, env, inp.path)
+    m = PROVER_STEPS_RE.search(text)
+    res.steps = int(m.group(1)) if m else None
+    if rc is None:
+        return f"prover timeout after {args.timeout}s"
+    m = NATIVE_PV_RE.search(text)
+    if not m:
+        err = PROVER_ERROR_RE.search(text)
+        return f"prover rc={rc}: " + (err.group(1) if err else "no Public Values line")
+    res.pv = bytes.fromhex(m.group(1))
+    res.gas = int.from_bytes(res.pv[:8], "little")
+    if not any(res.pv):
+        return "all-zero public values (guest aborted)"
+    # Host exits 1 on FAILED blocks.
+    want_rc = 1 if classify(res.gas) == "FAIL" else 0
+    if rc != want_rc:
+        return f"prover rc={rc}, expected {want_rc}"
+    return ""
+
+
 def run_native(args, inp: Input, res: Result,
                env: Dict[str, str]) -> Tuple[str, Optional[str]]:
     """Run the native runner; return (error reason, class)."""
@@ -227,7 +261,7 @@ def describe_mismatch(res: Result, zclass: str, nclass: str) -> str:
 def run_one(args, inp: Input, env: Dict[str, str]) -> Result:
     res = Result(inp)
     try:
-        reason = run_zisk(args, inp, res, env)
+        reason = (run_prover if args.prover else run_zisk)(args, inp, res, env)
         native_reason, nclass = "", None
         if args.native:
             native_reason, nclass = run_native(args, inp, res, env)
@@ -331,6 +365,12 @@ def main() -> int:
                         help="Pass -X to ziskemu (opcode/memory stats in the .log)")
     parser.add_argument("--legacy-inputs", action="store_true",
                         help="Let ziskemu frame the raw file (--legacy-inputs) instead of -i")
+    parser.add_argument("--prover", default=None,
+                        help="Run inputs through this z6m_prover_zisk host (zisk-sdk) "
+                             "instead of ziskemu")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="With --prover: RAYON_NUM_THREADS per host process "
+                             "(the SDK emulates on 16 threads)")
     args = parser.parse_args()
 
     args.elf = os.path.abspath(args.elf)
@@ -342,11 +382,27 @@ def main() -> int:
         if not os.path.isfile(args.native) or not os.access(args.native, os.X_OK):
             print(f"ERROR: native runner not found: {args.native}", file=sys.stderr)
             return 1
-    args.ziskemu = resolve_ziskemu(args.ziskemu)
-    if not args.ziskemu or not shutil.which(args.ziskemu[0]):
-        print(f"ERROR: ziskemu not found: {shlex.join(args.ziskemu)} "
-              f"(set --ziskemu or $ZISKEMU)", file=sys.stderr)
-        return 1
+    if args.prover:
+        args.prover = os.path.abspath(args.prover)
+        if not os.path.isfile(args.prover) or not os.access(args.prover, os.X_OK):
+            print(f"ERROR: prover not found: {args.prover}", file=sys.stderr)
+            return 1
+        bad = [f for f, on in (("--ziskemu", args.ziskemu), ("--max-steps", args.max_steps),
+                               ("--stats", args.stats), ("--legacy-inputs", args.legacy_inputs))
+               if on]
+        if bad:
+            print(f"ERROR: {', '.join(bad)} only apply to ziskemu runs, not --prover",
+                  file=sys.stderr)
+            return 1
+    else:
+        if args.threads is not None:
+            print("ERROR: --threads only applies with --prover", file=sys.stderr)
+            return 1
+        args.ziskemu = resolve_ziskemu(args.ziskemu)
+        if not args.ziskemu or not shutil.which(args.ziskemu[0]):
+            print(f"ERROR: ziskemu not found: {shlex.join(args.ziskemu)} "
+                  f"(set --ziskemu or $ZISKEMU)", file=sys.stderr)
+            return 1
 
     if args.input:
         if not os.path.isfile(args.input):
@@ -371,16 +427,23 @@ def main() -> int:
     tmp_dir = os.path.join(args.log_dir, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     env = dict(os.environ, TMPDIR=tmp_dir)
+    if args.threads:
+        env["RAYON_NUM_THREADS"] = str(args.threads)
 
     print("=" * 70)
     print(f"  ZisK Execute: {len(inputs)} inputs, jobs={args.jobs}")
     print("=" * 70)
-    print(f"  ziskemu: {shlex.join(args.ziskemu)}")
+    if args.prover:
+        print(f"  Prover:  {args.prover} execute"
+              f"{f' (RAYON_NUM_THREADS={args.threads})' if args.threads else ''}")
+    else:
+        print(f"  ziskemu: {shlex.join(args.ziskemu)}")
     print(f"  ELF:     {args.elf}")
     print(f"  Native:  {args.native or '(none)'}")
-    print(f"  Input:   {'--legacy-inputs' if args.legacy_inputs else '-i (framed)'}"
-          f"{', -X' if args.stats else ''}"
-          f"{f', -n {args.max_steps}' if args.max_steps else ''}")
+    if not args.prover:
+        print(f"  Input:   {'--legacy-inputs' if args.legacy_inputs else '-i (framed)'}"
+              f"{', -X' if args.stats else ''}"
+              f"{f', -n {args.max_steps}' if args.max_steps else ''}")
     print(f"  Log dir: {args.log_dir}\n", flush=True)
 
     results: List[Optional[Result]] = [None] * len(inputs)
