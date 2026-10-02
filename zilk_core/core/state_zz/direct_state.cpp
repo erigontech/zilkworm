@@ -244,6 +244,7 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
 void DirectState::reserve_block_maps_() noexcept {
     created_accounts_.reserve(256);
     overflow_slots_.reserve(128);
+    blank_slots_.reserve(16);
     created_code_.reserve(64);
     touched_.reserve(512);
     headers_.reserve(256);
@@ -268,6 +269,7 @@ DirectState::DirectState(DirectState&& other) noexcept
 
     created_accounts_ = std::move(other.created_accounts_);
     overflow_slots_ = std::move(other.overflow_slots_);
+    blank_slots_ = std::move(other.blank_slots_);
     created_code_ = std::move(other.created_code_);
     created_code_collisions_ = std::move(other.created_code_collisions_);
     headers_ = std::move(other.headers_);
@@ -289,7 +291,8 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
                                         const evmc::bytes32& key) const noexcept {
     // Materializing: a storage read must leave the same record an account read
     // does. Only blob records carry inline slots; overlay records fall through.
-    // Blank reads aren't recorded: USE_HASH_KEY walks them (reth witness issue).
+    // Blank reads are recorded for check_root's non-membership walk; USE_HASH_KEY
+    // first walks the node store for them (reth witness issue).
     const auto* pa = observe_account_(addr);
     if (pa->slot_count > 0) {
         if (pa->deleted) [[unlikely]]
@@ -317,6 +320,7 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
         }
     }
 #endif
+    record_blank_slot_read(addr, key);
     return {};
 }
 

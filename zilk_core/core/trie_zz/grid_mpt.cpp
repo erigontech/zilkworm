@@ -53,7 +53,8 @@ namespace zilkworm {
 template <bool DeletionEnabled>
 inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbles) {
     //================================================
-    // The last leaf must have been inserted to a branch, or deleted from it
+    // depth_ is at the last operation: inserted or deleted leaf, or a node the blank-read
+    // halted at. The current node is a branch at this point
     //  --> lcp: lowest common point (between the last inserted and new_nibbles) <--
     //  --> (note: lcp starts at 0 index, parent_consumed is a counter starting at 1) <--
     // 3 cases arise:
@@ -69,6 +70,13 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
             delete_line(0);
         }
         return;
+    }
+
+    // When last was blank read, it may have halted on a non-branch node after an extension.
+    // Must seed back up to a branch. Folds always take care of stray nodes, so no worries there
+    if (last_was_blank_read_) {
+        while (depth_ != 0 && grid_[grid_[depth_].parent_depth].kind != kBranch)
+            depth_ = grid_[depth_].parent_depth;
     }
 
     unsigned cur_parent_depth;
@@ -146,11 +154,17 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
         auto new_nibbles = nibbles64::from_bytes32(trie_upd.key);
         search_nib_cursor_ = 0;
 
+        const auto cur = trie_upd.current_value();
+        const auto init = trie_upd.initial_value();
+        const bool expect_empty =
+            cur.empty() && (init.empty() || (init.size() == 1 && init[0] == 0x80)); // For non-existent keys that are read-only 
+
         if (!grid_.empty() && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
             // and it's in a branch, or just a leaf, or nothing (can't be ext -> leaf)
             seek_with_last_insert(new_nibbles);
         }
+        last_was_blank_read_ = false;
 
         if (grid_.empty()) {
             // Either the very first update, or the preceding deletes emptied
@@ -159,6 +173,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
             // (re)seeds the trie as a single full-path leaf.
             search_nibbles_ = new_nibbles;
             last_was_delete_ = false;
+            if (expect_empty) continue;  // non-membership confirmed: seed nothing
             LeafNode l{search_nibbles_, 0, trie_upd.current_value()};
             insert_line(0, 0, std::move(l));
             continue;
@@ -174,6 +189,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 unsigned nib = search_nibbles_[search_nib_cursor_];
                 auto unfold_res = unfold_slot(nib);
                 if (unfold_res == UnfoldResult::kEmpty) {
+                    if (expect_empty) { last_was_blank_read_ = true; break; }  // non-membership confirmed: insert nothing
                     // Child is empty - insert here
                     auto l = make_cur_leaf(trie_upd.current_value());
                     insert_line(l.parent_slot, depth_, std::move(l));
@@ -197,8 +213,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 unsigned old_child_depth{grid_line.child_depth[last_nib]};
 
                 if (m == grid_line.ext.path.len) {
-                    // Full match -> unfold child
-                    if (old_child_depth == 0) {
+                    // Full match -> unfold child if not present, or point to it
+                    if (old_child_depth != 0) {
+                        depth_ = old_child_depth;
+                    } else {
                         ByteView rlp;
                         if (grid_line.ext.child_len < 32) {
                             embedded_rlp_copies_.emplace_back(grid_line.ext.child);
@@ -226,6 +244,8 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     }
                     continue;
                 }
+
+                if (expect_empty) { last_was_blank_read_ = true; break; }  // non-membership confirmed: split nothing
 
                 auto old_ext_line{grid_line};  // cache the value;
                 auto new_ext_len = old_ext_line.ext.path.len - m - 1;
@@ -331,6 +351,8 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     }
                     break;  // update complete
                 }
+
+                if (expect_empty) { last_was_blank_read_ = true; break; }  // non-membership confirmed: split nothing
 
                 LeafNode old_leaf{grid_[depth_].leaf};
                 BranchNode bn;
