@@ -67,8 +67,8 @@ elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES ".*Clang$")
     add_link_options(-fprofile-instr-generate -fcoverage-mapping)
   endif()
 
-  # configure libc++
-  if(NOT SILKWORM_WASM_API)
+  # configure libc++ (skip for bare-metal cross-compilation)
+  if(NOT SILKWORM_WASM_API AND NOT CMAKE_SYSTEM_NAME STREQUAL "Generic")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
     # std::views::join is experimental on clang < 18 and Apple clang < 16
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18)
@@ -112,13 +112,16 @@ if(MSVC)
 elseif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   add_link_options(-Wl,-stack_size -Wl,${SILKWORM_STACK_SIZE})
 else()
-  add_link_options(-Wl,-z,stack-size=${SILKWORM_STACK_SIZE})
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Generic")
+    add_link_options(-Wl,-z,stack-size=${SILKWORM_STACK_SIZE})
+  endif()
 
   # https://clang.llvm.org/docs/SafeStack.html
   if("${CMAKE_CXX_COMPILER_ID}" MATCHES ".*Clang$"
      AND NOT SILKWORM_WASM_API
      AND NOT SILKWORM_SANITIZE
      AND NOT SILKWORM_FUZZER
+     AND NOT CMAKE_SYSTEM_NAME STREQUAL "Generic"
   )
     add_compile_options(-fsanitize=safe-stack)
     add_link_options(-fsanitize=safe-stack)
