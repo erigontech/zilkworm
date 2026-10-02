@@ -50,11 +50,11 @@ For a 32-byte key — a code hash or a node hash — `key8` is the key's first e
 
 For a 20-byte address, `key8` is the address's first eight bytes read the same way, except that the most significant byte of the word is taken from the address's last byte, byte 19, instead of byte 7. The exception exists for the precompile addresses, which are zero in every byte but the last: a shortening taken from the first eight bytes alone would give all of them one `key8`, and the whole set would become a single `key8` collision.
 
-**2-stage lookup.** `key8` enters the lookup through two rounds of one hash. The verifier adds the map's salt (`seed_factor`) to `key8`, mixes the sum once with a one-round SplitMix64 stage-1 mixer (the first xorshift-multiply-xorshift stage of Stafford's Mix13 finalizer, which SplitMix64 adopted; the second multiply round is dropped), and reduces the low 32 bits of the result to a bucket with the [Lemire multiply-high reduction](https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/); it then adds that bucket's 64-bit displacement to the salted key, mixes the sum again with the same mixer, and reduces its low 32 bits again, this time into the range of slots. Every addition wraps at 64 bits.
+**2-stage lookup.** `key8` enters the lookup through two rounds of one hash. The verifier adds the map's salt (`seed_factor`) to `key8`, mixes the sum once with a two-multiply mixer (xorshift by 30, multiply, xorshift by 33, multiply, both by the constant `0xFFFFFFFF85EBCA6B`, the sign extension of the 32-bit `0x85EBCA6B`; no final xorshift), and reduces the low 32 bits of the result to a bucket with the [Lemire multiply-high reduction](https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/); it then adds that bucket's 64-bit displacement to the salted key, mixes the sum again with the same mixer, and reduces its low 32 bits again, this time into the range of slots. Every addition wraps at 64 bits.
 
-The one-round variant is a deliberate trade. The full finalizer's second multiply buys avalanche quality that a hash table does not need: the mixer's only job here is to spread the salted key across the bucket and slot ranges well enough that the producer can find displacements, and the producer verifies that empirically for the exact key-set it ships. Dropping the round saves one 64-bit multiply and one shift per mix, two per lookup, on the proving path. The variant is not cryptographic and does not need to be: a bad or malicious mix can only produce a miss (§3.4), never a wrong hit.
+The shape is a deliberate trade. The Lemire reduction keeps the high bits of the low 32-bit word, so for the table sizes MFBD ships it reads bits 17..31 of the mixed word and nothing below; the mixer's job is full avalanche onto that window, and two multiplies give it: measured over 2²⁰ samples, the window's worst bit-flip bias after the second multiply is max |A−½| = 0.0021 against a noise floor of about 0.001, so the final xorshift of a standard finalizer would add an instruction without changing what the reduction reads. The constant is a sign-extended 32-bit value, which rv64im materializes in two instructions (`lui`+`addi`) instead of the six a general 64-bit literal needs (`lui`, `addi`, `lui`, `addi`, `slli`, `add`); per the hashers report a `find` costs 35 instructions on rv64im against 37 for the one-round SplitMix64 stage it replaces. The mixer is not cryptographic and does not need to be: a bad or malicious mix can only produce a miss (§3.4), never a wrong hit.
 
-**Why 64 bits.** An unsigned 64-bit integer is the native integer on both host and guest; both are little-endian, so forming `key8` from a hash is one 8-byte load of the key's first word with no byte swap, and the address form adds one byte load and three bit operations. Every step from there to the slot — the addition of the salt, SplitMix64's shift, xor, and multiply, and the Lemire reduction, whose 32×32-bit product fits in one 64-bit register so that taking its high half is a single multiply and a shift — is a handful of single-register native instructions on one value.
+**Why 64 bits.** An unsigned 64-bit integer is the native integer on both host and guest; both are little-endian, so forming `key8` from a hash is one 8-byte load of the key's first word with no byte swap, and the address form adds one byte load and three bit operations. Every step from there to the slot — the addition of the salt, the mixer's shifts, xors, and multiplies, and the Lemire reduction, whose 32×32-bit product fits in one 64-bit register so that taking its high half is a single multiply and a shift — is a handful of single-register native instructions on one value.
 
 This avoids any loop over the key's bytes and any multi-limb arithmetic, and the only memory traffic on the way to the slot is the key's first word, one displacement, and one slot offset. Mixing the full 20 or 32 bytes to the same quality would take several dependent rounds over three or four words on every read. And because every lookup is confirmed against the full-length key, collisions included, the shortening is both cheap and safe.
 
@@ -331,7 +331,7 @@ One index structure is used three times — over addresses (`MPHA`), over code h
 
 ```
 MPHF map                              header + four regions; all offsets relative to the header start
-├─ MphfMapHeader       56 B           magic ∈ {"MPHA","MPHC","MPHN"}, version 3
+├─ MphfMapHeader       56 B           magic ∈ {"MPHA","MPHC","MPHN"}, version 4
 │  ├─ magic, version         u32 × 2
 │  ├─ n_keys                 u32      entries in the slot table
 │  ├─ n_buckets              u32      entries in the displacement table
@@ -368,10 +368,11 @@ lookup(key8):
         if body_at(e.offset): return body_at(e.offset)
     return MISS
 
-m(x):                                         # one-round SplitMix64 stage-1 mixer (§1.3)
+m(x):                                         # two-multiply mixer (§1.3)
     x ^= x >> 30
-    x *= 0xBF58476D1CE4E5B9
-    x ^= x >> 31
+    x *= 0xFFFFFFFF85EBCA6B
+    x ^= x >> 33
+    x *= 0xFFFFFFFF85EBCA6B
     return x
 
 reduce(x, n):                                 # x, n < 2^32
@@ -381,7 +382,7 @@ body_at(off):                                 # [body_len u64][body ...]; body s
     return body if body.key == query_key else NONE
 ```
 
-1. **Mix.** `m` is a bijection on 64-bit words (every operation is invertible); its job is to move every bit of the salted key into the low 32 bits before reduction.
+1. **Mix.** `m` is a bijection on 64-bit words (each xorshift is invertible and the multiplier is odd, so every step is one); its job is to move every bit of the salted key into the low 32 bits before reduction, and in particular into their upper half, which is what the reduction keeps.
 2. **Bucket and displacement.** `displacement[b]` is added to the salted key `z`, not to `m(z)`, and the sum is mixed again. An empty bucket, or one the producer could not place, carries `0`.
 3. **Slot.** `n_keys` is the number of distinct `key8` values indexed: one slot per distinct `key8`.
 4. **Slot offset.** `off != 0` names the single candidate body. `off == 0` means nothing was placed here: the key is absent, or it is one of the two collision kinds of §1.3.
@@ -402,7 +403,7 @@ Within a trial, buckets are placed largest first; for each bucket the first `d_j
 
 **The full-key comparison and the sidecar.** The arithmetic produces a guess that is never trusted: the verifier MUST compare all 20 or 32 bytes of the query key against the key embedded at offset 0 of the candidate body, and a difference is a definite miss. On every path the length of a returned body MUST be taken from the `body_len` prefix in the data arena — the prefix that delimits exactly the bytes the keccak check covered; the sidecar entry is exactly `key8` and `offset` (two u64, 16 bytes, no reserved bytes) and carries no length of its own (B1; body length, §3.4); entries are 8-byte aligned and each field is a single native load. The data arena is u32-sized, so a verifier MUST reject an `offset` unless `offset < data_size`, before doing any arithmetic with it. The verifier MUST use `seed_factor` as stored and MUST ignore `seed`.
 
-**The cost of a read.** Two mixes, two reductions, two table loads, one comparison, and a pointer (§1.3); a read that falls to the sidecar adds one binary search over a short table and the same comparison. The structural cost is paid once, off-chain, in the producer, which ships flat tables — about one 64-bit displacement per four keys, one 32-bit slot offset per key, and 16 bytes per sidecar entry — that the guest reads with plain loads. The tables are deliberately uncompressed: entropy-coding the displacement array would shrink the witness and move the decode cost back into the guest, the trade §1.2 rejects.
+**The cost of a read.** Two mixes of two multiplies each, two reductions, two table loads, one comparison, and a pointer, 35 instructions per `find` on rv64im (against 37 for the stage it replaced, per the hashers report cited in §1.3); a read that falls to the sidecar adds one binary search over a short table and the same comparison. The structural cost is paid once, off-chain, in the producer, which ships flat tables — about one 64-bit displacement per four keys, one 32-bit slot offset per key, and 16 bytes per sidecar entry — that the guest reads with plain loads. The tables are deliberately uncompressed: entropy-coding the displacement array would shrink the witness and move the decode cost back into the guest, the trade §1.2 rejects.
 
 **Why the producer's build can be left unchecked.** The displacement table, the slot offsets, and the sidecar are attacker-supplied bytes, and the verifier neither rebuilds nor checks the perfect-hash property. The checks of §3 bound what a hostile index can do. The full-key comparison (§3.4) lets a wrong or malicious index route a query only to a body whose key does not match — a miss, never a body for the wrong key; code and node sanity (§3.3) mean a body that does match cannot carry the wrong content. A miss, in turn, is not absorbed: it becomes a recorded empty read (§3.4) that the trie walk of §3.1 checks from `pre_state_root`, where an empty read of a key that is in fact present fails the pre-value comparison or meets a missing node. The worst a hostile index can do is therefore make a key unfindable — accept to reject, never the other way (§3.4).
 

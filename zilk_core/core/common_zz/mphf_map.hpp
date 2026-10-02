@@ -28,12 +28,14 @@ using ::silkworm::Bytes;
 // Caller verifies membership via key bytes embedded in body.
 // MphfMap reads unchecked: see validate_mphf below for the layout contract.
 inline constexpr uint64_t kMphfGoldenRatio = 0x9E3779B97F4A7C15ull;
-inline constexpr uint32_t kMphfMapVersion = 3u;
+inline constexpr uint32_t kMphfMapVersion = 4u;
 
-// SplitMix64-stage1 mixer.
+// sign-extended 32-bit c: lui+addi only
+inline constexpr uint64_t kMphfMixConstant = static_cast<uint64_t>(static_cast<int32_t>(0x85EBCA6B));
+static_assert(kMphfMixConstant == 0xFFFFFFFF85EBCA6Bull);
 [[gnu::always_inline]] inline uint64_t mix64_body(uint64_t z) noexcept {
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    return z ^ (z >> 31);
+    z = (z ^ (z >> 30)) * kMphfMixConstant;
+    return (z ^ (z >> 33)) * kMphfMixConstant;
 }
 
 // Lemire fast mod: x in [0,n) with one mul + shift.

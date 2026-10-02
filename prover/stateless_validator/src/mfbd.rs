@@ -26,7 +26,7 @@ pub const MFBD_HEADER_SIZE: usize = 16;
 
 // FlatBundle inner header.
 const FLAT_BUNDLE_MAGIC: u32 = 0x444E4246; // "FBND"
-const FLAT_BUNDLE_VERSION: u32 = 14;
+const FLAT_BUNDLE_VERSION: u32 = 15;
 const FLAT_BUNDLE_HEADER_SIZE: usize = 56;
 
 // PreStateMeta.
@@ -36,7 +36,7 @@ const PRESTATE_VERSION: u32 = 4;
 const PRESTATE_META_SIZE: usize = 68;
 
 // MphfMapHeader.
-const MPHF_MAP_VERSION: u32 = 3;
+const MPHF_MAP_VERSION: u32 = 4;
 const MPHF_MAP_HEADER_SIZE: usize = 56;
 const MPHF_ADDR_MAP_MAGIC: u32 = 0x4148504D; // "MPHA"
 const MPHF_CODE_STORE_MAGIC: u32 = 0x4348504D; // "MPHC"
@@ -47,6 +47,7 @@ const MPHF_GOLDEN_RATIO: u64 = 0x9E3779B97F4A7C15;
 const MPHF_LAMBDA: u32 = 4;
 const MPHF_MAX_DISPLACEMENT: u32 = 1 << 20;
 const MPHF_MAX_SEED_RETRIES: u32 = 32;
+const MPHF_NO_KEY: u32 = u32::MAX;
 
 // Per-block flag bit.
 const BLOCK_FLAG_EXPECT_INVALID: u8 = 0x01;
@@ -100,10 +101,13 @@ fn hash_key8(h: &[u8; 32]) -> u64 {
 
 // ---------- MPHF builder (CHD with collision sidecar) ----------
 
+// sign-extended 32-bit c: lui+addi only
+const MPHF_MIX_CONSTANT: u64 = 0xFFFF_FFFF_85EB_CA6B;
+
 #[inline]
 fn mix64_body(z: u64) -> u64 {
-    let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z ^ (z >> 31)
+    let z = (z ^ (z >> 30)).wrapping_mul(MPHF_MIX_CONSTANT);
+    (z ^ (z >> 33)).wrapping_mul(MPHF_MIX_CONSTANT)
 }
 
 #[inline]
@@ -128,7 +132,11 @@ struct ChdSolution {
     spilled_keys: Vec<u32>,
 }
 
-fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
+fn chd_solve(
+    distinct_keys: &[u64],
+    max_retries: u32,
+    max_displacement: u32,
+) -> Result<ChdSolution> {
     let n = distinct_keys.len() as u32;
     if n == 0 {
         return Ok(ChdSolution {
@@ -145,12 +153,12 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
 
     let mut z1_cache = vec![0u64; n as usize];
     let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); n_buckets as usize];
-    let mut slot_used = vec![false; n as usize];
+    let mut slot_owner = vec![MPHF_NO_KEY; n as usize];
     let mut trial_positions: Vec<u32> = Vec::new();
 
     let mut best: Option<ChdSolution> = None;
 
-    for seed_try in 0u64..MPHF_MAX_SEED_RETRIES as u64 {
+    for seed_try in 0u64..max_retries as u64 {
         let seed_factor = seed_try.wrapping_mul(MPHF_GOLDEN_RATIO);
 
         for b in &mut buckets {
@@ -170,8 +178,8 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
         let mut order: Vec<u32> = (0..n_buckets).collect();
         order.sort_by(|a, b| buckets[*b as usize].len().cmp(&buckets[*a as usize].len()));
 
-        for s in slot_used.iter_mut() {
-            *s = false;
+        for s in slot_owner.iter_mut() {
+            *s = MPHF_NO_KEY;
         }
         let mut displacement_factors = vec![0u64; n_buckets as usize];
         let mut idx_for_key = vec![u32::MAX; n as usize];
@@ -185,7 +193,7 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
             }
 
             let mut placed = false;
-            for d in 0..=MPHF_MAX_DISPLACEMENT {
+            for d in 0..=max_displacement {
                 let d_factor = ((seed_try ^ d as u64 ^ MPHF_GOLDEN_RATIO)
                     .wrapping_sub(seed_try))
                 .wrapping_mul(MPHF_GOLDEN_RATIO);
@@ -195,7 +203,7 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
                 for &key_idx in bucket {
                     let h2 = mix64_body(z1_cache[key_idx as usize].wrapping_add(d_factor));
                     let pos = fast_mod_u32(h2 as u32, n);
-                    if slot_used[pos as usize] {
+                    if slot_owner[pos as usize] != MPHF_NO_KEY {
                         collision = true;
                         break;
                     }
@@ -207,7 +215,7 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
                 }
                 if !collision {
                     for (pi, &pos) in trial_positions.iter().enumerate() {
-                        slot_used[pos as usize] = true;
+                        slot_owner[pos as usize] = bucket[pi];
                         idx_for_key[bucket[pi] as usize] = pos;
                     }
                     displacement_factors[*bi as usize] = d_factor;
@@ -224,6 +232,19 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
                     spilled_this_try.push(key_idx);
                 }
             }
+        }
+
+        // sidecar keys must probe empty slots
+        let mut si = 0;
+        while si < spilled_this_try.len() {
+            let pos = idx_for_key[spilled_this_try[si] as usize] as usize;
+            si += 1;
+            let owner = slot_owner[pos];
+            if owner == MPHF_NO_KEY {
+                continue;
+            }
+            slot_owner[pos] = MPHF_NO_KEY;
+            spilled_this_try.push(owner);
         }
 
         if spilled_this_try.is_empty() {
@@ -260,6 +281,15 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
 /// may contain duplicate `key8` values; the second and later are routed through
 /// the collision sidecar.
 fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
+    build_mphf_with_budget(magic, entries, MPHF_MAX_SEED_RETRIES, MPHF_MAX_DISPLACEMENT)
+}
+
+fn build_mphf_with_budget(
+    magic: u32,
+    entries: &[(u64, Vec<u8>)],
+    max_retries: u32,
+    max_displacement: u32,
+) -> Result<Vec<u8>> {
     // BTreeMap mirrors std::map on the C++ side: iteration is ascending by key,
     // which keeps the MPHF layout deterministic and cross-encoder byte-equal.
     let mut unique: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
@@ -280,7 +310,7 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
     }
 
     let distinct_keys: Vec<u64> = unique.keys().copied().collect();
-    let mut sol = chd_solve(&distinct_keys)?;
+    let mut sol = chd_solve(&distinct_keys, max_retries, max_displacement)?;
 
     // CHD-spilled keys join the sidecar.
     for &i in &sol.spilled_keys {
@@ -1354,5 +1384,69 @@ mod tests {
         let direct_off = 16 + u32::from_le_bytes(out1[48..52].try_into().unwrap()) as usize;
         let n_accounts = u32::from_le_bytes(out1[direct_off + 8..direct_off + 12].try_into().unwrap());
         assert_eq!(n_accounts, 2);
+    }
+
+    // C++ MphfBuilder<20> output, recipe {1,1,5}@0x600000
+    const CPP_SPILL_GOLDEN: &str = concat!(
+        "5445535404000000050000000200000000000000000000000000000000000000",
+        "60000000400000003800000048000000a000000070010000b95948ce222d44df",
+        "0000000000000000000000000800000000000000000000000000000000000000",
+        "0000600000000000500000000000000001006000000000002801000000000000",
+        "030060000000000098000000000000000400600000000000e000000000000000",
+        "00000000000000003c0000000000000002006000000000000000000000000000",
+        "000000000200600000000000abababababababababababababababababababab",
+        "abababababababababababab000000003c000000000000000000600000000000",
+        "0000000000000000000000000000600000000000abababababababababababab",
+        "abababababababababababababababababababab000000003c00000000000000",
+        "03006000000000000000000000000000000000000300600000000000abababab",
+        "abababababababababababababababababababababababababababab00000000",
+        "3c00000000000000040060000000000000000000000000000000000004006000",
+        "00000000abababababababababababababababababababababababababababab",
+        "abababab000000003c0000000000000001006000000000000000000000000000",
+        "000000000100600000000000abababababababababababababababababababab",
+        "abababababababababababab00000000",
+    );
+
+    // 4 sidecar keys, 1 co-spilled
+    #[test]
+    fn chd_spill_path_matches_cpp_builder() {
+        let entries: Vec<(u64, Vec<u8>)> = (0..5u64)
+            .map(|i| {
+                let tag = 0x600000u64 + i;
+                let mut addr = [0u8; 20];
+                addr[..8].copy_from_slice(&tag.to_le_bytes());
+                addr[19] = (tag >> 8) as u8;
+                let mut body = vec![0xABu8; 60];
+                body[..20].copy_from_slice(&addr);
+                body[20..28].copy_from_slice(&tag.to_le_bytes());
+                (addr_key8(&addr), body)
+            })
+            .collect();
+        let blob = build_mphf_with_budget(0x54534554, &entries, 1, 1).unwrap();
+        assert_eq!(alloy_primitives::hex::encode(&blob), CPP_SPILL_GOLDEN);
+
+        // The reader's invariant: every sidecar key lands on an empty slot.
+        let rd32 = |o: usize| u32::from_le_bytes(blob[o..o + 4].try_into().unwrap());
+        let rd64 = |o: usize| u64::from_le_bytes(blob[o..o + 8].try_into().unwrap());
+        let n_keys = rd32(8);
+        let n_buckets = rd32(12);
+        let seed_factor = rd64(24);
+        let coll_off = rd32(32) as usize;
+        let n_coll = rd32(36) as usize / MPHF_COLLISION_ENTRY_SIZE;
+        let disp_off = rd32(40) as usize;
+        let slots_off = rd32(44) as usize;
+        assert_eq!(n_coll, 4);
+        for i in 0..n_coll {
+            let key = rd64(coll_off + i * MPHF_COLLISION_ENTRY_SIZE);
+            let z1 = key.wrapping_add(seed_factor);
+            let b = fast_mod_u32(mix64_body(z1) as u32, n_buckets) as usize;
+            let df = rd64(disp_off + b * 8);
+            let idx = fast_mod_u32(mix64_body(z1.wrapping_add(df)) as u32, n_keys) as usize;
+            assert_eq!(
+                rd32(slots_off + idx * 4),
+                0,
+                "sidecar key {key:#x} probes an occupied slot"
+            );
+        }
     }
 }
