@@ -451,8 +451,42 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
     if (!fill_branch_child(out_branch, 0, e0_start, e0_payload.data(), h0->payload_length)) return kInvalid;
     if (!fill_branch_child(out_branch, 1, e1_start, e1_payload.data(), h1->payload_length)) return kInvalid;
 
-    for (size_t i = 2; i < 16; ++i) {
-        if (!fill_branch_child_rlp(out_branch, i, remaining)) return kInvalid;
+    // Slots 2..15: fill_branch_child_rlp() with the position in local pointers and the mask in a
+    // local. `remaining` escapes into decode_header() below, so each of its updates was a stack
+    // store, and out_branch.mask was reloaded and stored around every child's byte copy.
+    {
+        const uint8_t* p = remaining.data();
+        const uint8_t* const end = p + remaining.size();
+        unsigned mask = out_branch.mask;
+        for (size_t i = 2; i < 16; ++i) {
+            if (p == end) return kInvalid;
+            const uint8_t b0 = *p;
+            if (b0 == 0xa0) {  // 32-byte hash ref
+                if (end - p < 33) return kInvalid;  // input-too-short (matches decode_header)
+                out_branch.child_ptr[i] = p + 1;
+                out_branch.child_len[i] = 32;
+                mask |= 1u << i;
+                p += 33;
+            } else if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty
+                out_branch.child_len[i] = 0;
+                out_branch.child_ptr[i] = nullptr;
+                ++p;
+            } else if (b0 >= 0xc0 && b0 <= 0xf7) {  // embedded short list
+                const size_t plen_ = static_cast<size_t>(b0 - 0xc0);
+                if (plen_ > 31) return kInvalid;  // must fit child[i].bytes (header + payload)
+                if (static_cast<size_t>(end - p) < 1 + plen_) return kInvalid;
+                out_branch.child[i].bytes[0] = b0;
+                std::copy_n(p + 1, plen_, &out_branch.child[i].bytes[1]);
+                out_branch.child_len[i] = static_cast<uint8_t>(plen_ + 1);
+                out_branch.child_ptr[i] = nullptr;
+                mask |= 1u << i;
+                p += 1 + plen_;
+            } else {
+                return kInvalid;  // not a valid branch child
+            }
+        }
+        out_branch.mask = static_cast<uint16_t>(mask);
+        remaining = ByteView{p, static_cast<size_t>(end - p)};
     }
 
     // Value (17th) — empty (0x80) for fixed-length-key tries; short-circuit the common case.
