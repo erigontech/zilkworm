@@ -253,11 +253,17 @@ class GridMPT {
     // hits a 32-byte hash ref absent from the node store (witness incomplete).
     unsigned missing_count_{0};
 
-#ifndef NDEBUG
-    // DEBUG-only flag for failure propagation throughout the GridMPT implementation.
-    // In RELEASE builds, soundness rests on the final new_root == state_root compare.
+    // Set by any site that detects the trie state is inconsistent -- a node the
+    // store cannot supply, a cursor past the end of the key, a path length that
+    // does not fit. Unconditional, not DEBUG-only: it used to be, on the
+    // reasoning that "soundness rests on the final new_root == state_root
+    // compare". That holds only if the code between detection and the compare is
+    // memory-safe, and at three sites it was not -- they logged and carried on
+    // into an unchecked pop_back(), an out-of-bounds array index, and a
+    // truncating cast. calc_root_from_updates now checks this once at its single
+    // exit, so a caller that ignores an intermediate bool cannot swallow the
+    // failure. Costs one store on paths that are already returning an error.
     bool failed_{false};
-#endif
 
     LeafNode make_cur_leaf(ByteView value_rlp);
 
@@ -311,7 +317,7 @@ class GridMPT {
     void pop_back();
     unsigned move_line(unsigned from_depth);
     UnfoldResult unfold_slot(unsigned slot);
-    void seek_with_last_insert(nibbles64& new_nibbles);
+    [[nodiscard]] bool seek_with_last_insert(nibbles64& new_nibbles);
 
     // Main algorithm
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
@@ -332,10 +338,8 @@ class GridMPT {
 
     unsigned missing_count() const noexcept { return missing_count_; }
 
-#ifndef NDEBUG
-    // DEBUG-only method exposing a single source of truth for success or failure.
+    //! Single source of truth for whether this trie walk hit an inconsistency.
     bool failed() const noexcept { return failed_; }
-#endif
 
     unsigned cascade_delete(unsigned depth);
 };
