@@ -948,6 +948,24 @@ bool DirectState::sanitize() {
                 return;
             }
         }
+        // The EVM reads a slot's `current`, but check_root proves only its `initial` and
+        // skips `current` for an account the block leaves unmodified, so a pre-state slot
+        // must arrive with the two equal. The keys must be strictly ascending: reads and
+        // writes binary-search them, so a key out of order or repeated can hide a proven
+        // slot from the EVM.
+        const auto slots = slots_for(*pa);
+        for (size_t i = 0; i < slots.size(); ++i) {
+            if (i > 0 && std::memcmp(slots[i - 1].key, slots[i].key, 32) >= 0) [[unlikely]] {
+                sys_println("sanitize: pre-state slot keys not strictly ascending");
+                acc_walk_ok = false;
+                return;
+            }
+            if (!eq_hash32(slots[i].initial, slots[i].current)) [[unlikely]] {
+                sys_println("sanitize: pre-state slot current != initial");
+                acc_walk_ok = false;
+                return;
+            }
+        }
         pa->deleted = false;
         pa->modified = true;    // To be unset during addr_hashes loop
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
@@ -960,15 +978,22 @@ bool DirectState::sanitize() {
     }
     if (!acc_walk_ok) return false;
 
-    const uint32_t data_size = pre_state_map_.valid() ? pre_state_map_.header()->data_size : 0u;
     const uint8_t* prev_hash = nullptr;
     for (const auto& e : addr_hashes_) {
         if (prev_hash != nullptr && std::memcmp(prev_hash, e.addr_hash, 32) >= 0) return false;
         const auto h = silkworm::keccak256(ByteView{e.addr, 20});
         if (std::memcmp(h.bytes, e.addr_hash, 32) != 0) return false;
-        if (static_cast<uint64_t>(e.entry_offset) + 8u + sizeof(Account) > data_size) return false;
+        // Routing: check_root reads the account at entry_offset, the EVM reads whatever
+        // find() returns, so they must be the same entry. validate_mphf makes every find()
+        // hit an owned entry start, so entry_offset cannot point into another entry's body,
+        // and with the parity sweep below find() misses every address addr_hashes omits.
+        const auto b = pre_state_map_.find<20, 0, &addr_key8>(e.addr);
+        if (!b || static_cast<uint64_t>(b->data() - pre_state_map_.data()) !=
+                      uint64_t{e.entry_offset} + 8u) [[unlikely]] {
+            sys_println("sanitize: addr_hashes entry_offset is not where find() routes");
+            return false;
+        }
         auto* pa = account_at_offset(e.entry_offset);
-        if (!pa || !eq_addr20(pa->addr, e.addr)) return false;
         pa->modified = false;  // This account's hash now checked
         prev_hash = e.addr_hash;
     }

@@ -274,21 +274,20 @@ is self-consistent. The checks it performs (in the order the function runs them)
    hash belongs to the claimed *identity* — that is exactly the gap this binding
    closes. Without it, a witness could hand the EVM the storage of address A
    while claiming it belongs to address B. (Storage slot *keys* are hashed and
-   bound on the read path inside `check_root`, not in `sanitize()` — and the
-   same is true of MPHF *routing* for account reads; see check 4.)
+   bound on the read path inside `check_root`, not in `sanitize()`; their order
+   and values are check 5.)
 
 2. **`addr_hashes` 1-to-1 coverage sweep.** It walks the `addr_hashes` array
    (sorted by `keccak256(addr)`) and requires it strictly increasing (no
    duplicates — the comparison rejects `memcmp(prev, cur) >= 0`), with every
-   entry's `entry_offset` resolving to an `Account` whose 20-byte address
-   matches, while re-checking `keccak256(addr) == addr_hash` per entry. The
+   entry's `entry_offset` naming the entry `find(addr)` lands on (check 4),
+   while re-checking `keccak256(addr) == addr_hash` per entry. The
    "exactly once" guarantee rides on the `modified` scratch flag: the body walk
    runs first and stamps `modified = true` on every prestate account, the sweep
    clears it per named entry, and a second body walk rejects if any account is
    still `modified` (never named by `addr_hashes`). Gaps or duplicates fail the
-   sweep. This proves the `addr_hashes` ↔ walked-body bijection, but it
-   deliberately does **not** constrain the account *read path*, `find(addr)`;
-   see check 4.
+   sweep. This proves the `addr_hashes` ↔ walked-body bijection; check 4 ties it
+   to the account *read path*.
 
 3. **Per-Account slot-extent bound.** This bound is enforced at `DirectState`
    construction (via `validate_prestate_layout` / `validate_or_abort`), before
@@ -310,14 +309,19 @@ is self-consistent. The checks it performs (in the order the function runs them)
    MphfMap invariant, `off + 8 + body_len <= data_size`. This stops a forged
    `slot_count` from steering reads out of bounds, or into a neighbouring entry.
 
-4. **MPHF routing.** This one is enforced at root-check time inside
-   `check_root`, not in `sanitize()`, but it belongs to the same threat model:
-   checks 1 and 2 prove that `addr_hashes` and the walked bodies are in
-   bijection, yet neither constrains where `find(addr)` actually lands — a
+4. **MPHF routing.** Checks 1 and 2 alone prove that `addr_hashes` and the
+   walked bodies are in bijection, yet not where `find(addr)` actually lands. A
    forged `MphfMapHeader` (e.g. a transposed `slot_offsets[]`) can make
    `find(addr)` miss an account that the body walk and `addr_hashes` both
-   cover. The enforcement rides on the account read path never returning
-   "nothing". `DirectState::find_or_create_account(addr)` is the single
+   cover, and a row's `entry_offset` can name bytes inside another entry's body
+   for an address the map does not hold. `check_root` reads the account at
+   `entry_offset`, the EVM reads what `find()` returns, so the coverage sweep
+   requires each row's `entry_offset` to be the entry `find(addr)` lands on.
+   With the parity check, `find()` then hits every address `addr_hashes` names
+   and misses every other one, for every block of the bundle.
+
+   A second line sits behind it, resting on the account read path never
+   returning "nothing". `DirectState::find_or_create_account(addr)` is the single
    creation-capable lookup: the MPHF blob map first, then the
    `created_accounts_` overlay, and on a *total* miss it *materializes* a
    record in `created_accounts_` with `deleted = true`
@@ -355,10 +359,11 @@ is self-consistent. The checks it performs (in the order the function runs them)
    `check_root` then merges the pre-state `addr_hashes` with the created-set
    hashes and rejects on any overlap ("Created and existing hashes clash") —
    inside the merge loop, before it computes or compares a root at all. So a
-   routing forgery against an account named by `addr_hashes` is caught even
-   when the victim is only ever *read*: the misrouted read materializes an
-   overlay record whose `keccak256(addr)` collides with the `addr_hashes`
-   entry. Before materialization, only *written* accounts left such a trace.
+   routing forgery that got past `sanitize()` would still be caught in a
+   bundle's first block even when the victim is only ever *read*: the
+   misrouted read materializes an overlay record whose `keccak256(addr)`
+   collides with the `addr_hashes` entry. Before materialization, only
+   *written* accounts left such a trace.
 
    `created_accounts_` is routinely non-empty on an honest block. Every
    precompile the EVM touches lands there — `Host::access_account` calls
@@ -366,11 +371,20 @@ is self-consistent. The checks it performs (in the order the function runs them)
    genuinely new EOA or contract. A populated overlay is therefore never itself
    a rejection signal; the hash clash is the only discriminator.
 
+5. **Pre-state slot values and order.** The body walk requires every inline
+   `Slot` to arrive with `initial == current`, and an account's slots strictly
+   ascending by key. The EVM reads `current`, while `check_root` proves
+   `initial` and, for an account the block leaves unmodified, nothing else: a
+   witness shipping the two different would hand the EVM an unproven value
+   under a valid header. Reads and writes binary-search the keys, so a key out
+   of order or repeated could hide a proven slot from the EVM. Both producers
+   already emit this (`mfbd_design_specs.md` §3.3).
+
 Together these bind every byte of state the EVM will read to a verified
 identity and hash, so a malformed or adversarial witness cannot smuggle in
 mismatched accounts, code, or slots and still pass the post-state root check.
 
-Three gaps remain open, and the checks above should not be read as covering
+Two gaps remain open, and the checks above should not be read as covering
 them:
 
 - **Pure omission.** An account whose leaf exists in the real pre-trie but
@@ -384,10 +398,11 @@ them:
   but absent from the real pre-trie is not rejected by a read check. Its
   read-only update reaches a point in the trie that proves its key absent, and
   `calc_root_from_updates` inserts a leaf there rather than failing (§3.1).
-- **`check_root_new_block`.** Every block after a bundle's first (§3.1) carries
-  no clash guard at all, and decides leaf inclusion via `is_deleted`, which
-  resolves through `find()` — so it inherits whatever routing the blob's MPHF
-  header dictates.
+
+Routing used to be a third: `check_root_new_block` (every block after a
+bundle's first, §3.1) carries no clash guard and decides leaf inclusion via
+`is_deleted`, which resolves through `find()`. Check 4 now settles routing in
+`sanitize()`, before any block runs.
 
 Both directions of the account-read behaviour are pinned by tests in the
 `zilkworm.tests` target, built on the shared harness
@@ -402,12 +417,18 @@ assert which check fired:
   `slot_offsets` entries and nothing else, then drives eight reads of the
   victim account through the EVM: `BALANCE`, `EXTCODESIZE`, `EXTCODEHASH`,
   `EXTCODECOPY`, `STATICCALL`, `DELEGATECALL`, a value-bearing `CALL`, and a
-  `BALANCE` whose result is discarded. Because the header is resealed over the
-  spoofed run, the bundle would verify were it not for the clash check; every
-  case asserts the run is rejected on the clash message specifically, with no
-  "New Root" line ever emitted. The discarded-result case is the sharpest: the
-  forged block is byte-identical to the honest one — same gas, same receipts
-  root, same state root — so nothing but the overlay record distinguishes them.
+  `BALANCE` whose result is discarded. The header is resealed over the run a
+  guest made before check 4 existed (the transposition applied right after
+  `sanitize()`), so the bundle would verify were it not for the routing checks;
+  every case asserts the run is rejected by `sanitize()`'s routing check, with
+  no "New Root" line ever emitted, while the mirrored root check still records
+  the clash behind it. The discarded-result case is the sharpest: the forged
+  block is byte-identical to the honest one — same gas, same receipts root,
+  same state root — so nothing but the witness distinguishes them.
+- `prestate_forgery_test.cpp` covers check 5 and the phantom-row half of check
+  4. Its end-to-end case forges `current` on a slot of a contract the block only
+  reads, and a probe copies that slot into its own storage; resealed over that
+  run the bundle verified until check 5, and is now rejected in `sanitize()`.
 - `account_read_honest_test.cpp` pins the other direction, that the check does
   not over-trigger: an honest read of an address absent from the witness, a
   block whose only overlay entries are touched precompiles, a control case
@@ -945,7 +966,7 @@ trie and every touched storage trie *from scratch* out of the witness
 1. Merge the pre-state `addr_hashes` with any newly created accounts into one
    sorted-by-`addr_hash` sequence, rejecting outright — before any root is
    computed — if the two sets intersect ("Created and existing hashes clash").
-   This is the disjointness check that backstops MPHF routing (§2.3.2, check 4).
+   It is the second line behind `sanitize()`'s routing check (§2.3.2, check 4).
 2. For each account, walk its pre-state and newly created slots, caching
    `keccak256(slot_key)` and encoding initial/current values, then drive
    `GridMPT<true>` to recompute that account's storage root over the witness
@@ -1001,7 +1022,8 @@ walk for a single leaf-to-root pass, which is why it is markedly faster than
 block 0's recompute. It also performs **no read checks and no clash guard**: the
 leaf rebuild trusts every cached leaf, and it never compares the created set
 against `addr_hashes`. Both guarantees therefore hold only for a bundle's first
-root check (§2.3.2 lists this as an open gap).
+root check. Routing does not rest on them: `sanitize()` settles it for every
+block of the bundle (§2.3.2, check 4).
 
 | Aspect | Block 0 | Blocks 1+ |
 |---|---|---|
