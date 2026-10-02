@@ -763,11 +763,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     if (!node_store_map_.valid() || headers_.empty()) return nullptr;
 
     // Dedupe: a fresh walk would lose in-place writes and reallocate recovered_accounts_ under live iterators.
-    for (const auto& up : recovered_accounts_) {
-        if (std::memcmp(up->addr, addr.bytes, sizeof(addr.bytes)) == 0) {
-            return up.get();
-        }
-    }
+    if (const auto* hit = find_recovered_account(addr)) return hit;
 
     // Account-trie pre-root = parent block's state_root. get_account has no
     // header context here; the highest-numbered header in headers_ is the
@@ -806,13 +802,34 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     sys_println("USE_HASH_KEY: recovered account " +
                 to_hex(ByteView{addr.bytes, sizeof(addr.bytes)}, true) +
                 " from node-store (preimage missing from keys)");
-    // The leaf is already in prev_root; this account is treated as a
-    // read-only prestate account (not in addr_hashes / created), so it is
-    // intentionally excluded from the state-root recompute updates. Cache
-    // the owned copy so the returned pointer outlives the call.
+    // check_root emits it only when modified.
     const Account* ret = acc.get();
     recovered_accounts_.push_back(std::move(acc));
     return ret;
+}
+
+const Account* DirectState::find_recovered_account(const evmc::address& addr) const noexcept {
+    for (const auto& up : recovered_accounts_) {
+        if (std::memcmp(up->addr, addr.bytes, sizeof(addr.bytes)) == 0) return up.get();
+    }
+    return nullptr;
+}
+
+bool DirectState::recovered_account_modified(const Account& pa) const noexcept {
+    if (pa.deleted) return true;
+    if (!pa.modified) return false;
+    // acc_rlp_buf: pre-state leaf snapshot.
+    uint8_t cur[kAccRlpBufSize];
+    const uint8_t n = pa.rlp_into(cur, std::bit_cast<evmc::bytes32>(pa.storage_root));
+    if (n != pa.acc_rlp_len || std::memcmp(cur, pa.acc_rlp_buf, n) != 0) return true;
+    const auto addr = std::bit_cast<evmc::address>(pa.addr);
+    if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end() && !it->second.empty()) return true;
+    if (auto it = recovered_slots_.find(addr); it != recovered_slots_.end()) {
+        for (const auto& kv : it->second) {
+            if (kv.second.written()) return true;
+        }
+    }
+    return false;
 }
 
 const DirectState::RecoveredSlot*
