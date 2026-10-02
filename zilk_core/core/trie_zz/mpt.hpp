@@ -44,7 +44,9 @@ using ::zilkworm::keccak_bytes32;
 namespace zilkworm {
 struct nibbles64 {
     uint8_t len{};
-    std::array<uint8_t, 64> nib{};  // max trie path is 64 nibbles
+    // Max trie path is 64 nibbles. Word-aligned so a strict-alignment target (rv32 Airbender)
+    // can zero and copy it with word stores; at offset 1 each was a byte-wise library call.
+    alignas(4) std::array<uint8_t, 64> nib{};
 
     uint8_t& operator[](size_t index) { return nib[index]; }
     const uint8_t& operator[](size_t index) const { return nib[index]; }
@@ -185,7 +187,9 @@ struct GridLine {
     uint8_t parent_depth;  // Depth in the stack the current line's parent is at
     uint8_t consumed;      // path nibbles consumed till this node (cumulative)
     bool modified;
-    std::array<uint8_t, 16> child_depth{};
+    // Word-aligned (free: the union below is 8-aligned) so zeroing it is 4 word stores on a
+    // strict-alignment target rather than a call to memset for 16 unaligned bytes.
+    alignas(4) std::array<uint8_t, 16> child_depth{};
 
     union {
         BranchNode branch;
