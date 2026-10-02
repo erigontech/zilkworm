@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloy_consensus::Header as ConsensusHeader;
-use alloy_provider::{ext::DebugApi, Provider, ProviderBuilder};
+use alloy_provider::{ext::DebugApi, DynProvider, Provider, ProviderBuilder};
 use alloy_primitives::Bytes;
 use alloy_rpc_types::Block as RpcBlock;
 use alloy_rpc_types_debug::ExecutionWitness;
@@ -101,6 +101,8 @@ fn extract_bytes_from_value(value: &serde_json::Value) -> Result<Vec<Bytes>> {
 }
 
 /// Fetch execution witness from a geth node using a raw JSON-RPC call.
+/// HTTP-only: this path talks to `rpc_url` directly via reqwest and is never
+/// routed through the injected provider (the `--geth` flow stays on HTTP).
 async fn fetch_geth_execution_witness(
     rpc_url: &str,
     block_number: u64,
@@ -175,6 +177,10 @@ pub struct FetchRequest<'a> {
     /// is rebuilt from a fresh RPC fetch. Used by the live prover service so
     /// `--execute-every 1` always operates on a freshly-built bundle.
     pub force_rebuild: bool,
+    /// `None` → HTTP from `rpc_url` (all CLI paths); `Some` → injected — the
+    /// service passes its WS provider so fetches ride the `newHeads` socket.
+    /// The raw-reqwest `--geth` path stays HTTP-only either way.
+    pub provider: Option<DynProvider>,
 }
 
 pub struct FetchOutcome {
@@ -183,9 +189,77 @@ pub struct FetchOutcome {
     pub flat_bundle_path: PathBuf,
 }
 
+/// Injected provider, or HTTP built from `rpc_url` (lazy — no network call).
+fn resolve_provider(injected: Option<DynProvider>, rpc_url: &str) -> Result<DynProvider> {
+    match injected {
+        Some(provider) => Ok(provider),
+        None => {
+            let url = Url::parse(rpc_url)?;
+            Ok(ProviderBuilder::new().connect_http(url).erased())
+        }
+    }
+}
+
+/// Witness acquisition seam: PR 3 adds a `PushWithFallback` variant here
+/// (erigon push subscription with request fallback) without touching the
+/// fetch orchestration.
+enum WitnessSource {
+    /// Disk cache, then geth or alloy RPC.
+    Request,
+}
+
+impl WitnessSource {
+    /// `provider` is used only on the alloy path.
+    async fn acquire(
+        &self,
+        provider: &DynProvider,
+        block_number: u64,
+        witness_path: &Path,
+        geth: bool,
+        rpc_url: &str,
+        save_all_responses: bool,
+    ) -> Result<ExecutionWitness> {
+        match self {
+            WitnessSource::Request => {
+                if witness_path.exists() {
+                    let witness_json = fs::read_to_string(witness_path)?;
+                    match serde_json::from_str::<ExecutionWitness>(&witness_json) {
+                        Ok(w) => Ok(w),
+                        Err(e) if geth => {
+                            debug!("alloy format parse failed ({}), trying geth format...", e);
+                            let geth_witness: GethExecutionWitness =
+                                serde_json::from_str(&witness_json)
+                                    .wrap_err("failed to parse witness file as geth format")?;
+                            convert_geth_witness(geth_witness)
+                        }
+                        Err(e) => Err(e).wrap_err(
+                            "failed to parse witness file; if using geth, pass --geth flag",
+                        ),
+                    }
+                } else if geth {
+                    let witness = fetch_geth_execution_witness_with_retry(rpc_url, block_number, 3)
+                        .await
+                        .wrap_err("failed to fetch geth execution witness after retries")?;
+                    if save_all_responses {
+                        write_json(witness_path, &witness)?;
+                    }
+                    Ok(witness)
+                } else {
+                    let witness = debug_execution_witness_with_retry(provider, block_number, 3)
+                        .await
+                        .wrap_err("failed to fetch execution witness after retries")?;
+                    if save_all_responses {
+                        write_json(witness_path, &witness)?;
+                    }
+                    Ok(witness)
+                }
+            }
+        }
+    }
+}
+
 pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchOutcome> {
-    let url = Url::parse(request.rpc_url)?;
-    let provider = ProviderBuilder::new().connect_http(url);
+    let provider = resolve_provider(request.provider, request.rpc_url)?;
 
     let mut block_number = if let Some(num) = request.block_number {
         num
@@ -254,39 +328,16 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
         rlp
     };
 
-    let execution_witness: ExecutionWitness = if witness_path.exists() {
-        let witness_json = fs::read_to_string(&witness_path)?;
-        match serde_json::from_str::<ExecutionWitness>(&witness_json) {
-            Ok(w) => w,
-            Err(e) if request.geth => {
-                debug!("alloy format parse failed ({}), trying geth format...", e);
-                let geth: GethExecutionWitness = serde_json::from_str(&witness_json)
-                    .wrap_err("failed to parse witness file as geth format")?;
-                convert_geth_witness(geth)?
-            }
-            Err(e) => {
-                return Err(e).wrap_err(
-                    "failed to parse witness file; if using geth, pass --geth flag",
-                );
-            }
-        }
-    } else if request.geth {
-        let witness = fetch_geth_execution_witness_with_retry(request.rpc_url, block_number, 3)
-            .await
-            .wrap_err("failed to fetch geth execution witness after retries")?;
-        if request.save_all_responses {
-            write_json(&witness_path, &witness)?;
-        }
-        witness
-    } else {
-        let witness = debug_execution_witness_with_retry(&provider, block_number, 3)
-            .await
-            .wrap_err("failed to fetch execution witness after retries")?;
-        if request.save_all_responses {
-            write_json(&witness_path, &witness)?;
-        }
-        witness
-    };
+    let execution_witness: ExecutionWitness = WitnessSource::Request
+        .acquire(
+            &provider,
+            block_number,
+            &witness_path,
+            request.geth,
+            request.rpc_url,
+            request.save_all_responses,
+        )
+        .await?;
 
     let payload = serde_json::json!({
         "block":   alloy_primitives::hex::encode_prefixed(&current_block_rlp),
@@ -461,4 +512,94 @@ pub fn write_json<T: ?Sized + Serialize>(path: &Path, value: &T) -> Result<()> {
     let writer = BufWriter::new(file);
     serde_json::to_writer_pretty(writer, value)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway erased HTTP provider for the injected-provider arm. alloy
+    /// HTTP providers construct lazily, so this makes no network call.
+    fn dummy_provider() -> DynProvider {
+        ProviderBuilder::new()
+            .connect_http("http://localhost:8545".parse().unwrap())
+            .erased()
+    }
+
+    #[test]
+    fn resolve_provider_none_builds_http_from_rpc_url() {
+        // `None` → build the HTTP provider from `rpc_url` (offline-safe: alloy
+        // HTTP providers construct lazily).
+        assert!(resolve_provider(None, "http://localhost:8545").is_ok());
+    }
+
+    #[test]
+    fn resolve_provider_none_rejects_bad_rpc_url() {
+        // The `None` arm parses `rpc_url`; a malformed URL is a construction
+        // error rather than a silent HTTP provider.
+        assert!(resolve_provider(None, "not a url").is_err());
+    }
+
+    #[test]
+    fn resolve_provider_some_returns_injected_without_parsing_url() {
+        // `Some` → return the injected provider verbatim. The garbage `rpc_url`
+        // proves the injected arm never parses it (it would error otherwise).
+        assert!(resolve_provider(Some(dummy_provider()), "not a url").is_ok());
+    }
+
+    #[tokio::test]
+    async fn witness_source_request_reads_disk_cache_without_network() {
+        // Disk-cache hit: `acquire` parses the on-disk witness JSON and never
+        // touches the provider or network. The garbage `rpc_url` and the
+        // lazily-constructed dummy provider prove no RPC path is taken.
+        let dir = tempfile::tempdir().unwrap();
+        let block_number = 42;
+        let witness_path = dir
+            .path()
+            .join(format!("executionWitness{}.json", block_number));
+
+        let fixture = ExecutionWitness {
+            state: vec![Bytes::from(vec![0x01, 0x02])],
+            codes: vec![Bytes::from(vec![0x03])],
+            keys: vec![],
+            headers: vec![Bytes::from(vec![0x04, 0x05, 0x06])],
+        };
+        write_json(&witness_path, &fixture).unwrap();
+
+        let got = WitnessSource::Request
+            .acquire(
+                &dummy_provider(),
+                block_number,
+                &witness_path,
+                false,
+                "not a url",
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(got, fixture);
+    }
+
+    #[tokio::test]
+    async fn fetch_request_provider_injection_routes_rpcs() {
+        // The injected provider must carry the fetch RPCs end-to-end: a
+        // request through the resolved provider consumes the injected mock's
+        // queue, and the garbage `rpc_url` proves the HTTP-from-url arm was
+        // never taken.
+        let asserter = alloy_provider::mock::Asserter::new();
+        asserter.push_success(&7u64);
+        let injected = ProviderBuilder::new()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let provider = resolve_provider(Some(injected), "not a url").expect("injected arm");
+        assert_eq!(
+            provider.get_block_number().await.expect("mocked response"),
+            7
+        );
+        assert!(
+            asserter.read_q().is_empty(),
+            "the RPC must consume the injected mock's queue"
+        );
+    }
 }

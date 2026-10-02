@@ -39,6 +39,12 @@ struct Args {
     #[arg(long)]
     rpc_url: Option<String>,
 
+    /// Opt-in WebSocket EL endpoint (ws:// or wss://). When set, the service
+    /// uses newHeads as a tip watermark and routes fetch RPCs over the same
+    /// connection. Absent → identical poll-based behaviour.
+    #[arg(long)]
+    ws_url: Option<String>,
+
     /// Root data directory (e.g. /mnt/data, not /mnt/data/blocks)
     ///
     /// Block artifacts are written to <data-dir>/blocks/<N>/; execution and
@@ -294,6 +300,7 @@ async fn main() -> Result<()> {
                 execute_every: args.execute_every,
                 post_every: args.post_every,
                 rpc_url,
+                ws_url: args.ws_url.clone(),
                 save_all_responses: args.save_all_responses,
                 download_only: args.download_only,
                 proving_key_path: Some(args.pk_path.clone()),
@@ -351,6 +358,8 @@ async fn main() -> Result<()> {
                 data_dir: data_dir.unwrap_or_else(|| args.data_dir.clone()),
                 geth,
                 force_rebuild: false,
+                // CLI one-shot: always build the HTTP provider from `--rpc-url`.
+                provider: None,
             })
             .await?;
             println!(
