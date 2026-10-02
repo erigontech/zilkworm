@@ -95,6 +95,27 @@ namespace {
                          alignof(BlockHashEntry),
                          "DirectState: block_hashes section out of range")) [[unlikely]]
             return false;
+        // Canonical blob layout, exactly what build_blob_from_accounts and mfbd.rs emit:
+        //   meta | addr MphfMap | addr_hashes | block_hashes | code-store MphfMap
+        // each starting where the previous one ends and the code store ending the
+        // blob. The addr map's data[] is written in place during execution; this chain
+        // keeps every other section, the code store's tables above all, out from under
+        // it. It relies on validate_mphf making each map fill its region exactly.
+        {
+            const uint64_t pre_lo = align8(static_cast<uint32_t>(sizeof(PreStateMeta)));
+            const uint64_t bh_lo = uint64_t{meta->addr_hashes_offset} +
+                                   uint64_t{meta->n_accounts} * sizeof(AddrHashEntry);
+            const uint64_t cs_lo = bh_lo + uint64_t{meta->n_block_hashes} * sizeof(BlockHashEntry);
+            const uint64_t blob_hi = cs_lo + uint64_t{meta->code_store_size};
+            if (meta->prestate_offset != pre_lo ||
+                meta->addr_hashes_offset < meta->prestate_offset ||
+                (meta->n_accounts == 0 && meta->addr_hashes_offset != meta->prestate_offset) ||
+                meta->block_hashes_offset != bh_lo || meta->code_store_offset != cs_lo ||
+                (meta->code_store_size % 8u) != 0 || blob_hi != blob_size) [[unlikely]] {
+                sys_println("DirectState: sections do not tile the blob canonically");
+                return false;
+            }
+        }
         // The addr map runs from prestate_offset up to addr_hashes_offset; a size-0
         // region would skip validate_mphf.
         if (meta->n_accounts > 0) {
@@ -204,6 +225,11 @@ namespace {
     }
 
 }  // namespace
+
+bool validate_direct_state_layout(std::span<const uint8_t> prestate_bytes,
+                                  std::span<const uint8_t> nodestore_bytes) noexcept {
+    return validate_prestate_layout(prestate_bytes) && validate_nodestore_layout(nodestore_bytes);
+}
 
 namespace detail {
     // Forces single-pass linkers to pull this TU when direct_state_builder.cpp is.

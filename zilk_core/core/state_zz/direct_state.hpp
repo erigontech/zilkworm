@@ -440,6 +440,11 @@ DirectState::read_account(const evmc::address& addr) noexcept {
     return pa;
 }
 
+// Layout check the DirectState constructor runs (and aborts on). Exposed so a loader
+// can turn a malformed bundle into a failed run instead of an abort.
+[[nodiscard]] bool validate_direct_state_layout(std::span<const uint8_t> prestate_bytes,
+                                                std::span<const uint8_t> nodestore_bytes) noexcept;
+
 class DirectStateView final : public evmone::state::StateView {
   public:
     explicit DirectStateView(DirectState& s) noexcept : state_{s} {}

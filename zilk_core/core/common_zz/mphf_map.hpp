@@ -192,17 +192,21 @@ class MphfMap {
 };
 
 // The one layout check for an MphfMap region. Every map passes it before an MphfMap
-// is built over it (the DirectState constructor, for the addr map, code store and
+// is built over it (validate_direct_state_layout, for the addr map, code store and
 // node store), so find() and for_each() read without re-checking.
 //
-// It checks the header, then each section's bounds and alignment inside the region,
-// then every entry reachable from slot_offsets[] or the sidecar: [len:u64][body]
-// inside data[] with body_len >= KeyOffset + KeySize, the bytes
-// find<KeySize, KeyOffset>() memcmps.
+// It requires the one layout MphfBuilder and mfbd.rs emit, as two tilings with no
+// overlap and no gap:
+//   - sections: header | displacement | slot_offsets | collisions | data, each
+//     starting where the previous one ends (8-byte padding only), data[] ending
+//     the region;
+//   - entries: [len:u64][body] back to back over data[8, data_size), 8-aligned,
+//     body_len >= KeyOffset + KeySize (the bytes find<KeySize, KeyOffset>()
+//     memcmps), each owned by exactly one slot or sidecar row.
 //
-// Checking once is sound because data[] is the only section written through
-// afterwards (Account scratch, EVM state), and it must start at or past the end of
-// the header and of every table. No later write can rewrite a checked offset.
+// Checking once is sound because the only bytes written afterwards are entry bodies
+// (Account scratch, EVM state). A body shares no byte with a table, with another
+// entry's len header, or with another body, so no write can change a checked value.
 template <size_t KeySize, size_t KeyOffset = 0>
 [[nodiscard]] bool validate_mphf(std::span<const uint8_t> base,
                                  uint32_t region_off,
@@ -234,87 +238,52 @@ template <size_t KeySize, size_t KeyOffset = 0>
         return false;
     }
 
-    auto bounds_within_region = [&](uint64_t off, uint64_t size, const char* msg) -> bool {
-        if (off > region_size || size > region_size || off + size > region_size) [[unlikely]] {
-            sys_println(msg);
-            return false;
-        }
-        return true;
-    };
-
     if (m->n_keys == 0) {
         return true;
     }
-
-    bool ok = true;
-
-    if ((m->displacement_offset % alignof(uint64_t)) != 0) [[unlikely]] {
-        sys_println("MphfMapHeader: validate_mphf: displacement_offset misaligned");
-        ok = false;
-    }
     if (m->n_buckets == 0) [[unlikely]] {
         sys_println("MphfMapHeader: validate_mphf: n_buckets == 0 with n_keys > 0");
-        ok = false;
+        return false;
     }
-    ok &= bounds_within_region(m->displacement_offset,
-                               static_cast<uint64_t>(m->n_buckets) * 8u,
-                               "MphfMapHeader: validate_mphf: displacement table out of range");
-
-    if ((m->slot_offsets_offset % alignof(uint32_t)) != 0) [[unlikely]] {
-        sys_println("MphfMapHeader: validate_mphf: slot_offsets misaligned");
-        ok = false;
+    if ((m->collisions_size % sizeof(MphfCollisionEntry)) != 0) [[unlikely]] {
+        sys_println("MphfMapHeader: validate_mphf: collisions_size not a MphfCollisionEntry multiple");
+        return false;
     }
-    ok &= bounds_within_region(m->slot_offsets_offset,
-                               static_cast<uint64_t>(m->n_keys) * 4u,
-                               "MphfMapHeader: validate_mphf: slot_offsets out of range");
-
-    if (m->collisions_size > 0) {
-        if ((m->collisions_offset % alignof(MphfCollisionEntry)) != 0) [[unlikely]] {
-            sys_println("MphfMapHeader: validate_mphf: collisions_offset misaligned");
-            ok = false;
-        }
-        if ((m->collisions_size % sizeof(MphfCollisionEntry)) != 0) [[unlikely]] {
-            sys_println("MphfMapHeader: validate_mphf: collisions_size not a MphfCollisionEntry multiple");
-            ok = false;
-        }
-        ok &= bounds_within_region(m->collisions_offset, m->collisions_size,
-                                   "MphfMapHeader: validate_mphf: collisions out of range");
+    if (m->data_size < 8u || (m->data_size % 8u) != 0) [[unlikely]] {
+        sys_println("MphfMapHeader: validate_mphf: data_size not an 8-multiple >= 8");
+        return false;
     }
 
-    if ((m->data_offset % alignof(uint64_t)) != 0) [[unlikely]] {
-        sys_println("MphfMapHeader: validate_mphf: data_offset misaligned");
-        ok = false;
+    // Section tiling. One equality chain gives bounds, alignment, mutual exclusion
+    // and gaplessness together.
+    auto a8 = [](uint64_t v) noexcept { return (v + 7u) & ~uint64_t{7u}; };
+    const uint64_t disp_lo  = a8(sizeof(MphfMapHeader));
+    const uint64_t slots_lo = disp_lo + uint64_t{m->n_buckets} * 8u;
+    const uint64_t coll_lo  = slots_lo + a8(uint64_t{m->n_keys} * 4u);
+    const uint64_t data_lo  = coll_lo + uint64_t{m->collisions_size};
+    const uint64_t region_hi = data_lo + uint64_t{m->data_size};
+    if (m->displacement_offset != disp_lo || m->slot_offsets_offset != slots_lo ||
+        m->collisions_offset != coll_lo || m->data_offset != data_lo ||
+        region_hi != region_size) [[unlikely]] {
+        sys_println("MphfMapHeader: validate_mphf: sections do not tile the region canonically");
+        return false;
     }
-    ok &= bounds_within_region(m->data_offset, m->data_size,
-                               "MphfMapHeader: validate_mphf: data region out of range");
-    // data[] starts at or past the end of the header and of each table.
-    const uint64_t data_lo = m->data_offset;
-    if (data_lo < sizeof(MphfMapHeader) ||
-        data_lo < uint64_t{m->displacement_offset} + uint64_t{m->n_buckets} * 8u ||
-        data_lo < uint64_t{m->slot_offsets_offset} + uint64_t{m->n_keys} * 4u ||
-        (m->collisions_size > 0 &&
-         data_lo < uint64_t{m->collisions_offset} + m->collisions_size)) [[unlikely]] {
-        sys_println("MphfMapHeader: validate_mphf: data section overlaps a preceding section");
-        ok = false;
-    }
-    if (!ok) [[unlikely]] return false;  // the entry walk below dereferences the sections
 
     const uint8_t* mbase = base.data() + region_off;
     const auto* slot_offsets = reinterpret_cast<const uint32_t*>(mbase + m->slot_offsets_offset);
     const auto* collisions = reinterpret_cast<const MphfCollisionEntry*>(mbase + m->collisions_offset);
     const uint32_t n_collisions = m->collisions_size / static_cast<uint32_t>(sizeof(MphfCollisionEntry));
     const uint8_t* data = mbase + m->data_offset;
-    const uint32_t data_size = m->data_size;
+    const uint64_t data_size = m->data_size;
 
-    // off is u64 (sidecar) or u32 (slot) but data[] is u32-sized: compare before
-    // adding, since off + 8 can wrap and the high half must not be dropped.
-    auto entry_within_data = [&](uint64_t off) -> bool {
-        if (off > data_size || data_size - off < 8u) [[unlikely]] {
-            sys_println("MphfMapHeader: validate_mphf: entry header out of data region");
-            return false;
-        }
-        uint64_t body_len; std::memcpy(&body_len, data + off, 8);
-        if (body_len > data_size - off - 8u) [[unlikely]] {
+    // Entry tiling, pass 1: walk the arena from offset 8 and mark every entry start.
+    // It never follows a slot or sidecar offset.
+    std::vector<uint64_t> starts((data_size / 8u + 63u) / 64u, 0u);
+    uint64_t n_entries = 0;
+    for (uint64_t pos = 8u; pos != data_size;) {
+        // pos and data_size are 8-multiples with pos < data_size, so 8 header bytes fit.
+        uint64_t body_len; std::memcpy(&body_len, data + pos, 8);
+        if (body_len > data_size - pos - 8u) [[unlikely]] {
             sys_println("MphfMapHeader: validate_mphf: entry body out of data region");
             return false;
         }
@@ -322,14 +291,38 @@ template <size_t KeySize, size_t KeyOffset = 0>
             sys_println("MphfMapHeader: validate_mphf: entry body shorter than its key");
             return false;
         }
+        starts[(pos / 8u) / 64u] |= uint64_t{1} << ((pos / 8u) % 64u);
+        ++n_entries;
+        pos += a8(8u + body_len);  // <= data_size: both sides of the bound above are 8-multiples
+    }
+    // Pass 2: every slot and sidecar offset claims one marked start, once. off is
+    // u64 (sidecar) or u32 (slot); compare before indexing so the high half counts.
+    uint64_t n_claimed = 0;
+    auto claim = [&](uint64_t off) -> bool {
+        if (off >= data_size || (off % 8u) != 0) [[unlikely]] return false;
+        uint64_t& word = starts[(off / 8u) / 64u];
+        const uint64_t bit = uint64_t{1} << ((off / 8u) % 64u);
+        if ((word & bit) == 0) [[unlikely]] return false;  // not an entry start, or already claimed
+        word &= ~bit;
+        ++n_claimed;
         return true;
     };
     for (uint32_t i = 0; i < m->n_keys; ++i) {
         const uint32_t off = slot_offsets[i];
-        if (off != 0 && !entry_within_data(off)) [[unlikely]] return false;
+        if (off != 0 && !claim(off)) [[unlikely]] {
+            sys_println("MphfMapHeader: validate_mphf: slot offset is not a distinct entry start");
+            return false;
+        }
     }
     for (uint32_t i = 0; i < n_collisions; ++i) {
-        if (!entry_within_data(collisions[i].offset)) [[unlikely]] return false;
+        if (!claim(collisions[i].offset)) [[unlikely]] {
+            sys_println("MphfMapHeader: validate_mphf: sidecar offset is not a distinct entry start");
+            return false;
+        }
+    }
+    if (n_claimed != n_entries) [[unlikely]] {
+        sys_println("MphfMapHeader: validate_mphf: data[] holds an entry no slot or sidecar row owns");
+        return false;
     }
     return true;
 }
