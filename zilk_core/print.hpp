@@ -7,6 +7,8 @@
 #include <semihosting.hpp>
 #elif defined(AIRBENDER)
 #include <airbender_csr.hpp>
+#elif defined(ZISK)
+#include <zisk_syscalls.hpp>
 #else
 #include <iostream>
 #include <string_view>
