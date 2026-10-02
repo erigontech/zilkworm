@@ -574,3 +574,18 @@ using sp1_AffinePoint = uint64_t[8];
 {
     zisk::bn254_curve_dbl(p);
 }
+
+[[gnu::always_inline]] inline void syscall_bn254_fp2_addmod(uint64_t* p, const uint64_t* q) noexcept
+{
+    zisk::bn254_complex_add(p, q);
+}
+
+[[gnu::always_inline]] inline void syscall_bn254_fp2_submod(uint64_t* p, const uint64_t* q) noexcept
+{
+    zisk::bn254_complex_sub(p, q);
+}
+
+[[gnu::always_inline]] inline void syscall_bn254_fp2_mulmod(uint64_t* p, const uint64_t* q) noexcept
+{
+    zisk::bn254_complex_mul(p, q);
+}
