@@ -20,11 +20,12 @@ endif
         eest-blockchain-tests-json eest-prover-test-json tests-json \
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
         ere-workload-checkout ere-fixtures ere-validate ere-compare \
-        release-artifacts
+        release-artifacts z6m_guest_zisk zisk-emu-check
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
 	rm -rf prover/target
+	rm -rf prover/guest_zisk/build*/
 	
 # USE_HASH_KEY=ON enables node-store account recovery.
 USE_HASH_KEY ?= OFF
@@ -37,6 +38,27 @@ z6m_guest:
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
 z6m_prover: z6m_guest
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
+
+# ZisK v1.3.1-alpha. ZISK_GCC_BIN: xPack bin dir.
+ZISK_GCC_BIN   ?=
+ZISK_BUILD_DIR ?= prover/guest_zisk/build
+ZISKEMU        ?= ziskemu
+ZISK_ENV := $(if $(ZISK_GCC_BIN),PATH=$(ZISK_GCC_BIN):$$PATH,)
+
+z6m_guest_zisk:
+	$(ZISK_ENV) cmake -S prover/guest_zisk -B $(ZISK_BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_zisk/cmake/riscv64im-zisk.cmake \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DZISK=ON \
+		-DUSE_HASH_KEY=$(USE_HASH_KEY)
+	$(ZISK_ENV) cmake --build $(ZISK_BUILD_DIR) -j$$(nproc)
+
+# ziskemu vs native public values on BENCH_CORPUS_DIR.
+zisk-emu-check: z6m_guest_zisk
+	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S .
+	cmake --build build --target state_transition -j$$(nproc)
+	python3 tools/scripts/zisk_execute.py --elf $(ZISK_BUILD_DIR)/z6m_guest.elf \
+		--dir $(BENCH_CORPUS_DIR) --native build/zilk_core/dev/cli/state_transition --ziskemu "$(ZISKEMU)"
 
 test_hc: z6m_prover
 	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp

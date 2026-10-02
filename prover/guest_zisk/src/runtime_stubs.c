@@ -1,0 +1,41 @@
+// Copyright 2026 The Zilkworm Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Single-threaded rv64im has no A extension.
+#include <stdint.h>
+
+#define WEAK   __attribute__((weak))
+#define OPAQUE __attribute__((used,visibility("default")))
+
+// --- 32-bit variants -------------------------------------------------
+WEAK OPAQUE
+int fegetround(void) { return 0; }
+
+WEAK OPAQUE
+int fesetround(int) { return 0; }
+
+WEAK OPAQUE
+int __atomic_fetch_add_4(volatile int *ptr, int val, int memorder)
+{
+    int old = *ptr;
+    *ptr   += val;
+    return old;
+}
+
+WEAK OPAQUE
+int __atomic_fetch_sub_4(volatile int *ptr, int val, int memorder)
+{
+    int old = *ptr;
+    *ptr   -= val;
+    return old;
+}
+
+WEAK OPAQUE
+int __atomic_compare_exchange_4(volatile int *ptr, int *expected,
+                                int desired, int weak,
+                                int success_mem, int failure_mem)
+{
+    if (*ptr == *expected) { *ptr = desired; return 1; }
+    *expected = *ptr;
+    return 0;
+}
