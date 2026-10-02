@@ -11,12 +11,17 @@ license = "Apache-2.0"
 
 [dependencies]
 alloy-consensus = { version = "2.0", default-features = false }
+alloy-eips = { version = "2.0", default-features = false }
 alloy-genesis = { version = "2.0", default-features = false }
 alloy-primitives = { version = "1.0", default-features = false }
 alloy-rlp = "0.3"
 alloy-rpc-types-debug = "2.0"
 anyhow = "1"
 stateless = { git = "https://github.com/paradigmxyz/stateless", rev = "e5480e71a8031641ff471cad9dc482a7a14b32d5", default-features = false }
+
+# Canonical EEST statelessInputBytes decode per EIP-8025 (tests-zkevm v0.8.2 schema).
+stateless-validator-common = { git = "https://github.com/eth-act/ere-guests", rev = "eaa3f4601e9686e1fc540a00c039532b85550879", package = "stateless-validator-common", default-features = false, features = ["std"] }
+libssz = { version = "0.3.0", default-features = false, features = ["alloc"] }
 
 # Optional, gated by the `download` feature: fetch the SP1 guest ELF and VK from GitHub Releases.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
