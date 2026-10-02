@@ -35,6 +35,10 @@ add_executable(z6m_guest
     src/zisk_runtime.cpp
     src/main.cpp
     src/runtime_stubs.c
+    src/dma/memcpy.s
+    src/dma/memmove.s
+    src/dma/memset.s
+    src/dma/memcmp.s
 )
 
 target_include_directories(z6m_guest PRIVATE
