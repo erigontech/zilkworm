@@ -65,7 +65,7 @@ target_include_directories(z6m_guest SYSTEM PRIVATE
 # loops back into library calls.  Also compile without LTO so the strong
 # symbol definition survives into the final link and overrides newlib.
 set_source_files_properties(src/mem_builtins.c PROPERTIES
-    COMPILE_OPTIONS "-fno-tree-loop-distribute-patterns;-fno-lto"
+    COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto"
 )
 
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
