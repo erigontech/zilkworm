@@ -4,8 +4,16 @@
 pub mod types;
 
 #[cfg(feature = "network")]
+pub mod ethproofs_client;
+
+#[cfg(feature = "network")]
 pub mod fetcher;
+
+#[cfg(feature = "network")]
+pub use ethproofs_client::{EthProofsConfig, EthproofsClient};
 
 #[cfg(feature = "network")]
 pub use fetcher::{fetch_block_and_witness, write_json, FetchOutcome, FetchRequest};
 pub use types::*;
+#[cfg(feature = "network")]
+pub use alloy_provider;

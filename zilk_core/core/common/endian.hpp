@@ -99,11 +99,56 @@ static DecodingResult from_big_compact(ByteView data, T& out) {
         return std::unexpected{DecodingError::kLeadingZero};
     }
 
-    auto* ptr{reinterpret_cast<uint8_t*>(&out)};
-    std::memcpy(ptr + (sizeof(T) - data.size()), &data[0], data.size());
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    // Direct BE→native construction avoids memcpy + bswap.
+    // For ≤8 bytes: ~10 insns. For uint256: fills word-by-word from data end,
+    // avoids the expensive full bswap(uint256) (~96 insns on rv32).
+    if constexpr (sizeof(T) <= 8)
+    {
+        T val = 0;
+        for (size_t i = 0; i < data.size(); ++i)
+            val = (val << 8) | data[i];
+        out = val;
+        return {};
+    }
+    else if constexpr (sizeof(T) == 32)
+    {
+        // Fill uint64_t words from BE data, right-aligned in uint256.
+        // words_[0] is least significant. data[0] is most significant byte.
+        // Process from the END of data in up to 8-byte chunks.
+        out = 0;
+        const size_t sz = data.size();
+        const uint8_t* end = data.data() + sz;
+        size_t word_idx = 0;  // start from LSW
 
-    out = intx::to_big_endian(out);
-    return {};
+        size_t remaining = sz;
+        while (remaining >= 8)
+        {
+            end -= 8;
+            uint64_t w = 0;
+            for (size_t j = 0; j < 8; ++j)
+                w = (w << 8) | end[j];
+            out[word_idx++] = w;
+            remaining -= 8;
+        }
+        if (remaining > 0)
+        {
+            const uint8_t* start = data.data();
+            uint64_t w = 0;
+            for (size_t j = 0; j < remaining; ++j)
+                w = (w << 8) | start[j];
+            out[word_idx] = w;
+        }
+        return {};
+    }
+    else
+#endif
+    {
+        auto* ptr{reinterpret_cast<uint8_t*>(&out)};
+        std::memcpy(ptr + (sizeof(T) - data.size()), &data[0], data.size());
+        out = intx::to_big_endian(out);
+        return {};
+    }
 }
 
 }  // namespace silkworm::endian

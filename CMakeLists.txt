@@ -138,6 +138,12 @@ install(
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/zilk_core
 )
 
+install(
+    FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/zilk_core/print.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/zilk_core
+)
+
 # Header-only transitive deps since this is fetched and qemu has split build required by zilk_core public headers
 install(
     DIRECTORY
