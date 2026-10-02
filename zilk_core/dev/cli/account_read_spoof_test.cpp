@@ -1,9 +1,10 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// End-to-end soundness proof for the created/existing hash clash check:
-// a READ-ONLY account access whose witness routing has been sabotaged must be rejected,
-// even when the block header is forged so that every other check passes.
+// End-to-end soundness proof for the account routing checks (sanitize()'s routing check,
+// and behind it the created/existing hash clash check): a READ-ONLY account access whose
+// witness routing has been sabotaged must be rejected, even when the block header is
+// forged so that every other check passes.
 //
 // Why read-only accesses are the hard case
 // ----------------------------------------
@@ -30,24 +31,25 @@
 // Transposition (rather than slot zeroing) is deliberate: both bodies are still visited
 // exactly once by `for_each`, so `sanitize()` resolves code offsets, refills both RLP
 // caches with genuine values, and its modified-flag parity still balances. The pre-state
-// leaves `GridMPT` sees are genuine, so no downstream RLP or root mismatch fires. The
-// only trace left is `find_or_create_account` materializing a `deleted=true` record for
-// C in `created_accounts_` — which `check_root` catches because keccak(C) is also an
-// `addr_hashes` entry ("Created and existing hashes clash").
+// leaves `GridMPT` sees are genuine, so no downstream RLP or root mismatch fires.
+//
+// Two checks catch it. `sanitize()`'s routing check requires every `addr_hashes` entry to
+// sit where `find()` routes its address, so the guest rejects the bundle at rest, before
+// executing anything. Behind it, the read leaves `find_or_create_account` materializing a
+// `deleted=true` record for C in `created_accounts_`, which `check_root` would catch because
+// keccak(C) is also an `addr_hashes` entry ("Created and existing hashes clash").
 //
 // Adversarial header
 // ------------------
 // For every case the block committed to the guest carries the gas, receipts root, logs
-// bloom and state root of the SPOOFED execution, derived by shadow-running the very
-// bundle the guest receives and mirroring `check_root` minus the clash rejection
-// (`mirror_check_root`). Each case additionally runs the GENUINE bundle with its own
-// honestly derived header and asserts it is ACCEPTED: that is what proves the header
-// derivation is faithful rather than accidentally wrong.
-//
-// Two things together show the clash rejection alone is doing the work. The genuine-bundle
-// acceptance above makes the header derivation known-faithful; and deleting the clash branch
-// from `check_root` makes all eight reads execute cleanly, leaving only the four per-read
-// rejection assertions of Run 2 to fail — 32 in total.
+// bloom and state root of the SPOOFED execution: the genuine bundle shadow-run with the
+// transposition applied right after `sanitize()` (`shadow_execute`'s `after_sanitize`).
+// Without the routing check `sanitize()` comes out the same on genuine and transposed
+// bytes, so that is the run a guest made over the forged bundle before the check existed.
+// `check_root` is mirrored minus the clash rejection (`mirror_check_root`), which still
+// records the clash, so the second line stays covered. Each case additionally runs the
+// GENUINE bundle with its own honestly derived header and asserts it is ACCEPTED: that is
+// what proves the header derivation is faithful rather than accidentally wrong.
 //
 // NOTE: some helpers in `account_read_test_util.hpp` intentionally duplicate the private
 // helpers of `addr_hash_orphan_test.cpp` (PR #101, branch canepat/account_routing_check).
@@ -335,11 +337,16 @@ TEST_CASE("StateTransition::run rejects read-only account spoofing across zero-g
             }
 
             // ================= spoofing producer =================
-            // Same sanitize path as the guest, over the very bytes the guest gets.
-            const ShadowRun spoof = shadow_execute(forged_blob, nodestore, prev_root,
-                                                   chain.base.header, tx);
-            // sanitize() must NOT be what rejects this bundle: transposition keeps every
-            // body walked, the caches genuine and the modified-flag parity balanced.
+            // The forged bytes no longer get past sanitize(): find(C) misses the entry
+            // C's addr_hashes row names.
+            CHECK_FALSE(shadow_execute(forged_blob, nodestore, prev_root,
+                                       chain.base.header, tx).sanitize_ok);
+            // What the guest executed over them before the routing check: the genuine
+            // bundle, transposed once sanitize() is done with it.
+            const ShadowRun spoof = shadow_execute(
+                genuine_blob, nodestore, prev_root, chain.base.header, tx,
+                silkworm::test::kShanghaiConfig,
+                [&](std::vector<uint8_t>& b) { forge_slot_transposition(b, C, C2); });
             REQUIRE(spoof.sanitize_ok);
             REQUIRE(spoof.post.missing == 0);
 
@@ -405,7 +412,8 @@ TEST_CASE("StateTransition::run rejects read-only account spoofing across zero-g
 
             // ---- Run 2: forged bundle + the header the spoofed execution justifies ----
             // Gas, receipts root, logs bloom and state root all match what the guest
-            // recomputes for this witness, so absent the clash check the bundle verifies.
+            // recomputed for this witness without the routing check, so absent both checks
+            // the bundle verifies.
             {
                 std::vector<uint8_t> env = make_envelope(chain, spoof, forged_blob, nodestore);
                 REQUIRE_FALSE(env.empty());
@@ -417,13 +425,13 @@ TEST_CASE("StateTransition::run rejects read-only account spoofing across zero-g
                     gas = st.run().gas_used;
                     log = cap.str();
                 }
-                // (b) rejected, and (c) rejected by the clash path specifically.
+                // (b) rejected, and (c) rejected at rest by the routing check, before any
+                // block executed: the clash never gets a chance and no root is computed.
                 CHECK(st.failed());
                 CHECK(gas == StateTransition::kRunFailure);
-                CHECK(log.find("Created and existing hashes clash") != std::string::npos);
-                // Not sanitize (which prints only when it rejects), and the clash fires
-                // BEFORE the root is even computed - no "New Root" line was emitted.
-                CHECK(log.find("sanitize") == std::string::npos);
+                CHECK(log.find("sanitize: addr_hashes entry_offset is not where find() routes") !=
+                      std::string::npos);
+                CHECK(log.find("Created and existing hashes clash") == std::string::npos);
                 CHECK(log.find("New Root") == std::string::npos);
             }
         }

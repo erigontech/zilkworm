@@ -68,6 +68,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -657,18 +658,25 @@ struct ShadowRun {
 ///
 /// `provisional` supplies the block context (number, timestamp, base fee, beneficiary,
 /// gas limit); its gas_used/roots are irrelevant here.
+///
+/// `after_sanitize`, when set, edits the witness bytes between `sanitize()` and execution.
+/// Give it a forgery `sanitize()` now rejects, applied to the genuine bytes, and the run is
+/// the one a guest without that check would have made over the forged bundle: the header
+/// a producer would publish for it.
 inline ShadowRun shadow_execute(const std::vector<uint8_t>& blob_in,
                                 const std::vector<uint8_t>& nodestore_in,
                                 const bytes32& prev_root,
                                 const silkworm::BlockHeader& provisional,
                                 std::span<const silkworm::Transaction> txs,
-                                const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig) {
+                                const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig,
+                                const std::function<void(std::vector<uint8_t>&)>& after_sanitize = {}) {
     ShadowRun r{};
     r.blob = blob_in;
     r.nodestore = nodestore_in;
     r.ds = std::make_unique<DirectState>(std::span<uint8_t>{r.blob}, std::span<uint8_t>{r.nodestore});
     r.sanitize_ok = r.ds->sanitize();
     if (!r.sanitize_ok) return r;
+    if (after_sanitize) after_sanitize(r.blob);  // in place: r.ds keeps pointing into r.blob
 
     silkworm::Block block{};
     block.header = provisional;
@@ -708,10 +716,11 @@ inline ShadowRun shadow_execute(const std::vector<uint8_t>& blob_in,
                                 const bytes32& prev_root,
                                 const silkworm::BlockHeader& provisional,
                                 const silkworm::Transaction& tx,
-                                const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig) {
+                                const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig,
+                                const std::function<void(std::vector<uint8_t>&)>& after_sanitize = {}) {
     const std::array<silkworm::Transaction, 1> one{tx};
     return shadow_execute(blob_in, nodestore_in, prev_root, provisional,
-                          std::span<const silkworm::Transaction>{one}, cfg);
+                          std::span<const silkworm::Transaction>{one}, cfg, after_sanitize);
 }
 
 // ---------------------------------------------------------------------------
@@ -761,8 +770,9 @@ inline std::vector<uint8_t> make_envelope(const ChainSetup& chain, const ShadowR
 /// Transposes the MPHF `slot_offsets` entries of `a` and `b` in the serialized
 /// pre-state, at rest — a producer-controllable layout field. Afterwards `find(a)`
 /// lands on `b`'s body (20-byte key mismatch -> miss) and vice versa, while BOTH bodies
-/// remain reachable from `for_each`, so `sanitize()` still resolves code offsets, refills
-/// both RLP caches with genuine values and its modified-flag parity still balances.
+/// remain reachable from `for_each`, so the code offsets, both RLP caches and the
+/// modified-flag parity all come out genuine. `sanitize()`'s routing check rejects it;
+/// apply it through `shadow_execute`'s `after_sanitize` to see what it would have done.
 /// Requires `addr_key8(a) != addr_key8(b)` (each must own a slot).
 inline void forge_slot_transposition(std::vector<uint8_t>& blob, const evmc::address& a,
                                      const evmc::address& b) {
