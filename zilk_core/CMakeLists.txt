@@ -15,6 +15,11 @@ if(SP1)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_hypercube/src/include)
 endif()
 
+if(ZISK)
+    add_compile_definitions(-DZISK)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_zisk/src/include)
+endif()
+
 if(QEMU_DEBUG)
     add_compile_definitions(-DQEMU_DEBUG)
     include_directories(${SILKWORM_MAIN_DIR}/qemu_runner/src/include)

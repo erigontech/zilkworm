@@ -24,6 +24,11 @@ if(SP1)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_hypercube/src/include)
 endif()
 
+if(ZISK)
+    add_compile_definitions(-DZISK)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_zisk/src/include)
+endif()
+
 if(SILKWORM_WASM_API)
   add_compile_definitions(EVMC_LOADER_MOCK)
 endif()
