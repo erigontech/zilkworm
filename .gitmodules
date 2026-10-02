@@ -1,8 +1,8 @@
 [submodule "evmone"]
 	path = third_party/evmone
 	url = https://github.com/erigontech/zvm1.git
-	branch = oss
+	branch = som/airbender
 [submodule "intx"]
 	path = third_party/intx
-	url = https://github.com/chfast/intx.git
-	branch = master
+	url = https://github.com/erigontech/intx.git
+	branch = release/airbender
