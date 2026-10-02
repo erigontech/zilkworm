@@ -12,6 +12,7 @@ members = [
 exclude = [
     "stateless_validator",
     "prover_airbender",
+    "prover_zisk",
 ]
 resolver = "2"
 

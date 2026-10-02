@@ -98,6 +98,7 @@ The envelope bytes are identical across runners; only the surrounding transport 
 | Runner             | Transport |
 |--------------------|-----------|
 | SP1 hypercube      | Envelope on SP1 stdin. |
+| ZisK               | Envelope as one `[u64 len][envelope][pad8]` stdin record (`ZiskStdin::from_bytes`), copied into guest RAM. |
 | Native `.mfbd`     | MFBD envelope in the file. |
 | Native `.json`     | EEST JSON file; the native runner wraps it with an `EJSN` header before invoking StateTransition. |
 | QEMU               | Envelope passed verbatim through the `stdin_payload.bin` file input |
@@ -121,6 +122,9 @@ failure/empty paths:
 |----------------|----------------|---------|
 | `kRunFailure`  | `UINT64_MAX`   | Failed. |
 | `kRunSkipped`  | `UINT64_MAX-1` | Skipped. |
+
+The ZisK guest commits the same 112 bytes to public output slots 0–27 (u32 LE), i.e. bytes
+0–111 of `ziskemu -o`; `z6m_prover_zisk` reads them back the same way.
 
 The roots, block hash, and chain ID bind the proof to a concrete state transition. The SP1 hypercube host currently parses and logs them.
 

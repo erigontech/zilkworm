@@ -1,0 +1,144 @@
+name: ZisK EEST Blockchain Tests
+
+on:
+  push:
+    branches: [master, main, release/*]
+    paths:
+      - '.github/workflows/zisk-eest.yml'
+      - '.github/docker/zisk-ci.Dockerfile'
+      - 'tools/scripts/eest_runner.py'
+      - 'prover/guest_zisk/**'
+      - 'prover/prover_zisk/**'
+      - 'prover/common/**'
+      - 'prover/witness_ffi/**'
+      - 'zilk_core/core/**'
+      - 'zilk_core/dev/**'
+      - 'third_party/evmone/lib/**'
+      - 'third_party/evmone'
+  pull_request:
+    branches: [master, main, release/*]
+    paths:
+      - '.github/workflows/zisk-eest.yml'
+      - '.github/docker/zisk-ci.Dockerfile'
+      - 'tools/scripts/eest_runner.py'
+      - 'prover/guest_zisk/**'
+      - 'prover/prover_zisk/**'
+      - 'prover/common/**'
+      - 'prover/witness_ffi/**'
+      - 'zilk_core/core/**'
+      - 'zilk_core/dev/**'
+      - 'third_party/evmone/lib/**'
+      - 'third_party/evmone'
+  workflow_dispatch:
+
+jobs:
+  eest:
+    name: ZisK EEST
+    runs-on: ubuntu-latest
+    environment: ci
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/erigontech/zilkworm-ci-zisk:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init -v /tmp/z6m-cargo-cache:/cargo-cache
+    env:
+      CARGO_HOME: /cargo-cache/cargo
+    steps:
+      - name: Prepare local cargo cache
+        run: |
+          mkdir -p /cargo-cache/cargo /cargo-cache/target-zisk
+          cat > /cargo-cache/cargo/config.toml <<'TOML'
+          [net]
+          git-fetch-with-cli = true
+          TOML
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          submodules: false
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
+      - name: Symlink cargo target for caching
+        run: |
+          # prover_zisk has its own workspace target dir.
+          if [ ! -d prover/prover_zisk/target ] && [ -d /cargo-cache/target-zisk ]; then
+            ln -s /cargo-cache/target-zisk prover/prover_zisk/target
+          elif [ -d prover/prover_zisk/target ] && [ ! -L prover/prover_zisk/target ]; then
+            mv prover/prover_zisk/target/* /cargo-cache/target-zisk/ 2>/dev/null || true
+            rm -rf prover/prover_zisk/target
+            ln -s /cargo-cache/target-zisk prover/prover_zisk/target
+          fi
+
+      - name: Build guest ELF and prover
+        run: make z6m_prover_zisk
+
+      - name: Prepare EEST MFBD fixtures
+        id: eest-mfbd
+        uses: ./.github/actions/prepare-eest-mfbd
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          # Same corpus as hypercube-eest.yml (Glamsterdam devnet).
+          manifest-key: eest_devnet
+
+      - name: Run EEST tests
+        shell: bash
+        env:
+          EEST_MFBD_DIR: ${{ steps.eest-mfbd.outputs.dir }}
+          # One thread; SDK emulator costs 20-30x CPU.
+          Z6M_ZISK_EXECUTOR: ziskemu
+        run: |
+          python3 tools/scripts/eest_runner.py \
+            --prover prover/prover_zisk/target/release/z6m_prover_zisk \
+            --max-parallel "$(nproc)" \
+            --stagger 15 \
+            --log-dir eest-logs \
+            --fail-threshold 5
+
+      - name: Test summary
+        if: always()
+        shell: bash
+        run: |
+          total=0; passed=0; failed=0; skipped=0
+          for f in eest-logs/*.log; do
+            [ -f "$f" ] || continue
+            line=$(grep '^Total:' "$f" || true)
+            if [ -n "$line" ]; then
+              t=$(echo "$line" | grep -oP 'Total: \K[0-9]+')
+              p=$(echo "$line" | grep -oP 'Passed: \K[0-9]+')
+              fl=$(echo "$line" | grep -oP 'Failed: \K[0-9]+')
+              s=$(echo "$line" | grep -oP 'Skipped: \K[0-9]+' || echo 0)
+              total=$((total + t))
+              passed=$((passed + p))
+              failed=$((failed + fl))
+              skipped=$((skipped + s))
+            fi
+          done
+          echo "========================================"
+          echo "  ZISK EEST RESULTS"
+          echo "========================================"
+          echo "  Total:   $total"
+          echo "  Passed:  $passed"
+          echo "  Failed:  $failed"
+          echo "  Skipped: $skipped"
+          echo "========================================"
+          if [ "$failed" -gt 5 ]; then
+            echo "FAIL: $failed failures exceed threshold"
+            exit 1
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zisk-eest-logs
+          path: eest-logs/
+          retention-days: 30

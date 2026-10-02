@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Glob
 # Execute Blocks and EEST Fixtures on the ZisK Guest
 
 ## Overview
-The ZisK guest (`prover/guest_zisk`, ZisK v1.3.1-alpha) is built with `make z6m_guest_zisk` and runs under `ziskemu`, the ZisK emulator. The guest commits the same 112-byte public values as the SP1 guest to the ZisK output slots, so `ziskemu -o out.bin` writes them to `out.bin[0:112]` (`out.bin[112:256]` stays zero). `tools/scripts/zisk_execute.py` runs a whole corpus or EEST tree and compares each result byte-for-byte with the native `state_transition` runner's `Public Values: 0x…` line.
+The ZisK guest (`prover/guest_zisk`, ZisK v1.3.1-alpha) is built with `make z6m_guest_zisk` and runs under `ziskemu`, the ZisK emulator, or under the host prover `z6m_prover_zisk` (`prover/prover_zisk`, zisk-sdk 1.3.1-alpha). The guest commits the same 112-byte public values as the SP1 guest to the ZisK output slots, so `ziskemu -o out.bin` writes them to `out.bin[0:112]` (`out.bin[112:256]` stays zero). `tools/scripts/zisk_execute.py` runs a whole corpus or EEST tree through either one and compares each result byte-for-byte with the native `state_transition` runner's `Public Values: 0x…` line.
 
 ## Command Syntax
 
@@ -38,8 +38,38 @@ The native reference is `build/zilk_core/dev/cli/state_transition <file.mfbd>`, 
 ```bash
 python3 tools/scripts/zisk_execute.py --elf ELF (--input F.mfbd | --dir CORPUS | --eest-dir DIR [--filter REGEX])
     [--native BIN] [--ziskemu "CMD"] [-j 8] [--timeout 900] [--max-steps N] [--log-dir temp/zisk_execute] [--stats] [--legacy-inputs]
+    [--prover BIN [--threads N]]
 ```
 For the 200-block corpus there is also `make zisk-emu-check BENCH_CORPUS_DIR=temp/runtime/zisk_corpus ZISKEMU=$ZISKEMU`.
+
+### Host prover (`z6m_prover_zisk`)
+```bash
+make z6m_prover_zisk        # builds the guest, then prover/prover_zisk/target/release/z6m_prover_zisk
+Z=prover/prover_zisk/target/release/z6m_prover_zisk
+$Z execute --file-name <file.mfbd> [--is-test] [--save-input temp/runtime/in.bin]
+$Z --test-service --data-dir temp/mainnet --start-block <START> --end-block <END> --execution-log-file=temp/mainnet/logs/<feature>_<commit>.log
+$Z --test-service --test-dir <mfbd>/blockchain_tests/<subdir>
+make zisk-eest [ZISK_EXECUTOR=ziskemu] [ZISK_EEST_FLAGS="--filter for_osaka --max-parallel 4"]
+make zisk-benchmark BENCH_CORPUS_DIR=temp/runtime/zisk_corpus [ZISK_EXECUTOR=ziskemu]
+```
+The CLI matches `z6m_prover` (hypercube): the same global flags, `execute`/`fetch`/`prove`/`verify`/`setup` subcommands and `executionLogs.log` format, so `eest_runner.py --prover $Z` and `sp1_benchmark.py --prover $Z` work unchanged. `execute` prints `Executed|FAILED|SKIPPED block N (… cycles=<steps> …)` and `Public Values: 0x<224 hex>`, and exits 1 on a failed or aborted run. `cycle_count` in the logs is ZisK steps; `prover_gas` is 0 (execute-only has no cost model).
+
+ZisK-only flags (before the subcommand):
+- `--executor emulator|assembly|ziskemu` (or `Z6M_ZISK_EXECUTOR`):
+  - `emulator` (default) is the zisk-sdk execute-only path: it emulates on 16 threads, then counts and plans, so it costs 20-30x the CPU of ziskemu. Cap it with `RAYON_NUM_THREADS`.
+  - `ziskemu` runs the same engine as the `ziskemu` CLI in-process on one thread. Steps and public values are identical, and it sees the halt-with-error flag. It is execute-only.
+  - `assembly` needs ziskup's `~/.zisk/zisk/emulator-asm` tree and `ulimit -l unlimited`.
+- `--elf PATH`: run this ELF instead of the one embedded at build time.
+- `--proving-key DIR`, `--remote URL`: only for `setup`/`prove`/`--prove-every`.
+
+### Proving (needs the proving key)
+```bash
+ziskup --version 1.3.1-alpha --provingkey      # ~5 GB download into ~/.zisk/provingKey; 25-64 GB RAM
+$Z setup                                       # ROM setup + program VK (cached in ~/.zisk/cache)
+$Z prove --file-name <file.mfbd> [--proof-type compressed|minimal|plonk] [--proof-path P]
+$Z verify --proof-path P
+```
+Without a key, `setup`/`prove` stop with `ZisK proving key not found at …` before loading anything. `--remote URL` sends setup and prove to a ZisK coordinator instead. `prove` verifies the new proof before saving it (default `<data-dir>/<N>/proof<N>.bin`) and appends to `provingLogs.log`. `verify` binds the proof to this ELF's program VK, so run `setup` once first.
 
 ### Profile one block
 ```bash
@@ -57,6 +87,8 @@ $ZISKEMU -e prover/guest_zisk/build/z6m_guest.elf --legacy-inputs <file.mfbd> -X
 - `--max-steps`: passed to ziskemu as `-n`. ziskemu's default is 2^36−1 (about 68.7 G steps); a run that hits it ends in `EmulationNoCompleted` (rc 1, ERROR).
 - `--stats`: passes `-X` and puts the stats report in each `.log`
 - `--legacy-inputs`: hands the raw file to ziskemu (`--legacy-inputs F`). By default the script frames the file itself (`[u64 LE len][raw][pad to 8]`) and passes `-i`.
+- `--prover`: runs each input as `BIN --elf ELF execute --file-name F` instead of ziskemu, and reads `Public Values:` and `cycles=` from its output. `--ziskemu`, `--max-steps`, `--stats` and `--legacy-inputs` do not apply. Set `Z6M_ZISK_EXECUTOR` to pick the host executor.
+- `--threads`: with `--prover`, sets `RAYON_NUM_THREADS` for each host process. Keep `-j × --threads` within the cores you can use (for example `-j 2 --threads 7`).
 
 ## Results
 
@@ -90,7 +122,10 @@ The last stdout line is `Total: X, Passed: Y, Failed: Z, Skipped: W, Mismatch: M
   - Unrecoverable states (OOM, `fatal()`, traps) end in the ZisK halt-with-error word. ziskemu still exits 0, but prints `Emu::run_fast() finished with error at step=N pc=0x…` on stderr, and the run cannot be proven. `zisk_execute.py` reports this as ERROR.
   - SP1 handles this differently: it commits partial public values with exit code 1.
 - **Run time:** a 200-block corpus or the 8615-file EEST tree takes a long time, so run it in the background (`run_in_background: true`).
-- **After M3**, run blocks through the host prover exactly as in `execute-blocks`: `prover/prover_zisk/target/release/z6m_prover_zisk --test-service --data-dir temp/mainnet --start-block <START> --end-block <END> --execution-log-file=temp/mainnet/logs/<feature>_<commit>.log`.
+- **Host prover quirks** (zisk-sdk 1.3.1-alpha):
+  - The SDK emulator runs the guest on 16 threads, so guest UART lines appear up to 16 times on stdout.
+  - On a halted-with-error run (OOM, `fatal()`) the SDK's count phase panics. The host catches the panic, reports the run as FAILED / `execution failed`, rebuilds its executor and continues. `--executor ziskemu` reports the same run as `FAILED … (guest aborted …)` instead.
+  - `TMPDIR` matters for the SDK as well: keep it on disk.
 
 ## Workflow
 
@@ -99,7 +134,7 @@ When the user wants to run blocks or EEST fixtures on the ZisK guest:
 1. **Confirm parameters**
     - Ask what to run (one block, a corpus dir, or an EEST tree) if it is not already known from context
 2. **Check prerequisites**
-    - `ZISKEMU`, the guest ELF and the native runner exist; build whatever is missing
+    - `ZISKEMU` (or `z6m_prover_zisk` for `--prover`), the guest ELF and the native runner exist; build whatever is missing
 3. **Run command**
 4. **Report**
     - Give the summary line, every MISMATCH/ERROR with its reason, and the `results.tsv` path
@@ -118,7 +153,12 @@ build/zilk_core/dev/cli/state_transition temp/runtime/zisk_corpus/24491136/flatW
 python3 tools/scripts/zisk_execute.py --elf prover/guest_zisk/build/z6m_guest.elf --dir temp/runtime/zisk_corpus --native build/zilk_core/dev/cli/state_transition --log-dir temp/runtime/zisk_corpus_check
 ```
 
-### Example 3: EEST Fixtures vs Native
+### Example 3: 200-Block Corpus Through the Host Prover vs Native
+```bash
+python3 tools/scripts/zisk_execute.py --elf prover/guest_zisk/build/z6m_guest.elf --dir temp/runtime/zisk_corpus --native build/zilk_core/dev/cli/state_transition --prover prover/prover_zisk/target/release/z6m_prover_zisk -j 2 --threads 7 --log-dir temp/runtime/zisk_corpus_host
+```
+
+### Example 4: EEST Fixtures vs Native
 ```bash
 python3 tools/scripts/zisk_execute.py --elf prover/guest_zisk/build/z6m_guest.elf --eest-dir test-fixtures-cache/mfbd-<sha>/blockchain_tests --native build/zilk_core/dev/cli/state_transition -j 16 --log-dir temp/runtime/zisk_eest
 ```
