@@ -104,9 +104,12 @@ inline const Bytes& encode_branch(const BranchNode& b) {
         if (b.dirty != 0) {
             const uint8_t b0 = b.orig[0];
             uint8_t* p = out + (b0 < 0xf8 ? 1 : 1 + (b0 - 0xf7));  // list header length
-            for (size_t i = 0; i < 16; ++i) {
+            // Walk the slots only up to the last dirty one (the rest are already in place), with
+            // the mask in a local: the byte copies below may alias b, so b.dirty was reloaded per slot.
+            unsigned dirty = b.dirty;
+            for (size_t i = 0; dirty != 0; ++i, dirty >>= 1) {
                 const auto len = b.orig_child_len[i];
-                if (b.dirty & (1u << i)) {
+                if (dirty & 1u) {
                     if (len == 0) {
                         *p = rlp::kEmptyStringCode;
                     } else if (len == 32) {
