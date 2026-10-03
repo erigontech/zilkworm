@@ -6,6 +6,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <functional>
 #include <optional>
 #include <utility>
@@ -102,7 +103,28 @@ inline ByteView encode_branch(const BranchNode& b) {
         // At the witness node's phase modulo 32, see static_buffer.
         uint8_t* const out = static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31);
         std::memcpy(out, b.orig, b.orig_size);
-        if (b.dirty != 0) {
+        if (b.dirty == 0) {
+            return ByteView{out, b.orig_size};
+        }
+        // A full branch (16 hash children, empty value: 3 + 16 * 33 + 1 bytes, most branches on
+        // mainnet) has slot i at 3 + 33 i, so its dirty slots are addressed directly. The general
+        // walk below sums the slot sizes up to the last dirty one.
+        {
+            typedef uint32_t __attribute__((may_alias)) w32;
+            const auto* lens = reinterpret_cast<const w32*>(std::assume_aligned<8>(b.orig_child_len.data()));
+            if (b.orig_size == 3 + 16 * 33 + 1 &&
+                ((lens[0] ^ 0x20202020u) | (lens[1] ^ 0x20202020u) | (lens[2] ^ 0x20202020u) |
+                 (lens[3] ^ 0x20202020u)) == 0) {
+                for (unsigned dirty = b.dirty; dirty != 0; dirty &= dirty - 1) {
+                    const unsigned i = static_cast<unsigned>(std::countr_zero(dirty));
+                    uint8_t* const p = out + 3 + 33 * i;
+                    *p = 0xa0;
+                    std::memcpy(p + 1, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+                }
+                return ByteView{out, b.orig_size};
+            }
+        }
+        {
             const uint8_t b0 = b.orig[0];
             uint8_t* p = out + (b0 < 0xf8 ? 1 : 1 + (b0 - 0xf7));  // list header length
             // Walk the slots only up to the last dirty one (the rest are already in place), with
