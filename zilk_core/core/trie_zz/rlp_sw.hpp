@@ -25,34 +25,35 @@ namespace zilkworm {
 namespace rlp = ::silkworm::rlp;
 namespace endian = ::silkworm::endian;
 
+// The encoding of one node, returned as a view by encode_line() and its encode_*() and valid
+// until the next call. A fixed 32-byte aligned array rather than a Bytes: the copy-and-patch
+// encode of a branch can then put its copy at the witness node's offset modulo 32 (the guest's
+// memcpy copies same-phase operands in 32-byte CSR chunks), and the keccak of the result stays on
+// its aligned path as witness node bodies are 8-aligned. A branch is at most 3 + 16 * 33 bytes
+// (its value is empty in the fixed-key state and storage tries), a leaf holds at most an account.
+inline constexpr size_t kNodeBufferSize = 2048;
 #if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG) && !defined(AIRBENDER)
-inline thread_local Bytes static_buffer = []() {
-    Bytes buf;
-    buf.reserve(1024);
-    return buf;
-}();
+alignas(32) inline thread_local uint8_t static_buffer[kNodeBufferSize];
 #else
-inline static Bytes static_buffer = []() {
-    Bytes buf;
-    buf.reserve(1024);
-    return buf;
-}();
+alignas(32) inline uint8_t static_buffer[kNodeBufferSize];
 #endif
 
-// Helper to clear static buffer between test runs
-inline void clear_static_buffer() {
-    static_buffer.clear();
-}
+// Kept for tests that reset state between runs; the buffer holds nothing between calls.
+inline void clear_static_buffer() {}
 
 inline const Bytes empty{silkworm::rlp::kEmptyStringCode};
 
-// resize() zero-fills bytes that are overwritten right after; skip it where the library allows.
-inline void resize_uninitialized(Bytes& buf, size_t n) {
-#ifdef __cpp_lib_string_resize_and_overwrite
-    buf.resize_and_overwrite(n, [](uint8_t*, size_t m) noexcept { return m; });
-#else
-    buf.resize(n);
-#endif
+// Writes an RLP list header for a payload of `len` bytes at `out`, returns the position after it.
+inline uint8_t* encode_list_header(uint8_t* out, size_t len) noexcept {
+    if (len < 56) {
+        *out++ = static_cast<uint8_t>(rlp::kEmptyListCode + len);
+    } else {
+        auto be = endian::to_big_compact(len);
+        *out++ = static_cast<uint8_t>(0xF7 + be.size());
+        std::memcpy(out, be.data(), be.size());
+        out += be.size();
+    }
+    return out;
 }
 
 inline size_t hp_size(size_t nibbles) noexcept { return 1 + ((nibbles + 1) >> 1); }
@@ -89,7 +90,7 @@ inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, 
     return true;
 }
 
-inline const Bytes& encode_branch(const BranchNode& b) {
+inline ByteView encode_branch(const BranchNode& b) {
     if (b.mask == 0) {
         return empty;
     }
@@ -98,8 +99,8 @@ inline const Bytes& encode_branch(const BranchNode& b) {
     // still read (hash) or were copied (embedded) from that encoding, so this matches
     // the full re-encode byte for byte. The original witness bytes are never written.
     if (b.orig != nullptr && b.same_layout_as_orig()) {
-        resize_uninitialized(static_buffer, b.orig_size);
-        uint8_t* const out = static_buffer.data();
+        // At the witness node's phase modulo 32, see static_buffer.
+        uint8_t* const out = static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31);
         std::memcpy(out, b.orig, b.orig_size);
         if (b.dirty != 0) {
             const uint8_t b0 = b.orig[0];
@@ -122,28 +123,25 @@ inline const Bytes& encode_branch(const BranchNode& b) {
                 p += len == 0 ? 1 : len == 32 ? 33 : len;
             }
         }
-        return static_buffer;
+        return ByteView{out, b.orig_size};
     }
-    static_buffer.clear();
-    rlp::Header h{.list = true, .payload_length = 0};
+    size_t payload_length = 0;
     // Calculate payload for 16 children
     for (size_t i = 0; i < 16; ++i) {
         auto child_len = b.child_len[i];
 
         // No double encoding for embedded node
-        h.payload_length += (child_len == 0 || child_len == 32)
+        payload_length += (child_len == 0 || child_len == 32)
                                 ? 1 + child_len
                                 : child_len;
 
         // Double encoding of embedded node
-        // h.payload_length += 1 + child_len;
+        // payload_length += 1 + child_len;
     }
 
-    h.payload_length += rlp::length(b.value);
-    rlp::encode_header(static_buffer, h);
-    const size_t header_len = static_buffer.size();
-    resize_uninitialized(static_buffer, header_len + h.payload_length);
-    uint8_t* p = static_buffer.data() + header_len;
+    payload_length += rlp::length(b.value);
+    uint8_t* p = encode_list_header(static_buffer, payload_length);
+    const uint8_t* const begin = static_buffer;
 
     for (size_t i = 0; i < 16; ++i) {
         auto child_len = b.child_len[i];
@@ -160,10 +158,10 @@ inline const Bytes& encode_branch(const BranchNode& b) {
         }
     }
     p += rlp::encode_into(p, b.value);
-    return static_buffer;
+    return ByteView{begin, static_cast<size_t>(p - begin)};
 }
 
-inline const Bytes& encode_ext(const ExtensionNode& e) {
+inline ByteView encode_ext(const ExtensionNode& e) {
     if (e.child_len == 0) {
         return empty;
     }
@@ -183,8 +181,7 @@ inline const Bytes& encode_ext(const ExtensionNode& e) {
     const size_t hdr_sz = (payload < 56) ? 1 : 1 + intx::count_significant_bytes(payload);
     const size_t total = hdr_sz + payload;
 
-    static_buffer.resize(total);
-    uint8_t* out = static_buffer.data();
+    uint8_t* out = static_buffer;
 
     // List header.
     if (payload < 56) {
@@ -215,10 +212,10 @@ inline const Bytes& encode_ext(const ExtensionNode& e) {
         out += e.child_len;
     }
 
-    return static_buffer;
+    return ByteView{static_buffer, total};
 }
 
-inline const Bytes& encode_leaf(const LeafNode& l) {
+inline ByteView encode_leaf(const LeafNode& l) {
     // HP-encode path on the stack.
     uint8_t hpbuf[1 + 32];
     uint8_t* hp_end = encode_hp_path(hpbuf, l.path.nib.data(), l.path.len, /*leaf*/ true);
@@ -234,8 +231,7 @@ inline const Bytes& encode_leaf(const LeafNode& l) {
     const size_t hdr_sz = (payload < 56) ? 1 : 1 + intx::count_significant_bytes(payload);
     const size_t total = hdr_sz + payload;
 
-    static_buffer.resize(total);
-    uint8_t* out = static_buffer.data();
+    uint8_t* out = static_buffer;
 
     // List header.
     if (payload < 56) {
@@ -274,7 +270,7 @@ inline const Bytes& encode_leaf(const LeafNode& l) {
         out += l.value.size();
     }
 
-    return static_buffer;
+    return ByteView{static_buffer, total};
 }
 
 // ---------------------------------------------
@@ -519,7 +515,7 @@ inline bool is_empty(const GridLine& line) {
 }
 
 // Encode the given line's node
-inline const Bytes& encode_line(const GridLine& line) {
+inline ByteView encode_line(const GridLine& line) {
     switch (line.kind) {
         case kBranch:
             return encode_branch(line.branch);
