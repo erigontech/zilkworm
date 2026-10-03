@@ -366,12 +366,86 @@ void *memset(void *dest, int c, size_t n) {
             dw[12] = 0; dw[13] = 0; dw[14] = 0; dw[15] = 0;
             return dest;
         }
-        if (n == 4) {
-            dw[0] = 0;
-            return dest;
-        }
-        if (n == 24) {
-            dw[0] = 0; dw[1] = 0; dw[2] = 0; dw[3] = 0; dw[4] = 0; dw[5] = 0;
+        // Any other fill of up to 256 bytes: a jump into an unrolled run of word stores, then
+        // the tail bytes. Most zero fills are struct value-initializations of 68 to 240 bytes
+        // (evmc_message, Account, StorageValue, Transaction); the generic path below steers
+        // such a fill through its 32-byte alignment, CSR and remainder stages for ~90 cycles,
+        // this costs the stores plus about 10 instructions.
+        if (n <= 256) {
+            switch (n >> 2) {
+        case 64: dw[63] = 0; __attribute__((fallthrough));
+        case 63: dw[62] = 0; __attribute__((fallthrough));
+        case 62: dw[61] = 0; __attribute__((fallthrough));
+        case 61: dw[60] = 0; __attribute__((fallthrough));
+        case 60: dw[59] = 0; __attribute__((fallthrough));
+        case 59: dw[58] = 0; __attribute__((fallthrough));
+        case 58: dw[57] = 0; __attribute__((fallthrough));
+        case 57: dw[56] = 0; __attribute__((fallthrough));
+        case 56: dw[55] = 0; __attribute__((fallthrough));
+        case 55: dw[54] = 0; __attribute__((fallthrough));
+        case 54: dw[53] = 0; __attribute__((fallthrough));
+        case 53: dw[52] = 0; __attribute__((fallthrough));
+        case 52: dw[51] = 0; __attribute__((fallthrough));
+        case 51: dw[50] = 0; __attribute__((fallthrough));
+        case 50: dw[49] = 0; __attribute__((fallthrough));
+        case 49: dw[48] = 0; __attribute__((fallthrough));
+        case 48: dw[47] = 0; __attribute__((fallthrough));
+        case 47: dw[46] = 0; __attribute__((fallthrough));
+        case 46: dw[45] = 0; __attribute__((fallthrough));
+        case 45: dw[44] = 0; __attribute__((fallthrough));
+        case 44: dw[43] = 0; __attribute__((fallthrough));
+        case 43: dw[42] = 0; __attribute__((fallthrough));
+        case 42: dw[41] = 0; __attribute__((fallthrough));
+        case 41: dw[40] = 0; __attribute__((fallthrough));
+        case 40: dw[39] = 0; __attribute__((fallthrough));
+        case 39: dw[38] = 0; __attribute__((fallthrough));
+        case 38: dw[37] = 0; __attribute__((fallthrough));
+        case 37: dw[36] = 0; __attribute__((fallthrough));
+        case 36: dw[35] = 0; __attribute__((fallthrough));
+        case 35: dw[34] = 0; __attribute__((fallthrough));
+        case 34: dw[33] = 0; __attribute__((fallthrough));
+        case 33: dw[32] = 0; __attribute__((fallthrough));
+        case 32: dw[31] = 0; __attribute__((fallthrough));
+        case 31: dw[30] = 0; __attribute__((fallthrough));
+        case 30: dw[29] = 0; __attribute__((fallthrough));
+        case 29: dw[28] = 0; __attribute__((fallthrough));
+        case 28: dw[27] = 0; __attribute__((fallthrough));
+        case 27: dw[26] = 0; __attribute__((fallthrough));
+        case 26: dw[25] = 0; __attribute__((fallthrough));
+        case 25: dw[24] = 0; __attribute__((fallthrough));
+        case 24: dw[23] = 0; __attribute__((fallthrough));
+        case 23: dw[22] = 0; __attribute__((fallthrough));
+        case 22: dw[21] = 0; __attribute__((fallthrough));
+        case 21: dw[20] = 0; __attribute__((fallthrough));
+        case 20: dw[19] = 0; __attribute__((fallthrough));
+        case 19: dw[18] = 0; __attribute__((fallthrough));
+        case 18: dw[17] = 0; __attribute__((fallthrough));
+        case 17: dw[16] = 0; __attribute__((fallthrough));
+        case 16: dw[15] = 0; __attribute__((fallthrough));
+        case 15: dw[14] = 0; __attribute__((fallthrough));
+        case 14: dw[13] = 0; __attribute__((fallthrough));
+        case 13: dw[12] = 0; __attribute__((fallthrough));
+        case 12: dw[11] = 0; __attribute__((fallthrough));
+        case 11: dw[10] = 0; __attribute__((fallthrough));
+        case 10: dw[9] = 0; __attribute__((fallthrough));
+        case 9: dw[8] = 0; __attribute__((fallthrough));
+        case 8: dw[7] = 0; __attribute__((fallthrough));
+        case 7: dw[6] = 0; __attribute__((fallthrough));
+        case 6: dw[5] = 0; __attribute__((fallthrough));
+        case 5: dw[4] = 0; __attribute__((fallthrough));
+        case 4: dw[3] = 0; __attribute__((fallthrough));
+        case 3: dw[2] = 0; __attribute__((fallthrough));
+        case 2: dw[1] = 0; __attribute__((fallthrough));
+        case 1: dw[0] = 0; __attribute__((fallthrough));
+        case 0: break;
+            }
+            d += n & ~(size_t)3;
+            switch (n & 3) {
+            case 3: d[2] = 0; __attribute__((fallthrough));
+            case 2: d[1] = 0; __attribute__((fallthrough));
+            case 1: d[0] = 0; __attribute__((fallthrough));
+            case 0: break;
+            }
             return dest;
         }
         // n==288: 9*32 bytes, 30 call sites (stack-array zeroing).
@@ -386,16 +460,6 @@ void *memset(void *dest, int c, size_t n) {
             csr_memcopy32(dw + 48, memset_zeros);
             csr_memcopy32(dw + 56, memset_zeros);
             csr_memcopy32(dw + 64, memset_zeros);
-            return dest;
-        }
-        // n==96: 24 words (common for 3x bytes32).
-        if (n == 96) {
-            dw[0]  = 0; dw[1]  = 0; dw[2]  = 0; dw[3]  = 0;
-            dw[4]  = 0; dw[5]  = 0; dw[6]  = 0; dw[7]  = 0;
-            dw[8]  = 0; dw[9]  = 0; dw[10] = 0; dw[11] = 0;
-            dw[12] = 0; dw[13] = 0; dw[14] = 0; dw[15] = 0;
-            dw[16] = 0; dw[17] = 0; dw[18] = 0; dw[19] = 0;
-            dw[20] = 0; dw[21] = 0; dw[22] = 0; dw[23] = 0;
             return dest;
         }
     }
