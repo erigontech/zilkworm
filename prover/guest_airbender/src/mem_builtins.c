@@ -20,6 +20,62 @@ void csr_memcopy32(void *dst, const void *src) {
         : "+r"(a2) : "r"(a0), "r"(a1) : "memory");
 }
 
+// 32 bytes between any two addresses (3.5M calls per 200 mainnet blocks: hashes read out of
+// witness RLP, whose alignment is arbitrary). The source words are read aligned and shifted
+// together, the destination is written with byte stores up to its first word boundary, word
+// stores to the last one and byte stores after. The generic stages below take 74..86 cycles for
+// this shape, this about 45. Reads up to 3 bytes past src + 32, inside the same aligned word.
+static void copy32_any(unsigned char *dst, const unsigned char *src) {
+    const uintptr_t soff = (uintptr_t)src & 3;
+    const uint32_t *sw = (const uint32_t *)(src - soff);
+    const unsigned sh = (unsigned)soff * 8;
+    uint32_t carry = sw[0];
+    unsigned si = 1;
+    // next_src: the next 4 source bytes as a word, at any source alignment.
+#define NEXT_SRC(v)                                                   \
+    do {                                                              \
+        if (sh == 0) {                                                \
+            v = carry;                                                \
+            carry = sw[si++];                                         \
+        } else {                                                      \
+            uint32_t w1_ = sw[si++];                                  \
+            v = (carry >> sh) | (w1_ << (32 - sh));                   \
+            carry = w1_;                                              \
+        }                                                             \
+    } while (0)
+    const uintptr_t doff = (uintptr_t)dst & 3;
+    if (doff == 0) {
+        uint32_t *dw = (uint32_t *)dst;
+        for (int k = 0; k < 8; k++) {
+            uint32_t v;
+            NEXT_SRC(v);
+            dw[k] = v;
+        }
+        return;
+    }
+    const unsigned lead = 4 - (unsigned)doff;
+    uint32_t v;
+    NEXT_SRC(v);
+    for (unsigned k = 0; k < lead; k++) {
+        dst[k] = (unsigned char)v;
+        v >>= 8;
+    }
+    uint32_t *dw = (uint32_t *)(dst + lead);
+    const unsigned keep = 32 - lead * 8;  // Bits of v (source bytes not yet stored) at its bottom.
+    for (int k = 0; k < 7; k++) {
+        uint32_t nx;
+        NEXT_SRC(nx);
+        dw[k] = v | (nx << keep);
+        v = nx >> (32 - keep);
+    }
+    unsigned char *tail = dst + lead + 28;
+    for (unsigned k = 0; k < 4 - lead; k++) {
+        tail[k] = (unsigned char)v;
+        v >>= 8;
+    }
+#undef NEXT_SRC
+}
+
 // ---------------------------------------------------------------------------
 // memcpy — non-overlapping copy, CSR MEMCOPY + word-aligned fast path
 // ---------------------------------------------------------------------------
@@ -94,6 +150,13 @@ void *memcpy(void *dest, const void *src, size_t n) {
             dw[3] = sw[3]; dw[4] = sw[4]; dw[5] = sw[5];
             return dest;
         }
+    }
+
+    // 32 bytes with either address unaligned (a copy onto itself reads each word before it
+    // writes it, so the no-op below is not needed first).
+    if (n == 32) {
+        copy32_any(d, s);
+        return dest;
     }
 
     // A copy onto itself is a no-op: memmove() forwards one for an EVM MCOPY with equal
