@@ -135,6 +135,9 @@ class MphfMap {
 
     bool valid() const noexcept { return h_ != nullptr; }
     uint32_t n_keys() const noexcept { return n_keys_; }
+    /// The data section: every entry's body lies at an 8-aligned offset from here.
+    const uint8_t* data_base() const noexcept { return data_; }
+    uint32_t data_size() const noexcept { return h_ != nullptr ? h_->data_size : 0u; }
     uint8_t* data() const noexcept { return data_; }
     const MphfMapHeader* header() const noexcept { return h_; }
 

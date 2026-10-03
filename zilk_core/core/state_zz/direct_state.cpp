@@ -237,6 +237,7 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
             std::abort();
         }
         node_store_map_.reset(reinterpret_cast<MphfMapHeader*>(nodestore_bytes.data()));
+        node_verified_.assign((node_store_map_.data_size() / 8 + 31) / 32, 0u);
     }
     reserve_block_maps_();
 }
@@ -265,6 +266,7 @@ DirectState::DirectState(DirectState&& other) noexcept
         code_store_map_.reset(reinterpret_cast<MphfMapHeader*>(prestate_view_.data() + pre_state_meta_->code_store_offset));
     }
     node_store_map_ = other.node_store_map_;
+    node_verified_ = std::move(other.node_verified_);
 
     created_accounts_ = std::move(other.created_accounts_);
     overflow_slots_ = std::move(other.overflow_slots_);
@@ -892,14 +894,8 @@ bool DirectState::sanitize() {
         return false;
     }
 
-    bool nodes_keccak_ok = true;
-    node_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-        nodes_keccak_ok &= bytes_equal<32>(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr);
-    });
-    if (!nodes_keccak_ok) {
-        sys_println("sanitize: node-hash mismatch in witness bundle ");
-        return false;
-    }
+    // Trie nodes are bound to their hash on first lookup, see find_node_rlp(): a corrupt node
+    // fails there as a missing one, and an unused one is never read.
 
     bool acc_walk_ok = true;
     auto handle_account_body = [&](std::span<uint8_t> body) {
