@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <cstring>
 #include <format>
 #include <memory>
@@ -226,6 +227,53 @@ struct TrieNodeFlat {
         return std::memcmp(key.bytes, other.key.bytes, 32) < 0;
     }
 };
+
+/// Sorts n nodes by key. A node is 155 bytes, so a sort that moves nodes (n^2/4 moves for the
+/// insertion sort below 17, n log n for std::sort) spends most of its time copying; this sorts
+/// indices and then applies the permutation, moving each node at most once (cycle following).
+inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
+    if (n < 2) return;
+    uint32_t local_idx[64];
+    std::vector<uint32_t> heap_idx;
+    uint32_t* idx = local_idx;
+    if (n > 64) {
+        heap_idx.resize(n);
+        idx = heap_idx.data();
+    }
+    for (size_t i = 0; i < n; ++i) idx[i] = static_cast<uint32_t>(i);
+    const auto less = [data](uint32_t a, uint32_t b) noexcept {
+        return std::memcmp(data[a].key.bytes, data[b].key.bytes, 32) < 0;
+    };
+    if (n <= 16) {
+        for (size_t i = 1; i < n; ++i) {
+            const uint32_t k = idx[i];
+            size_t j = i;
+            while (j > 0 && less(k, idx[j - 1])) {
+                idx[j] = idx[j - 1];
+                --j;
+            }
+            idx[j] = k;
+        }
+    } else {
+        std::sort(idx, idx + n, less);
+    }
+    // data[i] must become the node idx[i] held before; follow each cycle with one node in hand.
+    for (size_t i = 0; i < n; ++i) {
+        if (idx[i] == i) continue;
+        TrieNodeFlat held = data[i];
+        size_t j = i;
+        while (true) {
+            const size_t k = idx[j];
+            idx[j] = static_cast<uint32_t>(j);
+            if (k == i) {
+                data[j] = held;
+                break;
+            }
+            data[j] = data[k];
+            j = k;
+        }
+    }
+}
 
 // A class holding the data for the Trie root calculation
 // Proceeds as follows:
