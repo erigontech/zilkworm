@@ -76,9 +76,10 @@ target_compile_options(z6m_guest PRIVATE
     -fno-unwind-tables
     -fno-asynchronous-unwind-tables
     -fno-stack-protector
-    # The frame pointer comes from the toolchain file: omitted in the release build (a frame
+    # The frame pointer is the toolchain file's choice: cmake/riscv32im.cmake omits it (a frame
     # record in memcpy, memset, memcmp and operator new/delete was 7 of their instructions per
-    # call), kept by the profiling toolchain the flamegraph unwinder needs.
+    # call). A profiling build whose flamegraph unwinder needs -fno-omit-frame-pointer sets it
+    # there, for the whole guest, rather than for these sources alone.
     -fdata-sections
     -ffunction-sections
 )
