@@ -76,7 +76,9 @@ target_compile_options(z6m_guest PRIVATE
     -fno-unwind-tables
     -fno-asynchronous-unwind-tables
     -fno-stack-protector
-    -fno-omit-frame-pointer
+    # The frame pointer comes from the toolchain file: omitted in the release build (a frame
+    # record in memcpy, memset, memcmp and operator new/delete was 7 of their instructions per
+    # call), kept by the profiling toolchain the flamegraph unwinder needs.
     -fdata-sections
     -ffunction-sections
 )
