@@ -89,10 +89,12 @@ struct BranchNode {
     // Layout of the witness encoding is unchanged iff no slot changed length class.
     // Both child_len and orig_child_len arrays must stay 8-aligned.
     inline bool same_layout_as_orig() const noexcept {
-        uint64_t lens[2], lens_orig[2];  // 2×u64 = all 16 slots
-        std::memcpy(lens, child_len.data(), 16);
-        std::memcpy(lens_orig, orig_child_len.data(), 16);
-        return ((lens[0] ^ lens_orig[0]) | (lens[1] ^ lens_orig[1])) == 0;
+        // Through data() the 8-byte alignment is lost, and a strict-alignment target then
+        // copies both arrays byte-wise (two memcpy calls per encode); read them as words.
+        typedef uint32_t __attribute__((may_alias)) w32;
+        const w32* a = reinterpret_cast<const w32*>(std::assume_aligned<8>(child_len.data()));
+        const w32* b = reinterpret_cast<const w32*>(std::assume_aligned<8>(orig_child_len.data()));
+        return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3])) == 0;
     }
 
     inline uint8_t child_count() const noexcept {
