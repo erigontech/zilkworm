@@ -86,6 +86,11 @@ class DirectState : public BlockState {
     const PreStateMeta* pre_state_meta_{nullptr};
     MphfMap pre_state_map_;
     MphfMap node_store_map_;
+    /// One bit per 8-aligned node-store data offset: set once the node there has been looked up
+    /// and its keccak matched the key, see find_node_rlp(). Lazily verifying what is used costs
+    /// the hashing of only those nodes; sanitize() hashed every node of the witness, a tenth of
+    /// which no block ever unfolds.
+    mutable std::vector<uint32_t> node_verified_;
     MphfMap code_store_map_;
 
     std::span<const AddrHashEntry> addr_hashes_;
@@ -350,8 +355,22 @@ DirectState::find_pre_account_unchecked(const evmc::address& addr) noexcept {
 
 [[gnu::always_inline]] inline std::optional<ByteView>
 DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
-    if (auto b = node_store_map_.find<32, 0, &hash_key8>(node_hash.bytes))
+    if (auto b = node_store_map_.find<32, 0, &hash_key8>(node_hash.bytes)) {
+        // SOUNDNESS-CRITICAL: a node is used only if its keccak is the hash it was asked for, so
+        // every node that reaches the trie is bound to a hash reference in a verified parent (or
+        // the pre-state root). Checked on the first lookup; nodes never looked up never matter.
+        const auto bit = static_cast<uint32_t>(b->data() - node_store_map_.data_base()) >> 3;
+        auto& word = node_verified_[bit >> 5];
+        const auto mask = uint32_t{1} << (bit & 31);
+        if ((word & mask) == 0) {
+            if (!bytes_equal<32>(silkworm::keccak256(FlatKv::payload(ByteView{b->data(), b->size()})).bytes,
+                                 node_hash.bytes))
+                [[unlikely]]
+                return std::nullopt;  // As a node missing from the witness.
+            word |= mask;
+        }
         return ByteView{b->data() + FlatKv::kPayloadOffset, b->size() - FlatKv::kPayloadOffset};
+    }
     return std::nullopt;
 }
 

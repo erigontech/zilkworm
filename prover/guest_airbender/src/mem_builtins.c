@@ -20,6 +20,62 @@ void csr_memcopy32(void *dst, const void *src) {
         : "+r"(a2) : "r"(a0), "r"(a1) : "memory");
 }
 
+// 32 bytes between any two addresses (3.5M calls per 200 mainnet blocks: hashes read out of
+// witness RLP, whose alignment is arbitrary). The source words are read aligned and shifted
+// together, the destination is written with byte stores up to its first word boundary, word
+// stores to the last one and byte stores after. The generic stages below take 74..86 cycles for
+// this shape, this about 45. Reads up to 3 bytes past src + 32, inside the same aligned word.
+static void copy32_any(unsigned char *dst, const unsigned char *src) {
+    const uintptr_t soff = (uintptr_t)src & 3;
+    const uint32_t *sw = (const uint32_t *)(src - soff);
+    const unsigned sh = (unsigned)soff * 8;
+    uint32_t carry = sw[0];
+    unsigned si = 1;
+    // next_src: the next 4 source bytes as a word, at any source alignment.
+#define NEXT_SRC(v)                                                   \
+    do {                                                              \
+        if (sh == 0) {                                                \
+            v = carry;                                                \
+            carry = sw[si++];                                         \
+        } else {                                                      \
+            uint32_t w1_ = sw[si++];                                  \
+            v = (carry >> sh) | (w1_ << (32 - sh));                   \
+            carry = w1_;                                              \
+        }                                                             \
+    } while (0)
+    const uintptr_t doff = (uintptr_t)dst & 3;
+    if (doff == 0) {
+        uint32_t *dw = (uint32_t *)dst;
+        for (int k = 0; k < 8; k++) {
+            uint32_t v;
+            NEXT_SRC(v);
+            dw[k] = v;
+        }
+        return;
+    }
+    const unsigned lead = 4 - (unsigned)doff;
+    uint32_t v;
+    NEXT_SRC(v);
+    for (unsigned k = 0; k < lead; k++) {
+        dst[k] = (unsigned char)v;
+        v >>= 8;
+    }
+    uint32_t *dw = (uint32_t *)(dst + lead);
+    const unsigned keep = 32 - lead * 8;  // Bits of v (source bytes not yet stored) at its bottom.
+    for (int k = 0; k < 7; k++) {
+        uint32_t nx;
+        NEXT_SRC(nx);
+        dw[k] = v | (nx << keep);
+        v = nx >> (32 - keep);
+    }
+    unsigned char *tail = dst + lead + 28;
+    for (unsigned k = 0; k < 4 - lead; k++) {
+        tail[k] = (unsigned char)v;
+        v >>= 8;
+    }
+#undef NEXT_SRC
+}
+
 // ---------------------------------------------------------------------------
 // memcpy — non-overlapping copy, CSR MEMCOPY + word-aligned fast path
 // ---------------------------------------------------------------------------
@@ -94,6 +150,13 @@ void *memcpy(void *dest, const void *src, size_t n) {
             dw[3] = sw[3]; dw[4] = sw[4]; dw[5] = sw[5];
             return dest;
         }
+    }
+
+    // 32 bytes with either address unaligned (a copy onto itself reads each word before it
+    // writes it, so the no-op below is not needed first).
+    if (n == 32) {
+        copy32_any(d, s);
+        return dest;
     }
 
     // A copy onto itself is a no-op: memmove() forwards one for an EVM MCOPY with equal
@@ -366,12 +429,86 @@ void *memset(void *dest, int c, size_t n) {
             dw[12] = 0; dw[13] = 0; dw[14] = 0; dw[15] = 0;
             return dest;
         }
-        if (n == 4) {
-            dw[0] = 0;
-            return dest;
-        }
-        if (n == 24) {
-            dw[0] = 0; dw[1] = 0; dw[2] = 0; dw[3] = 0; dw[4] = 0; dw[5] = 0;
+        // Any other fill of up to 256 bytes: a jump into an unrolled run of word stores, then
+        // the tail bytes. Most zero fills are struct value-initializations of 68 to 240 bytes
+        // (evmc_message, Account, StorageValue, Transaction); the generic path below steers
+        // such a fill through its 32-byte alignment, CSR and remainder stages for ~90 cycles,
+        // this costs the stores plus about 10 instructions.
+        if (n <= 256) {
+            switch (n >> 2) {
+        case 64: dw[63] = 0; __attribute__((fallthrough));
+        case 63: dw[62] = 0; __attribute__((fallthrough));
+        case 62: dw[61] = 0; __attribute__((fallthrough));
+        case 61: dw[60] = 0; __attribute__((fallthrough));
+        case 60: dw[59] = 0; __attribute__((fallthrough));
+        case 59: dw[58] = 0; __attribute__((fallthrough));
+        case 58: dw[57] = 0; __attribute__((fallthrough));
+        case 57: dw[56] = 0; __attribute__((fallthrough));
+        case 56: dw[55] = 0; __attribute__((fallthrough));
+        case 55: dw[54] = 0; __attribute__((fallthrough));
+        case 54: dw[53] = 0; __attribute__((fallthrough));
+        case 53: dw[52] = 0; __attribute__((fallthrough));
+        case 52: dw[51] = 0; __attribute__((fallthrough));
+        case 51: dw[50] = 0; __attribute__((fallthrough));
+        case 50: dw[49] = 0; __attribute__((fallthrough));
+        case 49: dw[48] = 0; __attribute__((fallthrough));
+        case 48: dw[47] = 0; __attribute__((fallthrough));
+        case 47: dw[46] = 0; __attribute__((fallthrough));
+        case 46: dw[45] = 0; __attribute__((fallthrough));
+        case 45: dw[44] = 0; __attribute__((fallthrough));
+        case 44: dw[43] = 0; __attribute__((fallthrough));
+        case 43: dw[42] = 0; __attribute__((fallthrough));
+        case 42: dw[41] = 0; __attribute__((fallthrough));
+        case 41: dw[40] = 0; __attribute__((fallthrough));
+        case 40: dw[39] = 0; __attribute__((fallthrough));
+        case 39: dw[38] = 0; __attribute__((fallthrough));
+        case 38: dw[37] = 0; __attribute__((fallthrough));
+        case 37: dw[36] = 0; __attribute__((fallthrough));
+        case 36: dw[35] = 0; __attribute__((fallthrough));
+        case 35: dw[34] = 0; __attribute__((fallthrough));
+        case 34: dw[33] = 0; __attribute__((fallthrough));
+        case 33: dw[32] = 0; __attribute__((fallthrough));
+        case 32: dw[31] = 0; __attribute__((fallthrough));
+        case 31: dw[30] = 0; __attribute__((fallthrough));
+        case 30: dw[29] = 0; __attribute__((fallthrough));
+        case 29: dw[28] = 0; __attribute__((fallthrough));
+        case 28: dw[27] = 0; __attribute__((fallthrough));
+        case 27: dw[26] = 0; __attribute__((fallthrough));
+        case 26: dw[25] = 0; __attribute__((fallthrough));
+        case 25: dw[24] = 0; __attribute__((fallthrough));
+        case 24: dw[23] = 0; __attribute__((fallthrough));
+        case 23: dw[22] = 0; __attribute__((fallthrough));
+        case 22: dw[21] = 0; __attribute__((fallthrough));
+        case 21: dw[20] = 0; __attribute__((fallthrough));
+        case 20: dw[19] = 0; __attribute__((fallthrough));
+        case 19: dw[18] = 0; __attribute__((fallthrough));
+        case 18: dw[17] = 0; __attribute__((fallthrough));
+        case 17: dw[16] = 0; __attribute__((fallthrough));
+        case 16: dw[15] = 0; __attribute__((fallthrough));
+        case 15: dw[14] = 0; __attribute__((fallthrough));
+        case 14: dw[13] = 0; __attribute__((fallthrough));
+        case 13: dw[12] = 0; __attribute__((fallthrough));
+        case 12: dw[11] = 0; __attribute__((fallthrough));
+        case 11: dw[10] = 0; __attribute__((fallthrough));
+        case 10: dw[9] = 0; __attribute__((fallthrough));
+        case 9: dw[8] = 0; __attribute__((fallthrough));
+        case 8: dw[7] = 0; __attribute__((fallthrough));
+        case 7: dw[6] = 0; __attribute__((fallthrough));
+        case 6: dw[5] = 0; __attribute__((fallthrough));
+        case 5: dw[4] = 0; __attribute__((fallthrough));
+        case 4: dw[3] = 0; __attribute__((fallthrough));
+        case 3: dw[2] = 0; __attribute__((fallthrough));
+        case 2: dw[1] = 0; __attribute__((fallthrough));
+        case 1: dw[0] = 0; __attribute__((fallthrough));
+        case 0: break;
+            }
+            d += n & ~(size_t)3;
+            switch (n & 3) {
+            case 3: d[2] = 0; __attribute__((fallthrough));
+            case 2: d[1] = 0; __attribute__((fallthrough));
+            case 1: d[0] = 0; __attribute__((fallthrough));
+            case 0: break;
+            }
             return dest;
         }
         // n==288: 9*32 bytes, 30 call sites (stack-array zeroing).
@@ -386,16 +523,6 @@ void *memset(void *dest, int c, size_t n) {
             csr_memcopy32(dw + 48, memset_zeros);
             csr_memcopy32(dw + 56, memset_zeros);
             csr_memcopy32(dw + 64, memset_zeros);
-            return dest;
-        }
-        // n==96: 24 words (common for 3x bytes32).
-        if (n == 96) {
-            dw[0]  = 0; dw[1]  = 0; dw[2]  = 0; dw[3]  = 0;
-            dw[4]  = 0; dw[5]  = 0; dw[6]  = 0; dw[7]  = 0;
-            dw[8]  = 0; dw[9]  = 0; dw[10] = 0; dw[11] = 0;
-            dw[12] = 0; dw[13] = 0; dw[14] = 0; dw[15] = 0;
-            dw[16] = 0; dw[17] = 0; dw[18] = 0; dw[19] = 0;
-            dw[20] = 0; dw[21] = 0; dw[22] = 0; dw[23] = 0;
             return dest;
         }
     }

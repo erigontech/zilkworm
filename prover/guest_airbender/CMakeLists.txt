@@ -65,7 +65,7 @@ target_include_directories(z6m_guest SYSTEM PRIVATE
 # loops back into library calls.  Also compile without LTO so the strong
 # symbol definition survives into the final link and overrides newlib.
 set_source_files_properties(src/mem_builtins.c PROPERTIES
-    COMPILE_OPTIONS "-fno-tree-loop-distribute-patterns;-fno-lto"
+    COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto"
 )
 
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
@@ -76,7 +76,10 @@ target_compile_options(z6m_guest PRIVATE
     -fno-unwind-tables
     -fno-asynchronous-unwind-tables
     -fno-stack-protector
-    -fno-omit-frame-pointer
+    # The frame pointer is the toolchain file's choice: cmake/riscv32im.cmake omits it (a frame
+    # record in memcpy, memset, memcmp and operator new/delete was 7 of their instructions per
+    # call). A profiling build whose flamegraph unwinder needs -fno-omit-frame-pointer sets it
+    # there, for the whole guest, rather than for these sources alone.
     -fdata-sections
     -ffunction-sections
 )
