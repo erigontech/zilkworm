@@ -18,6 +18,26 @@
 #include <zilk_core/print.hpp>
 
 namespace zilkworm {
+
+/// a[0..N) == b[0..N), for the hash and key checks of the witness lookups. With strict alignment
+/// (rv32 Airbender) memcmp is a call; two word-aligned operands, the usual case, compare a word at
+/// a time inline instead.
+template <size_t N>
+[[gnu::always_inline]] inline bool bytes_equal(const uint8_t* a, const uint8_t* b) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    if constexpr (N % 4 == 0) {
+        if (((reinterpret_cast<uintptr_t>(a) | reinterpret_cast<uintptr_t>(b)) & 3) == 0) {
+            typedef uint32_t __attribute__((may_alias)) w32;
+            const w32* const wa = reinterpret_cast<const w32*>(a);
+            const w32* const wb = reinterpret_cast<const w32*>(b);
+            for (size_t i = 0; i < N / 4; ++i)
+                if (wa[i] != wb[i]) return false;
+            return true;
+        }
+    }
+#endif
+    return std::memcmp(a, b, N) == 0;
+}
 using ::silkworm::ByteView;
 using ::silkworm::Bytes;
 
@@ -137,7 +157,7 @@ class MphfMap {
         const uint32_t off = slot_offsets_[idx];
         if (off != 0) [[likely]] {
             uint8_t* body = data_ + off + 8u;
-            if (std::memcmp(body + KeyOffset, key, KeySize) == 0) [[likely]] {
+            if (bytes_equal<KeySize>(body + KeyOffset, key)) [[likely]] {
                 uint64_t len; std::memcpy(&len, data_ + off, 8);
                 return std::span<uint8_t>{body, static_cast<size_t>(len)};
             }
@@ -174,7 +194,7 @@ class MphfMap {
             [](const MphfCollisionEntry& e, uint64_t kk) noexcept { return e.key < kk; });
         for (; it != collisions_ + n_collisions_ && it->key == k8; ++it) {
             uint8_t* body = data_ + it->offset + 8u;
-            if (std::memcmp(body + KeyOffset, key, KeySize) == 0) {
+            if (bytes_equal<KeySize>(body + KeyOffset, key)) {
                 uint64_t len; std::memcpy(&len, data_ + it->offset, 8);
                 return std::span<uint8_t>{body, static_cast<size_t>(len)};
             }

@@ -885,7 +885,7 @@ bool DirectState::sanitize() {
     // SOUNDNESS-CRITICAL: binds each leaf's identity to its trie-key hash.
     bool code_keccak_ok = true;
     code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-        code_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+        code_keccak_ok &= bytes_equal<32>(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr);
     });
     if (!code_keccak_ok) {
         sys_println("sanitize: code-hash mismatch in witness bundle ");
@@ -894,7 +894,7 @@ bool DirectState::sanitize() {
 
     bool nodes_keccak_ok = true;
     node_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-        nodes_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+        nodes_keccak_ok &= bytes_equal<32>(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr);
     });
     if (!nodes_keccak_ok) {
         sys_println("sanitize: node-hash mismatch in witness bundle ");
@@ -939,7 +939,7 @@ bool DirectState::sanitize() {
     for (const auto& e : addr_hashes_) {
         if (prev_hash != nullptr && std::memcmp(prev_hash, e.addr_hash, 32) >= 0) return false;
         const auto h = silkworm::keccak256(ByteView{e.addr, 20});
-        if (std::memcmp(h.bytes, e.addr_hash, 32) != 0) return false;
+        if (!bytes_equal<32>(h.bytes, e.addr_hash)) return false;
         if (static_cast<uint64_t>(e.entry_offset) + 8u + sizeof(Account) > data_size) return false;
         auto* pa = account_at_offset(e.entry_offset);
         if (!pa || !eq_addr20(pa->addr, e.addr)) return false;
