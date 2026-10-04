@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <cstring>
 #include <format>
 #include <memory>
@@ -44,7 +45,9 @@ using ::zilkworm::keccak_bytes32;
 namespace zilkworm {
 struct nibbles64 {
     uint8_t len{};
-    std::array<uint8_t, 64> nib{};  // max trie path is 64 nibbles
+    // Max trie path is 64 nibbles. Word-aligned so a strict-alignment target (rv32 Airbender)
+    // can zero and copy it with word stores; at offset 1 each was a byte-wise library call.
+    alignas(4) std::array<uint8_t, 64> nib{};
 
     uint8_t& operator[](size_t index) { return nib[index]; }
     const uint8_t& operator[](size_t index) const { return nib[index]; }
@@ -86,10 +89,12 @@ struct BranchNode {
     // Layout of the witness encoding is unchanged iff no slot changed length class.
     // Both child_len and orig_child_len arrays must stay 8-aligned.
     inline bool same_layout_as_orig() const noexcept {
-        uint64_t lens[2], lens_orig[2];  // 2×u64 = all 16 slots
-        std::memcpy(lens, child_len.data(), 16);
-        std::memcpy(lens_orig, orig_child_len.data(), 16);
-        return ((lens[0] ^ lens_orig[0]) | (lens[1] ^ lens_orig[1])) == 0;
+        // Through data() the 8-byte alignment is lost, and a strict-alignment target then
+        // copies both arrays byte-wise (two memcpy calls per encode); read them as words.
+        typedef uint32_t __attribute__((may_alias)) w32;
+        const w32* a = reinterpret_cast<const w32*>(std::assume_aligned<8>(child_len.data()));
+        const w32* b = reinterpret_cast<const w32*>(std::assume_aligned<8>(orig_child_len.data()));
+        return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3])) == 0;
     }
 
     inline uint8_t child_count() const noexcept {
@@ -185,7 +190,9 @@ struct GridLine {
     uint8_t parent_depth;  // Depth in the stack the current line's parent is at
     uint8_t consumed;      // path nibbles consumed till this node (cumulative)
     bool modified;
-    std::array<uint8_t, 16> child_depth{};
+    // Word-aligned (free: the union below is 8-aligned) so zeroing it is 4 word stores on a
+    // strict-alignment target rather than a call to memset for 16 unaligned bytes.
+    alignas(4) std::array<uint8_t, 16> child_depth{};
 
     union {
         BranchNode branch;
@@ -222,6 +229,53 @@ struct TrieNodeFlat {
         return std::memcmp(key.bytes, other.key.bytes, 32) < 0;
     }
 };
+
+/// Sorts n nodes by key. A node is 155 bytes, so a sort that moves nodes (n^2/4 moves for the
+/// insertion sort below 17, n log n for std::sort) spends most of its time copying; this sorts
+/// indices and then applies the permutation, moving each node at most once (cycle following).
+inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
+    if (n < 2) return;
+    uint32_t local_idx[64];
+    std::vector<uint32_t> heap_idx;
+    uint32_t* idx = local_idx;
+    if (n > 64) {
+        heap_idx.resize(n);
+        idx = heap_idx.data();
+    }
+    for (size_t i = 0; i < n; ++i) idx[i] = static_cast<uint32_t>(i);
+    const auto less = [data](uint32_t a, uint32_t b) noexcept {
+        return std::memcmp(data[a].key.bytes, data[b].key.bytes, 32) < 0;
+    };
+    if (n <= 16) {
+        for (size_t i = 1; i < n; ++i) {
+            const uint32_t k = idx[i];
+            size_t j = i;
+            while (j > 0 && less(k, idx[j - 1])) {
+                idx[j] = idx[j - 1];
+                --j;
+            }
+            idx[j] = k;
+        }
+    } else {
+        std::sort(idx, idx + n, less);
+    }
+    // data[i] must become the node idx[i] held before; follow each cycle with one node in hand.
+    for (size_t i = 0; i < n; ++i) {
+        if (idx[i] == i) continue;
+        TrieNodeFlat held = data[i];
+        size_t j = i;
+        while (true) {
+            const size_t k = idx[j];
+            idx[j] = static_cast<uint32_t>(j);
+            if (k == i) {
+                data[j] = held;
+                break;
+            }
+            data[j] = data[k];
+            j = k;
+        }
+    }
+}
 
 // A class holding the data for the Trie root calculation
 // Proceeds as follows:
