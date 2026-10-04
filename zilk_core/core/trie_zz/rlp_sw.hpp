@@ -30,9 +30,17 @@ namespace endian = ::silkworm::endian;
 // until the next call. A fixed 32-byte aligned array rather than a Bytes: the copy-and-patch
 // encode of a branch can then put its copy at the witness node's offset modulo 32 (the guest's
 // memcpy copies same-phase operands in 32-byte CSR chunks), and the keccak of the result stays on
-// its aligned path as witness node bodies are 8-aligned. A branch is at most 3 + 16 * 33 bytes
+// its aligned path as witness node bodies are 8-aligned. A branch is at most 3 + 16 * 33 + 1 bytes
 // (its value is empty in the fixed-key state and storage tries), a leaf holds at most an account.
+// Witness nodes are untrusted, so decode_node() enforces both: a branch with a value and a leaf
+// value over kMaxLeafValueSize are invalid, which bounds every node any encoder can produce.
 inline constexpr size_t kNodeBufferSize = 2048;
+/// The longest leaf value decode_node() accepts. An account is at most 110 bytes; this limit
+/// only has to keep a leaf's encoding (list header, path, value header and value) in the buffer.
+inline constexpr size_t kMaxLeafValueSize = kNodeBufferSize - 64;
+static_assert(3 + 34 + 3 + kMaxLeafValueSize <= kNodeBufferSize, "a leaf must fit the encode buffer");
+static_assert(31 + 3 + 16 * 33 + 1 <= kNodeBufferSize,
+              "a branch copied at its witness phase must fit the encode buffer");
 #if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG) && !defined(AIRBENDER)
 alignas(32) inline thread_local uint8_t static_buffer[kNodeBufferSize];
 #else
@@ -489,6 +497,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                 second = ByteView{e1_start_ptr, header_len + h1->payload_length};
             }
         } else {
+            if (h1->payload_length > kMaxLeafValueSize) [[unlikely]] return kInvalid;  // see static_buffer
             second = e1_payload;
         }
         return kExtOrLeaf;
@@ -537,17 +546,14 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
         remaining = ByteView{p, static_cast<size_t>(end - p)};
     }
 
-    // Value (17th) — empty (0x80) for fixed-length-key tries; short-circuit the common case.
+    // Value (17th): empty (0x80), and the list ends there. The state and storage tries have
+    // fixed-length keys, so no key ends at a branch; a value would also not fit the encode buffer
+    // budget for branches (see static_buffer).
     if (remaining.size() == 1 && remaining[0] == rlp::kEmptyStringCode) {
         out_branch.value = {};
-        return kBranch;  // value empty + list fully consumed
+        return kBranch;
     }
-    // Rare: non-empty value.
-    auto hv = rlp::decode_header(remaining);
-    if (!hv || hv->list) return kInvalid;
-    out_branch.value = remaining.substr(0, hv->payload_length);
-    remaining.remove_prefix(hv->payload_length);
-    return remaining.empty() ? kBranch : kInvalid;  // preserve the all-consumed check
+    return kInvalid;
 }
 
 inline bool is_empty(const GridLine& line) {
