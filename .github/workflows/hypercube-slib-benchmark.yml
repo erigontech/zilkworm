@@ -1,13 +1,7 @@
 name: HyperCube slib Benchmark
 
-# HashState/slib SP1 cycle benchmark on the tests-zkevm-benchmark@v0.8.2
-# (Amsterdam) fixtures. Produces OUR guest cycle numbers; the reth baseline is
-# compared externally via dashboards, so this job only emits + uploads our data.
-#
-# Manual (workflow_dispatch) only, and intentionally NOT wired to push/PR: it is
-# NON-BLOCKING; the build/run step is marked continue-on-error so it never gates
-# CI. It needs the Amsterdam (glamsterdam-devnet-8) EVM support; see
-# docs/slib_benchmark.md.
+# HashState/slib SP1 cycle benchmark on tests-zkevm-benchmark@v0.8.2; manual and non-blocking.
+# See docs/hashstate.md, "SP1 cycle benchmark".
 
 on:
   workflow_dispatch:

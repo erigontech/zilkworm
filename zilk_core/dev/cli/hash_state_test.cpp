@@ -1,17 +1,8 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// HashState substrate unit tests (zilkworm.tests target).
-//
-// HashState is the SSZ-input-path node/code store, parallel to DirectState's
-// serialized MphfMap stores. add_node/add_code key their input by its REAL keccak256
-// and record the arena offset in an open-addressed HashIndex<32,&hash_key8>;
-// find_node_rlp / find_code recover the bytes. These tests cover round-trip, dedupe,
-// definitive miss, and — the load-bearing case — the full-key memcmp gate under a
-// home-bucket collision. A literal 8-byte key8 collision is infeasible to construct
-// under real keccak, so instead we drive two DISTINCT real keccak hashes into the SAME
-// index home bucket and confirm each still resolves to its own payload while a third
-// colliding-but-never-added hash misses.
+// HashState unit tests (zilkworm.tests target), starting with the node and code store.
+// See docs/hashstate.md, "Node and code store".
 
 #include <algorithm>
 #include <array>
@@ -136,15 +127,8 @@ TEST_CASE("HashState miss on never-added node hash", "[hash_state]") {
     CHECK_FALSE(hs.find_node_rlp(h).has_value());
 }
 
-// The safety gate: two DISTINCT real keccak hashes forced into the same index home
-// bucket must each resolve to their OWN payload (open-address probe + full-key memcmp),
-// and a third colliding-but-never-added hash must still miss.
-//
-// A literal key8 collision under real keccak is infeasible to construct, so a home-
-// bucket collision (mix64_body(hash_key8(h)) & (capacity-1)) is used instead. mix64_body
-// is public in mphf_map.hpp, but the exact home bucket also depends on the table's
-// capacity/mask; a sibling HashIndex sized with the SAME expected count reproduces both,
-// so its public index_of() gives the authoritative home bucket the real node index uses.
+// Two distinct keccak hashes sharing a home bucket each find their own node; a third one misses.
+// See docs/hashstate.md, "Node and code store".
 TEST_CASE("HashState full-key gate on home-bucket collision", "[hash_state]") {
     constexpr std::uint32_t kExpectedNodes = 4;  // -> capacity 8: home-bucket collisions are frequent
     HashState hs{kExpectedNodes, 16};
@@ -224,15 +208,8 @@ TEST_CASE("HashState code round-trips by code_hash", "[hash_state]") {
     CHECK(miss.empty());
 }
 
-// ---------------------------------------------------------------------------
-// build_state_from_trie — the standalone account-trie sweep.
-//
-// These tests hand-build small account tries out of the project's own MPT node
-// encoders (encode_leaf/encode_branch/encode_ext, rlp_sw.hpp), add the referenced
-// nodes to the store under their real keccak, then run build_state_from_trie(root) and check
-// the emitted account cache. Using the shared encoders (rather than raw RLP bytes)
-// keeps the fixtures canonical and readable — the same bytes decode_node reads back.
-// ---------------------------------------------------------------------------
+// build_state_from_trie account sweep over small tries built with the shared MPT encoders.
+// See docs/hashstate.md, "Trie sweep tests".
 
 namespace {
 
@@ -396,7 +373,7 @@ TEST_CASE("HashState build_state_from_trie account sweep", "[hash_state]") {
     Key kC;  // slot 0xC -> extension [0xA,0xB] -> leaf
     kC.nib[0] = 0xC; kC.nib[1] = 0xA; kC.nib[2] = 0xB;
     for (std::size_t i = 3; i < 64; ++i) kC.nib[i] = static_cast<uint8_t>((i * 7 + 1) & 0xF);
-    Key kE;  // slot 0x8 -> extension (62 nibbles) -> embedded 1-nibble leaf
+    Key kE;  // slot 0x8 -> extension (60 nibbles) -> branch -> embedded 2-nibble leaf
     kE.nib[0] = 0x8;
     for (std::size_t i = 1; i < 64; ++i) kE.nib[i] = static_cast<uint8_t>((i * 2 + 1) & 0xF);
 
@@ -416,16 +393,8 @@ TEST_CASE("HashState build_state_from_trie account sweep", "[hash_state]") {
     const ExtensionNode extC = make_ext(&kC.nib[1], 2, ByteView{hC.bytes, 32});
     const evmc::bytes32 hExtC = hs.add_node(ByteView{zilkworm::encode_ext(extC)});
 
-    // --- embedded inline leaf E under a deep branch: root[0x8] -> ext(60 nibbles) ->
-    // branch2 -> EMBEDDED leaf(2 nibbles, tiny 1-byte value). Embedded inline children
-    // only ever hang off a BRANCH (an extension's child is always a 32-byte hash ref, so
-    // decode_node rejects an inline-list ext child). The 60-nibble extension pushes the
-    // branch deep enough that the leaf's 2-nibble remainder + 1-byte value fit in
-    // < 32 bytes, so the leaf is inlined into branch2's RLP rather than hash-referenced.
-    // The leaf is NOT added to the store; build_state_from_trie must decode it inline (no lookup,
-    // so missing_count stays 0). Its 1-byte value is not a decodable account (a real
-    // account leaf is always > 32 bytes — two 32-byte hashes — hence never embeddable),
-    // so it is counted as a reached leaf but never cached. ---
+    // --- embedded leaf E under a deep branch: decoded inline (no lookup), reached, not cached ---
+    // See docs/hashstate.md, "Trie sweep tests".
     const uint8_t emb_value_byte = 0x2A;
     const LeafNode leafE = make_leaf(&kE.nib[62], 2, ByteView{&emb_value_byte, 1});
     const Bytes embE{zilkworm::encode_leaf(leafE)};  // own it before the next encode call
@@ -691,17 +660,8 @@ TEST_CASE("HashState build_state_from_trie skips an absent storage root", "[hash
     CHECK(hs.storage_slot_count() == 0u);
 }
 
-// ---------------------------------------------------------------------------
-// CHANGE 2 — read-miss confirmation. The build sweep only collects keys actually present in
-// the trie, so a cache miss is either a genuinely-empty key OR one wrongly left out of the
-// witness. get_account / get_storage cannot tell in advance, so on a miss they run a
-// single-path confirmation walk (confirm_absent) down the key's path:
-//   - PROVEN empty (an empty 0x80 branch slot for the key's next nibble, or an ext/leaf whose
-//     path diverges from the key) -> return blank, record nothing.
-//   - a node the walk needs is missing -> NOT confirmed: return blank so a value-returning
-//     caller proceeds, but record an unconfirmed read so the accept gate rejects later.
-// Fixtures are hand-built with the same MPT encoders as the sweep fixtures above.
-// ---------------------------------------------------------------------------
+// Read misses: confirm_absent either proves the key empty or records an unconfirmed read.
+// See docs/hashstate.md, "Partial-witness reads".
 
 // Account: a present read hits the cache; a genuinely-absent account whose exclusion-path
 // nodes are all in the store reads blank with NO unconfirmed read — proven two ways, via an
@@ -921,24 +881,8 @@ TEST_CASE("HashState get_storage on empty or absent account reads zero without c
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// ---------------------------------------------------------------------------
-// GridMPT fold over HashState — the compile-time-selected shared-trie path.
-//
-// These exercise GridMPT<true, HashState>: the templated GridMPT bound to HashState's
-// node store (state_->find_node_rlp resolves through the HashState open-addressed index),
-// with the pre-value / read-only check compiled out (state_keeps_prevalue_check<HashState>
-// == false). The fold reads nodes only from the node store (add_node), so it runs off the
-// witness directly — build_state_from_trie's account/storage caches are not consulted by
-// the fold.
-//
-// "Expected root" strategy: an equivalence against a hand-computed root, NOT against a
-// DirectState fold. Building a DirectState from raw nodes is impractical here (it reads a
-// serialized MphfMap bundle produced by the host-side flat-bundle builders), so instead we
-// compute the post-write Ethereum trie root directly with the SAME canonical encoders the
-// fold uses internally — encode_line dispatches a branch to encode_branch and a leaf to
-// encode_leaf (rlp_sw.hpp:391-401) — making keccak(encode_branch(post-state root)) a valid
-// oracle for the fold's output.
-// ---------------------------------------------------------------------------
+// GridMPT<true, HashState> fold over the witness node store, checked against a hand-built root.
+// See docs/hashstate.md, "GridMPT fold over HashState".
 
 // Change an existing account's value and fold: the recomputed root must equal the
 // independently hand-computed root of the post-write trie.
@@ -1051,18 +995,8 @@ TEST_CASE("GridMPT fold over HashState rejects a missing fold node", "[hash_stat
     CHECK(eq32(new_root, evmc::bytes32{}));        // reject -> zero root (never equals a header)
 }
 
-// ---------------------------------------------------------------------------
-// check_root_hashstate — the HashState accept check (check_root_hashstate.hpp).
-//
-// The additive sibling of StateTransition::check_root: it folds ONLY a block's writes
-// over a HashState whose caches were built from the pre-state trie, recomputes the
-// post-state root with the same GridMPT<true, HashState> fold, and accepts iff
-//   new_root == header_state_root && missing_count() == 0 && unconfirmed_read_count() == 0.
-// The pre-value / read-only check is compiled out for HashState; the two counts replace
-// it. The write set is supplied as INPUT (HashStateAccountWrite), shaped like check_root's
-// internal update set. "Expected root" is hand-computed with the fold's own canonical
-// encoders (encode_leaf/encode_branch), the same oracle strategy the fold tests above use.
-// ---------------------------------------------------------------------------
+// check_root_hashstate accepts iff the root matches and the missing/unconfirmed counts are zero.
+// See docs/hashstate.md, "Accept check tests".
 
 namespace {
 
@@ -1242,18 +1176,8 @@ TEST_CASE("check_root_hashstate rejects when a read was left unconfirmed",
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, writes, expected_root));
 }
 
-// SOUNDNESS REGRESSION — omitted BLOCKHASH ancestor (the missing-oldest-ancestor exploit).
-// A block that reads BLOCKHASH(k) for an IN-RANGE ancestor whose header the witness OMITTED
-// must be REJECTED, even when the recomputed post-state root matches header.state_root.
-// evmone's blockhash instruction (instructions.hpp:768-777) clamps k to [max(N-256,0), N-1]
-// and only then calls host.get_block_hash(k) -> HashState::get_block_hash(k); the real chain
-// always has that ancestor's hash, so a store miss means the witness omitted a required header.
-// PRE-FIX get_block_hash returned a silent zero and left both completeness counters at zero, so
-// a block that persisted BLOCKHASH(k) (SSTORE(slot, BLOCKHASH(k))) with header k omitted and
-// header.state_root set to that forged execution's root was ACCEPTED — the break. POST-FIX the
-// omitted-ancestor read fails closed (bumps unconfirmed_read_count_) and the accept gate
-// rejects. A PRESENT ancestor read still costs nothing, so legitimate partial witnesses (which
-// ship every ancestor they reference) keep validating.
+// Regression: BLOCKHASH of an omitted in-range ancestor must reject even when the root matches.
+// See docs/hashstate.md, "Omitted BLOCKHASH ancestor".
 TEST_CASE("check_root_hashstate rejects a BLOCKHASH read of an omitted in-range ancestor",
           "[hash_state][accept][blockhash]") {
     HashState hs;
@@ -1390,18 +1314,8 @@ TEST_CASE("check_root_hashstate accepts an off-boundary write but rejects a fold
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, bad_writes, folded));
 }
 
-// ---------------------------------------------------------------------------
-// slib front-end — decode a StatelessInputBytes blob (schema_id 0x1501) into a
-// HashState, then build_state_from_trie. Two flavours:
-//   1. the REAL tests-zkevm@v0.8.0 sample (slib_sample_fixture.hpp) — proves the
-//      hand-written SSZ reader parses the exact wire format and that parse+build
-//      reconstruct the committed pre-state accounts;
-//   2. a SYNTHETIC blob encoded (by the test) into the exact wire layout from a
-//      small COMPLETE trie — the clean missing_count()==0 path plus a storage
-//      cross-check (the real sample is an "optional proofs" partial witness with
-//      no touched storage, so it cannot exercise those two on its own).
-// Plus malformed-input tests that must fail cleanly (std::nullopt, no OOB/crash).
-// ---------------------------------------------------------------------------
+// slib front end: decode StatelessInputBytes into a HashState; real, synthetic and malformed blobs.
+// See docs/hashstate.md, "Stateless input front end".
 
 namespace {
 
@@ -1684,19 +1598,8 @@ TEST_CASE("slib rejects malformed StatelessInputBytes blobs", "[hash_state][slib
     }
 }
 
-// ---------------------------------------------------------------------------
-// S2 — the write overlay + mutators + address-keyed readers.
-//
-// These drive the copy-on-write overlay HashState grows on top of its pristine built
-// account/storage caches. The address-keyed readers hash the address internally, so any
-// fixture that must be reached THROUGH the built cache is keyed by the REAL keccak256(addr)
-// path (add_single_account / keccak_addr / nibbles_of); overlay-only scenarios use any real
-// address on an empty-trie HashState (build_state_from_trie(kEmptyRoot) first so a fresh
-// account's confirm_absent proves absence and records nothing). Each of the two deliberate
-// divergences from DirectState gets a dedicated case:
-//   (a) a zero storage write is RETAINED, not erased (see the storage read-back case);
-//   (b) apply_code_diff/destruct/revive set a storage_wiped_ flag (see the wipe cases).
-// ---------------------------------------------------------------------------
+// Write overlay, mutators and address-keyed readers, plus the two DirectState divergences.
+// See docs/hashstate.md, "Write overlay and mutators".
 
 namespace {
 
@@ -2053,15 +1956,8 @@ TEST_CASE("HashState subtract_from_balance and add_to_balance", "[hash_state]") 
     CHECK(hs.get_balance(addr) == intx::uint256{800});
 }
 
-// ---------------------------------------------------------------------------
-// S3 — HashStateView: the per-transaction evmone read view over HashState.
-//
-// HashStateView mirrors DirectStateView (direct_state.hpp:395-423) method-for-method over the
-// same evmone::state::StateView interface, forwarding to the S2 address-keyed readers. These
-// cases confirm the forwarding is faithful: a present account's fields + storage + code come
-// through, has_storage reflects the storage_root, and empty/absent keys give the right blank
-// results — all off the pristine built cache the address-keyed readers hash into internally.
-// ---------------------------------------------------------------------------
+// HashStateView forwards each StateView call faithfully to the address-keyed readers.
+// See docs/hashstate.md, "Per-transaction read view".
 
 namespace {
 
@@ -2189,15 +2085,8 @@ TEST_CASE("HashStateView returns nullopt for a confirmed-absent account", "[hash
     CHECK(hs.unconfirmed_read_count() == 0u);  // empty trie proves every key absent
 }
 
-// ---------------------------------------------------------------------------
-// S5 — the GATHER overload of check_root_hashstate (check_root_hashstate.hpp): recompute
-// the accept decision from HashState's OWN write overlay, without a hand-supplied span. The
-// overload iterates created_accounts() / overflow_slots_ / storage_wiped_, rebuilds the SAME
-// sorted HashStateAccountWrite set check_root builds from DirectState (state_transition.cpp:
-// 452-609), and delegates to the span-based overload above. These cases drive real writes
-// through the S2 mutators and confirm the gathered decision matches an INDEPENDENT hand-built
-// oracle AND the hand-built span-based version, then that an unconfirmed read still rejects.
-// ---------------------------------------------------------------------------
+// Gather overload of check_root_hashstate: the overlay-derived write set decides like the span.
+// See docs/hashstate.md, "Accept check tests".
 
 // The full gather path: a built account's FIELD change, a storage slot SET, a storage slot
 // CLEARED-TO-ZERO, and a freshly CREATED account, all through the mutators. The gather overload

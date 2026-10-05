@@ -17,14 +17,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_definitions(SP1)
 
-# Compile-time selection of the trie fold's read-side state backend, mirroring the
-# top-level CMakeLists option of the same name. OFF (default) => ActiveState is
-# DirectState and the guest ELF is byte-identical to today; ON => ActiveState is
-# HashState, the SSZ/slib StatelessInputBytes read-side backend. This MUST be set
-# here and not only at the top level: guest_hypercube is a SEPARATE CMake project,
-# so the top-level option never reaches it.
-# Placed before the add_subdirectory() calls below so the define reaches zilk_core,
-# evmone and the z6m_guest target. See zilk_core .../state_zz/active_state.hpp.
+# Read-side state backend for the guest; set here because the top-level option does not reach
+# this separate project. See docs/hashstate.md, "Build flag and test targets".
 option(Z6M_HASH_STATE "Build the guest with the HashState/slib (StatelessInputBytes) backend" OFF)
 if(Z6M_HASH_STATE)
     add_compile_definitions(Z6M_HASH_STATE)

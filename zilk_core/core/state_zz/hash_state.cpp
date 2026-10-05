@@ -234,15 +234,8 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             std::memcpy(h.bytes, hsrc, 32);
             auto child = find_node_rlp(h);
             if (!child) {
-                // PRUNED BOUNDARY (EIP-8025 partial witness). A real StatelessInputBytes
-                // witness carries only the state the block touches and prunes every untouched
-                // subtree to a bare 32-byte hash ref. A child hash-ref whose node is absent
-                // from the store is exactly that boundary — NOT an incomplete witness — so do
-                // NOT descend and do NOT bump missing_count_ (which now flags only a genuinely
-                // broken seeding root, never a pruned child). Completeness is enforced later:
-                // at read time confirm_absent turns a read that needs a pruned node into an
-                // unconfirmed read, and at fold time a write over a boundary recomputes a
-                // non-matching root. Keep sweeping the branch's other children.
+                // Pruned boundary (partial witness): do not descend, do not count as missing.
+                // See docs/hashstate.md, "Fail-closed policy".
                 continue;
             }
             descend(*child, child_path);
@@ -288,14 +281,8 @@ HashState::BuildStatus HashState::build_state_from_trie(const evmc::bytes32& pre
         if (!root_present) ++missing_count_;
     }
 
-    // --- storage passes ---
-    // One sibling sweep per derived account, rooted at its storage_root. An absent storage
-    // root is NOT fail-closed: a witness legitimately omits the storage trie of an account
-    // the block never touches, so sweep() == false is skipped, not counted. A hash-ref child
-    // reached WHILE walking an included storage trie whose node is absent is a PRUNED BOUNDARY
-    // (the same partial-witness rule sweep() applies to the account trie): the sweep stops
-    // there without bumping missing_count_. So missing_count_ after the storage passes still
-    // reflects only a broken account root, never a pruned subtree.
+    // --- storage passes --- one sweep per derived account; an absent storage root is skipped.
+    // See docs/hashstate.md, "Fail-closed policy".
     for (const auto& pr : storage_roots) {
         const evmc::bytes32 account_key = pr.first;
         const evmc::bytes32 sroot = pr.second;
@@ -506,22 +493,8 @@ evmc::bytes32 HashState::get_block_hash(BlockNum n) const noexcept {
         }
     }
 
-    // FAIL-CLOSED on a BLOCKHASH miss. evmone invokes get_block_hash ONLY for an IN-RANGE
-    // ancestor — the blockhash instruction (evmone instructions.hpp:768-777) already clamps
-    // n to [max(N-256,0), N-1] and returns zero itself for anything out of range without
-    // calling us — and the real chain always has that ancestor's hash. A miss here therefore
-    // means the witness OMITTED (or the runner's ancestor-contiguity gate rejected) a REQUIRED
-    // ancestor header, so this BLOCKHASH value is NOT authenticated by the header chain.
-    //
-    // Returning a silent zero was the soundness break: the missing-oldest-ancestor exploit
-    // has the block persist BLOCKHASH(k) (e.g. SSTORE(slot, BLOCKHASH(k))) for an omitted
-    // header k; execution stored the wrong value; the attacker set header.state_root to the
-    // resulting root and the accept gate passed (root matched, both completeness counters were
-    // zero, because a header/blockhash miss touched no state). Record it as an unconfirmed read
-    // — the SAME fail-closed channel get_account/get_storage misses use (mutable, reset by each
-    // build_state_from_trie) — so the accept gate (missing_count()==0 &&
-    // unconfirmed_read_count()==0, check_root_hashstate.hpp:160-162) now rejects. Still return
-    // zero so the value-returning EVM caller proceeds; the rejection is decided at accept time.
+    // Fail-closed BLOCKHASH miss: record an unconfirmed read, still return zero.
+    // See docs/hashstate.md, "Block headers and BLOCKHASH".
     ++unconfirmed_read_count_;
     return {};
 }

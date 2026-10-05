@@ -1,46 +1,8 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// check_root_hashstate — the HashState accept check, an additive sibling to
-// StateTransition::check_root (state_transition.cpp:423-631). It folds ONLY a block's
-// writes over a HashState whose account/storage caches were already built from the
-// pre-state trie (build_state_from_trie), recomputes the post-state root with the SAME
-// shared trie code check_root uses (GridMPT), and decides acceptance.
-//
-// It mirrors check_root's two-level fold structure exactly:
-//   1. per touched account, fold its storage trie first (reset() from the account's
-//      current storage_root) to obtain the account's NEW storage_root, then patch the
-//      account leaf with that root (check_root: state_transition.cpp:538-587, 605-607);
-//   2. fold the account trie from prev_root (check_root: state_transition.cpp:618-619).
-//
-// What differs from check_root — and why there is a separate function rather than a
-// branch inside it — is the accept decision. check_root runs the pre-value / read-only
-// check inside the fold; that check is COMPILED OUT for the HashState instantiation
-// (state_keeps_prevalue_check<HashState> == false, hash_state.hpp:324, grid_mpt.cpp:303).
-// In its place the accept gate here folds in two witness-completeness counters that the
-// HashState build + reads accumulate:
-//     accept  <=>  new_root == header_state_root
-//                  && hash_state.missing_count()          == 0
-//                  && hash_state.unconfirmed_read_count() == 0
-// i.e. the recomputed root matches the header AND the seeding account root was present
-// (missing_count() now flags ONLY a broken root — a real EIP-8025 partial witness prunes
-// untouched subtrees to bare hash refs, which the build treats as legitimate boundaries)
-// AND every read either hit the cache or was proven genuinely empty (fail-closed — see
-// hash_state.hpp:200-208). A write whose fold must descend into a pruned boundary is still
-// caught without a fourth condition: GridMPT cannot unfold the absent node, so it recomputes
-// a non-matching (zero) root and new_root == header_state_root fails.
-//
-// The write set can be supplied two ways. The span-based overload takes it as an INPUT
-// (HashStateAccountWrite below), shaped the way check_root shapes its internal update set
-// (sorted mpt::TrieNodeFlat). The GATHER overload (no supplied span, at the bottom of this
-// header) builds that same set from HashState's own write overlay — the analog of check_root's
-// gather over DirectState (state_transition.cpp:452-609) — then delegates to the span-based
-// overload unchanged, so the real execution path (S6) can accept a block right after running it.
-//
-// This header is compiled ONLY into HashState guest builds and host/native builds (the
-// unit tests). The guard mirrors grid_mpt.cpp:26 / :411 so the rv64im DirectState guest
-// pulls in NOTHING from here and its ELF stays byte-identical. Nothing in the guest
-// includes this header, and the guard is a belt-and-braces second line of defence.
+// check_root_hashstate: the HashState accept check, a sibling of StateTransition::check_root.
+// See docs/hashstate.md, "Accept check".
 
 #pragma once
 
@@ -162,35 +124,8 @@ struct HashStateAccountWrite {
         && hash_state.unconfirmed_read_count() == 0;
 }
 
-// GATHER overload — build the write set from HashState's own write overlay, then delegate to
-// the span-based check_root_hashstate above. This is the analog of StateTransition::check_root's
-// gather over DirectState (state_transition.cpp:452-609), producing the SAME sorted update set
-// from a different substrate so the real execution path can accept a block right after running
-// it (no hand-supplied span). Mirror of check_root's gather, step for step:
-//   * iterate the overlay `created_accounts()` — only WRITTEN accounts live there, exactly
-//     check_root's `modified` split expressed structurally (read-only accounts never enter);
-//   * per account keccak the 20-byte address to its addr_hash (mirroring st.cpp:457);
-//   * a DESTRUCTED account (deleted) with a pre-trie leaf (find_built_account hits) emits an
-//     `account == nullptr` 0x80 leaf delete (st.cpp:503-512); a created-then-destructed account
-//     (find_built_account MISSES) is SKIPPED (st.cpp:513-516). The probe is the side-effect-free
-//     find_built_account, NOT get_account, so a legitimate miss never bumps
-//     unconfirmed_read_count_ and wrongly rejects;
-//   * a LIVE account's overlay storage writes become a sorted-by-slot-hash TrieNodeFlat set,
-//     each value encoded as check_root does — rlp::encode_into_small(buf+40, zeroless_view(v))
-//     into current_off=40, so a ZERO value encodes as 0x80 and folds as a delete (st.cpp:585-586;
-//     this is why HashState RETAINS zero writes, divergence a);
-//   * the storage-fold seed is the account's pre-write storage_root, taken from the OVERLAY POD
-//     (frozen at copy-on-write, exactly check_root's `pa->storage_root`, st.cpp:565,629) with a
-//     `storage_wiped()` override to kEmptyRoot (contract-creation wipe leaves the POD's
-//     storage_root stale — divergence b). The frozen-overlay-copy source is chosen over the
-//     "built account else zero" variant because a created account with NO storage writes must
-//     seed kEmptyRoot, not zero (the span overload only normalizes zero->kEmptyRoot when
-//     storage_updates is non-empty), and the overlay POD already carries kEmptyRoot for created /
-//     revived accounts;
-//   * the account leaf is re-encoded by the span overload via `account->rlp_into` from the
-//     overlay POD, which reads `code_hash` (never code_store_offset — account.cpp:46), so a
-//     witness-code account (code_store_offset==0) still encodes its real code_hash;
-//   * sort the writes by addr_hash (memcmp) — the span contract — and delegate.
+// Gather overload: build the write set from HashState's write overlay, then delegate above.
+// See docs/hashstate.md, "Gather overload".
 [[nodiscard]] inline bool check_root_hashstate(
     const HashState& hash_state,
     const evmc::bytes32& prev_root,
@@ -230,14 +165,8 @@ struct HashStateAccountWrite {
             storage.reserve(slots->size());
             for (const auto& [k, v] : *slots) {
                 const evmc::bytes32 slot_hash = keccak_bytes32(k);
-                // DIVERGENCE (a) fold-up: HashState RETAINS zero writes (DirectState erases
-                // them, direct_state.cpp:391-397). A zero write is a genuine DELETE only when
-                // the slot EXISTED in the pre-state trie and the account was not wiped this
-                // block; then it must fold as a 0x80 delete of that leaf. A zero write to a
-                // slot that never existed is a NO-OP and must be OMITTED — emitting a 0x80 leaf
-                // for it would INSERT a spurious leaf, because grid_mpt.cpp only treats 0x80 as
-                // a delete when the target leaf already exists (grid_mpt.cpp:295,313-324),
-                // otherwise it seeds a leaf on the insert path and corrupts the storage root.
+                // Omit a zero write unless it deletes a slot that exists in the pre-state trie.
+                // See docs/hashstate.md, "Zero storage writes".
                 if (evmc::is_zero(v) &&
                     (wiped || !hash_state.find_built_storage(addr_hash, slot_hash)))
                     continue;
