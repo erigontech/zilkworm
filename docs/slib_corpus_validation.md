@@ -6,10 +6,14 @@ it.
 
 ## Status
 
-**All 3259 fixtures passing** on the tests-zkevm@v0.8.0 stateless corpus
+**No failures** on the tests-zkevm@v0.8.0 stateless corpus
 (`make eest-zkevm-tests`), on top of the Amsterdam (glamsterdam-devnet-8)
-integration. The `bad_v_r_s` case that used to fail is described below; it is
-fixed by the shared EIP-2 low-s rejection, not by anything slib-specific.
+integration. 3191 of the 3259 fixture files pass. The other 68 also hold blocks
+that ship no `statelessInputBytes` (pre-fork blocks of fork-transition tests,
+and some invalid blocks); the runner skips those blocks, so ctest reports the
+file as skipped, and every block in it that does carry a witness passes. The
+`bad_v_r_s` case that used to fail is described below; it is fixed by the
+shared EIP-2 low-s rejection, not by anything slib-specific.
 
 ## How the witness-validation negatives are scored
 
