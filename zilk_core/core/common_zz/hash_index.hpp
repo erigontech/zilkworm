@@ -13,27 +13,8 @@
 
 namespace zilkworm {
 
-// HashIndex: the HashState backend's in-guest key -> u32-offset index. It replaces
-// the minimal perfect hash (MphfMap) on the SSZ input path with a plain
-// open-addressed hash table built in the guest, so no displacement/collision
-// sidecar has to be serialized ahead of time.
-//
-// The 64-bit index key is the SAME key8 derivation the MPHF path uses: the caller
-// supplies it as the `Key8` template parameter (`hash_key8` for 32-byte hashes,
-// `addr_key8` for 20-byte addresses), exactly as `MphfMap::find` takes `shorten_key`.
-// Passing it in keeps this header free of a state_zz dependency (hash_key8 /
-// addr_key8 live beside DirectState, which already includes mphf_map.hpp).
-//
-// Buckets are `mix64_body(key8) & (capacity-1)` with capacity a power of two, so the
-// mask replaces a modulo. Probing is linear and wraps at the table end. Capacity is
-// sized to ~2x the expected entry count (load factor ~= 0.5), which keeps probe runs
-// short and guarantees a free bucket exists so lookups terminate on the empty
-// sentinel.
-//
-// Safety gate: two distinct keys can share a key8 (and thus a home bucket), so every
-// occupied bucket a probe visits is confirmed with a FULL-KEY memcmp before it counts
-// as a hit. A collision therefore can never return the wrong key's value — the same
-// invariant MphfMap::find upholds with its embedded-key memcmp (see mphf_map.hpp:137).
+// HashIndex: the HashState backend's open-addressed key -> u32-offset index.
+// See docs/hashstate.md, "Hash index".
 template <std::size_t KeySize, uint64_t (*Key8)(const uint8_t (&)[KeySize])>
 class HashIndex {
   public:
@@ -64,15 +45,8 @@ class HashIndex {
     // full (cannot happen at load factor <= 0.5). Returns true on insert/update.
     [[gnu::always_inline]] bool insert(const uint8_t (&key)[KeySize], uint32_t offset) noexcept {
         if (offset == kEmptyOffset) [[unlikely]] return false;
-        // Keep the load factor <= 0.5 by growing BEFORE we might exceed it. The ctor size
-        // is a best-effort HINT (hash_state.hpp:80), not a hard cap: a witness with more
-        // nodes/codes/accounts/slots than the hint (e.g. a state-heavy block) would otherwise
-        // overflow the fixed table, dropping later entries from the index and — worse —
-        // removing the guaranteed free bucket that lets find() terminate on the empty
-        // sentinel. Growth rehashes into a table twice the size, so the table is never full
-        // and every inserted key stays findable regardless of the hint. (A dedupe UPDATE of a
-        // present key does not add an entry, so this may over-grow by at most one doubling —
-        // harmless.)
+        // Grow before the load factor can exceed 0.5; the ctor size is only a hint.
+        // See docs/hashstate.md, "Growth past the size hint".
         if ((static_cast<uint64_t>(size_) + 1u) * 2u > capacity_) [[unlikely]] grow_();
         uint32_t i = index_of(Key8(key));
         for (uint32_t probes = 0; probes < capacity_; ++probes) {

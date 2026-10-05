@@ -1,34 +1,8 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// slib_input: the "default path" SSZ front-end that turns a StatelessInputBytes
-// blob (schema_id 0x1501, ProtocolFork.Amsterdam) into a populated HashState.
-//
-// This is a TARGETED, hand-written reader for THIS one container — deliberately not
-// a general SSZ library. The exact wire layout it follows (confirmed against
-// the tests-zkevm@v0.8.0 release source + a real sample):
-//
-//   raw = schema_id(2B BIG-endian = 15 01) || SSZ encode(SszStatelessInput)
-//
-//   SszStatelessInput   fixed region 20B: off(new_payload_request)@0 (== 20),
-//                       off(witness)@4, chain_id:uint64 inline @8, off(public_keys)@16
-//   SszExecutionWitness fixed region 12B: off(state)@0 (== 12), off(codes)@4,
-//                       off(headers)@8
-//     state   : ProgressiveList[ByteList[1024]]   RLP MPT nodes   (no spec count cap)
-//     codes   : ProgressiveList[ByteList[65536]]  contract code   (no spec count cap)
-//     headers : List[ByteList[1024], 256]         RLP block headers (count cap 256)
-//   public_keys : ProgressiveList[ByteVector[65]] fixed 65B stride, NO offset table
-//
-// All SSZ variable-field offsets are u32 little-endian, relative to the start of the
-// container they live in. A list-of-variable-bytes serializes as an offset table of
-// N u32 LE followed by the concatenated elements, N = first_offset / 4 (ProgressiveList
-// and List are byte-identical here, so one routine decodes state/codes/headers).
-//
-// Every marker / offset / length is validated before use (see decode_stateless_input):
-// the decoder never reads out of bounds and fails cleanly (std::nullopt) on any
-// malformed input. rv64im-safe: no exceptions/RTTI, multi-byte reads via memcpy
-// (8-byte-alignment agnostic), native copies only. It is ADDITIVE and host-testable,
-// kept out of the DirectState rv64im guest (parallel to HashState itself).
+// slib_input: SSZ front-end that decodes a StatelessInputBytes blob into a HashState.
+// See docs/hashstate.md, "StatelessInputBytes parsing".
 
 #pragma once
 

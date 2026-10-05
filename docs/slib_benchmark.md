@@ -105,5 +105,6 @@ to push/PR, and its run step is `continue-on-error`, so it never gates CI.
 
 The guest is a separate CMake project, so the top-level `Z6M_HASH_STATE` option
 does not reach it. `prover/guest_hypercube/CMakeLists.txt` therefore defines its
-own `option(Z6M_HASH_STATE ... OFF)`. Default **OFF** ⇒ the normal guest build is
-byte-identical to today; the define is only added when the option is `ON`.
+own `option(Z6M_HASH_STATE ... OFF)`. Default **OFF** ⇒ the normal guest build
+keeps DirectState and carries no HashState code; the define is only added when the
+option is `ON`.

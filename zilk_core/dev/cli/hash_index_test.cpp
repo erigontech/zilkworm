@@ -1,17 +1,8 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// HashIndex unit tests (zilkworm.tests target).
-//
-// HashIndex is the HashState backend's in-guest replacement for MphfMap on the SSZ
-// input path: a plain open-addressed hash table instead of a serialized minimal
-// perfect hash. It reuses the SAME key8 derivations (hash_key8 for 32-byte hashes,
-// addr_key8 for 20-byte addresses) and the same mix64_body mixer, so two distinct keys
-// can land in the same home bucket. The lookup's soundness therefore rests on the
-// FULL-KEY memcmp performed at every occupied bucket the probe visits — a collision
-// must never surface the wrong key's offset. The forced-collision cases below construct
-// keys that share a key8 (and thus a home bucket) and confirm each still resolves to
-// its own value, and that an absent key stops at the empty sentinel.
+// HashIndex unit tests (zilkworm.tests target): lookups, sizing, and full-key collision handling.
+// See docs/hashstate.md, "HashIndex lookups and collisions".
 
 #include <array>
 #include <bit>

@@ -1,28 +1,8 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
+
 // HashState: the SSZ-input-path state substrate, parallel to DirectState.
-//
-// This step builds ONLY the two owned content stores DirectState reads through a
-// serialized MphfMap. Here they are built in-guest and indexed by the plain
-// open-addressed HashIndex<32,&hash_key8> (no displacement/collision sidecar to
-// serialize ahead of time):
-//   - node store: keccak256(node) -> node RLP        (find_node_rlp)
-//   - code store: keccak256(code) -> contract bytecode (find_code)
-//
-// Each store owns a byte arena of [u32 len][bytes...] entries; the index maps the
-// content hash's key8 to the entry offset. The index key is the REAL keccak256 of
-// the bytes, computed at add time (identity binding), and HashIndex confirms every
-// probed bucket with a full-key memcmp — so a forged lookup hash can never surface
-// the wrong entry.
-//
-// On top of those two stores this step adds the ACCOUNT cache and the storage cache,
-// both filled by the standalone build_state_from_trie sweep (hashstate_design.md §2.6): a
-// read-only / insert-only depth-first walk. First the account trie from prev_root emits
-// each leaf's decoded account into the account cache; then, for every derived account
-// carrying a non-empty storage_root, the SAME sweep walks that account's storage trie
-// and emits each (slot_hash -> word) into the storage cache. The code cache remains the
-// next step (see the TODO markers at the bottom of the class).
+// See docs/hashstate.md, "HashState".
 
 #pragma once
 
@@ -65,15 +45,8 @@ namespace zilkworm {
 // mirroring DirectState verbatim so the eventual retype is a drop-in.
 class HashState : public BlockState {
   public:
-    // Outcome of a build_state_from_trie sweep. kOk = the sweep ran and every node it needed
-    // was either present or a legitimate PRUNED BOUNDARY (a bare hash ref into an untouched
-    // subtree that a real EIP-8025 partial witness omits — see build_state_from_trie).
-    // kMissingNode = the seeding ACCOUNT root itself was absent (B2), the one gap that is
-    // never a legitimate omission; the sweep still emits everything reachable, but that gap
-    // is recorded in missing_count_ so the accept gate can hard-reject it (fail-closed, never
-    // silent — see hashstate_design.md §2.2 "Fail-closed rule"). A pruned child boundary does
-    // NOT set this; witness completeness for pruned parts is enforced at read time
-    // (confirm_absent -> unconfirmed_read_count_) and at fold time (a non-matching root).
+    // Outcome of build_state_from_trie: kMissingNode iff the seeding account root was absent.
+    // See docs/hashstate.md, "Fail-closed policy".
     enum class BuildStatus : std::uint8_t { kOk, kMissingNode };
 
     // Sizes are best-effort hints for the open-addressed tables (~2x -> load factor
@@ -119,47 +92,12 @@ class HashState : public BlockState {
     std::uint32_t node_count() const noexcept { return node_index_.size(); }
     std::uint32_t code_count() const noexcept { return code_index_.size(); }
 
-    // Standalone one-pass ACCOUNT + STORAGE derivation (hashstate_design.md §2.6). A
-    // depth-first, left-to-right sweep through the node store with an EXPLICIT stack (no
-    // recursion — rv64im-safe): push the root, unfold the leftmost child down to a leaf,
-    // emit that leaf, fold back to the nearest parent with an unvisited child, and repeat
-    // until the stack drains. It mirrors GridMPT's unfold/fold lingo but is read-only /
-    // insert-only, so it has NONE of the delete / cascade / modified-flag machinery. It
-    // reuses the shared node types (mpt.hpp) and the FREE RLP decoders (decode_node,
-    // rlp::decode_header) but never calls a GridMPT method. The traversal itself lives in
-    // one private helper, sweep(): the account pass runs sweep(prev_root, <emit account>),
-    // then for every derived account with storage_root != kEmptyRoot a sibling pass runs
-    // sweep(storage_root, <emit slot for that account>). The empty trie
-    // (prev_root == kEmptyRoot) derives nothing and returns kOk. The prev_root is also
-    // stored (prev_root_) so a later read miss can start a single-path confirmation walk
-    // (confirm_absent) down the account trie.
-    //
-    // Fail-closed policy (asymmetric, and deliberately so — enforced at the two call
-    // sites in the .cpp, not inside sweep): an absent ACCOUNT root is a missing node (B2,
-    // the anchor of everything). An absent STORAGE root is NOT — a witness legitimately
-    // omits the storage trie of an account the block never touches, so it is skipped, not
-    // counted. A hash-ref child reached WHILE walking an included trie (account or storage)
-    // whose node is absent is a PRUNED BOUNDARY — the EIP-8025 partial-witness case — so the
-    // sweep stops there WITHOUT bumping missing_count_; it materializes exactly the touched
-    // leaves that are included. missing_count_ therefore flags ONLY a broken account root,
-    // never a pruned subtree.
+    // Derive the account and storage caches from prev_root in one read-only trie sweep.
+    // See docs/hashstate.md, "Building state from the trie".
     BuildStatus build_state_from_trie(const evmc::bytes32& prev_root);
 
-    // Account-cache lookup keyed by the 32-byte trie path (addr_hash == keccak256(addr)).
-    // Hit -> pointer to the derived Account POD in the arena; miss -> nullptr (a blank /
-    // non-existent account). Mirrors DirectState::read_account's pointer-or-null shape. The
-    // pointer is valid until the next emit grows the arena; a build_state_from_trie run
-    // followed by reads is the intended usage. Note: Account::addr is left zero — the build
-    // never sees the 20-byte preimage, only its hash (the trie path); the cache is keyed by
-    // that hash.
-    //
-    // A miss is NOT trusted blindly: the build sweep only collected keys actually present in
-    // the trie, so a missed key is either genuinely empty OR wrongly left out of the witness.
-    // note_account_miss_ runs a single-path confirmation walk (confirm_absent) from prev_root_
-    // to tell the two apart — proving emptiness records nothing, an unprovable gap records an
-    // unconfirmed read (unconfirmed_read_count_). Either way the read returns nullptr so a
-    // value-returning caller still gets a blank account; the accept gate rejects later iff the
-    // unconfirmed count is non-zero (fail-closed, never a silent wrong-empty).
+    // Account-cache lookup by addr_hash; a miss returns nullptr and is confirmed.
+    // See docs/hashstate.md, "Account and storage caches".
     [[gnu::always_inline]] inline const Account*
     get_account(const evmc::bytes32& addr_hash) const noexcept {
         if (auto off = account_index_.find(addr_hash.bytes)) {
@@ -169,22 +107,8 @@ class HashState : public BlockState {
         return nullptr;
     }
 
-    // Storage-cache lookup, the hash-space analog of DirectState::read_storage(addr, key)
-    // (direct_state.cpp:299): DirectState keys the pre-image (address, slot key); the
-    // derive sweep only ever sees their trie paths, so HashState keys the HASHES instead.
-    // `addr_hash` == keccak256(addr) (the account trie path, == a get_account key);
-    // `slot_hash` == keccak256(slot key) (the storage trie path). Return shape matches
-    // read_storage exactly: the 32-byte word on a hit, an all-zero bytes32 on a miss. Zero
-    // is unambiguous as "absent" because the storage trie never carries a zero-valued leaf
-    // (account_storage_root drops zero values, direct_state.cpp:610).
-    //
-    // A miss is confirmed exactly like get_account's: note_storage_miss_ decides whether the
-    // zero is safe. If the account is absent or its storage_root is the empty-trie root the
-    // slot is zero with no walk needed; otherwise a single-path confirmation walk down the
-    // account's storage trie either proves the slot empty (record nothing) or hits a needed
-    // node that is absent — including a storage root the build legitimately skipped because
-    // its node was never added — in which case an unconfirmed read is recorded. The slot
-    // always reads zero so a value-returning caller proceeds; the accept gate rejects later.
+    // Storage-cache lookup by (addr_hash, slot_hash); a miss reads zero and is confirmed.
+    // See docs/hashstate.md, "Account and storage caches".
     [[gnu::always_inline]] inline evmc::bytes32
     get_storage(const evmc::bytes32& addr_hash, const evmc::bytes32& slot_hash) const noexcept {
         std::uint8_t key[64];
@@ -221,14 +145,7 @@ class HashState : public BlockState {
     std::uint32_t unconfirmed_read_count() const noexcept { return unconfirmed_read_count_; }
 
     // --- silkworm::BlockState interface + BLOCKHASH store ------------------------------
-    // The block-header side of the state interface, mirroring DirectState so a later retype
-    // of the execution surface from DirectState& to ActiveState& (== HashState under
-    // -DZ6M_HASH_STATE) is a drop-in: identical signatures throughout. HashState holds the
-    // witness ancestor headers here; a later step wires the parser to feed them in.
-    //
-    // TODO(hashstate-slib, runner glue): populate these from the parsed witness headers
-    // (StatelessInputView::headers, slib_input.hpp:74) + the genesis header — S1 adds only
-    // the storage and the methods, not the population.
+    // See docs/hashstate.md, "Block headers and BLOCKHASH".
 
     // Record a header under its keccak hash and keep created_block_hashes_ sorted ascending
     // by block number for the log-n BLOCKHASH lookup. Verbatim DirectState::insert_header
@@ -253,23 +170,8 @@ class HashState : public BlockState {
     std::optional<intx::uint256> total_difficulty(uint64_t block_num,
                                                   const evmc::bytes32& block_hash) const noexcept override;
 
-    // --- Write overlay + mutators + address-keyed readers (S2) ------------------------
-    // HashState grows into a full ActiveState WRITE backend here. The built account /
-    // storage caches above stay PRISTINE — the pre-state "before" side. Every write lands
-    // in a copy-on-write OVERLAY (created_accounts_ / overflow_slots_ / created_code_, which
-    // reuse DirectState's container TYPES verbatim so the later DirectState->ActiveState
-    // retype is a drop-in) and every read consults the overlay FIRST, the built cache
-    // second, so a written value shadows the built one. Mutator bodies mirror
-    // direct_state.cpp:337-694 line-for-line EXCEPT for two deliberate divergences, each
-    // documented at its implementation site in hash_state.cpp:
-    //   (a) set_storage_slot RETAINS zero writes (DirectState ERASES them,
-    //       direct_state.cpp:391-397) so the fold can emit them as 0x80 deletes: the
-    //       HashState fold is incremental over prev_root and needs the explicit delete,
-    //       whereas DirectState recomputes each storage root from its live slots.
-    //   (b) apply_code_diff / destruct / revive set a per-account storage_wiped_ flag
-    //       instead of DirectState's in-place inline-slot wipe (the built cache is
-    //       immutable — nothing to wipe in place). A wiped account reads all pre-state slots
-    //       as zero and its storage fold seeds from kEmptyRoot.
+    // --- Write overlay + mutators + address-keyed readers -----------------------------
+    // See docs/hashstate.md, "Write overlay".
 
     // Address-keyed readers (overlay-then-built). A built-cache miss routes through
     // get_account / get_storage, so an unprovable miss is recorded fail-closed.
@@ -341,14 +243,8 @@ class HashState : public BlockState {
         return nullptr;
     }
 
-    // Side-effect-free built-STORAGE probe (NO confirm-on-miss): true iff the pristine
-    // pre-state storage cache holds a leaf for (addr_hash, slot_hash). The write gather uses
-    // it to tell a genuine slot DELETE (the slot existed pre-state, so a zero write must fold
-    // as a 0x80 delete of that leaf) from a NO-OP zero write (the slot never existed, so it
-    // must be OMITTED — DirectState erases such zeros, direct_state.cpp:391-397). Emitting a
-    // 0x80 leaf for a never-present slot would wrongly INSERT it: grid_mpt.cpp treats 0x80 as a
-    // delete only when the target leaf already exists (grid_mpt.cpp:295,313-324), so an
-    // insert-path 0x80 seeds a spurious leaf and corrupts the recomputed storage root.
+    // Side-effect-free probe (no confirm-on-miss): does the pre-state storage hold this slot?
+    // See docs/hashstate.md, "Write overlay".
     [[gnu::always_inline]] inline bool
     find_built_storage(const evmc::bytes32& addr_hash,
                        const evmc::bytes32& slot_hash) const noexcept {
@@ -383,45 +279,17 @@ class HashState : public BlockState {
     std::optional<evmc::bytes32> state_root_hash() const { return std::nullopt; }
 
   private:
-    // Shared explicit-stack DFS over ONE trie rooted at `root`, the single traversal the
-    // account pass and every storage pass run through (no recursion — rv64im-safe). At
-    // each leaf it calls emit_leaf(path_packed_to_bytes32, leaf_value_ByteView); the
-    // caller's emit decides how to decode/cache that leaf (account vs slot). A hash-ref child
-    // reached WHILE walking whose node is absent is a PRUNED BOUNDARY: the sweep stops that
-    // descent WITHOUT bumping missing_count_ (partial-witness rule). Returns false iff `root`
-    // itself was absent from the node store (the caller decides whether that is
-    // fail-closed — see build_state_from_trie), true if the sweep ran. Defined in the .cpp;
-    // only instantiated there (from build_state_from_trie's two emit lambdas).
+    // Explicit-stack DFS over one trie, calling emit_leaf(path, value) at each leaf.
+    // See docs/hashstate.md, "Building state from the trie".
     template <class EmitLeaf>
     bool sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf);
 
-    // Single-path descent through the node store toward `target_hash` (a 32-byte trie path:
-    // an addr_hash for the account trie, or a slot_hash for a storage trie), rooted at
-    // `root`. Returns true only when it PROVES `target_hash` is absent below `root`, false
-    // when it cannot. It reuses the EXACT decoders the sweep uses — rlp::decode_header to
-    // strip the outer list header, then decode_node (rlp_sw.hpp) for the branch / ext / leaf
-    // split — so a read confirmation reads trie bytes byte-for-byte the way the build did.
-    //
-    // Proven absent (return true) in two shapes, mirroring the sweep's own node handling:
-    //   - at a BRANCH, the child slot for the target's next nibble is the empty marker 0x80
-    //     (decode_node reports it as child_len == 0), so nothing hangs below that nibble; or
-    //   - at an EXTENSION or LEAF, the node's own path nibbles diverge from the target (a
-    //     nibble mismatch, or a path that outlasts the target), so the target cannot lie
-    //     below this node. The empty trie (root == kEmptyRoot) proves every key absent.
-    // NOT proven (return false): a node the walk needs — the seeding root, a hash-referenced
-    // child, or a malformed/undecodable node — is missing from the store, so emptiness is
-    // unknown and must not be guessed (fail-closed). A leaf whose path matches the target
-    // exactly means the key is actually PRESENT (not absent) and also returns false.
+    // Single-path walk toward target_hash; true only when it proves the key absent below root.
+    // See docs/hashstate.md, "Read-miss confirmation".
     bool confirm_absent(const evmc::bytes32& root, const evmc::bytes32& target_hash) const noexcept;
 
-    // Read-miss handlers for get_account / get_storage (defined in the .cpp so the hot
-    // header lookups stay tiny and the confirm/counter logic lives next to sweep). Each runs
-    // confirm_absent and, when it cannot prove the key empty, bumps unconfirmed_read_count_.
-    // note_storage_miss_ first consults the account cache: an absent account or an empty
-    // storage_root needs no walk (the slot is zero), otherwise it confirms against the
-    // account's storage_root — which also catches a storage root the build skipped because
-    // its node was never added (find_node_rlp misses, so the read is recorded, never a silent
-    // zero). const + mutable counter: a read never mutates the caches, only the diagnostic.
+    // Miss handlers for get_account / get_storage: count a miss that cannot be proven empty.
+    // See docs/hashstate.md, "Read-miss confirmation".
     void note_account_miss_(const evmc::bytes32& addr_hash) const noexcept;
     void note_storage_miss_(const evmc::bytes32& addr_hash,
                             const evmc::bytes32& slot_hash) const noexcept;
@@ -509,14 +377,8 @@ class HashState : public BlockState {
     // (built-cache) slots as zero and its storage fold seeds from kEmptyRoot.
     FlatHashSet<evmc::address> storage_wiped_;
 
-    // In-block created-code lookup by keccak code_hash: the created_code_ overlay plus its
-    // key8-collision spill. Hit -> the stored bytes; miss -> EMPTY ByteView. created_code_ is
-    // keyed by the REAL code hash (full_hash memcmp confirms every hit), so this can never
-    // surface the wrong bytes. Shared by read_code's created-code sentinel path AND its
-    // witness-store-miss fallback: a contract created in-block with the same code_hash makes
-    // an omitted witness code legitimately DERIVABLE (EIP-8025 optional proofs — the
-    // "create same hash then read" case). A non-empty code_hash always maps to non-empty
-    // bytes, so empty unambiguously means miss.
+    // In-block created-code lookup by code_hash (created_code_ + collision spill); miss -> empty.
+    // See docs/hashstate.md, "Created code lookup".
     ByteView find_created_code_(const evmc::bytes32& code_hash) const noexcept;
 
     // Non-recording overlay-or-built lookup (the DirectState lookup_account_ analog): NO
@@ -531,15 +393,8 @@ class HashState : public BlockState {
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
 };
 
-// HashStateView — the per-transaction evmone read view over HashState, mirroring
-// DirectStateView (direct_state.hpp:395-423) METHOD-FOR-METHOD so the S4 retype from
-// DirectStateView to ActiveStateView (active_state.hpp) is a drop-in: same
-// evmone::state::StateView interface, same body with DirectState -> HashState. HashState's
-// address-keyed readers (S2) hash the 20-byte address / 32-byte slot INTERNALLY, so the view
-// forwards them RAW — identical to DirectStateView, which never hashes anything either. The
-// balance is read with a plain memcpy (native-endian): HashState::Account::balance stores the
-// intx byte layout verbatim (hash_state.cpp:521-530 load/store_be_u256 are memcpy), the same
-// convention DirectState uses (direct_state.cpp:203-212), so the mirror is byte-correct.
+// HashStateView: the per-transaction evmone read view over HashState, mirroring DirectStateView.
+// See docs/hashstate.md, "HashStateView".
 class HashStateView final : public evmone::state::StateView {
   public:
     explicit HashStateView(HashState& s) noexcept : state_{s} {}

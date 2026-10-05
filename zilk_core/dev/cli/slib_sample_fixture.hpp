@@ -1,21 +1,8 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// GENERATED test fixture (do not hand-edit) for the slib StatelessInputBytes parser.
-//
-// Source: tests-zkevm@v0.8.0 release tarball fixtures_zkevm.tar.gz, streamed with
-//   gh release download tests-zkevm@v0.8.0 --repo ethereum/execution-specs
-//     -p fixtures_zkevm.tar.gz  (then tar --occurrence=1 -xzf ... <the one case>)
-// Case: blockchain_tests/for_amsterdam/amsterdam/eip8025_optional_proofs/
-//   witness_bytecodes_call_variants/witness_codes_call_existing_contract.json
-//   [test_witness_codes_call_existing_contract ... -call]
-//
-// kBlobHex is that case blocks[0].statelessInputBytes (schema_id 0x1501 || SSZ).
-// The witness is an EIP-8025 "optional proofs" partial trie: it carries the 9 pre
-// accounts the block touches and PRUNES 2 untouched system accounts (the beacon
-// deposit contract and the CREATE2 deployer) as bare hash refs -> a build from the
-// genesis root legitimately reports missing_count()==2. kPresent holds the 9
-// recovered accounts (fields cross-checked against pre); kPrunedAddrs holds the 2.
+// GENERATED (do not hand-edit): a real tests-zkevm@v0.8.0 StatelessInputBytes partial witness.
+// See docs/hashstate.md, "Stateless input front end".
 #pragma once
 #include <cstddef>
 #include <cstdint>

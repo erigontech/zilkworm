@@ -23,7 +23,7 @@
 // HashState backend is selected (Z6M_HASH_STATE) OR this is a host/native build
 // (!__riscv) — the latter so the fold-over-HashState unit test links in the default
 // build. The rv64im DirectState guest (Z6M_HASH_STATE off, __riscv) pulls in NEITHER
-// hash_state.hpp NOR the HashState instantiation, so its ELF is byte-identical to today.
+// hash_state.hpp NOR the HashState instantiation, so no HashState code reaches its ELF.
 #if defined(Z6M_HASH_STATE) || !defined(__riscv)
 #include <zilk_core/core/state_zz/hash_state.hpp>
 #endif
@@ -426,20 +426,14 @@ void GridMPT<DeletionEnabled, StateT>::init_from_root(bytes32 previous_root_hash
     }
 }
 
-// Explicit template instantiations.
-//
-// DirectState is named explicitly (not left to the StateT default) so these lines
-// emit GridMPT<*, DirectState> regardless of which backend Z6M_HASH_STATE selects —
-// otherwise, with the flag ON, GridMPT<false> would resolve via the default to
-// GridMPT<false, HashState> and collide with the HashState instantiations below.
-// Defaulted trailing template args are omitted from the Itanium mangling, so naming
-// DirectState here produces the SAME symbols as the previous GridMPT<false>/<true>.
+// Explicit template instantiations; DirectState is named rather than left to the default.
+// See docs/hashstate.md, "Trie fold under HashState".
 template class GridMPT<false, DirectState>;
 template class GridMPT<true, DirectState>;
 
 // HashState fold: emitted on the HashState guest build and on every host/native build
 // (so the unit test links); never on the rv64im DirectState guest (see the include
-// guard above), keeping that ELF byte-identical to today.
+// guard above), so no HashState code reaches that ELF.
 #if defined(Z6M_HASH_STATE) || !defined(__riscv)
 template class GridMPT<false, HashState>;
 template class GridMPT<true, HashState>;

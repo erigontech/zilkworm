@@ -178,19 +178,8 @@ zkevm-fixtures:
 	    echo "  zkevm fixtures ready at $$dst"; \
 	fi
 
-# Run the tests-zkevm StatelessInputBytes cases the same way eest-blockchain-tests
-# runs its corpus: configure -> build -> ctest, where each fixture file becomes a
-# `state_transition <path>` ctest case. Differences from eest-blockchain-tests:
-#   * points at the raw zkevm blockchain_test JSON (EEST_JSON_DIR, like the
-#     eest-blockchain-tests-json sibling) rather than pre-converted MFBD — the
-#     slib/HashState path reads statelessInputBytes straight from the JSON, so no
-#     eest_to_flat_bundle conversion step applies.
-#   * builds with -DZ6M_HASH_STATE=ON so ActiveState is the HashState (SSZ/slib)
-#     backend that consumes statelessInputBytes, in its own build/zkevm tree
-#     (the flag differs from the shared `build` tree used by the other targets).
-# NOTE: the slib/HashState parser that decodes `statelessInputBytes` and wires it
-# into execution is still being built, so this harness will not pass end-to-end
-# until that path lands — it is the runner scaffolding for it.
+# Run the tests-zkevm StatelessInputBytes corpus through HashState (flag-on build in build/zkevm).
+# See docs/hashstate.md, "Build flag and test targets".
 eest-zkevm-tests: zkevm-fixtures
 	cmake -B build/zkevm -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
 		-DZ6M_HASH_STATE=ON \
@@ -247,13 +236,7 @@ release-artifacts:
 # =============================================================================
 # HashState/slib SP1 cycle benchmark (tests-zkevm-benchmark@v0.8.2, Amsterdam)
 # =============================================================================
-#
-# Requires the Amsterdam (glamsterdam-devnet-8) EVM support: the benchmark
-# fixtures are Amsterdam `statelessInputBytes` blocks, so both the guest ELF and
-# the host must carry the full Amsterdam EVM semantics (zilk_core fork plumbing
-# plus the devnet-8 evmone submodule).
-# The reth baseline is produced externally and compared via dashboards; these
-# targets only emit OUR cycle numbers.
+# See docs/hashstate.md, "SP1 cycle benchmark".
 
 # The curated compute benchmark corpus: single heavy Amsterdam blocks packed to
 # fixed 10M/30M/60M gas budgets. Same on-wire schema (0x1501 || SSZ) as the
@@ -322,14 +305,8 @@ SLIB_BENCH_LOG   ?= $(SLIB_BENCH_WORK)/execution.log
 SLIB_BENCH_CSV   ?= $(SLIB_BENCH_WORK)/per_case.csv
 SLIB_PROVER      := prover/target/release/z6m_prover
 
-# Run the HashState/slib guest over every benchmark case and collect cycles.
-# `execute --is-test --file-name` SUMS cycles across all cases in a JSON file, so
-# we first split each fixture into one-case-per-file (slib_split_fixtures.py) and
-# run one prover invocation per case -> one cycle number per block. The prover
-# prints "Executed block N (gas_used=..., cycles=..., prover_gas=..., syscall_count=...)";
-# we rewrite that into the "block N executed, gas_used=..., cycle_count=..., prover_gas=..."
-# line cycle_stats.py parses (with a running index as the synthetic block id, since
-# every benchmark block is chain block 1), and also emit a per-case CSV.
+# Run the HashState/slib guest over every benchmark case, one prover run per case, and collect cycles.
+# See docs/hashstate.md, "SP1 cycle benchmark".
 slib-benchmark: zkevm-benchmark-fixtures z6m_prover_slib
 	@echo "  [slib-benchmark] splitting fixtures into one-case-per-file ..."
 	@rm -rf "$(SLIB_BENCH_CASES)"; mkdir -p "$(SLIB_BENCH_CASES)" "$(SLIB_BENCH_WORK)"
