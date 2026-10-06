@@ -109,11 +109,13 @@ void* calloc(size_t nmemb, size_t size) {
     if (__builtin_mul_overflow(nmemb, size, &total)) {
         return nullptr;
     }
-    uint8_t* p = static_cast<uint8_t*>(operator new(total));
-    if (p != nullptr) {
-        for (size_t i = 0; i < total; ++i) p[i] = 0;
-    }
-    return p;
+    // No zeroing: the heap never hands a byte out twice (free and delete are no-ops, realloc
+    // copies into a fresh block), nothing writes past allocated_bytes (the stack sits below
+    // .heap, the mem builtins and the input reader write exactly their n bytes, and newlib's
+    // memalign, the one writer outside its block, is replaced above), and RAM nobody has
+    // written reads 0, as .bss already relies on. _calloc_r inherits this. Reusing memory
+    // would need the zeroing back. Not malloc + memset: GCC folds that into a calloc call.
+    return operator new(total);
 }
 
 void* realloc(void* ptr, size_t size) {
