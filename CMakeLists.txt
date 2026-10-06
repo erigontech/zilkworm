@@ -89,6 +89,7 @@ if(BUILD_TESTING)
   add_executable(zilkworm.tests
     zilk_core/core/execution/div_mod_frontend_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
+    zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
     zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp

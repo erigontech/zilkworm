@@ -41,11 +41,16 @@ std::expected<Header, DecodingError> decode_header(ByteView& from) noexcept {
         if (DecodingResult res{endian::from_big_compact(from.substr(0, len_of_len), len)}; !res) {
             return std::unexpected{res.error()};
         }
-        h.payload_length = static_cast<size_t>(len);
         from.remove_prefix(len_of_len);
-        if (h.payload_length < 56) {
+        if (len < 56) {
             return std::unexpected{DecodingError::kNonCanonicalSize};
         }
+        // Bound the 64-bit length before narrowing it: size_t is 32 bits on rv32, so a length of 2^32 + n
+        // would otherwise pass as n.
+        if (len > from.size()) {
+            return std::unexpected{DecodingError::kInputTooShort};
+        }
+        h.payload_length = static_cast<size_t>(len);
     } else if (b < 0xF8) {
         from.remove_prefix(1);
         h.list = true;
@@ -61,11 +66,16 @@ std::expected<Header, DecodingError> decode_header(ByteView& from) noexcept {
         if (DecodingResult res{endian::from_big_compact(from.substr(0, len_of_len), len)}; !res) {
             return std::unexpected{res.error()};
         }
-        h.payload_length = static_cast<size_t>(len);
         from.remove_prefix(len_of_len);
-        if (h.payload_length < 56) {
+        if (len < 56) {
             return std::unexpected{DecodingError::kNonCanonicalSize};
         }
+        // Bound the 64-bit length before narrowing it: size_t is 32 bits on rv32, so a length of 2^32 + n
+        // would otherwise pass as n.
+        if (len > from.size()) {
+            return std::unexpected{DecodingError::kInputTooShort};
+        }
+        h.payload_length = static_cast<size_t>(len);
     }
 
     if (from.size() < h.payload_length) {

@@ -238,6 +238,9 @@ namespace rlp {
             return res;
         }
 
+        if (from.empty()) {  // `to` is peeked, which must not read past the transaction
+            return std::unexpected{DecodingError::kInputTooShort};
+        }
         if (from[0] == kEmptyStringCode) {
             to.to = std::nullopt;
             from.remove_prefix(1);
@@ -274,6 +277,7 @@ namespace rlp {
         if (!h->list) {
             return std::unexpected{DecodingError::kUnexpectedString};
         }
+        const uint8_t* const items{from.data()};
 
         intx::uint256 chain_id;
         if (DecodingResult res{decode(from, chain_id, Leftover::kAllow)}; !res) {
@@ -295,6 +299,9 @@ namespace rlp {
             return res;
         }
 
+        if (from.empty()) {  // `to` is peeked, which must not read past the transaction
+            return std::unexpected{DecodingError::kInputTooShort};
+        }
         if (from[0] == kEmptyStringCode) {
             to.to = std::nullopt;
             from.remove_prefix(1);
@@ -322,7 +329,14 @@ namespace rlp {
             }
         }
 
-        return decode_items(from, to.odd_y_parity, to.r, to.s);
+        if (DecodingResult res{decode_items(from, to.odd_y_parity, to.r, to.s)}; !res) {
+            return res;
+        }
+        // The items are bounded by the enclosing string only, so the list's own length is checked here.
+        if (static_cast<size_t>(from.data() - items) != h->payload_length) {
+            return std::unexpected{DecodingError::kUnexpectedListElements};
+        }
+        return {};
     }
 
     DecodingResult decode_transaction(ByteView& from, Transaction& to, Eip2718Wrapping accepted_typed_txn_wrapping,
