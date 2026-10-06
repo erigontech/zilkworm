@@ -84,6 +84,19 @@ inline constexpr uint32_t kMphfAddrMapMagic = 0x4148504Du;    // 'MPHA'
 inline constexpr uint32_t kMphfCodeStoreMagic = 0x4348504Du;  // 'MPHC'
 inline constexpr uint32_t kMphfNodeStoreMagic = 0x4E48504Du;  // 'MPHN'
 
+/// The code-store entries whose hashes the input reader has already checked, see
+/// code_store_stream.hpp: bit entry_offset / 8 of @c bits is set for a [len:u64][hash:32][payload]
+/// entry at entry_offset in the data section at @c data (of @c data_size bytes) whose payload it
+/// hashed as it read it, to the hash stored there. sanitize() takes it once and skips the hashing
+/// of those entries. Null (no entry verified) except in the Airbender guest.
+struct CodeStoreVerified {
+    const uint8_t* data{nullptr};
+    uint32_t data_size{0};
+    const uint32_t* bits{nullptr};
+    uint32_t n_bits{0};
+};
+extern CodeStoreVerified g_code_store_verified;
+
 // Sentinel: in-block created code; look up via created_code_[key8].
 inline constexpr uint32_t kCreatedCodeOffset = ~uint32_t{0};
 

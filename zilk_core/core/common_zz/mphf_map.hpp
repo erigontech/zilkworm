@@ -187,21 +187,27 @@ class MphfMap {
         return std::nullopt;
     }
 
+    // Visits the data offset of every singleton slot (skipping the 0 sentinels) and then of every
+    // sidecar entry.
+    template <typename Cb>
+    void for_each_offset(Cb&& cb) const noexcept {
+        if (h_ == nullptr || n_keys_ == 0) return;
+        for (uint32_t i = 0; i < n_keys_; ++i) {
+            const uint32_t off = slot_offsets_[i];
+            if (off != 0) cb(uint64_t{off});
+        }
+        for (uint32_t i = 0; i < n_collisions_; ++i)
+            cb(collisions_[i].offset);
+    }
+
     // Visits every singleton slot (skipping the 0 sentinels) and then every sidecar entry.
     template <std::size_t KeySize = 32, std::size_t KeyOffset = 0, typename Cb>
     void for_each(Cb&& cb) const noexcept {
-        if (h_ == nullptr || n_keys_ == 0) return;
-        auto apply_cb = [&](uint64_t off) noexcept {
+        for_each_offset([&](uint64_t off) noexcept {
             uint64_t body_len; std::memcpy(&body_len, data_ + off, 8);
             uint8_t* body = data_ + off + 8u;
             cb(body + KeyOffset, std::span<uint8_t>{body, static_cast<size_t>(body_len)});
-        };
-        for (uint32_t i = 0; i < n_keys_; ++i) {
-            const uint32_t off = slot_offsets_[i];
-            if (off != 0) apply_cb(off);
-        }
-        for (uint32_t i = 0; i < n_collisions_; ++i)
-            apply_cb(collisions_[i].offset);
+        });
     }
 
   private:

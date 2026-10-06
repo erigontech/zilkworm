@@ -11,6 +11,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <utility>
 
 #include <evmone/test/state/state_diff.hpp>
 #include <evmone_precompiles/keccak.hpp>
@@ -29,6 +30,8 @@
 #include <zilk_core/core/trie_zz/rlp_sw.hpp>  // decode_node
 #endif
 namespace zilkworm {
+
+CodeStoreVerified g_code_store_verified;
 
 namespace trie = ::silkworm::trie;
 using ::silkworm::keccak256;
@@ -946,9 +949,25 @@ std::optional<intx::uint256> DirectState::total_difficulty(uint64_t, const evmc:
 
 bool DirectState::sanitize() {
     // SOUNDNESS-CRITICAL: binds each leaf's identity to its trie-key hash.
+    //
+    // The input reader may have hashed entries as it read them, see CodeStoreVerified. Its bits
+    // stand for the bytes as read, so they apply only to this very data section, to the 8-aligned
+    // offsets they were set for, and once: they are dropped here, before anything is written.
+    const CodeStoreVerified verified = std::exchange(g_code_store_verified, CodeStoreVerified{});
+    const bool verified_here = verified.data != nullptr && verified.data == code_store_map_.data() &&
+                               verified.data_size == code_store_map_.data_size();
     bool code_keccak_ok = true;
-    code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-        code_keccak_ok &= bytes_equal<32>(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr);
+    const uint8_t* const code_data = code_store_map_.data();
+    code_store_map_.for_each_offset([&](uint64_t off) {
+        // A misaligned offset is never one the reader walked: it would share the bit of the entry
+        // it lies inside.
+        if (verified_here && (off & 7) == 0 && (off >> 3) < verified.n_bits &&
+            ((verified.bits[off >> 8] >> ((off >> 3) & 31)) & 1) != 0)
+            return;
+        const uint8_t* const body = code_data + off + 8u;
+        const auto body_len = static_cast<size_t>(load_u64_le(code_data + off));
+        code_keccak_ok &= bytes_equal<32>(
+            silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
     });
     if (!code_keccak_ok) {
         sys_println("sanitize: code-hash mismatch in witness bundle ");
