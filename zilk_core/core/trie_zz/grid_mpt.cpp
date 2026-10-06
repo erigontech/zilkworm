@@ -159,6 +159,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
             // (re)seeds the trie as a single full-path leaf.
             search_nibbles_ = new_nibbles;
             last_was_delete_ = false;
+            root_unfolded_ = false;
             LeafNode l{search_nibbles_, 0, trie_upd.current_value()};
             insert_line(0, 0, std::move(l));
             continue;
@@ -383,12 +384,17 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
     if (grid_.empty()) {
         return kEmptyRoot;
     }
+    // An unmodified root is the node verified to hash to prev_root_.
+    if (root_unfolded_ && !grid_[0].modified) {
+        return prev_root_;
+    }
     auto encoded = encode_line(grid_[0]);
     return keccak_bytes(encoded);
 }
 
 template <bool DeletionEnabled>
 void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
+    root_unfolded_ = false;
     if (previous_root_hash != kEmptyRoot) {
         auto rlp = state_->find_node_rlp(previous_root_hash);
         if (!rlp) [[unlikely]] {
@@ -398,13 +404,12 @@ void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
             sys_println("{\"err\":\"no_rlp\"}");
             return;
         }
+        root_unfolded_ = unfold_node_from_rlp(*rlp, 0, 0);
 #ifndef NDEBUG
-        if (!unfold_node_from_rlp(*rlp, 0, 0)) [[unlikely]] {
+        if (!root_unfolded_) [[unlikely]] {
             failed_ = true;
             sys_println("{\"err\":\"init_from_root: malformed root rlp\"}");
         }
-#else
-        unfold_node_from_rlp(*rlp, 0, 0);  // release: return checked via final root compare
 #endif
     }
 }

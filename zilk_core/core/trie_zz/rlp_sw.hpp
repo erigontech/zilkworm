@@ -99,7 +99,92 @@ inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, 
     return true;
 }
 
-inline ByteView encode_branch(const BranchNode& b) {
+// The index of a nonzero mask's lowest set bit. rv32im has no count-trailing-zeros instruction and
+// std::countr_zero is a __ctzsi2 call there: isolate the bit and look its index up by a De Bruijn
+// multiply instead.
+[[gnu::always_inline]] inline unsigned lowest_set_bit(uint32_t m) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    static constexpr uint8_t kIndex[32] = {0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
+                                           31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9};
+    return kIndex[((m & (0u - m)) * 0x077CB531u) >> 27];
+#else
+    return static_cast<unsigned>(std::countr_zero(m));
+#endif
+}
+
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+// Copies the 32 bytes at the 8-aligned src to dst, where dst & 3 == Off (1..3), little endian. A dst
+// at 2 mod 4 takes each source word as two halfwords. An odd dst takes the bytes before its first
+// word boundary, then seven words each shifted together from two source words, then the last Off
+// bytes.
+template <unsigned Off>
+[[gnu::always_inline]] inline void copy32_at_phase(uint8_t* dst, const uint8_t* src) noexcept {
+    typedef uint32_t __attribute__((may_alias)) w32;
+    typedef uint16_t __attribute__((may_alias)) h16;
+    // Each source word is loaded once, ahead of the stores that use it: for all the compiler knows
+    // a store may alias src, and it loaded the word again after one.
+    const w32* const s = reinterpret_cast<const w32*>(std::assume_aligned<8>(src));
+    if constexpr (Off == 2) {
+        h16* const d = reinterpret_cast<h16*>(dst);
+        for (size_t k = 0; k < 8; ++k) {
+            const uint32_t v = s[k];
+            d[2 * k] = static_cast<uint16_t>(v);
+            d[2 * k + 1] = static_cast<uint16_t>(v >> 16);
+        }
+    } else {
+        constexpr unsigned kLead = 4 - Off;
+        uint32_t cur = s[0];
+        for (unsigned k = 0; k < kLead; ++k) dst[k] = static_cast<uint8_t>(cur >> (8 * k));
+        w32* const d = reinterpret_cast<w32*>(dst + kLead);
+        for (size_t k = 0; k < 7; ++k) {
+            const uint32_t next = s[k + 1];
+            d[k] = (cur >> (8 * kLead)) | (next << (8 * Off));
+            cur = next;
+        }
+        for (unsigned k = 0; k < Off; ++k) dst[kLead + 28 + k] = static_cast<uint8_t>(cur >> (8 * (kLead + k)));
+    }
+}
+
+// Copies the 32 bytes at the 8-aligned src to dst at any alignment, with a word store wherever dst
+// allows one: the guest's memcpy takes ~60 cycles when dst is not word-aligned.
+[[gnu::always_inline]] inline void copy32_from_aligned8(uint8_t* dst, const uint8_t* src) noexcept {
+    switch (reinterpret_cast<uintptr_t>(dst) & 3) {
+        case 0: {
+            typedef uint32_t __attribute__((may_alias)) w32;
+            const w32* const s = reinterpret_cast<const w32*>(std::assume_aligned<8>(src));
+            w32* const d = reinterpret_cast<w32*>(dst);
+            for (size_t k = 0; k < 8; ++k) d[k] = s[k];
+            break;
+        }
+        case 1:
+            copy32_at_phase<1>(dst, src);
+            break;
+        case 2:
+            copy32_at_phase<2>(dst, src);
+            break;
+        default:
+            copy32_at_phase<3>(dst, src);
+            break;
+    }
+}
+#endif
+
+// Writes branch slot i's 32-byte hash reference to dst.
+[[gnu::always_inline]] inline void put_child_hash(uint8_t* dst, const BranchNode& b, size_t i) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    // child_ptr points into the witness at any alignment; a slot rewritten since holds its hash in
+    // child[i], which is 8-aligned.
+    if (b.child_ptr[i] == nullptr) [[likely]] {
+        copy32_from_aligned8(dst, b.child[i].bytes);
+        return;
+    }
+#endif
+    std::memcpy(dst, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+}
+
+// Always inlined (the guest calls it from encode_line() only): grown by the inline hash copies
+// above, it was otherwise compiled out of line and reached by a call.
+[[gnu::always_inline]] inline ByteView encode_branch(const BranchNode& b) {
     if (b.mask == 0) {
         return empty;
     }
@@ -124,10 +209,10 @@ inline ByteView encode_branch(const BranchNode& b) {
                 ((lens[0] ^ 0x20202020u) | (lens[1] ^ 0x20202020u) | (lens[2] ^ 0x20202020u) |
                  (lens[3] ^ 0x20202020u)) == 0) {
                 for (unsigned dirty = b.dirty; dirty != 0; dirty &= dirty - 1) {
-                    const unsigned i = static_cast<unsigned>(std::countr_zero(dirty));
+                    const unsigned i = lowest_set_bit(dirty);
                     uint8_t* const p = out + 3 + 33 * i;
                     *p = 0xa0;
-                    std::memcpy(p + 1, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+                    put_child_hash(p + 1, b, i);
                 }
                 return ByteView{out, b.orig_size};
             }
@@ -145,7 +230,7 @@ inline ByteView encode_branch(const BranchNode& b) {
                         *p = rlp::kEmptyStringCode;
                     } else if (len == 32) {
                         *p = 0xa0;
-                        std::memcpy(p + 1, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+                        put_child_hash(p + 1, b, i);
                     } else {
                         std::memcpy(p, b.child[i].bytes, len);
                     }

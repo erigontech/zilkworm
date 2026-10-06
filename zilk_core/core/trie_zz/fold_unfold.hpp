@@ -288,32 +288,37 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         }
         return;
     }
-
-    const auto& encoded = encode_line(grid_line);
-    bytes32 hash;
-    ByteView node_ref;
-    if (encoded.size() >= 32) {
-        hash = keccak_bytes(encoded);
-        node_ref = ByteView{hash.bytes, 32};
-    } else {
-        node_ref = encoded;
+    // The root has no parent to take its reference: calc_root_from_updates() encodes and hashes it.
+    if (grid_.size() <= 1) {
+        return;
     }
-    if (grid_.size() > 1) {
-        auto& parent = grid_[grid_line.parent_depth];
-        parent.modified = true;
-        switch (parent.kind) {
-            case kBranch:
-                parent.branch.set_child(grid_line.parent_slot, node_ref);
-                parent.child_depth[grid_line.parent_slot] = 0;  // clear
-                break;
-            case kExt:
-                parent.ext.set_child(node_ref);
-                parent.child_depth[grid_line.parent_slot] = 0;  // clear
-                break;
-            default:
-                std::unreachable();
-        }
-        delete_line(depth);
+
+    const ByteView encoded = encode_line(grid_line);
+    const unsigned slot = grid_line.parent_slot;
+    auto& parent = grid_[grid_line.parent_depth];
+    parent.modified = true;
+    parent.child_depth[slot] = 0;  // clear
+    // The line goes before its reference is written into the parent (its encoding is in
+    // static_buffer, and the parent does not move): the keccak of an encoding of 32 bytes or more,
+    // which returns straight into the parent's slot, then ends fold_line() with nothing live across it.
+    delete_line(depth);
+    switch (parent.kind) {
+        case kBranch:
+            if (encoded.size() >= 32) {
+                parent.branch.set_child_hash(slot, encoded);
+            } else {
+                parent.branch.set_child(slot, encoded);
+            }
+            break;
+        case kExt:
+            if (encoded.size() >= 32) {
+                parent.ext.set_child_hash(encoded);
+            } else {
+                parent.ext.set_child(encoded);
+            }
+            break;
+        default:
+            std::unreachable();
     }
 }
 

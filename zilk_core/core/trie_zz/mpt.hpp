@@ -125,6 +125,20 @@ struct BranchNode {
         child_ptr[slot] = nullptr;  // recomputed hash reads own inline storage
     }
 
+    // set_child() for a hash reference: the keccak of `rlp`, a child's encoding of 32 bytes or more.
+    inline void set_child_hash(unsigned slot, ByteView rlp) noexcept {
+        [[assume(slot < 16)]];
+        dirty |= static_cast<uint16_t>(1u << slot);
+        mask |= 1 << slot;
+        child_len[slot] = 32;
+        child_ptr[slot] = nullptr;
+        // The keccak returns its hash straight into the slot, with no copy out of a temporary: the
+        // bytes array provides storage for it, suitably aligned as child[] leads this 8-aligned
+        // struct. The hash bytes of child[] are only ever read through memcpy, byte loads or
+        // may_alias words, never through a typed access to the bytes array.
+        ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(silkworm::keccak256(rlp));
+    }
+
     inline void delete_child(unsigned slot) noexcept {
         [[assume(slot < 16)]];
         dirty |= static_cast<uint16_t>(1u << slot);
@@ -144,10 +158,25 @@ struct ExtensionNode {
         child_len = static_cast<uint8_t>(b.size());
     }
 
+    // set_child() for a hash reference: the keccak of `rlp`, a child's encoding of 32 bytes or more.
+    inline void set_child_hash(ByteView rlp) noexcept {
+        const ethash::hash256 h = silkworm::keccak256(rlp);
+        // child follows the 68-byte path, so it is only 4-aligned: too little to hold a hash256.
+        typedef uint32_t __attribute__((may_alias)) w32;
+        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
+        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        child_len = 32;
+    }
+
     inline void delete_child() noexcept {
         child_len = 0;
     }
 };
+
+// BranchNode::set_child_hash places an ethash::hash256 into child[slot].bytes; ExtensionNode::set_child_hash
+// stores whole words into child.
+static_assert(offsetof(BranchNode, child) == 0 && alignof(BranchNode) >= 8);
+static_assert(offsetof(ExtensionNode, child) % 4 == 0);
 
 struct LeafNode {
     nibbles64 path;
@@ -296,6 +325,8 @@ class GridMPT {
     nibbles64 search_nibbles_;  // The current key being searched for/inserted
 
     bool last_was_delete_{false};
+    // grid_[0] is the node find_node_rlp() verified to hash to prev_root_ (unchanged while unmodified).
+    bool root_unfolded_{false};
 
     // Node-store lookups go through DirectState::find_node_rlp, which owns
     // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload
