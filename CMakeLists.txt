@@ -98,6 +98,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/account_read_spoof_test.cpp
     zilk_core/dev/cli/account_read_honest_test.cpp
     zilk_core/dev/cli/delegation_clearing_storage_test.cpp
+    zilk_core/dev/cli/direct_state_handle_test.cpp
     zilk_core/dev/cli/code_store_collision_len_test.cpp
     zilk_core/dev/cli/storage_host_path_test.cpp
   )

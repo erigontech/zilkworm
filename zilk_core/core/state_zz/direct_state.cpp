@@ -203,6 +203,70 @@ namespace {
         std::memcpy(dst, src.bytes, 32);
     }
 
+    /// The slot std::lower_bound finds for `key` (memcmp order) if it holds `key`, else null.
+    /// lower_bound's position is that of the last probe that moved left, so the equality of
+    /// that comparison answers without a second compare. With strict alignment (rv32 Airbender)
+    /// memcmp is a call per probe; the slot keys are 8-aligned, and a word-aligned key, the
+    /// usual case, is compared a word at a time inline instead.
+    template <typename S>
+    [[gnu::always_inline]] inline S* find_slot(S* first, uint32_t n, const evmc::bytes32& key) noexcept {
+        auto len = static_cast<std::ptrdiff_t>(n);
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+        if ((reinterpret_cast<uintptr_t>(key.bytes) & 3) == 0) [[likely]] {
+            typedef uint32_t __attribute__((may_alias)) w32;
+            const w32* const k = reinterpret_cast<const w32*>(key.bytes);
+            bool eq = false;
+            while (len > 0) {
+                const std::ptrdiff_t half = len >> 1;
+                S* const mid = first + half;
+                const w32* const s = reinterpret_cast<const w32*>(mid->key);
+                uint32_t a = 0, b = 0;
+                int i = 0;
+                for (; i < 8; ++i) {
+                    a = s[i];
+                    b = k[i];
+                    if (a != b) break;
+                }
+                if (i == 8) {
+                    len = half;
+                    eq = true;
+                    continue;
+                }
+                // Little-endian words: the first differing byte is the lowest nonzero byte of
+                // a ^ b and the bytes below it are equal, so a and b masked up to the end of that
+                // byte order as memcmp does (rv32im has no byte swap).
+                const uint32_t d = a ^ b;
+                const uint32_t m = (d & 0xffu)       ? 0xffu
+                                   : (d & 0xffffu)   ? 0xffffu
+                                   : (d & 0xffffffu) ? 0xffffffu
+                                                     : ~uint32_t{0};
+                if ((a & m) < (b & m)) {
+                    first = mid + 1;
+                    len = len - half - 1;
+                } else {
+                    len = half;
+                    eq = false;
+                }
+            }
+            return eq ? first : nullptr;
+        }
+#endif
+        int last = 1;
+        while (len > 0) {
+            const std::ptrdiff_t half = len >> 1;
+            S* const mid = first + half;
+            const int c = std::memcmp(mid->key, key.bytes, 32);
+            if (c < 0) {
+                first = mid + 1;
+                len = len - half - 1;
+            } else {
+                len = half;
+                last = c;
+            }
+        }
+        return last == 0 ? first : nullptr;
+    }
+
 }  // namespace
 
 namespace detail {
@@ -292,17 +356,16 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
     // Materializing: a storage read must leave the same record an account read
     // does. Only blob records carry inline slots; overlay records fall through.
     // Blank reads aren't recorded: USE_HASH_KEY walks them (reth witness issue).
-    const auto* pa = observe_account_(addr);
-    if (pa->slot_count > 0) {
-        if (pa->deleted) [[unlikely]]
+    return read_storage(*observe_account_(addr), addr, key);
+}
+
+evmc::bytes32 DirectState::read_storage(const Account& pa, const evmc::address& addr,
+                                        const evmc::bytes32& key) const noexcept {
+    if (pa.slot_count > 0) {
+        if (pa.deleted) [[unlikely]]
             return {};
-        const auto storage_slots = slots_for(*pa);
-        auto it = std::lower_bound(storage_slots.cbegin(), storage_slots.cend(), key,
-                                   [](const Slot& s, const evmc::bytes32& k) {
-                                       return std::memcmp(s.key, k.bytes, 32) < 0;
-                                   });
-        if (it != storage_slots.cend() && eq_hash32(it->key, key.bytes)) {
-            return std::bit_cast<evmc::bytes32>(it->current);
+        if (const Slot* s = find_slot(slots_for(pa).data(), pa.slot_count, key)) {
+            return std::bit_cast<evmc::bytes32>(s->current);
         }
     }
 
@@ -312,8 +375,8 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
         }
     }
 #if USE_HASH_KEY
-    if (!pa->deleted) {
-        if (const auto* rs = recover_slot_from_nodestore(*pa, addr, key);
+    if (!pa.deleted) {
+        if (const auto* rs = recover_slot_from_nodestore(pa, addr, key);
             rs != nullptr && rs->found) {
             return rs->current;
         }
@@ -375,15 +438,8 @@ void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
                                    const evmc::bytes32& key, const evmc::bytes32& value) {
     pa.modified = true;
     if (pa.slot_count > 0) {
-        const auto cap_slots = slots_for(pa);
-        const auto begin = cap_slots.begin();
-        const auto end = begin + static_cast<std::ptrdiff_t>(pa.slot_count);
-        auto it = std::lower_bound(begin, end, key,
-                                   [](const Slot& s, const evmc::bytes32& k) {
-                                       return std::memcmp(s.key, k.bytes, 32) < 0;
-                                   });
-        if (it != end && eq_hash32(it->key, key.bytes)) {
-            copy32(it->current, value);
+        if (Slot* s = find_slot(slots_for(pa).data(), pa.slot_count, key)) {
+            copy32(s->current, value);
             return;
         }
         // Builder enforces slot_capacity == slot_count, so no in-place insert.
@@ -662,7 +718,12 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
 
 void DirectState::apply_state_diff(const evmone::state::StateDiff& diff) {
     for (const auto& m : diff.modified_accounts) {
-        auto* pa = find_or_create_account(m.addr);
+        // The handle is the record of get_account(), which find_or_create_account() would return.
+#if !defined(AIRBENDER)
+        check_account_handle(m.addr, m.view_handle);
+#endif
+        auto* pa = m.view_handle ? const_cast<Account*>(static_cast<const Account*>(m.view_handle))
+                                 : find_or_create_account(m.addr);
         revive_if_deleted(m.addr, *pa);
         journal_address_changed(m.addr);
         if (m.code) apply_code_diff(m.addr, *pa, *m.code);

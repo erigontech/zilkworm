@@ -10,6 +10,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include <evmc/evmc.hpp>
@@ -108,6 +110,11 @@ class DirectState : public BlockState {
     // Mutable: read-only accessors memoize "this address was observed" by
     // materializing an absent record; the observation is logically const.
     mutable FlatHashMap<evmc::address, Account> created_accounts_;
+    // DirectStateView hands out pointers to these records (StateView::Account::handle) that must
+    // survive the materializing inserts of the rest of the transaction, so they need node stability,
+    // which hash_maps.hpp does not promise of FlatHashMap.
+    static_assert(std::is_same_v<FlatHashMap<evmc::address, Account>,
+                                 std::unordered_map<evmc::address, Account>>);
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
@@ -163,7 +170,12 @@ class DirectState : public BlockState {
     [[gnu::always_inline]] inline Account* read_account(const evmc::address& addr) noexcept;
     evmc::bytes32 read_storage(const evmc::address& addr,
                                const evmc::bytes32& key) const noexcept;
+    /// read_storage() for the record `pa` of `addr` that the caller already holds.
+    evmc::bytes32 read_storage(const Account& pa, const evmc::address& addr,
+                               const evmc::bytes32& key) const noexcept;
     ByteView read_code(const evmc::address& addr) const noexcept;
+    /// read_code() for a record the caller already holds.
+    [[gnu::always_inline]] inline ByteView read_code(const Account& pa) const noexcept;
     ByteView read_code(const evmc::address& addr, const evmc::bytes32& /*code_hash*/) const noexcept {
         return read_code(addr);
     }
@@ -174,13 +186,26 @@ class DirectState : public BlockState {
         const Account* pa = observe_account_(addr);
         if (pa->deleted) [[unlikely]]
             return false;
+        return has_storage(addr, *pa);
+    }
+    /// has_storage() for the live record `pa` of `addr` that the caller already holds.
+    [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr, const Account& pa) const noexcept {
         // Only blob records carry inline slots; overlay records use overflow_slots_.
-        if (pa->slot_count > 0) return true;
+        if (pa.slot_count > 0) return true;
         if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end() && !it->second.empty()) return true;
         return false;
     }
 
     void apply_state_diff(const evmone::state::StateDiff& diff);
+
+#if !defined(AIRBENDER)
+    /// Host builds check every account handle against the lookup it replaces, so the whole test
+    /// suite exercises the invariant that the handle is the record of `addr`.
+    void check_account_handle(const evmc::address& addr, const void* handle) const noexcept {
+        if (handle != nullptr && handle != lookup_account_(addr)) [[unlikely]]
+            fatal("ERROR: account handle differs from the lookup of its address");
+    }
+#endif
 
     intx::uint256 get_balance(const evmc::address& addr) const noexcept;
     uint64_t get_nonce(const evmc::address& addr) const noexcept;
@@ -387,19 +412,23 @@ DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
 DirectState::read_code(const evmc::address& addr) const noexcept {
     // Materializing: system contracts (EIP-4788/2935/7002/7251) reach an account
     // only through its code, and that read must leave a record all the same.
-    const Account* pa = observe_account_(addr);
-    if (pa->deleted) [[unlikely]]
+    return read_code(*observe_account_(addr));
+}
+
+[[gnu::always_inline]] inline ByteView
+DirectState::read_code(const Account& pa) const noexcept {
+    if (pa.deleted) [[unlikely]]
         return {};
 
-    if (pa->code_store_len == 0) {
+    if (pa.code_store_len == 0) {
         // witness omitted code that is read
-        if (std::memcmp(pa->code_hash, silkworm::kEmptyHash.bytes, 32) != 0) [[unlikely]]
+        if (std::memcmp(pa.code_hash, silkworm::kEmptyHash.bytes, 32) != 0) [[unlikely]]
             fatal("ERROR: read_code: code omitted from witness for non-empty code_hash");
         return {};
     }
 
-    if (pa->code_store_offset == kCreatedCodeOffset) [[unlikely]] {
-        const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa->code_hash);
+    if (pa.code_store_offset == kCreatedCodeOffset) [[unlikely]] {
+        const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa.code_hash);
         const uint64_t k8 = hash_key8(h);
         if (auto it = created_code_.find(k8); it != created_code_.end() &&
                                               std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
@@ -412,7 +441,7 @@ DirectState::read_code(const evmc::address& addr) const noexcept {
         return {};
     }
 
-    return code_for(*pa);
+    return code_for(pa);
 }
 
 [[gnu::always_inline]] inline const Account*
@@ -481,7 +510,11 @@ class DirectStateView final : public evmone::state::StateView {
             .nonce = pa->nonce,
             .balance = balance_v,
             .code_hash = std::bit_cast<evmc::bytes32>(pa->code_hash),
-            .has_storage = state_.has_storage(addr),
+            // From the record in hand: has_storage(addr) would look it up again.
+            .has_storage = state_.has_storage(addr, *pa),
+            // Records are never erased or replaced and nothing mutates the state between this
+            // call and apply_state_diff(), the handle's last use.
+            .handle = pa,
         };
     }
 
@@ -493,6 +526,24 @@ class DirectStateView final : public evmone::state::StateView {
 
     evmc::bytes32 get_storage(const evmc::address& addr, const evmc::bytes32& key) const noexcept override {
         return state_.read_storage(addr, key);
+    }
+
+    /// A null handle (access-list placeholder, account made by CREATE) takes the lookup.
+    evmc::bytes_view get_account_code_at(const void* handle, const evmc::address& addr) const noexcept override {
+        if (handle == nullptr) return get_account_code(addr);
+#if !defined(AIRBENDER)
+        state_.check_account_handle(addr, handle);
+#endif
+        return state_.read_code(*static_cast<const zilkworm::Account*>(handle));
+    }
+
+    evmc::bytes32 get_storage_at(const void* handle, const evmc::address& addr,
+                                 const evmc::bytes32& key) const noexcept override {
+        if (handle == nullptr) return get_storage(addr, key);
+#if !defined(AIRBENDER)
+        state_.check_account_handle(addr, handle);
+#endif
+        return state_.read_storage(*static_cast<const zilkworm::Account*>(handle), addr, key);
     }
 
   private:
