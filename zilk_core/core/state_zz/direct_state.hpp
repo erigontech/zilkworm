@@ -20,6 +20,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/hash_maps.hpp>
+#include <zilk_core/core/common_zz/keccak_prefix.hpp>
 #include <zilk_core/core/common_zz/mphf_map.hpp>
 #include <zilk_core/core/state/block_state.hpp>
 #include <zilk_core/core/state_zz/pre_state.hpp>
@@ -371,6 +372,17 @@ class DirectState : public BlockState {
 
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept;
+    // find_node_rlp() that, when it has to hash a full branch, also saves the keccak state of its
+    // first blocks before a slot in a row of the kprefix pool. `request` is called then, and only then,
+    // for the kprefix::SnapRequest: the slot (kNoSlot for no snapshot) and the row.
+    template <class SnapRequestFn>
+    [[gnu::always_inline]] inline std::optional<ByteView>
+    find_node_rlp(const evmc::bytes32& node_hash, SnapRequestFn&& request) const noexcept;
+
+  private:
+    template <bool kSnap, class SnapRequestFn>
+    [[gnu::always_inline]] inline std::optional<ByteView>
+    find_node_rlp_impl(const evmc::bytes32& node_hash, SnapRequestFn&& request) const noexcept;
 };
 
 [[gnu::always_inline]] inline const Account*
@@ -389,6 +401,18 @@ DirectState::find_pre_account_unchecked(const evmc::address& addr) noexcept {
 
 [[gnu::always_inline]] inline std::optional<ByteView>
 DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
+    return find_node_rlp_impl<false>(node_hash, 0);
+}
+
+template <class SnapRequestFn>
+[[gnu::always_inline]] inline std::optional<ByteView>
+DirectState::find_node_rlp(const evmc::bytes32& node_hash, SnapRequestFn&& request) const noexcept {
+    return find_node_rlp_impl<true>(node_hash, request);
+}
+
+template <bool kSnap, class SnapRequestFn>
+[[gnu::always_inline]] inline std::optional<ByteView>
+DirectState::find_node_rlp_impl(const evmc::bytes32& node_hash, [[maybe_unused]] SnapRequestFn&& request) const noexcept {
     if (auto b = node_store_map_.find<32, 0, &hash_key8>(node_hash.bytes)) {
         // SOUNDNESS-CRITICAL: a node is used only if its keccak is the hash it was asked for, so
         // every node that reaches the trie is bound to a hash reference in a verified parent (or
@@ -397,9 +421,20 @@ DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
         auto& word = node_verified_[bit >> 5];
         const auto mask = uint32_t{1} << (bit & 31);
         if ((word & mask) == 0) {
-            if (!bytes_equal<32>(silkworm::keccak256(FlatKv::payload(ByteView{b->data(), b->size()})).bytes,
-                                 node_hash.bytes))
-                [[unlikely]]
+            const ByteView payload = FlatKv::payload(ByteView{b->data(), b->size()});
+            // The snapshot hash is the same keccak of the same bytes, compared in full all the same.
+            bool verified;
+            if constexpr (kSnap) {
+                const bool full = payload.size() == kprefix::kNodeSize && (reinterpret_cast<uintptr_t>(payload.data()) & 7) == 0;
+                const kprefix::SnapRequest snap = full ? request() : kprefix::SnapRequest{kprefix::kNoSlot, 0};
+                const unsigned blocks = kprefix::first_blocks(snap.slot);
+                verified = blocks != 0
+                               ? kprefix::verify_and_snap(payload.data(), snap.row, blocks, node_hash.bytes)
+                               : bytes_equal<32>(silkworm::keccak256(payload).bytes, node_hash.bytes);
+            } else {
+                verified = bytes_equal<32>(silkworm::keccak256(payload).bytes, node_hash.bytes);
+            }
+            if (!verified) [[unlikely]]
                 return std::nullopt;  // As a node missing from the witness.
             word |= mask;
         }

@@ -322,6 +322,33 @@ template <unsigned Off>
     return ByteView{begin, static_cast<size_t>(p - begin)};
 }
 
+// The number of leading keccak blocks of `encoded`, the encode_branch() of `b`, that the state saved
+// for it in the pool already covers, or 0 when none does. A nonzero result consumes the saved state:
+// the caller must resume from it, now, with the digest of `encoded` as the result.
+//
+// The saved state is that of the first 136 * blocks bytes of the witness node b.orig (see
+// keccak_prefix.hpp). `encoded` is that node with the hash bytes of the dirty slots rewritten: the
+// copy-and-patch path of encode_branch(), which b.orig != nullptr and an unchanged layout select,
+// and which touches slot i only from byte 4 + 33 i on, a slot's header byte staying 0xa0. So the
+// bytes before the first dirty slot are the node's, and the saved state may be used if none of the
+// slots that begin inside the blocks it covers is dirty (kHeadSlots). That a clean slot is unchanged
+// does not rest on the update that asked for the snapshot: every change to a slot sets its dirty bit,
+// and the pool row is found by b.orig. A node with no dirty slot is the witness node and resumes too.
+[[gnu::always_inline]] inline unsigned take_resumable_blocks(const BranchNode& b, size_t row, ByteView encoded) noexcept {
+    if (b.orig == nullptr || kprefix::tag_orig[row] != b.orig) return 0;
+    // The node as encode_branch() copied it: the whole witness node, laid out as it was. A node of
+    // kNodeSize bytes has no room for a slot that is not a hash reference, so this is the full branch.
+    if (b.orig_size != kprefix::kNodeSize ||
+        !b.same_layout_as_orig() || (reinterpret_cast<uintptr_t>(b.orig) & 7) != 0 ||
+        encoded.size() != kprefix::kNodeSize ||
+        encoded.data() != static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31))
+        return 0;
+    const unsigned blocks = kprefix::tag_sb[row];
+    if ((b.dirty & kprefix::kHeadSlots[blocks]) != 0) return 0;
+    kprefix::tag_orig[row] = nullptr;
+    return blocks;
+}
+
 // Writes the list header of a leaf or extension payload at `out`, returns the position after it. A payload
 // below 256 bytes takes the one-byte long form without to_big_compact; a longer one (a leaf value of up to
 // kMaxLeafValueSize) goes through encode_list_header.

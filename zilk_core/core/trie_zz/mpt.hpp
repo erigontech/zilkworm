@@ -18,6 +18,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/common_zz/keccak_prefix.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
 
@@ -139,6 +140,18 @@ struct BranchNode {
         ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(silkworm::keccak256(rlp));
     }
 
+    // set_child_hash() for a full branch whose keccak state after its first `blocks` blocks is in
+    // kprefix::pool[row]: the hash of `rlp` (see take_resumable_blocks()), which the call consumes.
+    inline void set_child_hash_resumed(unsigned slot, ByteView rlp, size_t row, unsigned blocks) noexcept {
+        [[assume(slot < 16)]];
+        dirty |= static_cast<uint16_t>(1u << slot);
+        mask |= 1 << slot;
+        child_len[slot] = 32;
+        child_ptr[slot] = nullptr;
+        ::new (static_cast<void*>(child[slot].bytes))
+            ethash::hash256(ethash_keccak256_resume(kprefix::pool[row], blocks, rlp.data(), rlp.size()));
+    }
+
     inline void delete_child(unsigned slot) noexcept {
         [[assume(slot < 16)]];
         dirty |= static_cast<uint16_t>(1u << slot);
@@ -162,6 +175,15 @@ struct ExtensionNode {
     inline void set_child_hash(ByteView rlp) noexcept {
         const ethash::hash256 h = silkworm::keccak256(rlp);
         // child follows the 68-byte path, so it is only 4-aligned: too little to hold a hash256.
+        typedef uint32_t __attribute__((may_alias)) w32;
+        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
+        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        child_len = 32;
+    }
+
+    // set_child_hash() resumed from kprefix::pool[row], as BranchNode::set_child_hash_resumed().
+    inline void set_child_hash_resumed(ByteView rlp, size_t row, unsigned blocks) noexcept {
+        const ethash::hash256 h = ethash_keccak256_resume(kprefix::pool[row], blocks, rlp.data(), rlp.size());
         typedef uint32_t __attribute__((may_alias)) w32;
         w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
         for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
@@ -325,6 +347,10 @@ class GridMPT {
     nibbles64 search_nibbles_;  // The current key being searched for/inserted
 
     bool last_was_delete_{false};
+    // Set while the descent for an update that sets a value (a deletion of 0x80 counts as one) runs:
+    // only such an update rewrites the hash bytes of the branches it passes through, see unfold_slot().
+    // Clear everywhere else, where the search cursor is not the one unfold_slot() would read.
+    bool snap_writes_{false};
     // grid_[0] is the node find_node_rlp() verified to hash to prev_root_ (unchanged while unmodified).
     bool root_unfolded_{false};
 
@@ -364,6 +390,10 @@ class GridMPT {
           grid_{},
           state_{&state} {
         grid_.reserve(66);  // Reserve max depth to avoid reallocations - 66 is a good compromise for average-bad cases
+        // Not in reset(): the witness does not change from one trie to the next, so a state saved while
+        // verifying a node stays that node's. A new instance may have a witness at the old one's
+        // addresses (a host test), whose tags would then name other bytes.
+        kprefix::clear_tags();
         init_from_root(previous_root_hash);
     }
 
@@ -377,6 +407,7 @@ class GridMPT {
         search_nib_cursor_ = 0;
         last_was_delete_ = false;
         missing_count_ = 0;
+        snap_writes_ = false;
 #ifndef NDEBUG
         failed_ = false;
 #endif

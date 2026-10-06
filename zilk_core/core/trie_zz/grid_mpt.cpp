@@ -175,6 +175,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
 
         auto new_nibbles = nibbles64::from_bytes32(trie_upd.key);
         search_nib_cursor_ = 0;
+        snap_writes_ = false;  // for the folds of the seek below
 
         if (!grid_.empty() && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
@@ -197,6 +198,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
 
         search_nibbles_ = new_nibbles;
         last_was_delete_ = false;
+        snap_writes_ = trie_upd.current_value().size() != 0;
 
         // MAIN LOOP
         while (depth_ < 128) {  // Searching down
@@ -410,6 +412,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
         }
     }
 
+    snap_writes_ = false;
     while (grid_.size() > 1) {
         fold_line(grid_.size() - 1);
     }

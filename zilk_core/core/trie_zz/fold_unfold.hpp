@@ -312,6 +312,11 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
     }
 
     const ByteView encoded = encode_line(grid_line);
+    // A full branch the lookup saved the keccak state of the leading blocks of, which this update left as
+    // they were, is hashed from that state.
+    const size_t row = depth & (kprefix::kRows - 1);
+    const unsigned resume_blocks =
+        grid_line.kind == kBranch ? take_resumable_blocks(grid_line.branch, row, encoded) : 0;
     const unsigned slot = grid_line.parent_slot;
     auto& parent = grid_[grid_line.parent_depth];
     parent.modified = true;
@@ -322,14 +327,18 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
     delete_line(depth);
     switch (parent.kind) {
         case kBranch:
-            if (encoded.size() >= 32) {
+            if (resume_blocks != 0) {
+                parent.branch.set_child_hash_resumed(slot, encoded, row, resume_blocks);
+            } else if (encoded.size() >= 32) {
                 parent.branch.set_child_hash(slot, encoded);
             } else {
                 parent.branch.set_child(slot, encoded);
             }
             break;
         case kExt:
-            if (encoded.size() >= 32) {
+            if (resume_blocks != 0) {
+                parent.ext.set_child_hash_resumed(encoded, row, resume_blocks);
+            } else if (encoded.size() >= 32) {
                 parent.ext.set_child_hash(encoded);
             } else {
                 parent.ext.set_child(encoded);
@@ -554,6 +563,10 @@ inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& 
 // Returns kEmpty when the slot is empty - 0x80 (caller should insert here),
 // kMissing when a 32-byte hash ref has no entry in the node store
 // (witness incomplete — caller should hard-fail), kSuccess otherwise.
+// During the descent for an update that writes (snap_writes_), search_nibbles_ at search_nib_cursor_ is the
+// slot being unfolded, and a full branch verified here keeps the keccak state of its blocks before the first
+// slot the update changes in it, for fold_line() to resume from. Updates come in key order, so that slot
+// is the next nibble of the key (which ends after nibble 63).
 template <bool DeletionEnabled>
 inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     if (slot > 15) [[unlikely]] {
@@ -605,7 +618,11 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         bytes32 ck;
         const uint8_t* hs = grid_line.branch.child_ptr[slot] ? grid_line.branch.child_ptr[slot] : child.bytes;
         std::memcpy(ck.bytes, hs, 32);
-        auto rlp_opt = state_->find_node_rlp(ck);
+        auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
+            return kprefix::SnapRequest{snap_writes_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
+                                                                                : kprefix::kNoSlot,
+                                        grid_.size() & (kprefix::kRows - 1)};
+        });
         if (!rlp_opt) [[unlikely]] {
             ++missing_count_;
 #ifndef NDEBUG
