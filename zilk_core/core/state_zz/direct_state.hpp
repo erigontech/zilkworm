@@ -63,6 +63,15 @@ struct nibbles64;  // trie_zz/mpt.hpp
 
 // 7 MSBs + 19th byte (LSB): precompile addrs vary only in byte 19
 [[gnu::always_inline]] inline uint64_t addr_key8(const uint8_t (&a)[20]) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    // The same key from two word loads: with strict alignment the memcpy below is eight byte
+    // loads through a stack temporary, and the callers' addresses are word-aligned.
+    if ((reinterpret_cast<uintptr_t>(a) & 3) == 0) [[likely]] {
+        typedef uint32_t __attribute__((may_alias)) w32;
+        const w32* const w = reinterpret_cast<const w32*>(a);
+        return w[0] | (uint64_t{(w[1] & 0x00FFFFFFu) | (uint32_t{a[19]} << 24)} << 32);
+    }
+#endif
     uint64_t k; std::memcpy(&k, a, 8);
     k = (k & 0x00FFFFFFFFFFFFFFull) | (uint64_t(a[19]) << 56); return k;
 }
