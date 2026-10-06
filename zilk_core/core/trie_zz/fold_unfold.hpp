@@ -79,7 +79,6 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
     auto list{payload.substr(0, hh.payload_length)};
 
     bool is_leaf = false;
-    std::array<uint8_t, 64> path;
     uint8_t plen = 0;
     ByteView second{};
 
@@ -87,7 +86,9 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
     if (!line_ptr) [[unlikely]] return false;
     GridLine& line = *line_ptr;
 
-    Kind kind = decode_node(list, line.branch, is_leaf, path, plen, second);
+    // A leaf or extension path is decoded straight into the line (both nodes start with their nibbles64
+    // path); decode_node writes no branch field for those.
+    Kind kind = decode_node(list, line.branch, is_leaf, line.leaf.path.nib, plen, second);
     if (kind == kBranch) {
         // emplace_line initializes no union member and decode_node writes only the pre-existing BranchNode fields:
         // reset the origin fields explicitly.
@@ -108,21 +109,38 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
         pop_back();
         return false;
     }
+    // transform_line of the branch line emplace_line made, in place: its consumed is the parent's plus 1.
+    const unsigned parent_consumed = line.consumed - 1u;
+    // Keys are 64 nibbles: a leaf's path ends its key, and an extension's leaves at least one nibble for
+    // the branch below it. A witness node is bound only to the hash that referenced it (a storage trie is
+    // walked before the account trie checks its root), and the leaf split in calc_root_from_updates relies
+    // on this: a shorter leaf path wraps old_leaf.path.len there.
+    if (is_leaf ? parent_consumed + plen != 64 : (plen == 0 || parent_consumed + plen > 63)) [[unlikely]] {
+#ifndef NDEBUG
+        failed_ = true;
+#endif
+        pop_back();
+        return false;
+    }
+    line.leaf.path.len = plen;
     if (is_leaf) {
-        LeafNode l{nibbles64{plen, path}, static_cast<uint8_t>(parent_slot_index), second};
-        transform_line(line, std::move(l));
+        line.leaf.parent_slot = static_cast<uint8_t>(parent_slot_index);
+        line.leaf.value = second;
+        line.consumed = static_cast<uint8_t>(parent_consumed);
+        line.kind = kLeaf;
     } else {
-        ExtensionNode ext{nibbles64{plen, path}, {}};
         // Reject an oversized child that would overflow child (a 32-byte bytes32).
-        if (second.size() > sizeof(ext.child.bytes)) {
+        if (second.size() > sizeof(line.ext.child.bytes)) {
 #ifndef NDEBUG
             failed_ = true;
 #endif
+            pop_back();
             return false;
         }
-        std::copy(second.cbegin(), second.cend(), ext.child.bytes);
-        ext.child_len = static_cast<uint8_t>(second.size());
-        transform_line(line, std::move(ext));
+        std::copy(second.cbegin(), second.cend(), line.ext.child.bytes);
+        line.ext.child_len = static_cast<uint8_t>(second.size());
+        line.consumed = static_cast<uint8_t>(plen + parent_consumed);
+        line.kind = kExt;
     }
     return true;
 }

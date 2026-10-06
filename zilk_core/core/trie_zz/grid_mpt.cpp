@@ -49,6 +49,36 @@ namespace zilkworm {
     while (i < max && a[i] == b[i]) ++i;
     return i;
 }
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+// lcp_nibbles(a, b + off, max) for 4-aligned a and b with off + max <= 64 (nibbles64 arrays): on this
+// strict-alignment target lcp_nibbles' uint64_t loads are 8 lbu + 8 sb each. Compares a's words with
+// b's words funnel-shifted by off % 4 bytes; the word after the last one compared stays within b[0..63].
+[[gnu::always_inline]] inline size_t lcp_nibbles_aligned(const uint8_t* a, const uint8_t* b, size_t off,
+                                                          size_t max) noexcept {
+    typedef uint32_t __attribute__((may_alias)) w32;
+    const w32* const wa = reinterpret_cast<const w32*>(std::assume_aligned<4>(a));
+    const w32* const ea = wa + max / 4;
+    const w32* pa = wa;
+    const w32* pb = reinterpret_cast<const w32*>(std::assume_aligned<4>(b)) + off / 4;
+    const unsigned sh = 8 * static_cast<unsigned>(off % 4);
+    if (sh == 0) {
+#pragma GCC unroll 4
+        for (; pa != ea && *pa == *pb; ++pa, ++pb) {}
+    } else {
+        uint32_t lo = *pb++;
+#pragma GCC unroll 4
+        for (; pa != ea; ++pa, ++pb) {
+            const uint32_t hi = *pb;
+            if (*pa != ((lo >> sh) | (hi << (32 - sh)))) break;
+            lo = hi;
+        }
+    }
+    size_t k = 4 * static_cast<size_t>(pa - wa);  // the differing word's first byte, or the tail's
+#pragma GCC unroll 1
+    for (; k < max && a[k] == b[off + k]; ++k) {}
+    return k;
+}
+#endif
 // Find the least common path of current key from the top, with the last key as reference
 template <bool DeletionEnabled>
 inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbles) {
@@ -299,9 +329,18 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 // It's a leaf:
                 // Find common path and create extension and push
 
-                size_t cp = lcp_nibbles(grid_line.leaf.path.nib.data(),
-                                        search_nibbles_.nib.data() + search_nib_cursor_,
-                                        grid_line.leaf.path.len);
+                size_t cp;
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+                if (search_nib_cursor_ + grid_line.leaf.path.len <= 64) {
+                    cp = lcp_nibbles_aligned(grid_line.leaf.path.nib.data(), search_nibbles_.nib.data(),
+                                             search_nib_cursor_, grid_line.leaf.path.len);
+                } else
+#endif
+                {
+                    cp = lcp_nibbles(grid_line.leaf.path.nib.data(),
+                                     search_nibbles_.nib.data() + search_nib_cursor_,
+                                     grid_line.leaf.path.len);
+                }
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
                     // check pre-value matches
                     if (grid_line.leaf.value != trie_upd.initial_value()) {
