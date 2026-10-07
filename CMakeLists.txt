@@ -93,6 +93,11 @@ add_subdirectory(zilk_core)
 # libFuzzer harnesses (no-op unless SILKWORM_FUZZER=ON).
 add_subdirectory(fuzz)
 
+if(AIRBENDER)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/prover/guest_airbender/cmake/z6m_pgo.cmake)
+  z6m_pgo(zilkworm evmone silkworm_core silkworm_dev silkworm_types_zz)
+endif()
+
 # Aggregate Catch2 unit-test target. New *_test.cpp files join its source
 # list; each TEST_CASE is registered with ctest individually. Defined here
 # (not in zilk_core/) so projects embedding zilk_core with BUILD_TESTING=ON

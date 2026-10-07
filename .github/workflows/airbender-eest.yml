@@ -38,7 +38,9 @@ jobs:
             curl
           npm i -g xpm
           # Pinned to the guest compiler that prover/Dockerfile ships (release v15.2.0-1): the
-          # guest's code generation, and so its cycle counts, depend on the GCC version.
+          # guest's code generation, and so its cycle counts, depend on the GCC version, and the
+          # committed profile (Z6M_PGO=USE below) applies only with the compiler it was recorded
+          # with (prover/guest_airbender/pgo/manifest.txt).
           xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
           RISCV_GCC_BIN=$(find $HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc -name 'riscv-none-elf-gcc' -type f 2>/dev/null | head -1 | xargs dirname)
           echo "Found riscv-gcc at: $RISCV_GCC_BIN"
@@ -77,8 +79,10 @@ jobs:
       - name: Download pinned EEST fixtures
         run: tools/test-fixtures.sh test-fixtures.json test-fixtures-cache eest_stable
 
+      # Z6M_PGO=USE fails unless the committed profile matches the tree, the compiler and the flags
+      # (prover/guest_airbender/pgo/README.md): the guest tested here is the profiled one that ships.
       - name: Build guest ELF
-        run: make z6m_guest_airbender
+        run: make z6m_guest_airbender Z6M_PGO=USE
 
       # execute runs on the CPU simulator. The default `gpu` feature needs a CUDA toolkit,
       # which this container doesn't have (era_cudart_sys's build script fails without one).

@@ -35,7 +35,8 @@ RUN curl -fsSL -o /tmp/cmake.sh "https://github.com/Kitware/CMake/releases/downl
     && echo "${CMAKE_SHA256}  /tmp/cmake.sh" | sha256sum -c - \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local && rm /tmp/cmake.sh
 
-# RISC-V bare-metal GCC for guest cross-compilation
+# RISC-V bare-metal GCC for guest cross-compilation. The guest's committed profile applies only
+# with this compiler (prover/guest_airbender/pgo/manifest.txt).
 ARG RISCV_GCC_VERSION=15.2.0-1
 RUN mkdir -p /opt/riscv-gcc && \
     curl -fsSL "https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v${RISCV_GCC_VERSION}/xpack-riscv-none-elf-gcc-${RISCV_GCC_VERSION}-linux-x64.tar.gz" \
@@ -66,8 +67,12 @@ COPY . .
 # Node-store account recovery in the guest (USE_HASH_KEY), which mainnet blocks need; the
 # verification key depends on it.
 ARG USE_HASH_KEY=ON
+# Z6M_PGO=USE builds with the committed profile and fails if it does not match the tree, the
+# compiler or the flags (prover/guest_airbender/pgo/README.md). The profile is recorded for
+# USE_HASH_KEY=OFF, so the default USE_HASH_KEY=ON build leaves it off.
+ARG Z6M_PGO=OFF
 WORKDIR /build/prover/guest_airbender
-RUN make z6m_guest USE_HASH_KEY=${USE_HASH_KEY}
+RUN make z6m_guest USE_HASH_KEY=${USE_HASH_KEY} Z6M_PGO=${Z6M_PGO}
 
 # Build Rust GPU prover (gpu is default feature, deps fetched from git).
 # witness_ffi's libstdc++ (gcc-15) is newer than the runtime image's, so link
