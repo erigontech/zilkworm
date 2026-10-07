@@ -37,7 +37,7 @@ jobs:
             nodejs npm \
             curl
           npm i -g xpm
-          xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
+          xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
           RISCV_GCC_BIN=$(find $HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc -name 'riscv-none-elf-gcc' -type f 2>/dev/null | head -1 | xargs dirname)
           echo "Found riscv-gcc at: $RISCV_GCC_BIN"
           ls -la "$RISCV_GCC_BIN/" | head -5
