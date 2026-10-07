@@ -314,3 +314,44 @@ TEST_CASE("GridMPT<true> read-only sibling visit then delete of the branch's oth
                          {key_with_prefix({7}), slot_value_rlp(5)}};
     check_mixed_updates(pre, /*ro=*/{ro_key}, /*del=*/{del_key}, /*post=*/{});
 }
+
+namespace {
+
+// A hashed trie key: the given nibbles, then `fill` repeated (prefixes too long to grind with key_with_prefix).
+bytes32 key_with_nibbles(std::initializer_list<uint8_t> nibs, uint8_t fill) {
+    bytes32 k{};
+    size_t i = 0;
+    for (uint8_t n : nibs) {
+        k.bytes[i / 2] |= static_cast<uint8_t>(i % 2 == 0 ? n << 4 : n);
+        ++i;
+    }
+    for (; i < 64; ++i) k.bytes[i / 2] |= static_cast<uint8_t>(i % 2 == 0 ? fill << 4 : fill);
+    return k;
+}
+
+}  // namespace
+
+// A delete leaves the branch below an extension with a single child, which is a branch; an insert sorted
+// after it splits the extension above, and the next update has the seek fold past both. fold_line turned
+// the single-child branch into an extension over the child's reference and returned without folding it:
+// the seek went on to fold the extension split off above it, with the reference it held before the delete,
+// and the new extension later merged into that line, already folded. The root missed the delete.
+TEST_CASE("GridMPT<true> single-child branch below an extension the same batch splits", "[trie][gridmpt]") {
+    // ext(2,5,7) -> branch{3 -> D, a -> branch{5 -> E, 6 -> F}}. X leaves the extension after its first
+    // nibble (9 > 5: after D), Y leaves it at its first.
+    const bytes32 d = key_with_nibbles({2, 5, 7, 3}, 1);
+    const bytes32 e = key_with_nibbles({2, 5, 7, 0xa, 5}, 2);
+    const bytes32 f = key_with_nibbles({2, 5, 7, 0xa, 6}, 3);
+    const bytes32 x = key_with_nibbles({2, 9}, 4);
+    const bytes32 y = key_with_nibbles({0xf}, 5);
+    const Bytes32Map pre{{d, slot_value_rlp(1)}, {e, slot_value_rlp(2)}, {f, slot_value_rlp(3)}};
+    const Bytes32Map post{{x, slot_value_rlp(4)}, {y, slot_value_rlp(5)}};
+    SECTION("the extension at the root") {
+        check_mixed_updates(pre, /*ro=*/{}, /*del=*/{d}, post);
+    }
+    SECTION("the extension below a branch") {
+        Bytes32Map below = pre;
+        below.emplace(key_with_nibbles({0xc}, 6), slot_value_rlp(6));
+        check_mixed_updates(below, /*ro=*/{}, /*del=*/{d}, post);
+    }
+}

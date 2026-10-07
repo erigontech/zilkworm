@@ -229,15 +229,15 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         if (grid_line.kind == kBranch && grid_line.branch.has_single_child()) {  // Should get absorbed into an extension
             unsigned non_empty_nib = grid_line.branch.first_set_bit();
             depth_ = depth;
+            ExtensionNode ext{nibbles64{1, {static_cast<uint8_t>(non_empty_nib)}}};
             // TODO optimize by checking it's a branch or not
             if (unfold_slot(non_empty_nib) != UnfoldResult::kSuccess) {  // Needed because if it's a leaf this will get extended.
 #ifndef NDEBUG
                 failed_ = true;
 #endif
                 sys_println("Error: fold_line unexpected error unfolding non_emtpy_nib");
-            }
-            ExtensionNode ext{nibbles64{1, {static_cast<uint8_t>(non_empty_nib)}}};
-            if (grid_.back().kind == kBranch) {
+                // No child to absorb: the line folds as the branch it is.
+            } else if (grid_.back().kind == kBranch) {
                 auto clen = grid_line.branch.child_len[non_empty_nib];
                 const uint8_t* src = (clen == 32 && grid_line.branch.child_ptr[non_empty_nib])
                                          ? grid_line.branch.child_ptr[non_empty_nib]
@@ -248,11 +248,19 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
                 grid_line.modified = true;
                 grid_line.child_depth[non_empty_nib] = 0;
                 grid_.pop_back();
-                return;
-            }
-            transform_line(grid_line, std::move(ext));
+                // The extension folds into the parent below, in this call. A seek pass folds the parent right after
+                // this line, and an extension left behind merged into it only once the parent had gone with the
+                // reference it held before (a delete in this branch, then an insert splitting the extension above).
+            } else {
+                transform_line(grid_line, std::move(ext));
 
-            fold_line(grid_line.child_depth[non_empty_nib]);  // The extension would get absorbed, if needed, in the next recursion
+                fold_line(grid_line.child_depth[non_empty_nib]);  // The extension would get absorbed, if needed, in the next recursion
+                // An empty child (a witness leaf without a value) goes with every line it leaves empty, this
+                // extension included, as it has no child reference of its own yet.
+                if (depth >= grid_.size() || grid_line.parent_depth == 0xFF) {
+                    return;
+                }
+            }
         }
 
         if (grid_.size() > 1) {
