@@ -310,6 +310,9 @@ class GridMPT {
     unsigned move_line(unsigned from_depth);
     UnfoldResult unfold_slot(unsigned slot);
     void seek_with_last_insert(nibbles64& new_nibbles);
+    // Whether update `u`, whose key the walk is about to insert, claims the key absent; flags the walk
+    // failed if not.
+    bool claims_absent(const TrieNodeFlat& u);
 
     // Main algorithm
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
