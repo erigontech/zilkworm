@@ -432,6 +432,15 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
+        // A bundle is one chain: its first block is anchored at the parent header its parent hash
+        // names (check_root), each later block runs on the state the one before it left. So the
+        // committed block hash binds the bundle's earlier blocks, and with them its pre-state
+        // root, only if each block extends the one validated before it (block_hash_).
+        if (!first_root_check && block.header.parent_hash != block_hash_) {
+            sys_println(("ERROR: block " + std::to_string(i) + " does not extend the previous block").c_str());
+            failed_ = true;
+            return {0, false};
+        }
         const evmc_revision rev = cfg_it->second.revision(block.header.number, block.header.timestamp);
         const bool root_ok = first_root_check
                                  ? check_root(bundle.direct, block.header, rev)

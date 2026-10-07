@@ -2,6 +2,7 @@
 
 #include <zilk_core/dev/state_transition.hpp>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <string>
 #include <utility>
@@ -17,7 +18,8 @@ int main()
 
     using silkworm::cmd::state_transition::StateTransition;
     auto st = StateTransition(std::span<uint8_t>{buf, len});
-    const uint64_t result = st.run().gas_used;
+    const auto r = st.run();
+    const uint64_t result = r.gas_used;
 
     if (result == StateTransition::kRunFailure || st.failed()) {
         sys_println("[state_transition] run FAILED");
@@ -30,6 +32,12 @@ int main()
         sys_println(msg.c_str());
     }
 
-    uint32_t out[8] = {static_cast<uint32_t>(result), static_cast<uint32_t>(result >> 32), 0, 0, 0, 0, 0, 0};
+    // The public output is the hash of the last block the run validated, its bytes in order as
+    // little-endian words (zero when no block was validated: EJSN tests, skipped runs). The hash
+    // binds that block's chain: its bundle's pre-state is anchored at the state root of the header
+    // the first block's parent hash names, every later block must extend the one before it, and
+    // each header's state root and gas used are checked against the execution.
+    uint32_t out[8];
+    std::memcpy(out, r.block_hash.bytes, sizeof(out));
     airbender::finish_success(out);
 }
