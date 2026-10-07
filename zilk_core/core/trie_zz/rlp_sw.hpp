@@ -343,7 +343,9 @@ template <unsigned Off>
         encoded.size() != kprefix::kNodeSize ||
         encoded.data() != static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31))
         return 0;
-    const unsigned blocks = kprefix::tag_sb[row];
+    // tag_sb is 1..3 while the tag is set (verify_and_snap() stores the first_blocks() of a slot). Masked all the
+    // same: the index stays inside kHeadSlots, and the count within what a resume takes, whatever the row holds.
+    const unsigned blocks = kprefix::tag_sb[row] & 3u;
     if ((b.dirty & kprefix::kHeadSlots[blocks]) != 0) return 0;
     kprefix::tag_orig[row] = nullptr;
     return blocks;
