@@ -192,10 +192,13 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
 
         // MAIN LOOP
         while (true) {  // Searching down
-            // No 64-nibble key descends this deep; leaving the loop here would drop the update.
-            if (depth_ >= 128) [[unlikely]] {
+            // The nodes on the way down consume the key's nibbles, and only a leaf is reached with all 64 of them
+            // consumed (a branch reads the nibble at the cursor): any other line there is off the key's path, and
+            // leaving the loop here would drop the update. The bound is the key's, not the grid's: depth_ is a
+            // line index, and honest tries take the grid up to kMaxLines lines.
+            if (search_nib_cursor_ >= 64 && grid_[depth_].kind != kLeaf) [[unlikely]] {
                 failed_ = true;
-                sys_println("{\"err\":\"descent too deep\"}");
+                sys_println("{\"err\":\"descent past the key\"}");
                 return {};
             }
             auto& grid_line = grid_[depth_];
@@ -215,6 +218,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                         // as after a deletion from it.
                         last_was_delete_ = true;
                         break;
+                    }
+                    if (!has_room(1)) [[unlikely]] {
+                        return {};
                     }
                     auto l = make_cur_leaf(trie_upd.current_value());
                     insert_line(l.parent_slot, depth_, std::move(l));
@@ -271,6 +277,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     depth_ = grid_line.parent_depth;
                     last_was_delete_ = true;
                     break;
+                }
+                // The split appends up to five lines: the old child moved twice, a branch, an extension, the leaf.
+                if (!has_room(5)) [[unlikely]] {
+                    return {};
                 }
                 auto old_ext_line{grid_line};  // cache the value;
                 auto new_ext_len = old_ext_line.ext.path.len - m - 1;
@@ -380,6 +390,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 }
                 if (trie_upd.current_value().empty()) {
                     break;  // a read of a key absent from the trie, which leaves this leaf's path: nothing to insert
+                }
+                if (!has_room(3)) [[unlikely]] {  // the branch and both leaves
+                    return {};
                 }
                 LeafNode old_leaf{grid_[depth_].leaf};
                 BranchNode bn;
