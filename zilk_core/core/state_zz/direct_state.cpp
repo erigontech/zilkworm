@@ -341,7 +341,6 @@ void DirectState::reserve_block_maps_() noexcept {
     created_code_.reserve(64);
     touched_.reserve(512);
     headers_.reserve(256);
-    created_block_hashes_.reserve(256);
 }
 
 // Rebuilds typed sub-views; blob bytes are caller-owned and pointer-stable.
@@ -367,7 +366,7 @@ DirectState::DirectState(DirectState&& other) noexcept
     created_code_ = std::move(other.created_code_);
     created_code_collisions_ = std::move(other.created_code_collisions_);
     headers_ = std::move(other.headers_);
-    created_block_hashes_ = std::move(other.created_block_hashes_);
+    ancestor_missing_ = other.ancestor_missing_;
     touched_ = std::move(other.touched_);
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
     changed_storage_journal_ = std::move(other.changed_storage_journal_);
@@ -959,23 +958,6 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
 
 void DirectState::insert_header(const BlockHeader& header) {
     headers_[header.hash()] = header;
-
-    // created_block_hashes_ kept sorted ascending for log-n BLOCKHASH lookup.
-    const uint64_t block_num = header.number;
-    const auto h = header.hash();
-    auto it = std::lower_bound(created_block_hashes_.begin(),
-                               created_block_hashes_.end(), block_num,
-                               [](const BlockHashEntry& e, uint64_t n) {
-                                   return e.block_number < n;
-                               });
-    if (it != created_block_hashes_.end() && it->block_number == block_num) {
-        std::memcpy(it->block_hash, h.bytes, 32);
-    } else {
-        BlockHashEntry e{};
-        e.block_number = block_num;
-        std::memcpy(e.block_hash, h.bytes, 32);
-        created_block_hashes_.insert(it, e);
-    }
 }
 
 bool DirectState::read_body(BlockNum, const evmc::bytes32&, BlockBody&) const noexcept {
@@ -1094,28 +1076,23 @@ bool DirectState::sanitize() {
     return true;
 }
 
-evmc::bytes32 DirectState::get_block_hash(BlockNum n) const noexcept {
-    const auto bh = block_hashes();
-    if (!bh.empty()) {
-        const auto it = std::lower_bound(bh.begin(), bh.end(), n,
-                                         [](const BlockHashEntry& e, BlockNum k) {
-                                             return e.block_number < k;
-                                         });
-        if (it != bh.end() && it->block_number == n) {
-            return std::bit_cast<evmc::bytes32>(it->block_hash);
+// SOUNDNESS-CRITICAL: an ancestor's hash is the parent hash of its child, from `header` back, and each child
+// is the header keyed by the hash the one after it names (insert_header keys a header by its own hash), so
+// every hash returned is bound to `header`. Neither the witness's block-hash section nor the numbers of the
+// headers it carries are, and neither is read.
+evmc::bytes32 DirectState::get_block_hash(const BlockHeader& header, BlockNum n) const noexcept {
+    if (n >= header.number) [[unlikely]]
+        return {};
+    evmc::bytes32 hash = header.parent_hash;
+    for (BlockNum child = header.number - 1; child > n; --child) {
+        const auto it = headers_.find(hash);
+        if (it == headers_.end()) [[unlikely]] {
+            ancestor_missing_ = true;
+            return {};
         }
+        hash = it->second.parent_hash;
     }
-    if (!created_block_hashes_.empty()) {
-        const auto it = std::lower_bound(created_block_hashes_.begin(),
-                                         created_block_hashes_.end(), n,
-                                         [](const BlockHashEntry& e, BlockNum k) {
-                                             return e.block_number < k;
-                                         });
-        if (it != created_block_hashes_.end() && it->block_number == n) {
-            return std::bit_cast<evmc::bytes32>(it->block_hash);
-        }
-    }
-    return {};
+    return hash;
 }
 
 }  // namespace zilkworm
