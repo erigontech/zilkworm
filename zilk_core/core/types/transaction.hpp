@@ -18,6 +18,14 @@
 
 namespace silkworm {
 
+class Transaction;
+
+namespace rlp {
+    enum class Eip2718Wrapping;
+    DecodingResult decode_transaction(ByteView& from, Transaction& to, Eip2718Wrapping accepted_typed_txn_wrapping,
+                                      Leftover mode) noexcept;
+}  // namespace rlp
+
 // EIP-2930: Optional access lists
 struct AccessListEntry {
     evmc::address account{};
@@ -169,7 +177,25 @@ class Transaction : public UnsignedTransaction {
     //! Reset the computed values
     void reset();
 
+    //! The bytes encode_for_signing() writes. A decoded transaction copies its own unsigned items
+    //! instead of encoding them again; a transaction built in code is encoded.
+    void signing_payload(Bytes& into) const;
+
+    //! Set by rlp decoding, empty for a transaction built in code and after reset(): views into the
+    //! decoded bytes, which must outlive this object (as `data` already requires), of the
+    //! transaction-trie value (a typed transaction's type byte and list, without any string wrapper)
+    //! and of the list items before the signature. The decoder accepts only canonical encodings, so
+    //! these are the bytes the encoders would write.
+    ByteView rlp_encoded() const noexcept { return rlp_encoded_; }
+    ByteView rlp_unsigned() const noexcept { return rlp_unsigned_; }
+
   private:
+    // Written only by decode_transaction, so they cannot go out of step with the fields.
+    friend DecodingResult rlp::decode_transaction(ByteView&, Transaction&, rlp::Eip2718Wrapping, rlp::Leftover) noexcept;
+
+    ByteView rlp_encoded_{};
+    ByteView rlp_unsigned_{};
+
     mutable std::optional<evmc::address> sender_{std::nullopt};
     mutable bool sender_recovered_ = false;
 

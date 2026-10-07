@@ -228,7 +228,8 @@ namespace rlp {
         }
     }
 
-    static DecodingResult legacy_decode_items(ByteView& from, Transaction& to) noexcept {
+    // `sig` is where the signature items start.
+    static DecodingResult legacy_decode_items(ByteView& from, Transaction& to, const uint8_t*& sig) noexcept {
         if (DecodingResult res{decode_items(from, to.nonce, to.max_priority_fee_per_gas)}; !res) {
             return res;
         }
@@ -238,6 +239,9 @@ namespace rlp {
             return res;
         }
 
+        if (from.empty()) {  // `to` is peeked, which must not read past the transaction
+            return std::unexpected{DecodingError::kInputTooShort};
+        }
         if (from[0] == kEmptyStringCode) {
             to.to = std::nullopt;
             from.remove_prefix(1);
@@ -249,7 +253,11 @@ namespace rlp {
         }
 
         intx::uint256 v;
-        if (DecodingResult res{decode_items(from, to.value, to.data, v)}; !res) {
+        if (DecodingResult res{decode_items(from, to.value, to.data)}; !res) {
+            return res;
+        }
+        sig = from.data();
+        if (DecodingResult res{decode(from, v, Leftover::kAllow)}; !res) {
             return res;
         }
         if (!to.set_v(v)) {
@@ -259,7 +267,9 @@ namespace rlp {
         return decode_items(from, to.r, to.s);
     }
 
-    static DecodingResult eip2718_decode(ByteView& from, Transaction& to) noexcept {
+    // `items` is where the list items start, `sig` where the signature items start.
+    static DecodingResult eip2718_decode(ByteView& from, Transaction& to, const uint8_t*& items,
+                                         const uint8_t*& sig) noexcept {
         if (to.type != TransactionType::kAccessList &&
             to.type != TransactionType::kDynamicFee &&
             to.type != TransactionType::kBlob &&
@@ -274,6 +284,7 @@ namespace rlp {
         if (!h->list) {
             return std::unexpected{DecodingError::kUnexpectedString};
         }
+        items = from.data();
 
         intx::uint256 chain_id;
         if (DecodingResult res{decode(from, chain_id, Leftover::kAllow)}; !res) {
@@ -295,6 +306,9 @@ namespace rlp {
             return res;
         }
 
+        if (from.empty()) {  // `to` is peeked, which must not read past the transaction
+            return std::unexpected{DecodingError::kInputTooShort};
+        }
         if (from[0] == kEmptyStringCode) {
             to.to = std::nullopt;
             from.remove_prefix(1);
@@ -322,7 +336,15 @@ namespace rlp {
             }
         }
 
-        return decode_items(from, to.odd_y_parity, to.r, to.s);
+        sig = from.data();
+        if (DecodingResult res{decode_items(from, to.odd_y_parity, to.r, to.s)}; !res) {
+            return res;
+        }
+        // The items are bounded by the enclosing string only, so the list's own length is checked here.
+        if (static_cast<size_t>(from.data() - items) != h->payload_length) {
+            return std::unexpected{DecodingError::kUnexpectedListElements};
+        }
+        return {};
     }
 
     DecodingResult decode_transaction(ByteView& from, Transaction& to, Eip2718Wrapping accepted_typed_txn_wrapping,
@@ -332,6 +354,9 @@ namespace rlp {
         if (from.empty()) {
             return std::unexpected{DecodingError::kInputTooShort};
         }
+        const uint8_t* const begin{from.data()};
+        const uint8_t* items{nullptr};
+        const uint8_t* sig{nullptr};
 
         if (0 < from[0] && from[0] < kEmptyStringCode) {  // Raw serialization of a typed transaction
             if (accepted_typed_txn_wrapping == Eip2718Wrapping::kString) {
@@ -341,7 +366,7 @@ namespace rlp {
             to.type = static_cast<TransactionType>(from[0]);
             from.remove_prefix(1);
 
-            return eip2718_decode(from, to);
+            return eip2718_decode(from, to, items, sig);
         }
 
         const auto h{decode_header(from)};
@@ -359,12 +384,15 @@ namespace rlp {
             if (mode != Leftover::kAllow && leftover) {
                 return std::unexpected{DecodingError::kInputTooLong};
             }
-            if (DecodingResult res{legacy_decode_items(from, to)}; !res) {
+            items = from.data();
+            if (DecodingResult res{legacy_decode_items(from, to, sig)}; !res) {
                 return res;
             }
             if (from.size() != leftover) {
                 return std::unexpected{DecodingError::kUnexpectedListElements};
             }
+            to.rlp_encoded_ = ByteView{begin, static_cast<size_t>(from.data() - begin)};
+            to.rlp_unsigned_ = ByteView{items, static_cast<size_t>(sig - items)};
             return {};
         }
 
@@ -378,12 +406,13 @@ namespace rlp {
             return std::unexpected{DecodingError::kInputTooShort};
         }
 
+        const uint8_t* const typed{from.data()};
         to.type = static_cast<TransactionType>(from[0]);
         from.remove_prefix(1);
 
         ByteView eip2718_view{from.substr(0, h->payload_length - 1)};
 
-        if (DecodingResult res{eip2718_decode(eip2718_view, to)}; !res) {
+        if (DecodingResult res{eip2718_decode(eip2718_view, to, items, sig)}; !res) {
             return res;
         }
 
@@ -395,6 +424,8 @@ namespace rlp {
         if (mode != Leftover::kAllow && !from.empty()) {
             return std::unexpected{DecodingError::kInputTooLong};
         }
+        to.rlp_encoded_ = ByteView{typed, h->payload_length};
+        to.rlp_unsigned_ = ByteView{items, static_cast<size_t>(sig - items)};
         return {};
     }
 
@@ -440,11 +471,46 @@ void UnsignedTransaction::encode_for_signing(Bytes& into) const {
     }
 }
 
+void Transaction::signing_payload(Bytes& into) const {
+    if (rlp_unsigned_.empty()) {
+        encode_for_signing(into);
+        return;
+    }
+    // The unsigned items are copied as they are: only the list header (and EIP-155's trailing
+    // chain id, 0, 0) is written.
+    const bool eip155{type == TransactionType::kLegacy && chain_id};
+    const size_t payload{rlp_unsigned_.size() + (eip155 ? rlp::length(*chain_id) + 2 : 0)};
+    size_t length_bytes{0};  // of the long form, in which `payload` follows the 0xf7 + length_bytes prefix
+    if (payload >= 56) {
+        for (size_t n{payload}; n != 0; n >>= 8) {
+            ++length_bytes;
+        }
+    }
+    into.reserve(into.size() + (type != TransactionType::kLegacy) + 1 + length_bytes + payload);
+    if (type != TransactionType::kLegacy) {
+        into.push_back(static_cast<uint8_t>(type));
+    }
+    if (payload < 56) {
+        into.push_back(static_cast<uint8_t>(rlp::kEmptyListCode + payload));
+    } else {
+        into.push_back(static_cast<uint8_t>(0xf7 + length_bytes));
+        for (size_t i{length_bytes}; i-- > 0;) {
+            into.push_back(static_cast<uint8_t>(payload >> (8 * i)));
+        }
+    }
+    into.append(rlp_unsigned_);
+    if (eip155) {
+        rlp::encode(into, *chain_id);
+        into.push_back(rlp::kEmptyStringCode);
+        into.push_back(rlp::kEmptyStringCode);
+    }
+}
+
 std::optional<evmc::address> Transaction::sender() const {
     if (!sender_recovered_) {
         sender_recovered_ = true;
         Bytes rlp{};
-        encode_for_signing(rlp);
+        signing_payload(rlp);
         ethash::hash256 hash{keccak256(rlp)};
 
         uint8_t signature[kHashLength * 2];
@@ -472,7 +538,7 @@ void Transaction::recover_senders(std::span<const Transaction> txns) {
         auto& p = pending.emplace_back();
         p.txn = &txn;
         Bytes rlp{};
-        txn.encode_for_signing(rlp);  // As in sender().
+        txn.signing_payload(rlp);  // As in sender().
         p.hash = keccak256(rlp);
         intx::be::unsafe::store(p.rs, txn.r);
         intx::be::unsafe::store(p.rs + kHashLength, txn.s);
@@ -505,6 +571,8 @@ void Transaction::reset() {
     sender_recovered_ = false;
     data_non_zero_bytes_ = 0;
     hash_computed_.reset();
+    rlp_encoded_ = {};
+    rlp_unsigned_ = {};
 }
 
 intx::uint512 UnsignedTransaction::maximum_gas_cost() const {

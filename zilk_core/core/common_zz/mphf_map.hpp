@@ -38,6 +38,22 @@ template <size_t N>
 #endif
     return std::memcmp(a, b, N) == 0;
 }
+
+/// The little-endian u64 at p, for the [len:u64] entry headers. With strict alignment (rv32
+/// Airbender) the memcpy is eight byte loads through a stack temporary; the builder 8-aligns every
+/// entry, so the header is read as two words instead, and a caller that keeps only the low half
+/// (the length as a size_t) loads one.
+[[gnu::always_inline]] inline uint64_t load_u64_le(const uint8_t* p) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    if ((reinterpret_cast<uintptr_t>(p) & 3) == 0) [[likely]] {
+        typedef uint32_t __attribute__((may_alias)) w32;
+        const w32* const w = reinterpret_cast<const w32*>(p);
+        return w[0] | (uint64_t{w[1]} << 32);
+    }
+#endif
+    uint64_t v; std::memcpy(&v, p, 8);
+    return v;
+}
 using ::silkworm::ByteView;
 using ::silkworm::Bytes;
 
@@ -161,7 +177,7 @@ class MphfMap {
         if (off != 0) [[likely]] {
             uint8_t* body = data_ + off + 8u;
             if (bytes_equal<KeySize>(body + KeyOffset, key)) [[likely]] {
-                uint64_t len; std::memcpy(&len, data_ + off, 8);
+                const uint64_t len = load_u64_le(data_ + off);
                 return std::span<uint8_t>{body, static_cast<size_t>(len)};
             }
         } else if (n_collisions_ > 0) [[unlikely]] {
@@ -171,21 +187,27 @@ class MphfMap {
         return std::nullopt;
     }
 
+    // Visits the data offset of every singleton slot (skipping the 0 sentinels) and then of every
+    // sidecar entry.
+    template <typename Cb>
+    void for_each_offset(Cb&& cb) const noexcept {
+        if (h_ == nullptr || n_keys_ == 0) return;
+        for (uint32_t i = 0; i < n_keys_; ++i) {
+            const uint32_t off = slot_offsets_[i];
+            if (off != 0) cb(uint64_t{off});
+        }
+        for (uint32_t i = 0; i < n_collisions_; ++i)
+            cb(collisions_[i].offset);
+    }
+
     // Visits every singleton slot (skipping the 0 sentinels) and then every sidecar entry.
     template <std::size_t KeySize = 32, std::size_t KeyOffset = 0, typename Cb>
     void for_each(Cb&& cb) const noexcept {
-        if (h_ == nullptr || n_keys_ == 0) return;
-        auto apply_cb = [&](uint64_t off) noexcept {
+        for_each_offset([&](uint64_t off) noexcept {
             uint64_t body_len; std::memcpy(&body_len, data_ + off, 8);
             uint8_t* body = data_ + off + 8u;
             cb(body + KeyOffset, std::span<uint8_t>{body, static_cast<size_t>(body_len)});
-        };
-        for (uint32_t i = 0; i < n_keys_; ++i) {
-            const uint32_t off = slot_offsets_[i];
-            if (off != 0) apply_cb(off);
-        }
-        for (uint32_t i = 0; i < n_collisions_; ++i)
-            apply_cb(collisions_[i].offset);
+        });
     }
 
   private:
@@ -198,7 +220,7 @@ class MphfMap {
         for (; it != collisions_ + n_collisions_ && it->key == k8; ++it) {
             uint8_t* body = data_ + it->offset + 8u;
             if (bytes_equal<KeySize>(body + KeyOffset, key)) {
-                uint64_t len; std::memcpy(&len, data_ + it->offset, 8);
+                const uint64_t len = load_u64_le(data_ + it->offset);
                 return std::span<uint8_t>{body, static_cast<size_t>(len)};
             }
         }
@@ -336,7 +358,7 @@ template <size_t KeySize, size_t KeyOffset = 0>
             sys_println("MphfMapHeader: validate_mphf: entry header out of data region");
             return false;
         }
-        uint64_t body_len; std::memcpy(&body_len, data + off, 8);
+        const uint64_t body_len = load_u64_le(data + off);
         if (body_len > data_size - off - 8u) [[unlikely]] {
             sys_println("MphfMapHeader: validate_mphf: entry body out of data region");
             return false;

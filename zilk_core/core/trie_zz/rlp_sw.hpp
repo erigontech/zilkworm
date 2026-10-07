@@ -71,9 +71,56 @@ inline uint8_t* encode_hp_path(uint8_t* out, const uint8_t* nib, size_t n, bool 
     const bool odd = (n & 1);
     const uint8_t flag = (leaf ? 0x2 : 0x0) | (odd ? 0x1 : 0x0);
     *out++ = static_cast<uint8_t>((flag << 4) | (odd ? (n ? (nib[0] & 0x0F) : 0) : 0));
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    // nib is a nibbles64 array (4-aligned, 64 bytes). With x a word of it masked to low nibbles,
+    // t = x << 4 | x >> 8 holds n0 n1 in byte 0, n1 n2 in byte 1 and n2 n3 in byte 2.
+    typedef uint32_t __attribute__((may_alias)) w32;
+    const w32* w = reinterpret_cast<const w32*>(std::assume_aligned<4>(nib));
+    size_t bytes = n / 2;
+    if (!odd) {
+        for (; bytes >= 2; bytes -= 2, out += 2) {
+            const uint32_t x = *w++ & 0x0F0F0F0Fu;
+            const uint32_t t = (x << 4) | (x >> 8);
+            out[0] = static_cast<uint8_t>(t);
+            out[1] = static_cast<uint8_t>(t >> 16);
+        }
+        if (bytes != 0) {
+            const uint32_t x = *w & 0x0F0F0F0Fu;
+            *out++ = static_cast<uint8_t>((x << 4) | (x >> 8));
+        }
+    } else {
+        // Pairs start at nib[1]: n1 n2 is byte 1 of t, and n3 (t >> 24) pairs with the next word's n0.
+        uint32_t x = *w++ & 0x0F0F0F0Fu;
+        for (; bytes >= 2; bytes -= 2, out += 2) {
+            const uint32_t y = *w++ & 0x0F0F0F0Fu;
+            const uint32_t t = (x << 4) | (x >> 8);
+            out[0] = static_cast<uint8_t>(t >> 8);
+            out[1] = static_cast<uint8_t>((t >> 24) | y);
+            x = y;
+        }
+        if (bytes != 0) *out++ = static_cast<uint8_t>(((x << 4) | (x >> 8)) >> 8);
+    }
+#else
     size_t i = odd ? 1 : 0;
     for (; i + 1 < n; i += 2) *out++ = static_cast<uint8_t>((nib[i] << 4) | (nib[i + 1] & 0x0F));
     if (i < n) *out++ = static_cast<uint8_t>((nib[i] << 4));  // last high nibble only
+#endif
+    return out;
+}
+
+// Writes an RLP string header for a payload of `len` bytes at `out`, returns the position after it.
+inline uint8_t* encode_string_header(uint8_t* out, size_t len) noexcept {
+    if (len < 56) {
+        *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + len);
+    } else if (len < 256) {
+        *out++ = 0xB8;
+        *out++ = static_cast<uint8_t>(len);
+    } else {
+        auto be = endian::to_big_compact(len);
+        *out++ = static_cast<uint8_t>(0xB7 + be.size());
+        std::memcpy(out, be.data(), be.size());
+        out += be.size();
+    }
     return out;
 }
 
@@ -83,23 +130,107 @@ inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, 
     uint8_t flag = in[0] >> 4;
     is_leaf = (flag & 0x2) != 0;
     const bool odd = (flag & 0x1) != 0;
-    uint8_t nib0 = in[0] & 0x0F;
-
-    size_t pos = 1;
-    out_len = 0;
-
-    if (odd) {
-        out[out_len++] = nib0 & 0x0F;
+    // At most 64 nibbles (odd + 2 * (in.size() - 1) <= 64), checked once rather than per byte.
+    if (in.size() - 1 > (odd ? 31u : 32u)) [[unlikely]] return false;
+    uint8_t* o = out.data();
+    if (odd) *o++ = in[0] & 0x0F;
+    const uint8_t* const end = in.data() + in.size();
+#pragma GCC unroll 4
+    for (const uint8_t* p = in.data() + 1; p != end; ++p, o += 2) {
+        const uint8_t b = *p;  // read once: out may alias in as far as the compiler knows
+        o[0] = static_cast<uint8_t>(b >> 4);
+        o[1] = static_cast<uint8_t>(b & 0x0F);
     }
-    for (; pos < in.size(); ++pos) {
-        if (out_len > 62) [[unlikely]] return false;
-        out[out_len++] = (in[pos] >> 4) & 0x0F;
-        out[out_len++] = in[pos] & 0x0F;
-    }
+    out_len = static_cast<uint8_t>(odd + 2 * (in.size() - 1));
     return true;
 }
 
-inline ByteView encode_branch(const BranchNode& b) {
+// The index of a nonzero mask's lowest set bit. rv32im has no count-trailing-zeros instruction and
+// std::countr_zero is a __ctzsi2 call there: isolate the bit and look its index up by a De Bruijn
+// multiply instead.
+[[gnu::always_inline]] inline unsigned lowest_set_bit(uint32_t m) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    static constexpr uint8_t kIndex[32] = {0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
+                                           31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9};
+    return kIndex[((m & (0u - m)) * 0x077CB531u) >> 27];
+#else
+    return static_cast<unsigned>(std::countr_zero(m));
+#endif
+}
+
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+// Copies the 32 bytes at the 8-aligned src to dst, where dst & 3 == Off (1..3), little endian. A dst
+// at 2 mod 4 takes each source word as two halfwords. An odd dst takes the bytes before its first
+// word boundary, then seven words each shifted together from two source words, then the last Off
+// bytes.
+template <unsigned Off>
+[[gnu::always_inline]] inline void copy32_at_phase(uint8_t* dst, const uint8_t* src) noexcept {
+    typedef uint32_t __attribute__((may_alias)) w32;
+    typedef uint16_t __attribute__((may_alias)) h16;
+    // Each source word is loaded once, ahead of the stores that use it: for all the compiler knows
+    // a store may alias src, and it loaded the word again after one.
+    const w32* const s = reinterpret_cast<const w32*>(std::assume_aligned<8>(src));
+    if constexpr (Off == 2) {
+        h16* const d = reinterpret_cast<h16*>(dst);
+        for (size_t k = 0; k < 8; ++k) {
+            const uint32_t v = s[k];
+            d[2 * k] = static_cast<uint16_t>(v);
+            d[2 * k + 1] = static_cast<uint16_t>(v >> 16);
+        }
+    } else {
+        constexpr unsigned kLead = 4 - Off;
+        uint32_t cur = s[0];
+        for (unsigned k = 0; k < kLead; ++k) dst[k] = static_cast<uint8_t>(cur >> (8 * k));
+        w32* const d = reinterpret_cast<w32*>(dst + kLead);
+        for (size_t k = 0; k < 7; ++k) {
+            const uint32_t next = s[k + 1];
+            d[k] = (cur >> (8 * kLead)) | (next << (8 * Off));
+            cur = next;
+        }
+        for (unsigned k = 0; k < Off; ++k) dst[kLead + 28 + k] = static_cast<uint8_t>(cur >> (8 * (kLead + k)));
+    }
+}
+
+// Copies the 32 bytes at the 8-aligned src to dst at any alignment, with a word store wherever dst
+// allows one: the guest's memcpy takes ~60 cycles when dst is not word-aligned.
+[[gnu::always_inline]] inline void copy32_from_aligned8(uint8_t* dst, const uint8_t* src) noexcept {
+    switch (reinterpret_cast<uintptr_t>(dst) & 3) {
+        case 0: {
+            typedef uint32_t __attribute__((may_alias)) w32;
+            const w32* const s = reinterpret_cast<const w32*>(std::assume_aligned<8>(src));
+            w32* const d = reinterpret_cast<w32*>(dst);
+            for (size_t k = 0; k < 8; ++k) d[k] = s[k];
+            break;
+        }
+        case 1:
+            copy32_at_phase<1>(dst, src);
+            break;
+        case 2:
+            copy32_at_phase<2>(dst, src);
+            break;
+        default:
+            copy32_at_phase<3>(dst, src);
+            break;
+    }
+}
+#endif
+
+// Writes branch slot i's 32-byte hash reference to dst.
+[[gnu::always_inline]] inline void put_child_hash(uint8_t* dst, const BranchNode& b, size_t i) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    // child_ptr points into the witness at any alignment; a slot rewritten since holds its hash in
+    // child[i], which is 8-aligned.
+    if (b.child_ptr[i] == nullptr) [[likely]] {
+        copy32_from_aligned8(dst, b.child[i].bytes);
+        return;
+    }
+#endif
+    std::memcpy(dst, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+}
+
+// Always inlined (the guest calls it from encode_line() only): grown by the inline hash copies
+// above, it was otherwise compiled out of line and reached by a call.
+[[gnu::always_inline]] inline ByteView encode_branch(const BranchNode& b) {
     if (b.mask == 0) {
         return empty;
     }
@@ -124,10 +255,10 @@ inline ByteView encode_branch(const BranchNode& b) {
                 ((lens[0] ^ 0x20202020u) | (lens[1] ^ 0x20202020u) | (lens[2] ^ 0x20202020u) |
                  (lens[3] ^ 0x20202020u)) == 0) {
                 for (unsigned dirty = b.dirty; dirty != 0; dirty &= dirty - 1) {
-                    const unsigned i = static_cast<unsigned>(std::countr_zero(dirty));
+                    const unsigned i = lowest_set_bit(dirty);
                     uint8_t* const p = out + 3 + 33 * i;
                     *p = 0xa0;
-                    std::memcpy(p + 1, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+                    put_child_hash(p + 1, b, i);
                 }
                 return ByteView{out, b.orig_size};
             }
@@ -145,7 +276,7 @@ inline ByteView encode_branch(const BranchNode& b) {
                         *p = rlp::kEmptyStringCode;
                     } else if (len == 32) {
                         *p = 0xa0;
-                        std::memcpy(p + 1, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+                        put_child_hash(p + 1, b, i);
                     } else {
                         std::memcpy(p, b.child[i].bytes, len);
                     }
@@ -191,46 +322,73 @@ inline ByteView encode_branch(const BranchNode& b) {
     return ByteView{begin, static_cast<size_t>(p - begin)};
 }
 
+// The number of leading keccak blocks of `encoded`, the encode_branch() of `b`, that the state saved
+// for it in the pool already covers, or 0 when none does. A nonzero result consumes the saved state:
+// the caller must resume from it, now, with the digest of `encoded` as the result.
+//
+// The saved state is that of the first 136 * blocks bytes of the witness node b.orig (see
+// keccak_prefix.hpp). `encoded` is that node with the hash bytes of the dirty slots rewritten: the
+// copy-and-patch path of encode_branch(), which b.orig != nullptr and an unchanged layout select,
+// and which touches slot i only from byte 4 + 33 i on, a slot's header byte staying 0xa0. So the
+// bytes before the first dirty slot are the node's, and the saved state may be used if none of the
+// slots that begin inside the blocks it covers is dirty (kHeadSlots). That a clean slot is unchanged
+// does not rest on the update that asked for the snapshot: every change to a slot sets its dirty bit,
+// and the pool row is found by b.orig. A node with no dirty slot is the witness node and resumes too.
+[[gnu::always_inline]] inline unsigned take_resumable_blocks(const BranchNode& b, size_t row, ByteView encoded) noexcept {
+    if (b.orig == nullptr || kprefix::tag_orig[row] != b.orig) return 0;
+    // The node as encode_branch() copied it: the whole witness node, laid out as it was. A node of
+    // kNodeSize bytes has no room for a slot that is not a hash reference, so this is the full branch.
+    if (b.orig_size != kprefix::kNodeSize ||
+        !b.same_layout_as_orig() || (reinterpret_cast<uintptr_t>(b.orig) & 7) != 0 ||
+        encoded.size() != kprefix::kNodeSize ||
+        encoded.data() != static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31))
+        return 0;
+    const unsigned blocks = kprefix::tag_sb[row];
+    if ((b.dirty & kprefix::kHeadSlots[blocks]) != 0) return 0;
+    kprefix::tag_orig[row] = nullptr;
+    return blocks;
+}
+
+// Writes the list header of a leaf or extension payload at `out`, returns the position after it. A payload
+// below 256 bytes takes the one-byte long form without to_big_compact; a longer one (a leaf value of up to
+// kMaxLeafValueSize) goes through encode_list_header.
+inline uint8_t* encode_short_node_list_header(uint8_t* out, size_t payload) noexcept {
+    if (payload < 56) {
+        *out++ = static_cast<uint8_t>(rlp::kEmptyListCode + payload);
+    } else if (payload < 256) {
+        *out++ = 0xF8;
+        *out++ = static_cast<uint8_t>(payload);
+    } else {
+        out = encode_list_header(out, payload);
+    }
+    return out;
+}
+
+// The HP path's flag byte is below 0x80 (flag <= 3), so a one-byte path (an empty or one-nibble one) is its own RLP
+// encoding and a longer one has a one-byte string header (at most 33 bytes). Written in place, the path
+// needs no stack copy.
+inline uint8_t* encode_hp_path_rlp(uint8_t* out, const nibbles64& path, bool leaf) noexcept {
+    const size_t hp_len = 1 + path.len / 2;
+    if (hp_len != 1) *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + hp_len);
+    return encode_hp_path(out, path.nib.data(), path.len, leaf);
+}
+
+inline size_t hp_path_rlp_length(const nibbles64& path) noexcept {
+    const size_t hp_len = 1 + path.len / 2;
+    return hp_len + (hp_len != 1 ? 1 : 0);
+}
+
 inline ByteView encode_ext(const ExtensionNode& e) {
     if (e.child_len == 0) {
         return empty;
     }
 
-    // HP-encode path on the stack.
-    uint8_t hpbuf[1 + 32];
-    uint8_t* hp_end = encode_hp_path(hpbuf, e.path.nib.data(), e.path.len, /*leaf*/ false);
-    const size_t hp_len = static_cast<size_t>(hp_end - hpbuf);
-
-    // HP path RLP length.
-    const size_t hp_rlp_len = hp_len + ((hp_len != 1 || hpbuf[0] >= rlp::kEmptyStringCode) ? 1 : 0);
-
     // Child RLP length.
     const size_t child_rlp_len = (e.child_len == 32) ? 33 : e.child_len;
+    const size_t payload = hp_path_rlp_length(e.path) + child_rlp_len;
 
-    const size_t payload = hp_rlp_len + child_rlp_len;
-    const size_t hdr_sz = (payload < 56) ? 1 : 1 + intx::count_significant_bytes(payload);
-    const size_t total = hdr_sz + payload;
-
-    uint8_t* out = static_buffer;
-
-    // List header.
-    if (payload < 56) {
-        *out++ = static_cast<uint8_t>(rlp::kEmptyListCode + payload);
-    } else {
-        auto be = endian::to_big_compact(payload);
-        *out++ = static_cast<uint8_t>(0xF7 + be.size());
-        std::memcpy(out, be.data(), be.size());
-        out += be.size();
-    }
-
-    // HP path: RLP string header + bytes.
-    if (hp_len == 1 && hpbuf[0] < rlp::kEmptyStringCode) {
-        *out++ = hpbuf[0];
-    } else {
-        *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + hp_len);
-        std::memcpy(out, hpbuf, hp_len);
-        out += hp_len;
-    }
+    uint8_t* out = encode_short_node_list_header(static_buffer, payload);
+    out = encode_hp_path_rlp(out, e.path, /*leaf*/ false);
 
     // Child.
     if (e.child_len == 32) {
@@ -242,65 +400,33 @@ inline ByteView encode_ext(const ExtensionNode& e) {
         out += e.child_len;
     }
 
-    return ByteView{static_buffer, total};
+    return ByteView{static_buffer, static_cast<size_t>(out - static_buffer)};
 }
 
 inline ByteView encode_leaf(const LeafNode& l) {
-    // HP-encode path on the stack.
-    uint8_t hpbuf[1 + 32];
-    uint8_t* hp_end = encode_hp_path(hpbuf, l.path.nib.data(), l.path.len, /*leaf*/ true);
-    const size_t hp_len = static_cast<size_t>(hp_end - hpbuf);
+    // Value RLP length: a single byte below 0x80 is its own encoding.
+    const size_t vlen = l.value.size();
+    const bool val_single = vlen == 1 && l.value[0] < rlp::kEmptyStringCode;
+    const size_t val_rlp_len = val_single ? 1
+                               : vlen < 56 ? 1 + vlen
+                               : vlen < 256 ? 2 + vlen
+                                            : 1 + intx::count_significant_bytes(vlen) + vlen;
+    const size_t payload = hp_path_rlp_length(l.path) + val_rlp_len;
 
-    // HP path RLP length.
-    const size_t hp_rlp_len = hp_len + ((hp_len != 1 || hpbuf[0] >= rlp::kEmptyStringCode) ? 1 : 0);
-
-    // Value RLP length.
-    const size_t val_rlp_len = rlp::length(l.value);
-
-    const size_t payload = hp_rlp_len + val_rlp_len;
-    const size_t hdr_sz = (payload < 56) ? 1 : 1 + intx::count_significant_bytes(payload);
-    const size_t total = hdr_sz + payload;
-
-    uint8_t* out = static_buffer;
-
-    // List header.
-    if (payload < 56) {
-        *out++ = static_cast<uint8_t>(rlp::kEmptyListCode + payload);
-    } else {
-        auto be = endian::to_big_compact(payload);
-        *out++ = static_cast<uint8_t>(0xF7 + be.size());
-        std::memcpy(out, be.data(), be.size());
-        out += be.size();
-    }
-
-    // HP path.
-    if (hp_len == 1 && hpbuf[0] < rlp::kEmptyStringCode) {
-        *out++ = hpbuf[0];
-    } else {
-        *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + hp_len);
-        std::memcpy(out, hpbuf, hp_len);
-        out += hp_len;
-    }
+    uint8_t* out = encode_short_node_list_header(static_buffer, payload);
+    out = encode_hp_path_rlp(out, l.path, /*leaf*/ true);
 
     // Value.
-    if (l.value.empty()) {
-        *out++ = rlp::kEmptyStringCode;
-    } else if (l.value.size() == 1 && l.value[0] < rlp::kEmptyStringCode) {
+    if (val_single) {
         *out++ = l.value[0];
     } else {
-        if (l.value.size() < 56) {
-            *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + l.value.size());
-        } else {
-            auto be = endian::to_big_compact(l.value.size());
-            *out++ = static_cast<uint8_t>(0xB7 + be.size());
-            std::memcpy(out, be.data(), be.size());
-            out += be.size();
-        }
-        std::memcpy(out, l.value.data(), l.value.size());
-        out += l.value.size();
+        out = encode_string_header(out, vlen);
+        // An empty value has a null data pointer, which memcpy must not be given even for zero bytes.
+        if (vlen != 0) std::memcpy(out, l.value.data(), vlen);
+        out += vlen;
     }
 
-    return ByteView{static_buffer, total};
+    return ByteView{static_buffer, static_cast<size_t>(out - static_buffer)};
 }
 
 // ---------------------------------------------

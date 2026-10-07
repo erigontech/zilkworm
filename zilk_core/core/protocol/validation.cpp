@@ -297,10 +297,24 @@ uint64_t calc_excess_blob_gas(const BlockHeader& header, const BlockHeader& pare
 }
 
 evmc::bytes32 compute_transaction_root(const BlockBody& body) {
-    static constexpr auto kEncoder = [](Bytes& to, const Transaction& txn) {
-        rlp::encode(to, txn, /*wrap_eip2718_into_string=*/false);
-    };
-    return trie::root_hash(body.transactions, kEncoder);
+    const std::vector<Transaction>& txns{body.transactions};
+    if (!std::ranges::all_of(txns, [](const Transaction& txn) { return !txn.rlp_encoded().empty(); })) {
+        static constexpr auto kEncoder = [](Bytes& to, const Transaction& txn) {
+            rlp::encode(to, txn, /*wrap_eip2718_into_string=*/false);
+        };
+        return trie::root_hash(txns, kEncoder);
+    }
+    // Decoded transactions: the trie values are their own bytes, so they need no encoding
+    // (as in trie::root_hash, the builder borrows each until the next leaf).
+    trie::HashBuilder hb;
+    Bytes index_rlp;
+    for (size_t j{0}; j < txns.size(); ++j) {
+        const size_t index{trie::adjust_index_for_rlp(j, txns.size())};
+        index_rlp.clear();
+        rlp::encode(index_rlp, index);
+        hb.add_leaf(trie::unpack_nibbles(index_rlp), txns[index].rlp_encoded());
+    }
+    return hb.root_hash();
 }
 
 std::optional<evmc::bytes32> compute_withdrawals_root(const BlockBody& body) {

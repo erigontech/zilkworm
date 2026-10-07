@@ -79,7 +79,6 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
     auto list{payload.substr(0, hh.payload_length)};
 
     bool is_leaf = false;
-    std::array<uint8_t, 64> path;
     uint8_t plen = 0;
     ByteView second{};
 
@@ -87,7 +86,9 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
     if (!line_ptr) [[unlikely]] return false;
     GridLine& line = *line_ptr;
 
-    Kind kind = decode_node(list, line.branch, is_leaf, path, plen, second);
+    // A leaf or extension path is decoded straight into the line (both nodes start with their nibbles64
+    // path); decode_node writes no branch field for those.
+    Kind kind = decode_node(list, line.branch, is_leaf, line.leaf.path.nib, plen, second);
     if (kind == kBranch) {
         // emplace_line initializes no union member and decode_node writes only the pre-existing BranchNode fields:
         // reset the origin fields explicitly.
@@ -108,21 +109,38 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
         pop_back();
         return false;
     }
+    // transform_line of the branch line emplace_line made, in place: its consumed is the parent's plus 1.
+    const unsigned parent_consumed = line.consumed - 1u;
+    // Keys are 64 nibbles: a leaf's path ends its key, and an extension's leaves at least one nibble for
+    // the branch below it. A witness node is bound only to the hash that referenced it (a storage trie is
+    // walked before the account trie checks its root), and the leaf split in calc_root_from_updates relies
+    // on this: a shorter leaf path wraps old_leaf.path.len there.
+    if (is_leaf ? parent_consumed + plen != 64 : (plen == 0 || parent_consumed + plen > 63)) [[unlikely]] {
+#ifndef NDEBUG
+        failed_ = true;
+#endif
+        pop_back();
+        return false;
+    }
+    line.leaf.path.len = plen;
     if (is_leaf) {
-        LeafNode l{nibbles64{plen, path}, static_cast<uint8_t>(parent_slot_index), second};
-        transform_line(line, std::move(l));
+        line.leaf.parent_slot = static_cast<uint8_t>(parent_slot_index);
+        line.leaf.value = second;
+        line.consumed = static_cast<uint8_t>(parent_consumed);
+        line.kind = kLeaf;
     } else {
-        ExtensionNode ext{nibbles64{plen, path}, {}};
         // Reject an oversized child that would overflow child (a 32-byte bytes32).
-        if (second.size() > sizeof(ext.child.bytes)) {
+        if (second.size() > sizeof(line.ext.child.bytes)) {
 #ifndef NDEBUG
             failed_ = true;
 #endif
+            pop_back();
             return false;
         }
-        std::copy(second.cbegin(), second.cend(), ext.child.bytes);
-        ext.child_len = static_cast<uint8_t>(second.size());
-        transform_line(line, std::move(ext));
+        std::copy(second.cbegin(), second.cend(), line.ext.child.bytes);
+        line.ext.child_len = static_cast<uint8_t>(second.size());
+        line.consumed = static_cast<uint8_t>(plen + parent_consumed);
+        line.kind = kExt;
     }
     return true;
 }
@@ -288,32 +306,46 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         }
         return;
     }
-
-    const auto& encoded = encode_line(grid_line);
-    bytes32 hash;
-    ByteView node_ref;
-    if (encoded.size() >= 32) {
-        hash = keccak_bytes(encoded);
-        node_ref = ByteView{hash.bytes, 32};
-    } else {
-        node_ref = encoded;
+    // The root has no parent to take its reference: calc_root_from_updates() encodes and hashes it.
+    if (grid_.size() <= 1) {
+        return;
     }
-    if (grid_.size() > 1) {
-        auto& parent = grid_[grid_line.parent_depth];
-        parent.modified = true;
-        switch (parent.kind) {
-            case kBranch:
-                parent.branch.set_child(grid_line.parent_slot, node_ref);
-                parent.child_depth[grid_line.parent_slot] = 0;  // clear
-                break;
-            case kExt:
-                parent.ext.set_child(node_ref);
-                parent.child_depth[grid_line.parent_slot] = 0;  // clear
-                break;
-            default:
-                std::unreachable();
-        }
-        delete_line(depth);
+
+    const ByteView encoded = encode_line(grid_line);
+    // A full branch the lookup saved the keccak state of the leading blocks of, which this update left as
+    // they were, is hashed from that state.
+    const size_t row = depth & (kprefix::kRows - 1);
+    const unsigned resume_blocks =
+        grid_line.kind == kBranch ? take_resumable_blocks(grid_line.branch, row, encoded) : 0;
+    const unsigned slot = grid_line.parent_slot;
+    auto& parent = grid_[grid_line.parent_depth];
+    parent.modified = true;
+    parent.child_depth[slot] = 0;  // clear
+    // The line goes before its reference is written into the parent (its encoding is in
+    // static_buffer, and the parent does not move): the keccak of an encoding of 32 bytes or more,
+    // which returns straight into the parent's slot, then ends fold_line() with nothing live across it.
+    delete_line(depth);
+    switch (parent.kind) {
+        case kBranch:
+            if (resume_blocks != 0) {
+                parent.branch.set_child_hash_resumed(slot, encoded, row, resume_blocks);
+            } else if (encoded.size() >= 32) {
+                parent.branch.set_child_hash(slot, encoded);
+            } else {
+                parent.branch.set_child(slot, encoded);
+            }
+            break;
+        case kExt:
+            if (resume_blocks != 0) {
+                parent.ext.set_child_hash_resumed(encoded, row, resume_blocks);
+            } else if (encoded.size() >= 32) {
+                parent.ext.set_child_hash(encoded);
+            } else {
+                parent.ext.set_child(encoded);
+            }
+            break;
+        default:
+            std::unreachable();
     }
 }
 
@@ -531,6 +563,10 @@ inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& 
 // Returns kEmpty when the slot is empty - 0x80 (caller should insert here),
 // kMissing when a 32-byte hash ref has no entry in the node store
 // (witness incomplete — caller should hard-fail), kSuccess otherwise.
+// During the descent for an update that writes (snap_writes_), search_nibbles_ at search_nib_cursor_ is the
+// slot being unfolded, and a full branch verified here keeps the keccak state of its blocks before the first
+// slot the update changes in it, for fold_line() to resume from. Updates come in key order, so that slot
+// is the next nibble of the key (which ends after nibble 63).
 template <bool DeletionEnabled>
 inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     if (slot > 15) [[unlikely]] {
@@ -582,7 +618,11 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         bytes32 ck;
         const uint8_t* hs = grid_line.branch.child_ptr[slot] ? grid_line.branch.child_ptr[slot] : child.bytes;
         std::memcpy(ck.bytes, hs, 32);
-        auto rlp_opt = state_->find_node_rlp(ck);
+        auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
+            return kprefix::SnapRequest{snap_writes_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
+                                                                                : kprefix::kNoSlot,
+                                        grid_.size() & (kprefix::kRows - 1)};
+        });
         if (!rlp_opt) [[unlikely]] {
             ++missing_count_;
 #ifndef NDEBUG
