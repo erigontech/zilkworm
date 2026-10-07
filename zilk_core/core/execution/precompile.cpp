@@ -5,6 +5,7 @@
 #include "precompile.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #include <limits>
@@ -30,8 +31,10 @@ static void right_pad(Bytes& str, const size_t min_size) noexcept {
 uint64_t ecrec_gas(ByteView, evmc_revision) noexcept { return 3'000; }
 
 std::optional<Bytes> ecrec_run(ByteView input) noexcept {
-    Bytes d{input};
-    right_pad(d, 128);
+    // Only the first 128 bytes are read, zero-padded. A copy of the whole input would allocate its
+    // size on every call, which costs 3000 gas whatever the size, on a guest heap that never frees.
+    std::array<uint8_t, 128> d{};
+    std::copy_n(input.data(), std::min(input.size(), d.size()), d.begin());
 
     const auto v{intx::be::unsafe::load<intx::uint256>(&d[32])};
     const auto r{intx::be::unsafe::load<intx::uint256>(&d[64])};
