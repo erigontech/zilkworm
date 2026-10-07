@@ -4,6 +4,7 @@
 
 #include "state_transition.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cassert>
 #include <cstring>
@@ -457,18 +458,50 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
 }
 
 namespace {
+    // The distinct keys of a record's reads of slots the witness does not carry (the list from `head`, see
+    // AbsentRead), less those `written` holds: a slot the block wrote goes into the walk as a write, whose
+    // missing pre-value claims the key absent already. Distinct before they are hashed, as each transaction
+    // that reads a slot reads it from the witness again.
+    void absent_read_keys(std::span<const zilkworm::AbsentRead> reads, uint32_t head,
+                          const FlatHashMap<bytes32, bytes32>* written, std::vector<bytes32>& keys) {
+        keys.clear();
+        for (uint32_t i = head; i != 0; i = reads[i - 1].prev) {
+            const bytes32& key = reads[i - 1].key;
+            if (written == nullptr || !written->contains(key)) keys.push_back(key);
+        }
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    }
+
+    // A read-only update of a slot read as zero: the claim that its key is absent, which the walk checks
+    // where the key leaves the trie (and fails at the key's leaf if the witness left the slot out).
+    template <class Updates>
+    void emplace_absent_read(Updates& storage_updates, const bytes32& key) {
+        auto& node = storage_updates.emplace_back(keccak_bytes32(key));
+        node.buf[0] = 0x80;
+        node.self_initial_len = 1;
+    }
+
     // The witness slots of an account whose storage the block wiped are in no post-state, but the block can
-    // have read them first: walks them read-only against the root the account's pre-state leaf binds.
+    // have read them first: walks them read-only against the root the account's pre-state leaf binds, with
+    // the reads of slots the witness does not carry made under that root.
     // Out of line: since Cancun no account a block wipes carries witness slots.
     [[gnu::noinline]] bool wiped_storage_bound(const zilkworm::WipedStorage& wiped,
+                                               std::span<const zilkworm::AbsentRead> absent_reads,
                                                mpt::GridMPT<true>& storage_trie,
-                                               std::vector<mpt::TrieNodeFlat>& storage_spill) {
-        zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(wiped.slots.size(), storage_spill);
+                                               std::vector<mpt::TrieNodeFlat>& storage_spill,
+                                               std::vector<bytes32>& absent_keys) {
+        absent_read_keys(absent_reads, wiped.absent_reads, nullptr, absent_keys);
+        zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(wiped.slots.size() + absent_keys.size(),
+                                                                   storage_spill);
         for (const auto& slot : wiped.slots) {
             const auto& key = *reinterpret_cast<const bytes32*>(slot.key);
             auto& node = storage_updates.emplace_back(keccak_bytes32(key));
             node.self_initial_len = static_cast<uint8_t>(rlp::encode_into_small(
                 node.buf + 0, zeroless_view(ByteView{slot.initial, 32})));
+        }
+        for (const auto& key : absent_keys) {
+            emplace_absent_read(storage_updates, key);
         }
         std::sort(storage_updates.data(), storage_updates.data() + storage_updates.size());
         storage_trie.reset(wiped.storage_root);
@@ -516,12 +549,14 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     auto end_created_hashes = created_acc_hashes.end();
 
     std::vector<mpt::TrieNodeFlat> storage_spill;
+    const auto absent_reads = direct_state.absent_reads();
+    std::vector<bytes32> absent_keys;
 
     mpt::GridMPT<true> storage_trie{direct_state, kEmptyRoot};
 
     // A deleted or recreated account leaves none of its witness slots in the post-state.
     for (const auto& wiped : direct_state.wiped_storage()) {
-        if (!wiped_storage_bound(wiped, storage_trie, storage_spill)) [[unlikely]] {
+        if (!wiped_storage_bound(wiped, absent_reads, storage_trie, storage_spill, absent_keys)) [[unlikely]] {
             sys_println("ERROR: storage walk of a wiped account failed");
             return false;
         }
@@ -559,7 +594,11 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                     node.current_len = 1;
                     ++it_existing_hashes;
                 } else {
-                    // Created-then-destructed: no pre-trie leaf.
+                    // An address the witness does not carry, read as absent (or created and destructed
+                    // again): read-only, with no pre-value. The walk checks the claim that the key is
+                    // absent where it leaves the trie, and fails at its leaf if the witness left out an
+                    // account the trie has.
+                    acc_updates.emplace_back(std::bit_cast<bytes32>(it_created_hashes->addr_hash));
                     ++it_created_hashes;
                 }
                 continue;
@@ -587,22 +626,29 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
 #endif
 
         // Walk pre-state slots even with no SSTORE: binds slot.initial to keccak(key) under pa->storage_root.
+        // So do the reads of slots the witness does not carry, all made under that root: one that came
+        // before a wipe is in the wiped storage walked above.
         const bool has_pre_slots = !existing_slots.empty();
         const bool has_created = (created_slots != nullptr && !created_slots->empty());
+        const bool has_absent_reads = pa->absent_reads != 0;
         bytes32 storage_root;
 #if USE_HASH_KEY
-        if (has_pre_slots || has_created || rec_count > 0) {
+        if (has_pre_slots || has_created || has_absent_reads || rec_count > 0) {
 #else
-        if (has_pre_slots || has_created) {
+        if (has_pre_slots || has_created || has_absent_reads) {
 #endif
             storage_root = std::bit_cast<bytes32>(pa->storage_root);
+            absent_keys.clear();
+            if (has_absent_reads) [[unlikely]] {
+                absent_read_keys(absent_reads, pa->absent_reads, created_slots, absent_keys);
+                pa->absent_reads = 0;
+            }
 #if USE_HASH_KEY
-            const std::size_t need = existing_slots.size() + rec_count +
+            const std::size_t need = existing_slots.size() + rec_count + absent_keys.size() +
                                      (created_slots != nullptr ? created_slots->size() : 0);
 #else
-            const std::size_t need = existing_slots.size() + (created_slots != nullptr
-                                                                  ? created_slots->size()
-                                                                  : 0);
+            const std::size_t need = existing_slots.size() + absent_keys.size() +
+                                     (created_slots != nullptr ? created_slots->size() : 0);
 #endif
             zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(need, storage_spill);
             for (const auto& slot : existing_slots) {
@@ -623,6 +669,9 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                     node.current_len = static_cast<uint8_t>(rlp::encode_into_small(
                         node.buf + 40, zeroless_view(ByteView{v.bytes, 32})));
                 }
+            }
+            for (const auto& key : absent_keys) {
+                emplace_absent_read(storage_updates, key);
             }
 #if USE_HASH_KEY
             if (rec_slots != nullptr) {
@@ -692,9 +741,9 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
 
         if (!readonly) {
 #if USE_HASH_KEY
-            if (!has_pre_slots && !has_created && rec_count == 0) {
+            if (!has_pre_slots && !has_created && !has_absent_reads && rec_count == 0) {
 #else
-            if (!has_pre_slots && !has_created) {
+            if (!has_pre_slots && !has_created && !has_absent_reads) {
 #endif
                 storage_root = std::bit_cast<bytes32>(pa->storage_root);
             }
@@ -790,6 +839,8 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     sys_println(std::format("New Root: {}", to_hex(new_root)));
     // A failed walk returns a zero root, which would match a header committing to one.
     const bool ok = !acc_trie.failed() && new_root == header.state_root;
+    // Walked: every record's list was taken in the walks above (a deleted record's with its wiped storage).
+    direct_state.clear_absent_reads();
     for (const auto& addr : direct_state.changed_addresses_journal()) {
         if (direct_state.is_deleted(addr) || (clear_empty && direct_state.is_empty_account(addr))) continue;
         Account* pa = direct_state.read_account(addr);
