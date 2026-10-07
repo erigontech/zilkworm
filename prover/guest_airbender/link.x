@@ -112,7 +112,10 @@ SECTIONS
     *(.rodata._bls_p_lo)
     *(.rodata._bls_np_lo)
     *(.rodata._bls_p_hi)
-    ASSERT(. <= __global_pointer$ + 2048 - 256, "the gp window overflows above gp");
+    /* ld relaxes an object above gp only if its end (one past its last byte) is at most
+       gp + 1791 (2047 less the 256-byte section alignment): a window object ending at gp + 1792
+       would silently keep its auipc pair. */
+    ASSERT(. < __global_pointer$ + 1792, "the gp window overflows above gp");
 
     *(.srodata .srodata.*);
     *(.rodata .rodata.*);
@@ -236,6 +239,11 @@ BUG(riscv-rt): .bss is not 4-byte aligned");
 
 ASSERT(_sheap % 4 == 0, "
 BUG(riscv-rt): start of .heap is not 4-byte aligned");
+
+/* The gp window assumes .rodata is aligned to at most 256 bytes: an input section aligned
+   above that shrinks the reach left to gp-relative accesses and silently disables relaxations. */
+ASSERT(ALIGNOF(.rodata) <= 256, "
+ERROR(z6m): .rodata is aligned above 256 bytes, which breaks the gp window");
 
 ASSERT(_stext + SIZEOF(.text) < ORIGIN(REGION_TEXT) + LENGTH(REGION_TEXT), "
 ERROR(riscv-rt): The .text section must be placed inside the REGION_TEXT region.
