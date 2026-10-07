@@ -52,7 +52,5 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized extension child", "[trie][g
 
     const Bytes node = ext_node(/*child_len=*/60000);
     CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
-#ifndef NDEBUG
-    CHECK(trie.failed());  // rejected decode must mark the trie failed (debug-only sentinel)
-#endif
+    CHECK(trie.failed());  // rejected decode must mark the trie failed
 }

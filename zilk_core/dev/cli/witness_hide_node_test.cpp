@@ -302,10 +302,8 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
     const bytes32 reconstructed = acc_trie.calc_root_from_updates({&updW, 1});
     expect_true(acc_trie.missing_count() == 0,
                 "P1: validator reported NO missing node (witness looks complete)");
-#ifndef NDEBUG
     expect_true(!acc_trie.failed(),
                 "P1: validator reported NO failure (witness looks complete)");
-#endif
     expect_true(reconstructed == R,
                 "P2: check_root ACCEPTS — reconstructs true prev_root R without A");
 
