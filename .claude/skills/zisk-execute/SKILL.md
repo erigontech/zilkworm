@@ -48,6 +48,7 @@ make z6m_prover_zisk        # builds the guest, then prover/prover_zisk/target/r
 Z=prover/prover_zisk/target/release/z6m_prover_zisk
 $Z execute --file-name <file.mfbd> [--is-test] [--save-input temp/runtime/in.bin]
 $Z --test-service --data-dir temp/mainnet --start-block <START> --end-block <END> --execution-log-file=temp/mainnet/logs/<feature>_<commit>.log
+$Z --test-service --data-dir <dir with blocks/<N>/> --start-block <START> --end-block <END> --prove-every 1   # offline proving loop (needs the key)
 $Z --test-service --test-dir <mfbd>/blockchain_tests/<subdir>
 make zisk-eest [ZISK_EXECUTOR=ziskemu] [ZISK_EEST_FLAGS="--filter for_osaka --max-parallel 4"]
 make zisk-benchmark BENCH_CORPUS_DIR=temp/runtime/zisk_corpus [ZISK_EXECUTOR=ziskemu]
@@ -69,7 +70,7 @@ $Z setup                                       # ROM setup + program VK (cached 
 $Z prove --file-name <file.mfbd> [--proof-type compressed|minimal|plonk] [--proof-path P]
 $Z verify --proof-path P
 ```
-Without a key, `setup`/`prove` stop with `ZisK proving key not found at …` before loading anything. `--remote URL` sends setup and prove to a ZisK coordinator instead. `prove` verifies the new proof before saving it (default `<data-dir>/<N>/proof<N>.bin`) and appends to `provingLogs.log`. `verify` binds the proof to this ELF's program VK, so run `setup` once first.
+Without a key, `setup`/`prove` stop with `ZisK proving key not found at …` before loading anything. `--remote URL` sends setup and prove to a ZisK coordinator instead. `prove` verifies the new proof before saving it (default `<data-dir>/<N>/proof<N>.bin`) and appends to `provingLogs.log`. `verify` binds the proof to this ELF's program VK, so run `setup` once first. For a corpus use `--test-service … --prove-every 1`: one process, one key load, every `<data-dir>/blocks/<N>/flatWitnessBundle<N>.mfbd` in the range is proven, verified and saved; missing blocks are skipped and a failed proof is logged as `FAILED to prove block N` without stopping the loop. GPU host build and the first 200-block result are in `docs/zisk-docs.md` §3.7 and §5.1.
 
 ### Profile one block
 ```bash

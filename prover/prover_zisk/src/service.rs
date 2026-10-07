@@ -15,7 +15,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use url::Url;
 use z6m_common::{fetch_block_and_witness, FetchRequest};
 use zisk_common::io::ZiskStdin as RawStdin;
@@ -803,13 +803,19 @@ async fn get_block_number_with_retry<P: Provider>(provider: &P, max_retries: u32
     }
 }
 
-pub fn run_test_service(
-    executor: &mut ZiskExecutor,
+/// Offline loop over `<data-dir>/blocks/<N>/flatWitnessBundle<N>.mfbd`.
+/// Blocks matching `prove_every` are proven (the engine must be `Engine::Prove`);
+/// the others matching `execute_every` are executed only.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_test_service(
+    engine: &mut Engine,
     start_block: u64,
     end_block: u64,
     execute_every: Option<u64>,
+    prove_every: Option<u64>,
     data_dir: PathBuf,
     execution_log_file: Option<PathBuf>,
+    proof_type: String,
 ) -> Result<()> {
     if start_block > end_block {
         bail!(
@@ -831,17 +837,47 @@ pub fn run_test_service(
     };
     let log_path = execution_log_file.unwrap_or_else(|| data_dir.join("executionLogs.log"));
 
+    if matches_interval(prove_every, start_block.max(1)) || prove_every.is_some_and(|n| n > 0) {
+        if !matches!(engine, Engine::Prove(_)) {
+            bail!("--prove-every in test service mode needs a proving engine");
+        }
+    }
+
     for block_number in start_block..=end_block {
-        if block_number % execute_every != 0 {
+        let should_prove = matches_interval(prove_every, block_number);
+        if !should_prove && block_number % execute_every != 0 {
             continue;
         }
         let input_path = resolve_input_path(block_number, None, false, &data_dir)?;
         if !input_path.exists() {
-            warn!(
+            debug!(
                 "block {} not found at {}, skipping",
                 block_number,
                 input_path.display()
             );
+            continue;
+        }
+        if should_prove {
+            let Engine::Prove(prover) = &*engine else {
+                unreachable!("checked above");
+            };
+            let opts = ProveOptions {
+                block_number,
+                file_name: Some(input_path.clone()),
+                is_test: false,
+                data_dir: data_dir.clone(),
+                proof_path: None,
+                proof_type: proof_type.clone(),
+            };
+            if let Err(err) = prove_block(prover, &opts).await {
+                error!(%block_number, error = %err, "proving failed");
+                println!(
+                    "[{}] FAILED to prove block {}: {:#}",
+                    format_timestamp(),
+                    block_number,
+                    err
+                );
+            }
             continue;
         }
         let envelope = match envelope_from_mfbd(&input_path) {
@@ -854,7 +890,7 @@ pub fn run_test_service(
                 continue;
             }
         };
-        let report = match executor.execute(&envelope) {
+        let report = match engine.execute(&envelope).await {
             Ok(r) => r,
             Err(e) => {
                 warn!("block {} execution failed: {}, skipping", block_number, e);
