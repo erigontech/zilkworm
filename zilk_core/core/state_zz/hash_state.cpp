@@ -672,13 +672,12 @@ Account* HashState::find_or_create_account(const evmc::address& addr) {
         auto [ins, _] = created_accounts_.emplace(addr, copy);
         return &ins->second;
     }
-    // Total miss: materialize a fresh (deleted) record and CONFIRM absence down the account
-    // trie. A miss that cannot be proven empty (a pruned boundary) bumps
-    // unconfirmed_read_count_ so the accept gate rejects; a usable record is returned either
-    // way (never null).
-    Account* pa = materialize_absent_account_(addr);
-    if (!confirm_absent(prev_root_, h)) ++unconfirmed_read_count_;
-    return pa;
+    // Total miss: materialize a fresh (deleted) record, never null. That the pre-state trie has
+    // no leaf for the address is claimed by the record's account-trie update at accept time
+    // (check_root_hashstate, HashStateAccountWrite::absent), which the fold checks where the
+    // key leaves the trie: no confirm_absent walk here. A pruned boundary on the way, or a leaf
+    // at the key, fails that walk, and the accept gate rejects.
+    return materialize_absent_account_(addr);
 }
 
 // Caller guarantees pa.deleted; reset to a fresh account (DirectState:356-369).

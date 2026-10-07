@@ -199,10 +199,11 @@ class HashState : public BlockState {
     void clear_touched() noexcept { touched_.clear(); }
 
     // find_or_create_account: overlay hit -> return it; built hit -> copy-on-write into the
-    // overlay; total miss -> materialize a fresh (deleted) record AND confirm absence down
-    // the account trie (confirm_absent). An unprovable miss (pruned boundary) bumps
-    // unconfirmed_read_count_ so the accept gate rejects, but a usable record is ALWAYS
-    // returned (never null) — the analog of DirectState::materialize_absent_account_.
+    // overlay; total miss -> materialize a fresh (deleted) record, the analog of
+    // DirectState::materialize_absent_account_. A usable record is ALWAYS returned (never
+    // null). The miss is not walked here: the record's account-trie update claims the key
+    // absent, and the accept check's fold proves or refutes the claim (check_root_hashstate,
+    // HashStateAccountWrite::absent). See docs/hashstate.md, "Read-miss confirmation".
     Account* find_or_create_account(const evmc::address& addr);
 
     [[gnu::always_inline]] inline bool

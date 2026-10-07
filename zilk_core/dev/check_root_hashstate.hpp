@@ -26,11 +26,16 @@
 
 namespace zilkworm {
 
+// The pre-value an update claims for a key the pre-state trie does not have: zero, RLP 0x80
+// (what check_root claims for a slot read as zero). GridMPT::claims_absent accepts it where
+// the key leaves the trie; the HashState leaf match refutes it.
+inline constexpr std::uint8_t kAbsentClaim[1] = {0x80};
+
 // One touched account's contribution to a block's write set, in the shape check_root
-// builds internally (state_transition.cpp:452-608) but supplied as INPUT here. Only
-// accounts that actually changed appear — HashState carries no read-only / pre-value
-// entries (the pre-value check is compiled out), exactly as check_root skips readonly
-// accounts from its update set.
+// builds internally (state_transition.cpp:452-608) but supplied as INPUT here. Accounts
+// that changed appear, and accounts the block read as absent (see `absent`); HashState
+// carries no other read-only entry and no pre-value (the pre-value check is compiled
+// out), exactly as check_root skips readonly accounts from its update set.
 struct HashStateAccountWrite {
     // Account-trie path == keccak256(addr); the key of the account-trie update
     // (check_root: node key is it_existing_hashes->addr_hash, state_transition.cpp:591).
@@ -54,6 +59,14 @@ struct HashStateAccountWrite {
     // nullptr => the account is destructed this block, so its account-trie leaf is deleted
     // (current value 0x80, mirroring check_root's deletion path, state_transition.cpp:506-511).
     const Account* account{nullptr};
+
+    // The pre-state trie has no leaf for addr_hash: the block read the account as absent
+    // (find_or_create_account's total miss), and created it when `account` is set. The
+    // account-trie update then claims the key absent (the 0x80 pre-value), which the walk
+    // checks where the key leaves the trie (GridMPT::claims_absent) and refutes at a leaf
+    // (grid_mpt.cpp, the HashState arm of the leaf match). With `account == nullptr` the
+    // update is a read: it inserts nothing, and the root stays as it was.
+    bool absent{false};
 };
 
 // Fold the writes over the (already-built) HashState, recompute the post-state root, and
@@ -77,7 +90,14 @@ struct HashStateAccountWrite {
     for (const auto& w : writes_sorted) {
         auto& node = acc_updates.emplace_back(w.addr_hash);
 
-        if (w.account == nullptr) {
+        if (w.absent) {
+            // The claim that the pre-state trie has no leaf for this key (see `absent`). Out of
+            // line of buf, which the leaf RLP of a created account can take in full.
+            node.ext_initial = ByteView{kAbsentClaim, 1};
+            if (w.account == nullptr) {
+                continue;  // a read: nothing to write (current_len == 0)
+            }
+        } else if (w.account == nullptr) {
             // Destructed account: 0x80 current value signals leaf deletion
             // (check_root: state_transition.cpp:509).
             node.buf[0] = 0x80;
@@ -96,6 +116,11 @@ struct HashStateAccountWrite {
             }
             storage_trie.reset(storage_root);
             storage_root = storage_trie.calc_root_from_updates(w.storage_updates);
+            // A failed walk binds none of the slots (check_root: "storage trie walk failed").
+            if (storage_trie.failed()) [[unlikely]] {
+                sys_println("ERROR: storage trie walk failed (HashState)");
+                return false;
+            }
         }
 
         // Patch the account leaf with the (possibly new) storage_root
@@ -116,10 +141,14 @@ struct HashStateAccountWrite {
     sys_println(std::format("New Root (hashstate): {}",
                             silkworm::to_hex(ByteView{new_root.bytes, 32})));
 
-    // Accept iff the recomputed root matches the header AND the witness was complete AND
-    // every read was resolved. The pre-value / read-only check check_root runs inside the
-    // fold is compiled out for HashState; these two counters replace it.
-    return new_root == header_state_root
+    // Accept iff the account walk went through, the recomputed root matches the header, the
+    // witness was complete AND every read was resolved. The pre-value / read-only check
+    // check_root runs inside the fold is compiled out for HashState; the two counters and
+    // the claims of absence (HashStateAccountWrite::absent) replace it. A failed walk (a
+    // node missing or malformed, a claim refuted at a leaf) returns a zero root, which only
+    // a header committing to one would match.
+    return !acc_trie.failed()
+        && new_root == header_state_root
         && hash_state.missing_count() == 0
         && hash_state.unconfirmed_read_count() == 0;
 }
@@ -147,12 +176,17 @@ struct HashStateAccountWrite {
         const Account& acc = kv.second;
         const evmc::bytes32 addr_hash = keccak_bytes(ByteView{addr.bytes, 20});
 
-        // Destructed account: 0x80 leaf delete if a pre-trie leaf exists, else created-then-
-        // destructed -> no pre-trie leaf, skip (st.cpp:503-516). Side-effect-free probe.
+        // Whether the pre-state trie has a leaf for the address: a built account. The probe is
+        // the side-effect-free find_built_account, not get_account, which would bump
+        // unconfirmed_read_count_ on a legitimate miss. An address the probe misses is one
+        // find_or_create_account materialized on a total miss: its write claims the key absent.
+        const bool built = hash_state.find_built_account(addr_hash) != nullptr;
+
+        // Destructed account: 0x80 leaf delete if a pre-trie leaf exists (st.cpp:503-516).
+        // Otherwise an address the pre-state does not have, read as absent (or created and
+        // destructed again): a read-only claim of absence, which inserts nothing.
         if (acc.deleted) {
-            if (hash_state.find_built_account(addr_hash) != nullptr) {
-                writes.push_back(HashStateAccountWrite{addr_hash, {}, {}, nullptr});
-            }
+            writes.push_back(HashStateAccountWrite{addr_hash, {}, {}, nullptr, /*absent=*/!built});
             continue;
         }
 
@@ -197,7 +231,7 @@ struct HashStateAccountWrite {
         }
 
         writes.push_back(HashStateAccountWrite{
-            addr_hash, storage_root, std::span<const TrieNodeFlat>{storage}, &acc});
+            addr_hash, storage_root, std::span<const TrieNodeFlat>{storage}, &acc, /*absent=*/!built});
     }
 
     // The span overload requires addr_hash (memcmp) order; the overlay is a hash map, so sort.
