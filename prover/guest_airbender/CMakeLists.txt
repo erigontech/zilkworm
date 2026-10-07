@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/z6m_pgo.cmake)
+
 set(LINKER_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/link.x")
 set(MEMORY_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/memory.x")
 
@@ -74,6 +76,30 @@ set_source_files_properties(src/mem_builtins.c PROPERTIES
 # next to mem_builtins.c, within jal range of the LTO code that calls it.
 set_source_files_properties(src/hashtable_policy.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 
+if(Z6M_PGO STREQUAL "GEN")
+  # The instrumented build serializes the counters of every instrumented object (.gcov_info) at
+  # the end of main (pgo/gcov_dump.c). The section must be part of the image, because
+  # init_memory copies .rodata, and the linker script marks its bounds; the guest's own
+  # script stays untouched.
+  file(READ "${LINKER_SCRIPT}" link_script)
+  string(REPLACE "    *(.rodata .rodata.*);\n"
+    "    *(.rodata .rodata.*);\n    . = ALIGN(4);\n    __gcov_info_start = .;\n    KEEP(*(.gcov_info))\n    __gcov_info_end = .;\n"
+    link_script_gen "${link_script}")
+  if(link_script_gen STREQUAL link_script)
+    message(FATAL_ERROR "Z6M_PGO=GEN: no '*(.rodata .rodata.*);' line in ${LINKER_SCRIPT}")
+  endif()
+  set(LINKER_SCRIPT "${CMAKE_BINARY_DIR}/link_gen.x")
+  file(WRITE "${LINKER_SCRIPT}" "${link_script_gen}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/link.x")
+
+  target_sources(z6m_guest PRIVATE pgo/gcov_dump.c)
+  set_source_files_properties(pgo/gcov_dump.c PROPERTIES COMPILE_OPTIONS "-fno-lto")
+  # Only main.cpp, which is never profiled, sees the macro: the profiled sources keep the flags
+  # the profile was recorded with.
+  set_source_files_properties(src/main.cpp PROPERTIES COMPILE_DEFINITIONS Z6M_PGO_GEN)
+endif()
+z6m_pgo(guest z6m_guest LINK z6m_guest)
+
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
 target_compile_options(z6m_guest PRIVATE
     # -ffreestanding
@@ -110,7 +136,7 @@ target_link_libraries(z6m_guest PRIVATE
     "${CMAKE_BINARY_DIR}/zilkworm/deps/src/blst/libblst.a"
     # evmc loader/instructions libs no longer produced by the subbuild
     # (EVMC folded into evmone); the baremetal guest never dlopens VMs.
-    c m gcc nosys stdc++
+    ${Z6M_PGO_LIBS} c m gcc nosys stdc++
     -Wl,--end-group
 )
 

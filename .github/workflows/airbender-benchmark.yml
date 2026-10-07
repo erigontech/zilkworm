@@ -68,8 +68,10 @@ jobs:
         # Stale .fingerprint marks build scripts fresh but their OUT_DIR is evicted; force re-run.
         run: rm -rf prover/prover_airbender/target/release/build prover/prover_airbender/target/release/.fingerprint
 
+      # Z6M_PGO=USE: the profiled guest, or a failed build if the committed profile does not match
+      # (prover/guest_airbender/pgo/README.md).
       - name: Build guest ELF and prover
-        run: make z6m_prover_airbender
+        run: make z6m_prover_airbender Z6M_PGO=USE
 
       - name: Download raw benchmark blocks
         run: |

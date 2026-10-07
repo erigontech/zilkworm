@@ -1,0 +1,26 @@
+CMAKE_BUILD_TYPE=Release
+target z6m_guest
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS_RELEASE=
+  CMAKE_CXX_FLAGS_RELEASE=
+  directory COMPILE_DEFINITIONS=
+  COMPILE_OPTIONS=-fno-exceptions;-fno-rtti;-fno-unwind-tables;-fno-asynchronous-unwind-tables;-fno-stack-protector;-fdata-sections;-ffunction-sections
+  COMPILE_DEFINITIONS=AIRBENDER
+  INCLUDE_DIRECTORIES=<root>/prover/guest_airbender/build/zilkworm-install/include;<root>/prover/guest_airbender/../../third_party/evmone/evmc/include;<root>/prover/guest_airbender/build/zilkworm/_deps/nlohmann_json-src/include;<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include;<root>/prover/guest_airbender/src/include
+  C_STANDARD=11
+  CXX_STANDARD=23
+  CXX_EXTENSIONS=OFF
+  CXX_STANDARD_REQUIRED=ON
+  uses silkworm_dev
+  SYSTEM=ON
+  uses silkworm_core
+  SYSTEM=ON
+source z6m_guest <root>/prover/guest_airbender/src/simple_allocator.cpp
+  LANGUAGE=CXX
+source z6m_guest <root>/prover/guest_airbender/src/mem_builtins.c
+  COMPILE_OPTIONS=-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto
+  LANGUAGE=C
+source z6m_guest <root>/prover/guest_airbender/src/hashtable_policy.cpp
+  COMPILE_OPTIONS=-fno-lto
+  LANGUAGE=CXX

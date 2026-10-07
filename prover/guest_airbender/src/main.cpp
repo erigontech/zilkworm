@@ -9,6 +9,11 @@
 #include "include/airbender_csr.hpp"
 #include "include/airbender_input.hpp"
 
+#ifdef Z6M_PGO_GEN
+// Instrumented training build: prints the profile counters over the UART (pgo/gcov_dump.c).
+extern "C" void z6m_gcov_dump();
+#endif
+
 int main()
 {
     // Single input blob: an envelope self-described by its leading 4-byte
@@ -29,6 +34,10 @@ int main()
         std::string msg = "[state_transition] run successful, gas used: " + std::to_string(result);
         sys_println(msg.c_str());
     }
+
+#ifdef Z6M_PGO_GEN
+    z6m_gcov_dump();
+#endif
 
     uint32_t out[8] = {static_cast<uint32_t>(result), static_cast<uint32_t>(result >> 32), 0, 0, 0, 0, 0, 0};
     airbender::finish_success(out);
