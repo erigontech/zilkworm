@@ -61,7 +61,8 @@ struct Args {
     ///
     /// With --test-dir, executes EEST fixtures from that directory. Otherwise
     /// requires --start-block/--end-block and executes already-downloaded
-    /// bundles from --data-dir. No RPC access, no proving.
+    /// bundles from --data-dir; with --prove-every it proves them instead
+    /// (needs the proving key or --remote). No RPC access.
     #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "service")]
     test_service: bool,
 
@@ -84,7 +85,10 @@ struct Args {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     download_only: bool,
 
-    /// Service mode: prove blocks whose number is divisible by N (0 or unset: never)
+    /// Prove blocks whose number is divisible by N (0 or unset: never)
+    ///
+    /// In --service mode the block is fetched first; in --test-service mode
+    /// (without --test-dir) the bundle is read from --data-dir.
     #[arg(long)]
     prove_every: Option<u64>,
 
@@ -237,13 +241,22 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let exec_mode = args.executor.exec_mode();
 
+    let prover_opts = |proof_type: &str| -> Result<ProverOpts> {
+        Ok(ProverOpts {
+            executor: args.executor.prover_kind()?,
+            proving_key: args.proving_key.clone(),
+            remote: args.remote.clone(),
+            proof_kind: parse_proof_kind(proof_type)?,
+        })
+    };
+
     if args.test_service {
         if args.command.is_some() {
             bail!("--test-service cannot be combined with a subcommand");
         }
         let program = load_program(args.elf.as_deref())?;
-        let mut zisk = ZiskExecutor::new(program, exec_mode)?;
         if let Some(test_dir) = args.test_dir {
+            let mut zisk = ZiskExecutor::new(program, exec_mode)?;
             run_test_service_eest(
                 &mut zisk,
                 test_dir,
@@ -257,26 +270,26 @@ async fn main() -> Result<()> {
             let end = args.end_block.ok_or_else(|| {
                 eyre!("--test-service requires --end-block (or --test-dir for EEST tests)")
             })?;
+            let proves = args.prove_every.is_some_and(|n| n > 0);
+            let mut engine = if proves {
+                Engine::Prove(ZiskProver::new(program, &prover_opts(&args.proof_type)?).await?)
+            } else {
+                Engine::Execute(ZiskExecutor::new(program, exec_mode)?)
+            };
             run_test_service(
-                &mut zisk,
+                &mut engine,
                 start,
                 end,
                 args.execute_every,
+                args.prove_every,
                 args.data_dir.clone(),
                 args.execution_log_file,
-            )?;
+                args.proof_type.clone(),
+            )
+            .await?;
         }
         return Ok(());
     }
-
-    let prover_opts = |proof_type: &str| -> Result<ProverOpts> {
-        Ok(ProverOpts {
-            executor: args.executor.prover_kind()?,
-            proving_key: args.proving_key.clone(),
-            remote: args.remote.clone(),
-            proof_kind: parse_proof_kind(proof_type)?,
-        })
-    };
 
     if args.service {
         let rpc_url = args.rpc_url.clone().or_else(|| match &args.command {
