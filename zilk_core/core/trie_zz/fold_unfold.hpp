@@ -206,7 +206,9 @@ inline unsigned GridMPT<DeletionEnabled>::cascade_delete(unsigned depth) {
             delete_line(depth);
             depth = parent_depth;
         } else {
-            delete_line(depth);
+            // An empty root has no line left below it: drop the deleted ones above it too, or the walk would go
+            // on from a root marked deleted.
+            grid_.clear();
             return 0;
         }
     }
@@ -217,9 +219,13 @@ inline unsigned GridMPT<DeletionEnabled>::cascade_delete(unsigned depth) {
 template <bool DeletionEnabled>
 inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
     auto& grid_line = grid_[depth];
-    if (grid_line.parent_depth == 0xFF) {
-        grid_.pop_back();  // depth musth be at the end as otherwise already popped, see delete_line
-        return;            // Phantom line
+    if (grid_line.parent_depth == 0xFF) {  // Phantom line
+        // Popped once it is the last line (see delete_line); one in the middle stays until then, as popping
+        // here would take a live line from the end.
+        if (depth == grid_.size() - 1) {
+            grid_.pop_back();
+        }
+        return;
     }
     if constexpr (DeletionEnabled) {
         if (is_empty(grid_line)) {

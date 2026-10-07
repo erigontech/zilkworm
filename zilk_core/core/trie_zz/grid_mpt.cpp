@@ -96,7 +96,7 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     //================================================
     if (grid_.size() <= 1 || depth_ == 0) {
         if (grid_.size() > 0 && is_empty(grid_[0])) {
-            delete_line(0);
+            grid_.clear();  // with every deleted line above the root, as cascade_delete() does
         }
         return;
     }
@@ -142,6 +142,10 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
         while (parent_consumed > lcp && cur_parent_depth > 0) {
             for (auto i = grid_.size() - 1; i > cur_parent_depth; --i) {
                 if (grid_[i].parent_depth >= cur_parent_depth) {
+                    // Deletes line i alone: only an empty line takes more lines with it (cascade_delete deletes
+                    // the ancestors it leaves empty), which would leave i and the lines this loop climbs to
+                    // stale, and none gets here. A deletion's empty lines go in the cascade above, before any
+                    // fold; a read of an absent key inserts no leaf; decode_node() rejects a leaf without a value.
                     fold_line(i);
                 }
             }
@@ -188,6 +192,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
             // the whole trie (seek pops the last line then). Descending the
             // main loop would read grid_[0] out of bounds; this key simply
             // (re)seeds the trie as a single full-path leaf.
+            if (trie_upd.current_value().empty()) {
+                continue;  // a read of a key the empty trie does not have: nothing to insert, see below
+            }
             search_nibbles_ = new_nibbles;
             last_was_delete_ = false;
             root_unfolded_ = false;
@@ -206,6 +213,15 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
             if (grid_line.kind == kBranch) {
                 unsigned nib = search_nibbles_[search_nib_cursor_];
                 auto unfold_res = unfold_slot(nib);
+                if (unfold_res == UnfoldResult::kEmpty && trie_upd.current_value().empty()) {
+                    // A read of a key absent from the trie, which reaching this empty slot shows: nothing to
+                    // insert. An empty leaf would fold away again, but the cascade that deletes it can take lines
+                    // the seek still climbs through, and leave a branch with a single child the walk folded
+                    // already, whose new hash the witness cannot unfold. The next seek starts from this branch,
+                    // as after a deletion from it.
+                    last_was_delete_ = true;
+                    break;
+                }
                 if (unfold_res == UnfoldResult::kEmpty) {
                     // Child is empty - insert here
                     auto l = make_cur_leaf(trie_upd.current_value());
@@ -260,6 +276,13 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     continue;
                 }
 
+                if (trie_upd.current_value().empty()) {
+                    // A read of a key absent from the trie: it leaves the extension inside its path. Nothing to
+                    // insert, as for an empty slot; the next seek starts from the parent branch.
+                    depth_ = grid_line.parent_depth;
+                    last_was_delete_ = true;
+                    break;
+                }
                 auto old_ext_line{grid_line};  // cache the value;
                 auto new_ext_len = old_ext_line.ext.path.len - m - 1;
                 unsigned d1{}, d2{};
@@ -374,6 +397,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     break;  // update complete
                 }
 
+                if (trie_upd.current_value().empty()) {
+                    break;  // a read of a key absent from the trie, which leaves this leaf's path: nothing to insert
+                }
                 LeafNode old_leaf{grid_[depth_].leaf};
                 BranchNode bn;
 
