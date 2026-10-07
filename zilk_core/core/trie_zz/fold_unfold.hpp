@@ -449,10 +449,26 @@ inline GridLine* GridMPT<DeletionEnabled>::emplace_line(Kind kind, unsigned pare
         failed_ = true;
         return nullptr;
     }
+    // The grid never outgrows its allocation, which is kMaxLines (see grid_).
+    if (grid_.size() >= kMaxLines) [[unlikely]] {
+        failed_ = true;
+        sys_println("{\"err\":\"grid full\"}");
+        return nullptr;
+    }
     grid_.emplace_back(kind, parent_slot, parent_depth, consumed_init);
     depth_ = grid_.size() - 1;
     if (depth_ > 0) link_to_parent(grid_.back(), depth_, parent_slot, parent_depth);
     return &grid_.back();
+}
+
+template <bool DeletionEnabled>
+inline bool GridMPT<DeletionEnabled>::has_room(unsigned lines) {
+    if (grid_.size() + lines <= kMaxLines) [[likely]] {
+        return true;
+    }
+    failed_ = true;
+    sys_println("{\"err\":\"grid full\"}");
+    return false;
 }
 
 /// Create and insert a new line at the given target_depth
