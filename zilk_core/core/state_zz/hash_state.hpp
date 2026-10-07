@@ -8,14 +8,15 @@
 
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <optional>
 #include <vector>
 
 #include <evmc/evmc.hpp>
 
 #include <zilk_core/core/common_zz/hash_index.hpp>
-// Reuse hash_key8(const uint8_t(&)[32]) and the Bytes/ByteView/bytes32 aliases from
-// DirectState — do NOT redefine hash_key8 here (ODR clash if both headers meet in a TU).
+#include <zilk_core/core/common_zz/index_key.hpp>  // hash_key8, storage_key8
+// Reuse the Bytes/ByteView/bytes32 aliases from DirectState.
 #include <zilk_core/core/state_zz/direct_state.hpp>
 // Primary state_keeps_prevalue_check trait (defaults true); specialised to false for
 // HashState at the bottom of this header so the trie fold compiles the pre-value /
@@ -23,20 +24,6 @@
 #include <zilk_core/core/state_zz/active_state.hpp>
 
 namespace zilkworm {
-
-// key8 for the storage index. Its key is the 64-byte concatenation addr_hash || slot_hash
-// (see emit_slot_ / get_storage). Both halves are keccak outputs, so their leading 8 bytes
-// are effectively random; XORing them mixes BOTH the account and the slot into the home
-// bucket. That matters because a single account owns many slots — keying on the addr_hash
-// prefix alone would land every one of them in the same home bucket. HashIndex still
-// confirms every hit with a full 64-byte memcmp, so this only affects distribution, never
-// correctness. Signature matches HashIndex's Key8 param for KeySize == 64.
-[[gnu::always_inline]] inline uint64_t storage_key8(const uint8_t (&k)[64]) noexcept {
-    uint64_t a, s;
-    std::memcpy(&a, k, 8);       // addr_hash prefix
-    std::memcpy(&s, k + 32, 8);  // slot_hash prefix
-    return a ^ s;
-}
 
 // Derives from silkworm::BlockState (as DirectState does, direct_state.hpp:69) so it can
 // later stand in as ActiveState for the block-running code that receives the state as a
@@ -50,30 +37,37 @@ class HashState : public BlockState {
     enum class BuildStatus : std::uint8_t { kOk, kMissingNode };
 
     // Sizes are best-effort hints for the open-addressed tables (~2x -> load factor
-    // <= 0.5). HashIndex has no default ctor, so both are initialized in the .cpp; the
-    // arenas are front-padded there too (see below).
+    // <= 0.5). HashIndex has no default ctor, so all four are initialized in the .cpp; the
+    // account and storage arenas are front-padded there too (see below).
     explicit HashState(std::uint32_t expected_nodes = 1024,
                        std::uint32_t expected_codes = 256,
                        std::uint32_t expected_accounts = 1024,
                        std::uint32_t expected_storage_slots = 4096);
 
-    // Append `rlp` under its real keccak256 and return that hash. A repeated node is
-    // deduped (no second append) and the same hash is returned. Defined in the .cpp
+    // The node and code stores hold views (into owned_bytes_ or a borrowed input blob), so
+    // a copy would point back into the source's storage.
+    HashState(const HashState&) = delete;
+    HashState& operator=(const HashState&) = delete;
+
+    // Store a copy of `rlp` under its real keccak256 and return that hash. A repeated node
+    // is deduped (no second copy) and the same hash is returned. Defined in the .cpp
     // because it computes keccak.
     evmc::bytes32 add_node(ByteView rlp);
 
-    // Append `code` under its real keccak256 (the code_hash) and return it; deduped.
+    // Store a copy of `code` under its real keccak256 (the code_hash) and return it; deduped.
     evmc::bytes32 add_code(ByteView code);
+
+    // As add_node / add_code, but the store keeps a view of the caller's bytes instead of a
+    // copy: `rlp` / `code` must stay alive and unchanged for as long as this HashState is
+    // used. parse_stateless_input feeds the decoded input blob through these.
+    evmc::bytes32 add_node_borrowed(ByteView rlp);
+    evmc::bytes32 add_code_borrowed(ByteView code);
 
     // Hot lookup: EXACT DirectState::find_node_rlp seam shape — hit -> ByteView over
     // the stored RLP, miss -> std::nullopt (NOT an empty ByteView).
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
-        if (auto off = node_index_.find(node_hash.bytes)) {
-            std::uint32_t len;
-            std::memcpy(&len, node_arena_.data() + *off, sizeof(len));
-            return ByteView{node_arena_.data() + *off + sizeof(len), len};
-        }
+        if (auto v = node_index_.find(node_hash.bytes)) return ByteView{v->data, v->size};
         return std::nullopt;
     }
 
@@ -81,11 +75,7 @@ class HashState : public BlockState {
     // the stored code, miss -> EMPTY ByteView (NOT optional).
     [[gnu::always_inline]] inline ByteView
     find_code(const evmc::bytes32& code_hash) const noexcept {
-        if (auto off = code_index_.find(code_hash.bytes)) {
-            std::uint32_t len;
-            std::memcpy(&len, code_arena_.data() + *off, sizeof(len));
-            return ByteView{code_arena_.data() + *off + sizeof(len), len};
-        }
+        if (auto v = code_index_.find(code_hash.bytes)) return ByteView{v->data, v->size};
         return {};
     }
 
@@ -312,14 +302,28 @@ class HashState : public BlockState {
     void emit_slot_(const evmc::bytes32& account_key, const evmc::bytes32& slot_hash,
                     ByteView leaf_value);
 
-    // Arena entry layout: [uint32_t len][len bytes...]. The stored offset is the byte
-    // index of the len field. Both arenas are front-padded with 8 zero bytes in the
-    // ctor so the first real offset is >= 8 and can never equal HashIndex's empty-bucket
-    // sentinel (offset 0). len is read/written via memcpy (rv64im: no unaligned ld/sd).
-    std::vector<std::uint8_t> node_arena_;
-    HashIndex<32, &hash_key8> node_index_;
-    std::vector<std::uint8_t> code_arena_;
-    HashIndex<32, &hash_key8> code_index_;
+    // Node and code stores: the index maps the content's keccak256 straight to a view of
+    // the bytes, so a lookup is one probe with no length decode. The bytes live either in the
+    // caller's input blob (add_*_borrowed) or in owned_bytes_ (add_node / add_code), whose
+    // elements never move once added. `data` is never null for a stored entry (an empty
+    // input is pointed at kNoBytes), so a stored view never equals HashIndex's empty
+    // sentinel, the value-initialized {nullptr, 0}.
+    struct StoredBytes {
+        const std::uint8_t* data = nullptr;
+        std::uint32_t size = 0;
+        friend bool operator==(const StoredBytes&, const StoredBytes&) = default;
+    };
+    static constexpr std::uint8_t kNoBytes = 0;
+    static StoredBytes stored_view_(ByteView bytes) noexcept {
+        return {bytes.data() != nullptr ? bytes.data() : &kNoBytes,
+                static_cast<std::uint32_t>(bytes.size())};
+    }
+    // Dedupe on the real keccak256, then index `bytes` (which must already be stable).
+    evmc::bytes32 add_view_(HashIndex<32, &hash_key8, StoredBytes>& index, ByteView bytes);
+
+    std::deque<Bytes> owned_bytes_;
+    HashIndex<32, &hash_key8, StoredBytes> node_index_;
+    HashIndex<32, &hash_key8, StoredBytes> code_index_;
 
     // Account cache — the "recovered" pre-state bucket the design (§1.1) calls for: the
     // accounts build_state_from_trie unfolds out of the node trie. Arena entry layout is a bare

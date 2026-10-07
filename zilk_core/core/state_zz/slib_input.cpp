@@ -135,10 +135,10 @@ std::optional<StatelessInputView> parse_stateless_input(ByteView blob, HashState
     auto dec = decode_stateless_input(blob);
     if (!dec) return std::nullopt;
 
-    // Feed the witness content stores. add_node/add_code key each entry by its real
-    // keccak256 (identity binding) and dedupe repeats.
-    for (const ByteView node : dec->state) hs.add_node(node);
-    for (const ByteView code : dec->codes) hs.add_code(code);
+    // Feed the witness content stores. Each entry is keyed by its real keccak256 (identity
+    // binding) and repeats are deduped. The stores keep views into `blob`, not copies.
+    for (const ByteView node : dec->state) hs.add_node_borrowed(node);
+    for (const ByteView code : dec->codes) hs.add_code_borrowed(code);
 
     StatelessInputView v;
     v.chain_id = dec->chain_id;

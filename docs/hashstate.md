@@ -17,7 +17,7 @@ behaves as before.
 | Open-addressed key-to-offset index | `zilk_core/core/common_zz/hash_index.hpp` |
 | `statelessInputBytes` parser | `zilk_core/core/state_zz/slib_input.{hpp,cpp}` |
 | Accept check (post-state root) | `zilk_core/dev/check_root_hashstate.hpp` |
-| Blockchain-test runner arm | `zilk_core/dev/state_transition.cpp` |
+| Blockchain-test runner arm | `zilk_core/dev/blockchain_test_runner.cpp` |
 | Tests | `zilk_core/dev/cli/hash_state_test.cpp`, `zilk_core/dev/cli/hash_index_test.cpp` |
 
 Corpus results and how the witness-validation negatives are scored are in
@@ -94,16 +94,27 @@ authenticate so the accept gate can reject the block.
 
 `HashState` owns the two content stores that `DirectState` reads through a
 serialized `MphfMap`. `HashState` builds them in-guest and indexes them with the
-plain open-addressed `HashIndex<32, &hash_key8>`, so there is no displacement or
-collision sidecar to serialize ahead of time.
+plain open-addressed `HashIndex<32, &hash_key8, StoredBytes>`, so there is no displacement
+or collision sidecar to serialize ahead of time.
 
 | Store      | Key               | Value             | Lookup          |
 |------------|-------------------|-------------------|-----------------|
 | node store | `keccak256(node)` | node RLP          | `find_node_rlp` |
 | code store | `keccak256(code)` | contract bytecode | `find_code`     |
 
-Each store owns a byte arena of `[u32 len][bytes...]` entries, and the index
-maps the content hash's key8 to the entry offset.
+The index maps each content hash straight to a view of the bytes (`StoredBytes`, a pointer
+and a `u32` length), so a hit is one probe with no length decode and no arena indirection.
+The bytes are not copied on the input path:
+
+- `add_node_borrowed` and `add_code_borrowed` keep a view of the caller's bytes.
+  `parse_stateless_input` feeds the decoded `statelessInputBytes` blob through them, so the
+  stores point into that blob. The blob must outlive every use of the `HashState`; it already
+  had to, since the retained `StatelessInputView` points into it too.
+- `add_node` and `add_code` copy the bytes into `owned_bytes_` (a `std::deque<Bytes>`, whose
+  elements never move) and index a view of the copy. Tests use these for temporaries.
+- Because the stores hold views, `HashState` is not copyable.
+- A stored view's pointer is never null (an empty input points at a static byte), so it can
+  never equal the index's empty sentinel, the value-initialized `{nullptr, 0}`.
 
 The stores bind content to identity. `add_node` and `add_code` compute the real
 keccak256 of the bytes at add time and use it as the index key, and `HashIndex`
@@ -300,7 +311,7 @@ retyping the execution surface from `DirectState&` to `ActiveState&` (which is
 
 `HashState` holds the witness ancestor headers here. They come from the parsed
 witness headers (`StatelessInputView::headers`, `slib_input.hpp`) plus the
-genesis header: the runner (`zilk_core/dev/state_transition.cpp`) decodes the
+genesis header: the runner (`zilk_core/dev/blockchain_test_runner.cpp`) decodes the
 witness headers and calls `insert_header` for each one, and the `Blockchain`
 constructor inserts the genesis header.
 
@@ -411,29 +422,48 @@ drop-in.
 
 ## Hash index
 
-`zilk_core/core/common_zz/hash_index.hpp` defines `HashIndex<KeySize, Key8>`, the
-HashState backend's in-guest index from a key to a `u32` arena offset. On the SSZ input
+`zilk_core/core/common_zz/hash_index.hpp` defines `HashIndex<KeySize, Key8, Value>`, the
+HashState backend's in-guest index from a key to a small value: a `u32` arena offset (the
+default, used by the account and storage caches) or a `StoredBytes` view (the node and code
+stores). On the SSZ input
 path it replaces the minimal perfect hash (`MphfMap`) with a plain open-addressed hash
 table built in the guest, so no displacement or collision sidecar has to be serialised
 ahead of time.
 
 ### Index key
 
-The 64-bit index key is the same key8 derivation the MPHF path uses. The caller supplies
-it as the `Key8` template parameter (`hash_key8` for 32-byte hashes, `addr_key8` for
-20-byte addresses), in the same way `MphfMap::find` takes `shorten_key`. Passing it in
-keeps `hash_index.hpp` free of a `state_zz` dependency: `hash_key8` and `addr_key8` live
-beside `DirectState`, which already includes `mphf_map.hpp`.
+The 64-bit index key ("key8") folds a full key into 64 bits. The caller supplies the
+function as the `Key8` template parameter, in the same way `MphfMap::find` takes
+`shorten_key`. All of them are in `zilk_core/core/common_zz/index_key.hpp`, shared by the
+MPHF maps and `HashIndex`:
+
+| Function | Full key | key8 |
+| --- | --- | --- |
+| `hash_key8` | 32-byte keccak hash (code, trie node, account hash) | its first 8 bytes |
+| `addr_key8` | 20-byte address | its first 7 bytes, with byte 19 as the top byte |
+| `storage_key8` | 64-byte `addr_hash ‖ slot_hash` | XOR of the two halves' first 8 bytes |
+
+- A plain 8-byte prefix would give every precompile the same `addr_key8`, because
+  precompile addresses are zero in every byte but the last.
+- `storage_key8` depends on the slot as well as the account. Keyed on the `addr_hash`
+  prefix alone, every slot of an account would share one home bucket.
+- A key8 only has to tell keys apart: `HashIndex` mixes it before bucketing, and every hit
+  is confirmed against the full key (see "Collision safety").
+- The Rust MFBD encoder (`prover/stateless_validator/src/mfbd.rs`) has its own
+  `addr_key8` and `hash_key8`, which must stay in step.
 
 ### Buckets and probing
 
-- The home bucket for a key is `mix64_body(key8) & (capacity - 1)`. Capacity is always a
-  power of two, so the mask replaces a modulo.
+- The home bucket for a key is `mix64_body(key8) % capacity`. Capacity is always a power
+  of two, so the code computes it as `& (capacity - 1)`. It cannot leave that to the
+  compiler: capacity is a runtime value, and GCC emits a division for the `%` (`divq` on
+  x86-64, `remu` on RV64IM), even with `[[assume(std::has_single_bit(capacity))]]`.
 - Probing is linear and wraps around at the end of the table.
 - Capacity is sized to about twice the expected entry count (load factor about 0.5).
   This keeps probe runs short and guarantees that a free bucket exists, so every lookup
-  terminates on the empty sentinel. Offset `0` is reserved as that sentinel; real entries
-  always have a non-zero offset.
+  terminates on the empty sentinel. A value-initialized `Value` is reserved as that
+  sentinel (offset `0`, or a null view), and `insert` rejects it, so real entries never
+  carry it.
 
 ### Collision safety
 
@@ -667,12 +697,13 @@ second line of defence.
 
 ## Blockchain-test runner
 
-`zilk_core/dev/state_transition.cpp` runs EEST blockchain tests. Under the
-`HashState` build (`Z6M_HASH_STATE`), `blockchain_test` runs the slib arm
-described here instead of the `DirectState` body. The same file also holds the
-classifier for stateless witness-validation negatives and the input-magic
-dispatch in `StateTransition::run`. How the corpus is scored overall is
-summarized in [slib_corpus_validation.md](slib_corpus_validation.md).
+`zilk_core/dev/blockchain_test_runner.cpp` runs EEST blockchain tests, the
+EJSN input that `StateTransition::run` (in `state_transition.cpp`) dispatches to
+it. Under the `HashState` build (`Z6M_HASH_STATE`), `blockchain_test` runs the
+slib arm described here instead of the `DirectState` body. The same file also
+holds the classifier for stateless witness-validation negatives. How the corpus
+is scored overall is summarized in
+[slib_corpus_validation.md](slib_corpus_validation.md).
 
 ### Slib arm
 
@@ -944,8 +975,8 @@ and `HashIndex 20-byte address keys` adds a collision between two addresses.
 
 `HashState` is the node and code store for the SSZ input path, parallel to `DirectState`'s
 serialized `MphfMap` stores. `add_node` and `add_code` key their input by its real keccak256 and
-record the arena offset in an open-addressed `HashIndex<32, &hash_key8>`; `find_node_rlp` and
-`find_code` recover the bytes.
+record a view of a stored copy in an open-addressed `HashIndex<32, &hash_key8, StoredBytes>`;
+`find_node_rlp` and `find_code` return that view.
 
 The store tests cover round-trip, dedupe, a definitive miss, and the case that carries the most
 weight: the full-key `memcmp` gate under a home-bucket collision.

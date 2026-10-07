@@ -42,8 +42,8 @@ inline constexpr std::uint32_t kMaxPublicKeys = 1u << 20;
 struct DecodedStatelessInput {
     std::uint64_t chain_id = 0;
     ByteView new_payload_request;        // raw SSZ sub-blob (for later block execution)
-    std::vector<ByteView> state;         // RLP MPT nodes  -> HashState::add_node
-    std::vector<ByteView> codes;         // contract code  -> HashState::add_code
+    std::vector<ByteView> state;         // RLP MPT nodes  -> HashState::add_node_borrowed
+    std::vector<ByteView> codes;         // contract code  -> HashState::add_code_borrowed
     std::vector<ByteView> headers;       // RLP block headers (retained for execution)
     std::vector<ByteView> public_keys;   // 65-byte uncompressed secp256k1 keys
 };
@@ -60,14 +60,15 @@ struct StatelessInputView {
     ByteView new_payload_request;
     std::vector<ByteView> headers;
     std::vector<ByteView> public_keys;
-    std::uint32_t node_count = 0;        // # state nodes fed to add_node
-    std::uint32_t code_count = 0;        // # codes fed to add_code
+    std::uint32_t node_count = 0;        // # state nodes fed to add_node_borrowed
+    std::uint32_t code_count = 0;        // # codes fed to add_code_borrowed
 };
 
-// Parser entry point: decode `blob`, feed each state node to hs.add_node and each code
-// to hs.add_code (both keccak-verify on insert), and return the retained fields. Does
-// NOT call build_state_from_trie (the caller supplies the anchoring prev_root). Returns
-// std::nullopt on malformed input.
+// Parser entry point: decode `blob`, feed each state node to hs.add_node_borrowed and each
+// code to hs.add_code_borrowed (both keccak-verify on insert), and return the retained
+// fields. `hs` keeps views into `blob`, so `blob` must outlive every use of `hs`, as it must
+// already outlive the returned view. Does NOT call build_state_from_trie (the caller
+// supplies the anchoring prev_root). Returns std::nullopt on malformed input.
 std::optional<StatelessInputView> parse_stateless_input(ByteView blob, HashState& hs);
 
 // Convenience: parse_stateless_input followed by hs.build_state_from_trie(prev_root),
