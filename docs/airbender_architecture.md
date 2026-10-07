@@ -170,6 +170,11 @@ make z6m_guest_airbender
 ```
 Output: `prover/guest_airbender/build/z6m_guest.bin`
 
+The guest is compiled with the committed profile-guided-optimization profile when it matches the
+tree, the compiler (xPack riscv-none-elf-gcc 15.2.0-1) and the flags, and without it otherwise, with
+a warning (`Z6M_PGO=AUTO`, the default). `make z6m_guest_airbender Z6M_PGO=USE`, which Docker and CI
+use, fails instead of building without it. See `prover/guest_airbender/pgo/README.md`.
+
 ### Build Prover
 ```bash
 make z6m_prover_airbender

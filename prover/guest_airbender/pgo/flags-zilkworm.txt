@@ -1,0 +1,219 @@
+CMAKE_BUILD_TYPE=Release
+target evmone
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS_RELEASE=
+  CMAKE_CXX_FLAGS_RELEASE=
+  directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT
+  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-fno-exceptions;$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes>;$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>
+  COMPILE_DEFINITIONS=EVMONE_TRACING=0;AIRBENDER
+  INCLUDE_DIRECTORIES=<root>/third_party/evmone/include;<root>/third_party/evmone/lib;<root>/third_party/..;<root>/third_party/evmone;<root>/prover/guest_airbender/src/include;<root>/zilk_core
+  POSITION_INDEPENDENT_CODE=TRUE
+  uses evmc
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/evmc/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=c_std_99
+  uses intx::intx
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/intx/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=cxx_std_20
+  uses blst::blst
+  INTERFACE_INCLUDE_DIRECTORIES=<root>/prover/guest_airbender/build/zilkworm/deps/src/blst/bindings
+  SYSTEM=ON
+target silkworm_core
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS_RELEASE=
+  CMAKE_CXX_FLAGS_RELEASE=
+  directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
+  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete
+  INCLUDE_DIRECTORIES=<root>/zilk_core;<root>/prover/guest_airbender/src/include;<root>
+  COMPILE_FEATURES=cxx_std_23
+  CXX_STANDARD=23
+  POSITION_INDEPENDENT_CODE=TRUE
+  uses evmc
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/evmc/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=c_std_99
+  uses evmone
+  INTERFACE_INCLUDE_DIRECTORIES=<root>/third_party/evmone/include;<root>/third_party/evmone/lib;<root>/third_party/.
+  INTERFACE_LINK_LIBRARIES=evmc;intx::intx;blst::blst
+  uses intx::intx
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/intx/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=cxx_std_20
+  uses magic_enum::magic_enum
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include>;$<INSTALL_INTERFACE:include>
+  SYSTEM=ON
+  uses silkworm_types_zz
+  INTERFACE_INCLUDE_DIRECTORIES=<root>
+  INTERFACE_COMPILE_FEATURES=cxx_std_23
+  INTERFACE_LINK_LIBRARIES=evmc;evmone;intx::intx;magic_enum::magic_enum;nlohmann_json::nlohmann_json
+  uses blst::blst
+  INTERFACE_INCLUDE_DIRECTORIES=<root>/prover/guest_airbender/build/zilkworm/deps/src/blst/bindings
+  SYSTEM=ON
+  uses nlohmann_json::nlohmann_json
+  INTERFACE_COMPILE_DEFINITIONS=$<$<NOT:$<BOOL:ON>>:JSON_USE_GLOBAL_UDLS=0>;$<$<NOT:$<BOOL:ON>>:JSON_USE_IMPLICIT_CONVERSIONS=0>;$<$<BOOL:OFF>:JSON_DISABLE_ENUM_SERIALIZATION=1>;$<$<BOOL:OFF>:JSON_DIAGNOSTICS=1>;$<$<BOOL:OFF>:JSON_DIAGNOSTIC_POSITIONS=1>;$<$<BOOL:OFF>:JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON=1>
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/nlohmann_json-src/include/>;$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=cxx_std_11
+  SYSTEM=ON
+target silkworm_dev
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS_RELEASE=
+  CMAKE_CXX_FLAGS_RELEASE=
+  directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
+  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete
+  INCLUDE_DIRECTORIES=<root>/zilk_core;<root>/prover/guest_airbender/src/include;<root>
+  POSITION_INDEPENDENT_CODE=TRUE
+  uses nlohmann_json::nlohmann_json
+  INTERFACE_COMPILE_DEFINITIONS=$<$<NOT:$<BOOL:ON>>:JSON_USE_GLOBAL_UDLS=0>;$<$<NOT:$<BOOL:ON>>:JSON_USE_IMPLICIT_CONVERSIONS=0>;$<$<BOOL:OFF>:JSON_DISABLE_ENUM_SERIALIZATION=1>;$<$<BOOL:OFF>:JSON_DIAGNOSTICS=1>;$<$<BOOL:OFF>:JSON_DIAGNOSTIC_POSITIONS=1>;$<$<BOOL:OFF>:JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON=1>
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/nlohmann_json-src/include/>;$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=cxx_std_11
+  SYSTEM=ON
+  uses silkworm_core
+  INTERFACE_INCLUDE_DIRECTORIES=<root>
+  INTERFACE_COMPILE_FEATURES=cxx_std_23
+  INTERFACE_LINK_LIBRARIES=evmc;evmone;intx::intx;magic_enum::magic_enum;silkworm_types_zz;blst::blst;nlohmann_json::nlohmann_json
+  uses evmc
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/evmc/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=c_std_99
+  uses evmone
+  INTERFACE_INCLUDE_DIRECTORIES=<root>/third_party/evmone/include;<root>/third_party/evmone/lib;<root>/third_party/.
+  INTERFACE_LINK_LIBRARIES=evmc;intx::intx;blst::blst
+  uses intx::intx
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/intx/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=cxx_std_20
+  uses magic_enum::magic_enum
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include>;$<INSTALL_INTERFACE:include>
+  SYSTEM=ON
+  uses silkworm_types_zz
+  INTERFACE_INCLUDE_DIRECTORIES=<root>
+  INTERFACE_COMPILE_FEATURES=cxx_std_23
+  INTERFACE_LINK_LIBRARIES=evmc;evmone;intx::intx;magic_enum::magic_enum;nlohmann_json::nlohmann_json
+  uses blst::blst
+  INTERFACE_INCLUDE_DIRECTORIES=<root>/prover/guest_airbender/build/zilkworm/deps/src/blst/bindings
+  SYSTEM=ON
+target silkworm_types_zz
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS_RELEASE=
+  CMAKE_CXX_FLAGS_RELEASE=
+  directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
+  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete
+  INCLUDE_DIRECTORIES=<root>/zilk_core;<root>/prover/guest_airbender/src/include;<root>
+  COMPILE_FEATURES=cxx_std_23
+  CXX_STANDARD=23
+  POSITION_INDEPENDENT_CODE=TRUE
+  uses evmc
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/evmc/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=c_std_99
+  uses evmone
+  INTERFACE_INCLUDE_DIRECTORIES=<root>/third_party/evmone/include;<root>/third_party/evmone/lib;<root>/third_party/.
+  INTERFACE_LINK_LIBRARIES=evmc;intx::intx;blst::blst
+  uses intx::intx
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/intx/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=cxx_std_20
+  uses magic_enum::magic_enum
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include>;$<INSTALL_INTERFACE:include>
+  SYSTEM=ON
+  uses nlohmann_json::nlohmann_json
+  INTERFACE_COMPILE_DEFINITIONS=$<$<NOT:$<BOOL:ON>>:JSON_USE_GLOBAL_UDLS=0>;$<$<NOT:$<BOOL:ON>>:JSON_USE_IMPLICIT_CONVERSIONS=0>;$<$<BOOL:OFF>:JSON_DISABLE_ENUM_SERIALIZATION=1>;$<$<BOOL:OFF>:JSON_DIAGNOSTICS=1>;$<$<BOOL:OFF>:JSON_DIAGNOSTIC_POSITIONS=1>;$<$<BOOL:OFF>:JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON=1>
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/nlohmann_json-src/include/>;$<INSTALL_INTERFACE:include>
+  INTERFACE_COMPILE_FEATURES=cxx_std_11
+  SYSTEM=ON
+  uses blst::blst
+  INTERFACE_INCLUDE_DIRECTORIES=<root>/prover/guest_airbender/build/zilkworm/deps/src/blst/bindings
+  SYSTEM=ON
+source evmone <root>/third_party/evmone/lib/evmone/baseline_analysis.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone/baseline_instruction_table.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone/create_address.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone/delegation.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone/instructions_calls.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone/instructions_storage.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone_precompiles/keccak.c
+  LANGUAGE=C
+source evmone <root>/third_party/evmone/lib/evmone_precompiles/sha256.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone_precompiles/modexp.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone_precompiles/mulmod.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone_precompiles/bn254.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone_precompiles/pairing/bn254/pairing.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/lib/evmone_precompiles/secp256k1.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/test/state/authorization.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/test/state/host.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/test/state/precompiles.cpp
+  LANGUAGE=CXX
+source evmone <root>/third_party/evmone/test/state/state.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/chain/config.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/chain/dao.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/common/endian.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/common/util.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/common_zz/keccak_memo.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/crypto/ecdsa.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/crypto/secp256k1n.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/execution/precompile.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/execution/processor.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/protocol/blockchain.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/protocol/ethash_config.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/protocol/intrinsic_gas.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/protocol/merge_rule_set.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/protocol/rule_set.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/rlp/decode.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/rlp/encode.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/state_zz/direct_state.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/trie/hash_builder.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/trie/nibbles.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/trie/node.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/trie_zz/grid_mpt.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/types/address.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/types/block.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/types/bloom.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/types/log.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/types/receipt.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/types/transaction.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/types/withdrawal.cpp
+  LANGUAGE=CXX
+source silkworm_core <root>/zilk_core/core/types/y_parity_and_chain_id.cpp
+  LANGUAGE=CXX
+source silkworm_types_zz <root>/zilk_core/core/types_zz/account.cpp
+  LANGUAGE=CXX
+source silkworm_types_zz <root>/zilk_core/core/types_zz/flat_bundle.cpp
+  LANGUAGE=CXX

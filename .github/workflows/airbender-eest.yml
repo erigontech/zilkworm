@@ -37,7 +37,9 @@ jobs:
             nodejs npm \
             curl
           npm i -g xpm
-          xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
+          # Pinned: the guest is built with the committed profile (Z6M_PGO=USE below), which applies
+          # only with the compiler it was recorded with (prover/guest_airbender/pgo/manifest.txt).
+          xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
           RISCV_GCC_BIN=$(find $HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc -name 'riscv-none-elf-gcc' -type f 2>/dev/null | head -1 | xargs dirname)
           echo "Found riscv-gcc at: $RISCV_GCC_BIN"
           ls -la "$RISCV_GCC_BIN/" | head -5
@@ -75,11 +77,13 @@ jobs:
       - name: Download pinned EEST fixtures
         run: tools/test-fixtures.sh test-fixtures.json test-fixtures-cache eest_stable
 
+      # Z6M_PGO=USE fails unless the committed profile matches the tree, the compiler and the flags
+      # (prover/guest_airbender/pgo/README.md): the guest tested here is the profiled one that ships.
       - name: Build guest ELF
-        run: make z6m_guest_airbender
+        run: make z6m_guest_airbender Z6M_PGO=USE
 
       - name: Build prover
-        run: make z6m_prover_airbender
+        run: make z6m_prover_airbender Z6M_PGO=USE
 
       - name: Run EEST blockchain tests
         id: run_tests
