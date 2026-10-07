@@ -939,8 +939,18 @@ bool DirectState::sanitize() {
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
         // Execution reads a slot's current value, but check_root binds only its initial one to the
         // storage root: the block starts from that, whatever current value the witness carries.
-        for (Slot& slot : slots_for(*pa)) {
-            std::memcpy(slot.current, slot.initial, sizeof(slot.current));
+        //
+        // SOUNDNESS-CRITICAL: read_storage() and set_storage_slot() binary-search the slots by key, so their
+        // keys have to ascend strictly, which also rules out a key held twice. Out of order, a search can miss
+        // a slot the record holds, and the block would read zero for it, whatever value check_root binds.
+        const std::span<Slot> slots = slots_for(*pa);
+        for (size_t s = 0; s < slots.size(); ++s) {
+            if (s > 0 && std::memcmp(slots[s - 1].key, slots[s].key, sizeof(slots[s].key)) >= 0) [[unlikely]] {
+                sys_println("sanitize: witness slot keys not in ascending order");
+                acc_walk_ok = false;
+                return;
+            }
+            std::memcpy(slots[s].current, slots[s].initial, sizeof(slots[s].current));
         }
     };
     if (pre_state_meta_->n_accounts > 0) {
