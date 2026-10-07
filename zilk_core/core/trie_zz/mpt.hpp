@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <format>
 #include <memory>
 #include <optional>
@@ -242,7 +243,13 @@ class GridMPT {
     unsigned search_nib_cursor_{0};  // The position in the current search key
     // Previous root of the trie
     bytes32 prev_root_;
-    // A stack of grid-lines consisting of TrieNodes
+    // A stack of grid-lines consisting of TrieNodes. Lines name each other by uint8_t depth, 0xFF marking a
+    // deleted line, so there are at most kMaxLines; and references to lines are held across the appends of
+    // unfolds and insertions, so the grid is allocated at that size once and never moves. Honest tries take
+    // it far past a path's length: each branch on the path of the current key keeps the children the walk
+    // unfolded under it until it leaves the branch, so a path of D branches that each have 15 such children
+    // holds 16 D + 1 lines (76 keys ground to share prefixes of up to 4 nibbles make 81).
+    static constexpr size_t kMaxLines = 255;
     std::vector<GridLine> grid_;
     nibbles64 search_nibbles_;  // The current key being searched for/inserted
 
@@ -254,17 +261,19 @@ class GridMPT {
     // Either way the seam returns the RLP slice directly and lets us drop the
     // bundle blob span from GridMPT.
     const StateT* state_{nullptr};
-    std::vector<bytes32> embedded_rlp_copies_;  // To store owned copies of embedded node RLPs to survive next loop
+    // Owned copies of the embedded node RLPs unfolded during the walk: an embedded leaf's value is a view
+    // into its copy until the leaf is folded, so the copies must not move as more are added (a deque).
+    std::deque<bytes32> embedded_rlp_copies_;
 
     // Diagnostic — incremented every time unfold_slot or the ext-child path
     // hits a 32-byte hash ref absent from the node store (witness incomplete).
     unsigned missing_count_{0};
 
-#ifndef NDEBUG
-    // DEBUG-only flag for failure propagation throughout the GridMPT implementation.
-    // In RELEASE builds, soundness rests on the final new_root == state_root compare.
+    // Set by every path that cannot go on with the witness it was given (a missing or malformed node, a
+    // pre-value that does not match): the root calc_root_from_updates() then returns means nothing, and
+    // the caller must reject. A failed walk returns a zero root, which a root compare alone would accept
+    // against a header that commits to a zero root.
     bool failed_{false};
-#endif
 
     LeafNode make_cur_leaf(ByteView value_rlp);
 
@@ -280,28 +289,32 @@ class GridMPT {
     // emplace_back a grid_line of `kind`, set the `depth_` to it and `link_to_parent()`.
     GridLine* emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, unsigned consumed_init);
 
+    // Whether `lines` more lines fit the grid (see kMaxLines); flags the walk failed if not.
+    bool has_room(unsigned lines);
+
   public:
     GridMPT(const StateT& state, bytes32 previous_root_hash)
         : prev_root_{previous_root_hash},
           grid_{},
           state_{&state} {
-        grid_.reserve(66);  // Reserve max depth to avoid reallocations - 66 is a good compromise for average-bad cases
+        grid_.reserve(kMaxLines);
         init_from_root(previous_root_hash);
     }
+    // A copy would allocate its grid at the size it has, and its leaves would still view this one's copies.
+    GridMPT(const GridMPT&) = delete;
+    GridMPT& operator=(const GridMPT&) = delete;
 
     // Re-initialise this instance for a new previous-root, reusing the
     // already-allocated grid_/embedded_rlp_copies_ capacity. Used to hoist a
     // single GridMPT<true> out of the per-account merge-walk loop in
-    // check_root: ~100-300 modified accounts/block × ~38 KB grid_ buffer adds
+    // check_root: ~100-300 modified accounts/block × ~167 KB grid_ buffer adds
     // up to a lot of malloc+free that this avoids.
     void reset(bytes32 new_prev_root) {
         depth_ = 0;
         search_nib_cursor_ = 0;
         last_was_delete_ = false;
         missing_count_ = 0;
-#ifndef NDEBUG
         failed_ = false;
-#endif
         prev_root_ = new_prev_root;
         grid_.clear();                  
         embedded_rlp_copies_.clear();   // keeps capacity
@@ -319,6 +332,9 @@ class GridMPT {
     unsigned move_line(unsigned from_depth);
     UnfoldResult unfold_slot(unsigned slot);
     void seek_with_last_insert(nibbles64& new_nibbles);
+    // Whether update `u`, whose key the walk is about to insert, claims the key absent; flags the walk
+    // failed if not.
+    bool claims_absent(const TrieNodeFlat& u);
 
     // Main algorithm
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
@@ -339,10 +355,8 @@ class GridMPT {
 
     unsigned missing_count() const noexcept { return missing_count_; }
 
-#ifndef NDEBUG
-    // DEBUG-only method exposing a single source of truth for success or failure.
+    // Whether anything since construction or the last reset() failed; see failed_.
     bool failed() const noexcept { return failed_; }
-#endif
 
     unsigned cascade_delete(unsigned depth);
 };

@@ -456,13 +456,40 @@ struct MirrorRoot {
     /// `created_accounts()` — the condition `check_root` rejects with
     /// "Created and existing hashes clash".
     bool clashed{false};
+    /// True iff `check_root` rejects whatever the header's state root: a storage or the account
+    /// trie walk failed (`GridMPT::failed()`), or the storage walk of an unmodified account, or
+    /// of the wiped storage of a deleted or recreated one, did not come back to its storage root;
+    /// `root` then means nothing.
+    bool rejected{false};
 };
+
+/// The distinct keys of the reads of slots the witness does not carry in the list from `head`
+/// (`DirectState::absent_reads`), less those `written` holds, as `check_root` takes them.
+inline std::vector<bytes32> mirror_absent_read_keys(const DirectState& ds, uint32_t head,
+                                                    const silkworm::FlatHashMap<bytes32, bytes32>* written) {
+    std::vector<bytes32> keys;
+    for (uint32_t i = head; i != 0; i = ds.absent_reads()[i - 1].prev) {
+        const bytes32& key = ds.absent_reads()[i - 1].key;
+        if (written == nullptr || !written->contains(key)) keys.push_back(key);
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    return keys;
+}
+
+/// The read-only update `check_root` makes of a slot read as zero: the claim that its key is absent.
+inline void mirror_absent_read(std::vector<TrieNodeFlat>& ups, const bytes32& key) {
+    auto& node = ups.emplace_back(keccak_bytes32(key));
+    node.buf[0] = 0x80;
+    node.self_initial_len = 1;
+}
 
 /// Reproduces `check_root`'s per-account STORAGE root: a `GridMPT` ANCHORED at the record's
 /// committed `storage_root`, fed one update per inline slot (its `initial`, plus its `current`
-/// when the account was modified and the value actually changed) and one per overflow slot,
-/// sorted by keccak(key) — same construction, same `kEmptyRoot` substitution for a fresh
-/// account, same `reset()`-per-account `GridMPT`.
+/// when the account was modified and the value actually changed), one per overflow slot and
+/// one read-only claim per slot read as zero that the witness does not carry, sorted by
+/// keccak(key) — same construction, same `kEmptyRoot` substitution for a fresh account, same
+/// `reset()`-per-account `GridMPT`.
 ///
 /// This is deliberately NOT `DirectState::account_storage_root`, which rebuilds the storage
 /// trie FROM SCRATCH out of the slots the bundle happens to carry. The two agree only when the
@@ -471,10 +498,13 @@ struct MirrorRoot {
 /// lets a test derive the root the guest will actually compute.
 ///
 /// `missing_out` accumulates `missing_count()` across accounts, so a storage node absent from
-/// the node store surfaces in `MirrorRoot::missing` instead of hiding behind a matching root.
+/// the node store surfaces in `MirrorRoot::missing` instead of hiding behind a matching root;
+/// `rejected_out` is set when `check_root` rejects the walk: it failed, or it did not come back to
+/// the root of an account that was not modified.
 inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, Account& pa,
                                    bool has_existing, bool acc_modified,
-                                   GridMPT<true, DirectState>& storage_trie, unsigned& missing_out) {
+                                   GridMPT<true, DirectState>& storage_trie, unsigned& missing_out,
+                                   bool& rejected_out) {
     std::span<const Slot> existing_slots;
     if (has_existing && pa.slot_count > 0) {
         existing_slots = ds.slots_for(pa).first(pa.slot_count);
@@ -482,10 +512,13 @@ inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, A
     const auto* created_slots = ds.overflow_slots_for(addr);
     const bool has_pre_slots = !existing_slots.empty();
     const bool has_created = created_slots != nullptr && !created_slots->empty();
-    if (!has_pre_slots && !has_created) return std::bit_cast<bytes32>(pa.storage_root);
+    const bool has_absent_reads = pa.absent_reads != 0;
+    if (!has_pre_slots && !has_created && !has_absent_reads) return std::bit_cast<bytes32>(pa.storage_root);
+    const std::vector<bytes32> absent_keys = mirror_absent_read_keys(ds, pa.absent_reads, created_slots);
 
     std::vector<TrieNodeFlat> ups;
-    ups.reserve(existing_slots.size() + (created_slots != nullptr ? created_slots->size() : 0));
+    ups.reserve(existing_slots.size() + absent_keys.size() +
+                (created_slots != nullptr ? created_slots->size() : 0));
     for (const auto& slot : existing_slots) {
         const auto& key = *reinterpret_cast<const bytes32*>(slot.key);
         auto& node = ups.emplace_back(keccak_bytes32(key));
@@ -505,6 +538,7 @@ inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, A
                 node.buf + 40, silkworm::zeroless_view(ByteView{v.bytes, 32})));
         }
     }
+    for (const auto& key : absent_keys) mirror_absent_read(ups, key);
     std::sort(ups.begin(), ups.end());  // raw-key order != keccak(key) order
 
     bytes32 storage_root = std::bit_cast<bytes32>(pa.storage_root);
@@ -512,21 +546,50 @@ inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, A
     storage_trie.reset(storage_root);
     const bytes32 out = storage_trie.calc_root_from_updates({ups.data(), ups.size()});
     missing_out += storage_trie.missing_count();
+    rejected_out = rejected_out || storage_trie.failed() || (!acc_modified && out != storage_root);
     return out;
 }
 
+/// Reproduces `check_root`'s read-only walks of the witness slots of the accounts whose storage the
+/// block wiped (`DirectState::wiped_storage`), and of their reads of slots the witness does not
+/// carry, each anchored at the storage root it was read under; `rejected_out` is set when one fails
+/// or does not come back to that root.
+inline void mirror_wiped_storage(const DirectState& ds, GridMPT<true, DirectState>& storage_trie, unsigned& missing_out,
+                                 bool& rejected_out) {
+    for (const WipedStorage& wiped : ds.wiped_storage()) {
+        const std::vector<bytes32> absent_keys = mirror_absent_read_keys(ds, wiped.absent_reads, nullptr);
+        std::vector<TrieNodeFlat> ups;
+        ups.reserve(wiped.slots.size() + absent_keys.size());
+        for (const auto& slot : wiped.slots) {
+            const auto& key = *reinterpret_cast<const bytes32*>(slot.key);
+            auto& node = ups.emplace_back(keccak_bytes32(key));
+            node.self_initial_len = static_cast<uint8_t>(silkworm::rlp::encode_into_small(
+                node.buf + 0, silkworm::zeroless_view(ByteView{slot.initial, 32})));
+        }
+        for (const auto& key : absent_keys) mirror_absent_read(ups, key);
+        std::sort(ups.begin(), ups.end());
+        storage_trie.reset(wiped.storage_root);
+        const bytes32 out = storage_trie.calc_root_from_updates({ups.data(), ups.size()});
+        missing_out += storage_trie.missing_count();
+        rejected_out = rejected_out || storage_trie.failed() || out != wiped.storage_root;
+    }
+}
+
 /// Recomputes the account root exactly the way `StateTransition::check_root` does,
-/// with the single difference that a created/existing hash clash is recorded instead of
-/// aborting. Update-for-update faithful: same merge order over the two sorted sequences,
-/// same `ext_initial` (the record's own `acc_rlp_buf`), same read-only elision
-/// (`current_len == 0` when `!pa->modified`), same `0x80` deletion marker, anchored at
-/// the same `prev_root`. `missing` is `GridMPT::missing_count()` summed over the account trie
-/// and every per-account storage trie, and must be 0 for the derived root to mean anything.
+/// with the single difference that a created/existing hash clash, or a trie walk `check_root`
+/// rejects (`rejected`), is recorded instead of aborting. Update-for-update faithful: same
+/// merge order over the two sorted sequences, same `ext_initial` (the record's own
+/// `acc_rlp_buf`), same read-only elision (`current_len == 0` when `!pa->modified`), same
+/// `0x80` deletion marker, same read-only claim of absence for the deleted record of an address
+/// the witness does not carry, anchored at the same `prev_root`. `missing` is
+/// `GridMPT::missing_count()` summed over the account trie and every per-account storage trie,
+/// and must be 0 for the derived root to mean anything.
 ///
 /// Storage roots come from `mirror_storage_root`, i.e. the anchored per-account storage
 /// `GridMPT` — computed for every non-deleted account with slots even when the account is
 /// read-only, exactly as `check_root` does, so the node lookups counted in `missing` are the
-/// ones the guest performs.
+/// ones the guest performs. The read-only walks of wiped storage (`mirror_wiped_storage`) come
+/// first, as in `check_root`.
 inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
     struct Created {
         bytes32 addr_hash;
@@ -548,6 +611,9 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
 
     // One instance hoisted out of the walk and `reset()` per account, as check_root does.
     GridMPT<true, DirectState> storage_trie{ds, silkworm::kEmptyRoot};
+
+    // Before the merge, exactly as in check_root.
+    mirror_wiped_storage(ds, storage_trie, out.missing, out.rejected);
 
     auto it_ex = ds.addr_hashes().begin();
     const auto end_ex = ds.addr_hashes().end();
@@ -577,7 +643,8 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
                 node.current_len = 1;
                 ++it_ex;
             } else {
-                ++it_cr;  // created-then-destructed: no pre-trie leaf
+                ups.emplace_back(created[it_cr].addr_hash);  // read-only: the claim that the key is absent
+                ++it_cr;
             }
             continue;
         }
@@ -587,8 +654,8 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
         const bool acc_modified = has_existing ? pa->modified : true;
 
         // Before the account update is emplaced, exactly as in check_root.
-        const bytes32 storage_root = mirror_storage_root(ds, addr, *pa, has_existing,
-                                                        acc_modified, storage_trie, out.missing);
+        const bytes32 storage_root = mirror_storage_root(ds, addr, *pa, has_existing, acc_modified,
+                                                        storage_trie, out.missing, out.rejected);
 
         bool readonly = false;
         if (has_existing) {
@@ -610,6 +677,7 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
     GridMPT<true, DirectState> acc_trie{ds, prev_root};
     out.root = acc_trie.calc_root_from_updates({ups.data(), ups.size()});
     out.missing += acc_trie.missing_count();
+    out.rejected = out.rejected || acc_trie.failed();
     return out;
 }
 

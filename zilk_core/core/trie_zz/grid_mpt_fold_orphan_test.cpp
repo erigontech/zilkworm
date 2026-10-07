@@ -86,8 +86,6 @@ TEST_CASE("GridMPT: ext-split fold bug", "[trie][gridmpt]") {
     GridMPT<true, DirectState> grid{ds, silkworm::kEmptyRoot};
     const bytes32 got = grid.calc_root_from_updates({updates.data(), updates.size()});
 
-#ifndef NDEBUG
     CHECK_FALSE(grid.failed());
-#endif
     CHECK(got == expected);
 }

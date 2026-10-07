@@ -36,12 +36,15 @@ target_link_libraries(eest_to_flat_bundle PRIVATE ${ZILK_CLI_TRIE_LIBS})
 
 # mphf_map_test.cpp is a TU of the zilkworm.tests target (top-level CMakeLists.txt).
 
-# Soundness repro: a witness whose flat keys omit an existing account or slot
-# still passes check_root while the EVM reads it as empty. Standalone executable;
-# G-cases fail flag-off, pass when configured with -DUSE_HASH_KEY=ON. Run:
-#   build/zilk_core/dev/cli/witness_hide_node_test
+# Soundness regression: a witness whose flat keys omit an existing account or slot
+# makes the EVM read it as empty, and check_root must reject it (flag-off: the
+# walk of the claim that the key is absent; with -DUSE_HASH_KEY=ON the read
+# recovers it instead). Standalone executable, exit code = failure count.
 add_executable(witness_hide_node_test "witness_hide_node_test.cpp")
 target_link_libraries(witness_hide_node_test PRIVATE ${ZILK_CLI_TRIE_LIBS})
+if(BUILD_TESTING)
+    add_test(NAME witness_hide_node_test COMMAND witness_hide_node_test)
+endif()
 
 # file(GLOB STATE_TRANSITION_TESTS CONFIGURE_DEPENDS "state_transition_sample*.json")
 # add_custom_command(

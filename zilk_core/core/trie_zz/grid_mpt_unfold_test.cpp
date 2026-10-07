@@ -39,6 +39,45 @@ Bytes ext_node(size_t child_len) {
     return node;
 }
 
+// HP-encoded path of `n` nibbles (all 1): leaf flag 0x20 or extension flag 0x00, plus 0x10 | first nibble when n is odd.
+Bytes hp_path(size_t n, bool leaf) {
+    Bytes hp;
+    const uint8_t flag = leaf ? 0x20 : 0x00;
+    hp.push_back(n % 2 ? static_cast<uint8_t>(flag | 0x11) : flag);
+    hp.append(n / 2, 0x11);
+    return hp;
+}
+
+// Leaf or extension RLP with a path of `nibbles` nibbles: list( HP path, value string of value_len bytes ).
+Bytes path_node(size_t nibbles, bool leaf, size_t value_len) {
+    const Bytes hp = hp_path(nibbles, leaf);
+    Bytes inner;
+    if (hp.size() == 1 && hp[0] < 0x80) {
+        inner.push_back(hp[0]);  // a single byte below 0x80 is its own RLP string
+    } else {
+        silkworm::rlp::encode_header(inner, {.list = false, .payload_length = hp.size()});
+        inner.append(hp);
+    }
+    silkworm::rlp::encode_header(inner, {.list = false, .payload_length = value_len});
+    inner.append(value_len, leaf ? 0x5A : 0xAB);
+
+    Bytes node;
+    silkworm::rlp::encode_header(node, {.list = true, .payload_length = inner.size()});
+    node.append(inner);
+    return node;
+}
+
+// Unfolds `node` as the root of a fresh trie.
+bool unfolds_as_root(const Bytes& node) {
+    std::vector<uint8_t> prestate =
+        DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
+    DirectState direct{std::span<uint8_t>{prestate}};
+    GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
+    const bool ok = trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0);
+    CHECK(trie.failed() == !ok);
+    return ok;
+}
+
 }  // namespace
 
 // An extension child longer than 32 bytes must be rejected, not copied into the
@@ -52,7 +91,20 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized extension child", "[trie][g
 
     const Bytes node = ext_node(/*child_len=*/60000);
     CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
-#ifndef NDEBUG
-    CHECK(trie.failed());  // rejected decode must mark the trie failed (debug-only sentinel)
-#endif
+    CHECK(trie.failed());  // rejected decode must mark the trie failed
+}
+
+// Keys are 64 nibbles, and a witness node is bound only to the hash that referenced it, so a path whose
+// length cannot fit under its position must be rejected: a leaf has to end the key, and an extension needs
+// at least one nibble and leaves at least one for the branch below it. The leaf split in
+// calc_root_from_updates relies on this (a shorter leaf path wrapped a length there).
+TEST_CASE("unfold_node_from_rlp bounds leaf and extension path lengths", "[trie][gridmpt][unfold]") {
+    for (const size_t n : {0u, 1u, 10u, 62u, 63u, 65u, 66u})
+        CHECK_FALSE(unfolds_as_root(path_node(n, /*leaf=*/true, /*value_len=*/4)));
+    CHECK(unfolds_as_root(path_node(64, /*leaf=*/true, /*value_len=*/4)));
+
+    for (const size_t n : {0u, 64u, 65u})
+        CHECK_FALSE(unfolds_as_root(path_node(n, /*leaf=*/false, /*value_len=*/32)));
+    for (const size_t n : {1u, 2u, 31u, 63u})
+        CHECK(unfolds_as_root(path_node(n, /*leaf=*/false, /*value_len=*/32)));
 }

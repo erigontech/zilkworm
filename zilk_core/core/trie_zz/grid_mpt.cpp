@@ -3,7 +3,6 @@
 
 #include <array>
 #include <bit>
-#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -74,7 +73,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(nibbles64& n
     //================================================
     if (grid_.size() <= 1 || depth_ == 0) {
         if (grid_.size() > 0 && is_empty(grid_[0])) {
-            delete_line(0);
+            grid_.clear();  // with every deleted line above the root, as cascade_delete() does
         }
         return;
     }
@@ -95,9 +94,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(nibbles64& n
     }
     auto& parent = grid_[cur_parent_depth];
     if (parent.kind != kBranch) {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"seek: parent not branch\"}");
         depth_ = 0;
         return;
@@ -120,6 +117,10 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(nibbles64& n
         while (parent_consumed > lcp && cur_parent_depth > 0) {
             for (auto i = grid_.size() - 1; i > cur_parent_depth; --i) {
                 if (grid_[i].parent_depth >= cur_parent_depth) {
+                    // Deletes line i alone: only an empty line takes more lines with it (cascade_delete deletes
+                    // the ancestors it leaves empty), which would leave i and the lines this loop climbs to
+                    // stale, and none gets here. A deletion's empty lines go in the cascade above, before any
+                    // fold; a read of an absent key inserts no leaf; decode_node() rejects a leaf without a value.
                     fold_line(i);
                 }
             }
@@ -138,16 +139,32 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(nibbles64& n
         search_nib_cursor_ = parent_consumed;
     }
     if (search_nib_cursor_ > 63) {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"nib_cursor > 63\"}");
     }
 }
 
+// A key the walk inserts is absent from the pre-state trie, so its claimed pre-value must say so: none for a
+// created account or slot, 0x80 (zero) for a slot read as absent. Anything else is a value the block executed
+// with that no leaf binds; a read-only update inserts nothing, so the root would not show it. Each insertion
+// site checks it first, ahead of the return of a read.
+// Out of line: insertions are rare, and the check stays out of the descent loop.
+template <bool DeletionEnabled, class StateT>
+[[gnu::noinline]] bool GridMPT<DeletionEnabled, StateT>::claims_absent(const TrieNodeFlat& u) {
+    const ByteView v = u.initial_value();
+    if (v.empty() || (v.size() == 1 && v[0] == 0x80)) [[likely]] {
+        return true;
+    }
+    failed_ = true;
+    sys_println("Pre value claimed for a key absent from the trie");
+    return false;
+}
+
 template <bool DeletionEnabled, class StateT>
 bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
-    assert(!failed());
+    if (failed_) [[unlikely]] {
+        return {};  // the root node could not be read: there is no trie to walk
+    }
     for (auto updates_it = updates_sorted.begin(); updates_it != updates_sorted.end(); ++updates_it) {
         const auto& trie_upd = *updates_it;
 
@@ -165,6 +182,12 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
             // the whole trie (seek pops the last line then). Descending the
             // main loop would read grid_[0] out of bounds; this key simply
             // (re)seeds the trie as a single full-path leaf.
+            if (!claims_absent(trie_upd)) [[unlikely]] {
+                return {};
+            }
+            if (trie_upd.current_value().empty()) {
+                continue;  // a read of a key the empty trie does not have: nothing to insert, see below
+            }
             search_nibbles_ = new_nibbles;
             last_was_delete_ = false;
             LeafNode l{search_nibbles_, 0, trie_upd.current_value()};
@@ -176,21 +199,43 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
         last_was_delete_ = false;
 
         // MAIN LOOP
-        while (depth_ < 128) {  // Searching down
+        while (true) {  // Searching down
+            // The nodes on the way down consume the key's nibbles, and only a leaf is reached with all 64 of them
+            // consumed (a branch reads the nibble at the cursor): any other line there is off the key's path, and
+            // leaving the loop here would drop the update. The bound is the key's, not the grid's: depth_ is a
+            // line index, and honest tries take the grid up to kMaxLines lines.
+            if (search_nib_cursor_ >= 64 && grid_[depth_].kind != kLeaf) [[unlikely]] {
+                failed_ = true;
+                sys_println("{\"err\":\"descent past the key\"}");
+                return {};
+            }
             auto& grid_line = grid_[depth_];
             if (grid_line.kind == kBranch) {
                 unsigned nib = search_nibbles_[search_nib_cursor_];
                 auto unfold_res = unfold_slot(nib);
                 if (unfold_res == UnfoldResult::kEmpty) {
                     // Child is empty - insert here
+                    if (!claims_absent(trie_upd)) [[unlikely]] {
+                        return {};
+                    }
+                    if (trie_upd.current_value().empty()) {
+                        // A read of a key absent from the trie, which reaching this empty slot shows: nothing to
+                        // insert. An empty leaf would fold away again, but the cascade that deletes it can take lines
+                        // the seek still climbs through, and leave a branch with a single child the walk folded
+                        // already, whose new hash the witness cannot unfold. The next seek starts from this branch,
+                        // as after a deletion from it.
+                        last_was_delete_ = true;
+                        break;
+                    }
+                    if (!has_room(1)) [[unlikely]] {
+                        return {};
+                    }
                     auto l = make_cur_leaf(trie_upd.current_value());
                     insert_line(l.parent_slot, depth_, std::move(l));
                     grid_[depth_].modified = true;
                     break;
                 } else if (unfold_res == UnfoldResult::kMissing || unfold_res == UnfoldResult::kUndefined) {
-#ifndef NDEBUG
                     failed_ = true;
-#endif
                     sys_println("ERROR: missing hash ref in node store (witness incomplete)");
                     return {};
                 }
@@ -215,9 +260,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
                             auto rlp_opt = state_->find_node_rlp(grid_line.ext.child);
                             if (!rlp_opt) [[unlikely]] {
                                 ++missing_count_;
-#ifndef NDEBUG
                                 failed_ = true;
-#endif
                                 sys_println("ERROR: missing ext child rlp in node store (witness incomplete)");
                                 return {};
                             }
@@ -225,9 +268,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
                         }
                         if (!unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_)) [[unlikely]] {
                             ++missing_count_;
-#ifndef NDEBUG
                             failed_ = true;
-#endif
                             sys_println("ERROR: malformed ext child rlp in node store");
                             return {};
                         }
@@ -235,6 +276,20 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
                     continue;
                 }
 
+                if (!claims_absent(trie_upd)) [[unlikely]] {
+                    return {};
+                }
+                if (trie_upd.current_value().empty()) {
+                    // A read of a key absent from the trie: it leaves the extension inside its path. Nothing to
+                    // insert, as for an empty slot; the next seek starts from the parent branch.
+                    depth_ = grid_line.parent_depth;
+                    last_was_delete_ = true;
+                    break;
+                }
+                // The split appends up to five lines: the old child moved twice, a branch, an extension, the leaf.
+                if (!has_room(5)) [[unlikely]] {
+                    return {};
+                }
                 auto old_ext_line{grid_line};  // cache the value;
                 auto new_ext_len = old_ext_line.ext.path.len - m - 1;
                 unsigned d1{}, d2{};
@@ -320,9 +375,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
                     if constexpr (state_keeps_prevalue_check<StateT>) {
                         // check pre-value matches
                         if (grid_line.leaf.value != trie_upd.initial_value()) {
-#ifndef NDEBUG
                             failed_ = true;
-#endif
                             sys_println("Pre value mismatch in existing leaf");
                             return {};
                         }
@@ -349,6 +402,15 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
                     break;  // update complete
                 }
 
+                if (!claims_absent(trie_upd)) [[unlikely]] {
+                    return {};
+                }
+                if (trie_upd.current_value().empty()) {
+                    break;  // a read of a key absent from the trie, which leaves this leaf's path: nothing to insert
+                }
+                if (!has_room(3)) [[unlikely]] {  // the branch and both leaves
+                    return {};
+                }
                 LeafNode old_leaf{grid_[depth_].leaf};
                 BranchNode bn;
 
@@ -391,12 +453,10 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
         fold_line(grid_.size() - 1);
     }
 
-    assert(!failed());  // debug: no swallowed fold_line/seek unfold error above
     if (grid_.size() == 0) {
         return kEmptyRoot;
     }
     fold_line(0);
-    assert(!failed());  // debug: no fold_line(0) unfold error
     if (grid_.empty()) {
         return kEmptyRoot;
     }
@@ -409,20 +469,14 @@ void GridMPT<DeletionEnabled, StateT>::init_from_root(bytes32 previous_root_hash
     if (previous_root_hash != kEmptyRoot) {
         auto rlp = state_->find_node_rlp(previous_root_hash);
         if (!rlp) [[unlikely]] {
-#ifndef NDEBUG
             failed_ = true;
-#endif
             sys_println("{\"err\":\"no_rlp\"}");
             return;
         }
-#ifndef NDEBUG
         if (!unfold_node_from_rlp(*rlp, 0, 0)) [[unlikely]] {
             failed_ = true;
             sys_println("{\"err\":\"init_from_root: malformed root rlp\"}");
         }
-#else
-        unfold_node_from_rlp(*rlp, 0, 0);  // release: return checked via final root compare
-#endif
     }
 }
 

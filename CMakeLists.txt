@@ -98,9 +98,11 @@ if(BUILD_TESTING)
   add_executable(zilkworm.tests
     zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
+    zilk_core/core/trie_zz/grid_mpt_absent_read_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
     zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp
     zilk_core/core/trie_zz/encode_branch_patch_test.cpp
+    zilk_core/core/trie_zz/grid_mpt_capacity_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
     zilk_core/dev/cli/hash_index_test.cpp
     zilk_core/core/state_zz/hash_state.cpp
@@ -115,6 +117,8 @@ if(BUILD_TESTING)
       zilk_core/dev/cli/account_read_honest_test.cpp
       zilk_core/dev/cli/delegation_clearing_storage_test.cpp
       zilk_core/dev/cli/code_store_collision_len_test.cpp
+      zilk_core/dev/cli/witness_binding_test.cpp
+      zilk_core/dev/cli/state_transition_chain_test.cpp
     )
   endif()
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
