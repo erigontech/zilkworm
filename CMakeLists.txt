@@ -119,6 +119,11 @@ if(BUILD_TESTING)
   target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} Catch2::Catch2WithMain)
   include(Catch)
   catch_discover_tests(zilkworm.tests)
+  # evmone's host test of the Airbender blst patch is registered with ctest too; CI builds only
+  # this target before running ctest.
+  if(TARGET blst_airbender_patch_test)
+    add_dependencies(zilkworm.tests blst_airbender_patch_test)
+  endif()
 endif()
 
 # All unit tests target
