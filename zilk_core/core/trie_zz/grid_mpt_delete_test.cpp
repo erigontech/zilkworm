@@ -186,6 +186,72 @@ void check_partial_delete(const Bytes32Map& pre, const std::vector<bytes32>& del
     REQUIRE(got == expected);
 }
 
+// Runs a batch of {read-only | delete | upsert} updates through GridMPT<true>
+// against a complete witness of the pre trie and REQUIREs the canonical post
+// root. `ro` keys are visited read-only (current empty); `del` keys are
+// deleted; `post` keys are upserted.
+void check_mixed_updates(const Bytes32Map& pre, const std::vector<bytes32>& ro,
+                         const std::vector<bytes32>& del, const Bytes32Map& post) {
+    Bytes32Map nodes;
+    const bytes32 pre_root = hashbuilder_root(pre, &nodes);
+    std::vector<uint8_t> prestate =
+        DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
+    std::vector<uint8_t> nodestore = build_node_store(nodes);
+    DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
+
+    Bytes32Map expected_leaves = pre;
+    std::vector<TrieNodeFlat> updates;  // must never reallocate
+    updates.reserve(ro.size() + del.size() + post.size());
+    for (const auto& k : ro) {
+        auto& node = updates.emplace_back(k);
+        const auto& v = pre.at(k);
+        node.self_initial_len = static_cast<uint8_t>(v.size());
+        std::memcpy(node.buf, v.data(), v.size());
+        // current empty => read-only check
+    }
+    for (const auto& k : del) {
+        auto& node = updates.emplace_back(k);
+        const auto& v = pre.at(k);
+        node.self_initial_len = static_cast<uint8_t>(v.size());
+        std::memcpy(node.buf, v.data(), v.size());
+        node.buf[40] = 0x80;
+        node.current_off = 40;
+        node.current_len = 1;
+        expected_leaves.erase(k);
+    }
+    for (const auto& [k, v] : post) {
+        auto& node = updates.emplace_back(k);
+        node.current_off = 40;
+        node.current_len = static_cast<uint8_t>(v.size());
+        std::memcpy(node.buf + 40, v.data(), v.size());
+        expected_leaves[k] = v;
+    }
+    std::ranges::sort(updates, [](const TrieNodeFlat& a, const TrieNodeFlat& b) {
+        return std::memcmp(a.key.bytes, b.key.bytes, 32) < 0;
+    });
+
+    GridMPT<true> trie{direct, pre_root};
+    const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
+    const bytes32 expected = hashbuilder_root(expected_leaves, nullptr);
+
+    CAPTURE(silkworm::to_hex(got), silkworm::to_hex(expected));
+    CHECK(trie.missing_count() == 0);
+    CHECK_FALSE(trie.failed());
+    REQUIRE(got == expected);
+}
+
+// A hashed trie key: the given nibbles, then `fill` repeated (prefixes too long to grind with key_with_prefix).
+bytes32 key_with_nibbles(std::initializer_list<uint8_t> nibs, uint8_t fill) {
+    bytes32 k{};
+    size_t i = 0;
+    for (uint8_t n : nibs) {
+        k.bytes[i / 2] |= static_cast<uint8_t>(i % 2 == 0 ? n << 4 : n);
+        ++i;
+    }
+    for (; i < 64; ++i) k.bytes[i / 2] |= static_cast<uint8_t>(i % 2 == 0 ? fill << 4 : fill);
+    return k;
+}
+
 }  // namespace
 
 TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmpt]") {
@@ -238,4 +304,29 @@ TEST_CASE("GridMPT<true> single-child branch folds over an unmodified child", "[
                          {key_with_prefix({1, 0, 1}), slot_value_rlp(2)},
                          {key_with_prefix({1, 1, 1}), slot_value_rlp(3)}};
     check_partial_delete(pre, {key_with_prefix({1, 1, 1})});
+}
+
+// A delete leaves the branch below an extension with a single child, which is a branch; an insert sorted
+// after it splits the extension above, and the next update has the seek fold past both. fold_line turned
+// the single-child branch into an extension over the child's reference and returned without folding it:
+// the seek went on to fold the extension split off above it, with the reference it held before the delete,
+// and the new extension later merged into that line, already folded. The root missed the delete.
+TEST_CASE("GridMPT<true> single-child branch below an extension the same batch splits", "[trie][gridmpt]") {
+    // ext(2,5,7) -> branch{3 -> D, a -> branch{5 -> E, 6 -> F}}. X leaves the extension after its first
+    // nibble (9 > 5: after D), Y leaves it at its first.
+    const bytes32 d = key_with_nibbles({2, 5, 7, 3}, 1);
+    const bytes32 e = key_with_nibbles({2, 5, 7, 0xa, 5}, 2);
+    const bytes32 f = key_with_nibbles({2, 5, 7, 0xa, 6}, 3);
+    const bytes32 x = key_with_nibbles({2, 9}, 4);
+    const bytes32 y = key_with_nibbles({0xf}, 5);
+    const Bytes32Map pre{{d, slot_value_rlp(1)}, {e, slot_value_rlp(2)}, {f, slot_value_rlp(3)}};
+    const Bytes32Map post{{x, slot_value_rlp(4)}, {y, slot_value_rlp(5)}};
+    SECTION("the extension at the root") {
+        check_mixed_updates(pre, /*ro=*/{}, /*del=*/{d}, post);
+    }
+    SECTION("the extension below a branch") {
+        Bytes32Map below = pre;
+        below.emplace(key_with_nibbles({0xc}, 6), slot_value_rlp(6));
+        check_mixed_updates(below, /*ro=*/{}, /*del=*/{d}, post);
+    }
 }
