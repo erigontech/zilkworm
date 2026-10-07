@@ -693,19 +693,22 @@ struct ShadowRun {
 /// (`mirror_check_root`).
 ///
 /// `provisional` supplies the block context (number, timestamp, base fee, beneficiary,
-/// gas limit); its gas_used/roots are irrelevant here.
+/// gas limit); its gas_used/roots are irrelevant here. `headers` are the headers the block's
+/// BLOCKHASH reads from, as the guest holds them (genesis and ancestors).
 inline ShadowRun shadow_execute(const std::vector<uint8_t>& blob_in,
                                 const std::vector<uint8_t>& nodestore_in,
                                 const bytes32& prev_root,
                                 const silkworm::BlockHeader& provisional,
                                 std::span<const silkworm::Transaction> txs,
-                                const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig) {
+                                const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig,
+                                std::span<const silkworm::BlockHeader> headers = {}) {
     ShadowRun r{};
     r.blob = blob_in;
     r.nodestore = nodestore_in;
     r.ds = std::make_unique<DirectState>(std::span<uint8_t>{r.blob}, std::span<uint8_t>{r.nodestore});
     r.sanitize_ok = r.ds->sanitize();
     if (!r.sanitize_ok) return r;
+    for (const silkworm::BlockHeader& h : headers) r.ds->insert_header(h);
 
     silkworm::Block block{};
     block.header = provisional;

@@ -104,8 +104,10 @@ AcctSpec sender_of(const Tx& t, uint64_t nonce = 0) {
 
 /// The pre-state blob a producer hands over with `witness`, against the tries of `state`: a record of
 /// an account `state` has carries that account's storage root, so its account leaf is the committed
-/// one whatever slots or fields the record claims; any other record commits to its own slots.
-std::vector<uint8_t> witness_blob(const std::vector<AcctSpec>& state, const std::vector<AcctSpec>& witness) {
+/// one whatever slots or fields the record claims; any other record commits to its own slots. The
+/// blob's block-hash section holds `block_hashes`.
+std::vector<uint8_t> witness_blob(const std::vector<AcctSpec>& state, const std::vector<AcctSpec>& witness,
+                                  std::vector<BlockHashEntry> block_hashes = {}) {
     std::vector<std::pair<bytes32, Bytes>> codes;
     std::vector<DirectState::AccountInfo> infos;
     for (const AcctSpec& w : witness) {
@@ -124,7 +126,7 @@ std::vector<uint8_t> witness_blob(const std::vector<AcctSpec>& state, const std:
         info.storage = w.storage;
         infos.push_back(std::move(info));
     }
-    return DirectState::build_blob_from_accounts(std::move(infos), {}, build_code_store(codes));
+    return DirectState::build_blob_from_accounts(std::move(infos), std::move(block_hashes), build_code_store(codes));
 }
 
 /// The node store build_prestate() makes for `state`, without the nodes `omit(hash, in_account_trie)`
@@ -1405,4 +1407,150 @@ TEST_CASE("the guest accepts later blocks that read and pay accounts the first l
         CHECK(s.sr.storage(kCaller, 0) == word(1000));
         expect_accepted(run_guest(s, next, ps.blob, ps.nodestore), s, next);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Block hashes
+// ---------------------------------------------------------------------------
+// BLOCKHASH used to read the witness: its block-hash section first, then the headers it carries, by their
+// numbers. Neither is bound to the block, so a hash a producer put there was what the block read, and the
+// hash of a block it carried no header of read zero. The hash of an ancestor is the parent hash of its
+// child, which the guest holds only through the headers from the block back, each keyed by its own hash.
+
+namespace {
+
+/// Stores BLOCKHASH(0) in storage[0], then the sentinel.
+Bytes store_block_hash_0() {
+    Bytes k;
+    push1(k, 0x00);
+    k.push_back(0x40);  // BLOCKHASH
+    store_observation(k);
+    append_sentinel_and_stop(k);
+    return k;
+}
+
+/// kCaller stores BLOCKHASH(0) when `t` calls it.
+std::vector<AcctSpec> block_hash_reader(const Tx& t) {
+    return {sender_of(t), AcctSpec{.addr = kCaller, .nonce = 1, .code = store_block_hash_0()}};
+}
+
+/// The root of the state after `t`, where kCaller stored `h` as BLOCKHASH(0).
+bytes32 root_after_reading(const Tx& t, const evmc::bytes32& h) {
+    std::vector<AcctSpec> post = block_hash_reader(t);
+    spec_of(post, t.sender).nonce = 1;
+    spec_of(post, kCaller).storage = {{word(0), h}, {word(1), word(1)}};
+    return build_prestate(post).prev_root;
+}
+
+/// Block n carrying `t`, the headers of the blocks 0 to n - 1 before it, and the last of them as the
+/// bundle's genesis: the parent, which anchors `prev_root`.
+struct Ancestry {
+    std::vector<silkworm::BlockHeader> headers;
+    ChainSetup chain;
+};
+
+Ancestry ancestry(uint64_t n, const bytes32& prev_root, const Tx& t) {
+    Ancestry a{{}, make_chain(prev_root, t.tx, t.sender)};
+    silkworm::BlockHeader h = a.chain.genesis.header;
+    for (uint64_t i = 0; i < n; ++i) {
+        h.number = i;
+        h.timestamp = 1000 + i;
+        h.parent_hash = i == 0 ? evmc::bytes32{} : a.headers.back().hash();
+        a.headers.push_back(h);
+    }
+    a.chain.genesis.header = a.headers.back();
+    a.chain.genesis_rlp.clear();
+    silkworm::rlp::encode(a.chain.genesis_rlp, a.chain.genesis);
+    a.chain.base.header.parent_hash = a.headers.back().hash();
+    a.chain.base.header.number = n;
+    a.chain.base.header.timestamp = 1000 + n;
+    return a;
+}
+
+/// `a`'s block as a producer seals it, after a run that read the hashes of `headers`.
+Sealed seal_on(const Ancestry& a, const Tx& t, const Prestate& ps, std::span<const silkworm::BlockHeader> headers) {
+    Sealed s{a.chain, {}, "Shanghai"};
+    const std::array<silkworm::Transaction, 1> txs{t.tx};
+    s.sr = shadow_execute(ps.blob, ps.nodestore, ps.prev_root, s.chain.base.header, txs,
+                          silkworm::test::kNetworkConfig.at(s.network), headers);
+    REQUIRE(s.sr.sanitize_ok);
+    REQUIRE(s.sr.all_succeeded());
+    return s;
+}
+
+/// Runs the guest on `s`'s block with `ps` as its witness and `ancestors` as the bundle's ancestor headers.
+Outcome run_guest(const Sealed& s, const Prestate& ps, std::span<const silkworm::BlockHeader> ancestors) {
+    Bytes entries;
+    for (const silkworm::BlockHeader& h : ancestors) {
+        Bytes header;
+        silkworm::rlp::encode(header, h);
+        silkworm::rlp::encode(entries, ByteView{header});  // a string holding the header, as bundles carry it
+    }
+    Bytes ancestors_rlp;
+    silkworm::rlp::encode_header(ancestors_rlp, {.list = true, .payload_length = entries.size()});
+    ancestors_rlp += entries;
+    Bytes block_rlp;
+    silkworm::rlp::encode(block_rlp, sealed_block(s));
+    const std::array<ByteView, 1> blocks{ByteView{block_rlp}};
+    const std::vector<uint8_t> flat =
+        build_flat_bundle(ByteView{s.chain.genesis_rlp}, std::span<const ByteView>{blocks}, ByteView{ancestors_rlp},
+                          ps.blob, ps.nodestore, s.network);
+    REQUIRE_FALSE(flat.empty());
+    return run_envelope(wrap_mfbd(flat));
+}
+
+}  // namespace
+
+TEST_CASE("the guest takes no block hash from the witness's block-hash section", "[witness][binding][block_hash]") {
+    const Tx t = tx_to(kCaller);
+    const std::vector<AcctSpec> state = block_hash_reader(t);
+    const Prestate ps = build_prestate(state);
+
+    BlockHashEntry forged{};
+    forged.block_number = 0;
+    std::memset(forged.block_hash, 0xde, sizeof(forged.block_hash));
+    const std::vector<uint8_t> blob = witness_blob(state, state, {forged});
+    // Storing one nonzero hash costs what storing another does, so this run's gas and receipts are those
+    // of a run that read the forged one.
+    Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
+    s.sr.post.root = root_after_reading(t, std::bit_cast<evmc::bytes32>(forged.block_hash));
+    expect_rejected(run_guest(s, blob, ps.nodestore), "State Root Mismatch");
+
+    const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+    CHECK(honest.sr.storage(kCaller, 0) == honest.chain.genesis.header.hash());
+    expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
+}
+
+TEST_CASE("the guest takes an ancestor's hash from its child, not from a header of its number",
+          "[witness][binding][block_hash]") {
+    const Tx t = tx_to(kCaller);
+    const Prestate ps = build_prestate(block_hash_reader(t));
+    const Ancestry a = ancestry(2, ps.prev_root, t);  // block 2 reads the hash of block 0
+    const Sealed honest = seal_on(a, t, ps, a.headers);
+    CHECK(honest.sr.storage(kCaller, 0) == a.headers[0].hash());
+
+    // A header numbered 0 that is not block 0's, which block 1's parent hash names.
+    silkworm::BlockHeader off_chain = a.headers[0];
+    off_chain.timestamp += 7;
+    Sealed s = seal_on(a, t, ps, a.headers);
+    s.sr.post.root = root_after_reading(t, off_chain.hash());
+    expect_rejected(run_guest(s, ps, std::array{off_chain}), "State Root Mismatch");
+
+    expect_accepted(run_guest(honest, ps, std::array{a.headers[0]}), honest);
+}
+
+TEST_CASE("the guest rejects a block that read the hash of an ancestor the witness does not lead to",
+          "[witness][binding][block_hash]") {
+    const Tx t = tx_to(kCaller);
+    const Prestate ps = build_prestate(block_hash_reader(t));
+    const Ancestry a = ancestry(3, ps.prev_root, t);  // block 3 reads the hash of block 0, which block 1 names
+
+    // Without block 1's header the hash read zero.
+    const Sealed s = seal_on(a, t, ps, std::span{a.headers}.last(1));
+    REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
+    expect_rejected(run_guest(s, ps, {}), "read the hash of an ancestor the witness does not hold");
+
+    const Sealed honest = seal_on(a, t, ps, a.headers);
+    CHECK(honest.sr.storage(kCaller, 0) == a.headers[0].hash());
+    expect_accepted(run_guest(honest, ps, std::span{a.headers}.first(2)), honest);
 }

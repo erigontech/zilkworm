@@ -428,6 +428,13 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
+        // The block read zero for the hash of an ancestor the witness's headers do not lead to, and no root
+        // tells that apart from the hash.
+        if (bundle.direct.ancestor_missing()) [[unlikely]] {
+            sys_println(std::format("ERROR: block {} read the hash of an ancestor the witness does not hold", i));
+            failed_ = true;
+            return {0, false};
+        }
         // A bundle is one chain: its first block is anchored at the parent header its parent hash
         // names (check_root), each later block runs on the state the one before it left. So the
         // committed block hash binds the bundle's earlier blocks, and with them its pre-state
