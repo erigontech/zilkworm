@@ -57,7 +57,8 @@ std::vector<uint256> divisors(std::mt19937_64& rng) {
         const unsigned words = 1 + rng() % 8;
         for (unsigned w = 0; w < words; ++w) {
             const auto r = static_cast<uint32_t>(rng());
-            reinterpret_cast<uint32_t*>(&v)[w] = (rng() & 3) ? r : 0;
+            // Into the 64-bit words: a store through uint32_t* need not be seen by their reads.
+            if (rng() & 3) v[w / 2] |= uint64_t{r} << (32 * (w % 2));
         }
         out.push_back(v);
     }
