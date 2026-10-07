@@ -203,6 +203,31 @@ namespace {
         std::memcpy(dst, src.bytes, 32);
     }
 
+    // SOUNDNESS-CRITICAL: the entries of an MphfMap must tile its data section exactly as the
+    // MphfBuilder lays them out — contiguous from offset 8 (the reserved sentinel it leaves so
+    // slot_offsets[idx] == 0 means "empty"), each 8-aligned, with no gaps and no overlaps.
+    // find() and for_each() read bodies in place and sanitize() and the EVM write through the
+    // addr-map bodies, so an entry whose body overlapped another's would let a write into one
+    // change the other after it was bound. Checked once, before anything is written; validate_mphf
+    // has already bounded every entry inside the data region, so each [len] read here is in range.
+    [[nodiscard]] bool mphf_entries_tile(const MphfMap& m) {
+        if (!m.valid() || m.n_keys() == 0) return true;
+        const uint8_t* const data = m.data();
+        std::vector<uint32_t> offsets;
+        offsets.reserve(m.n_keys());
+        m.for_each([&](const uint8_t* /*key*/, std::span<uint8_t> body) {
+            offsets.push_back(static_cast<uint32_t>((body.data() - 8) - data));
+        });
+        std::sort(offsets.begin(), offsets.end());
+        uint64_t expect = 8u;  // data[0..8) is the sentinel the builder reserves
+        for (const uint32_t off : offsets) {
+            if (off != expect) return false;  // a gap, an overlap, or a misaligned start
+            uint64_t body_len; std::memcpy(&body_len, data + off, 8);
+            expect = off + mphf_align8(static_cast<uint32_t>(8u + body_len));
+        }
+        return expect == m.header()->data_size;
+    }
+
 }  // namespace
 
 namespace detail {
@@ -876,6 +901,34 @@ std::optional<intx::uint256> DirectState::total_difficulty(uint64_t, const evmc:
 }
 
 bool DirectState::sanitize() {
+    // SOUNDNESS-CRITICAL: the pre-state blob's sections lie in builder order and do not overlap —
+    // meta | prestate MphfMap | addr_hashes | block_hashes | code store — each ending at or before
+    // the next begins and the last within the blob. validate_prestate_layout bounds every section on
+    // its own; this rules out a producer pointing one into another, e.g. the code store onto a
+    // record's writable slots, which would let the initial->current copy below (or an SSTORE) change
+    // code after it was hashed, or a record's slots over another record's bound initial value.
+    {
+        const PreStateMeta& m = *pre_state_meta_;
+        const uint64_t blob_size = prestate_view_.size();
+        if (sizeof(PreStateMeta) > m.prestate_offset ||
+            m.prestate_offset > m.addr_hashes_offset ||
+            uint64_t{m.addr_hashes_offset} + uint64_t{m.n_accounts} * sizeof(AddrHashEntry) >
+                m.block_hashes_offset ||
+            uint64_t{m.block_hashes_offset} + uint64_t{m.n_block_hashes} * sizeof(BlockHashEntry) >
+                m.code_store_offset ||
+            uint64_t{m.code_store_offset} + m.code_store_size > blob_size) [[unlikely]] {
+            sys_println("sanitize: pre-state sections overlap or out of builder order");
+            return false;
+        }
+        // Within the addr map and the code store, every record/entry starts on an entry boundary and
+        // none overlaps another (the node store is a separate, disjoint bundle section, and its nodes
+        // are bound to their keccak on use, so an overlapping node cannot be mistaken for another).
+        if (!mphf_entries_tile(pre_state_map_) || !mphf_entries_tile(code_store_map_)) [[unlikely]] {
+            sys_println("sanitize: witness MphfMap entries overlap or leave gaps");
+            return false;
+        }
+    }
+
     // SOUNDNESS-CRITICAL: binds each leaf's identity to its trie-key hash.
     bool code_keccak_ok = true;
     code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
