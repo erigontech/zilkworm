@@ -6723,6 +6723,7 @@ dependencies = [
 name = "z6m_prover_airbender"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "base64",
  "bincode 1.3.3",
  "bincode 2.0.1",

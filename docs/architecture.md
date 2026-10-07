@@ -124,3 +124,14 @@ failure/empty paths:
 
 The roots, block hash, and chain ID bind the proof to a concrete state transition. The SP1 hypercube host currently parses and logs them.
 
+The Airbender guest's public output is 32 bytes, the output registers a0..a7: the `block_hash` above
+(the hash of the last validated block), its bytes in order as little-endian words, or zero when the run
+validated no block (EJSN tests, skipped runs). The hash binds that block's chain: StateTransition reads a
+bundle's pre-state root from the header that its first block's parent hash names (headers are stored
+under their own hash), requires every later block of the bundle to extend the one validated before it,
+and checks each header's state root and gas used against the execution. The bundles of an envelope are
+independent chains (the EEST conversions pack one test per bundle), so with several bundles the output
+covers the last validated block's bundle only. `z6m_prover_airbender` derives the expected value from
+the input (keccak256 of the last valid block's RLP header) and fails on a mismatch in `execute`,
+`prove`, `verify`, `--test-service` and `--service`.
+
