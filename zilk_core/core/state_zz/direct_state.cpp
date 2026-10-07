@@ -1001,6 +1001,15 @@ bool DirectState::sanitize() {
         pa->deleted = false;
         pa->modified = true;    // To be unset during addr_hashes loop
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
+        // Execution reads a slot's current value, but check_root binds only its initial one to the
+        // storage root: the block starts from that, whatever current value the witness carries. Copied
+        // by words (a Slot is 8-aligned): with strict alignment a 32-byte memcpy is a call per slot.
+        typedef uint32_t __attribute__((may_alias)) w32;
+        for (Slot& slot : slots_for(*pa)) {
+            const w32* const from = reinterpret_cast<const w32*>(slot.initial);
+            w32* const to = reinterpret_cast<w32*>(slot.current);
+            for (size_t i = 0; i < 8; ++i) to[i] = from[i];
+        }
     };
     if (pre_state_meta_->n_accounts > 0) {
         pre_state_map_.for_each<20>(
