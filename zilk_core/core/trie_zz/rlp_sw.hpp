@@ -250,7 +250,7 @@ template <unsigned Off>
         // walk below sums the slot sizes up to the last dirty one.
         {
             typedef uint32_t __attribute__((may_alias)) w32;
-            const auto* lens = reinterpret_cast<const w32*>(std::assume_aligned<8>(b.orig_child_len.data()));
+            const w32* const lens = reinterpret_cast<const w32*>(std::assume_aligned<8>(b.orig_child_len.data()));
             if (b.orig_size == 3 + 16 * 33 + 1 &&
                 ((lens[0] ^ 0x20202020u) | (lens[1] ^ 0x20202020u) | (lens[2] ^ 0x20202020u) |
                  (lens[3] ^ 0x20202020u)) == 0) {
