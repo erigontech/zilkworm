@@ -72,7 +72,7 @@ TEST_CASE("HashIndex basic insert and find (32-byte keys)", "[hash_index]") {
 
     // offset 0 is the empty sentinel and is rejected by insert.
     const auto bad = make_key32(0x2000ULL, 0x01);
-    CHECK_FALSE(idx.insert(ref32(bad), HashIndex<32, &hash_key8>::kEmptyOffset));
+    CHECK_FALSE(idx.insert(ref32(bad), HashIndex<32, &hash_key8>::kEmpty));
     CHECK_FALSE(idx.find(ref32(bad)).has_value());
 }
 

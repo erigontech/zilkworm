@@ -35,14 +35,12 @@ HashState::HashState(std::uint32_t expected_nodes, std::uint32_t expected_codes,
       code_index_{expected_codes},
       account_index_{expected_accounts},
       storage_index_{expected_storage_slots} {
-    // Front-pad all arenas so the first real entry offset is >= 8 and can never
+    // Front-pad both arenas so the first real entry offset is >= 8 and can never
     // equal HashIndex's empty-bucket sentinel (offset 0). std::vector<uint8_t> data is
     // max_align_t-aligned, and every account entry is a whole Account (256 B, a multiple
     // of 8) starting at offset 8, so each stays 8-aligned for the reinterpret_cast. The
     // storage arena stores bare 32-byte words (32 is a multiple of 8) from offset 8, so
     // those stay 8-aligned too.
-    node_arena_.resize(8, 0);
-    code_arena_.resize(8, 0);
     accounts_arena_.resize(8, 0);
     storage_arena_.resize(8, 0);
 }
@@ -410,31 +408,32 @@ void HashState::note_storage_miss_(const evmc::bytes32& addr_hash,
     if (!confirm_absent(sroot, slot_hash)) ++unconfirmed_read_count_;
 }
 
-evmc::bytes32 HashState::add_node(ByteView rlp) {
+evmc::bytes32 HashState::add_view_(HashIndex<32, &hash_key8, StoredBytes>& index,
+                                   ByteView bytes) {
     // Identity binding: the index key IS the real keccak256 of the bytes (matches the
     // direct_state.cpp:417-418 idiom exactly).
-    const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(rlp));
-    if (node_index_.find(h.bytes)) return h;  // dedupe: already stored, no re-append
+    const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(bytes));
+    if (!index.find(h.bytes)) index.insert(h.bytes, stored_view_(bytes));  // dedupe
+    return h;
+}
 
-    const std::uint32_t off = static_cast<std::uint32_t>(node_arena_.size());
-    const std::uint32_t len = static_cast<std::uint32_t>(rlp.size());
-    node_arena_.resize(node_arena_.size() + sizeof(len) + rlp.size());
-    std::memcpy(node_arena_.data() + off, &len, sizeof(len));
-    std::memcpy(node_arena_.data() + off + sizeof(len), rlp.data(), rlp.size());
-    node_index_.insert(h.bytes, off);
+evmc::bytes32 HashState::add_node_borrowed(ByteView rlp) { return add_view_(node_index_, rlp); }
+
+evmc::bytes32 HashState::add_code_borrowed(ByteView code) { return add_view_(code_index_, code); }
+
+evmc::bytes32 HashState::add_node(ByteView rlp) {
+    const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(rlp));
+    if (node_index_.find(h.bytes)) return h;  // dedupe: already stored, no second copy
+    const Bytes& copy = owned_bytes_.emplace_back(rlp);
+    node_index_.insert(h.bytes, stored_view_(copy));
     return h;
 }
 
 evmc::bytes32 HashState::add_code(ByteView code) {
     const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(code));
     if (code_index_.find(h.bytes)) return h;  // dedupe
-
-    const std::uint32_t off = static_cast<std::uint32_t>(code_arena_.size());
-    const std::uint32_t len = static_cast<std::uint32_t>(code.size());
-    code_arena_.resize(code_arena_.size() + sizeof(len) + code.size());
-    std::memcpy(code_arena_.data() + off, &len, sizeof(len));
-    std::memcpy(code_arena_.data() + off + sizeof(len), code.data(), code.size());
-    code_index_.insert(h.bytes, off);
+    const Bytes& copy = owned_bytes_.emplace_back(code);
+    code_index_.insert(h.bytes, stored_view_(copy));
     return h;
 }
 
