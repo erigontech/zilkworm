@@ -173,8 +173,18 @@ class DirectState : public BlockState {
         const Account* pa = observe_account_(addr);
         if (pa->deleted) [[unlikely]]
             return false;
-        // Only blob records carry inline slots; overlay records use overflow_slots_.
-        if (pa->slot_count > 0) return true;
+        // SOUNDNESS-CRITICAL: decides EIP-7610 create collisions, by the storage root and never by the
+        // witness slots: a zero slot is what an absent key holds, and the collision check reads no slot,
+        // so the witness need not carry any. A pre-state record's root is the one its account leaf
+        // commits to, which check_root binds; a created or revived record's is the empty root. Only code
+        // running at the address clears the storage under a non-empty root, and that leaves the account
+        // code or a nonce, a collision either way, until it is destructed.
+        if (!eq_hash32(pa->storage_root, kEmptyRoot.bytes)) return true;
+        // Under the empty root, what the block has written: into a witness slot, which check_root binds
+        // to a zero initial value, or into overflow_slots_, which holds no zero.
+        for (const Slot& slot : slots_for(*pa)) {
+            if (!evmc::is_zero(std::bit_cast<evmc::bytes32>(slot.current))) return true;
+        }
         if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end() && !it->second.empty()) return true;
         return false;
     }
