@@ -334,8 +334,8 @@ TEST_CASE("check_root rejects a witness that omits a pre-state root node",
 // ---------------------------------------------------------------------------
 // A key the walk has to insert is absent from the pre-state trie, so its claimed pre-value must be
 // empty: no value for a created account or slot, 0x80 (zero) for a slot read as absent. A read-only
-// claim of anything else used to insert an empty leaf that folded away again, returning the
-// committed root while the block executed with the claimed value.
+// claim of anything else used to leave the trie as it was, returning the committed root while the
+// block executed with the claimed value. A read returns at its insertion point after that check.
 
 namespace {
 

@@ -65,7 +65,7 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     //================================================
     if (grid_.size() <= 1 || depth_ == 0) {
         if (grid_.size() > 0 && is_empty(grid_[0])) {
-            delete_line(0);
+            grid_.clear();  // with every deleted line above the root, as cascade_delete() does
         }
         return;
     }
@@ -109,6 +109,10 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
         while (parent_consumed > lcp && cur_parent_depth > 0) {
             for (auto i = grid_.size() - 1; i > cur_parent_depth; --i) {
                 if (grid_[i].parent_depth >= cur_parent_depth) {
+                    // Deletes line i alone: only an empty line takes more lines with it (cascade_delete deletes
+                    // the ancestors it leaves empty), which would leave i and the lines this loop climbs to
+                    // stale, and none gets here. A deletion's empty lines go in the cascade above, before any
+                    // fold; a read of an absent key inserts no leaf; decode_node() rejects a leaf without a value.
                     fold_line(i);
                 }
             }
@@ -134,7 +138,8 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
 
 // A key the walk inserts is absent from the pre-state trie, so its claimed pre-value must say so: none for a
 // created account or slot, 0x80 (zero) for a slot read as absent. Anything else is a value the block executed
-// with that no leaf binds; a read-only update would insert an empty leaf, which folds away again.
+// with that no leaf binds; a read-only update inserts nothing, so the root would not show it. Each insertion
+// site checks it first, ahead of the return of a read.
 // Out of line: insertions are rare, and the check stays out of the descent loop.
 template <bool DeletionEnabled>
 [[gnu::noinline]] bool GridMPT<DeletionEnabled>::claims_absent(const TrieNodeFlat& u) {
@@ -172,6 +177,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
             if (!claims_absent(trie_upd)) [[unlikely]] {
                 return {};
             }
+            if (trie_upd.current_value().empty()) {
+                continue;  // a read of a key the empty trie does not have: nothing to insert, see below
+            }
             search_nibbles_ = new_nibbles;
             last_was_delete_ = false;
             LeafNode l{search_nibbles_, 0, trie_upd.current_value()};
@@ -198,6 +206,15 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     // Child is empty - insert here
                     if (!claims_absent(trie_upd)) [[unlikely]] {
                         return {};
+                    }
+                    if (trie_upd.current_value().empty()) {
+                        // A read of a key absent from the trie, which reaching this empty slot shows: nothing to
+                        // insert. An empty leaf would fold away again, but the cascade that deletes it can take lines
+                        // the seek still climbs through, and leave a branch with a single child the walk folded
+                        // already, whose new hash the witness cannot unfold. The next seek starts from this branch,
+                        // as after a deletion from it.
+                        last_was_delete_ = true;
+                        break;
                     }
                     auto l = make_cur_leaf(trie_upd.current_value());
                     insert_line(l.parent_slot, depth_, std::move(l));
@@ -247,6 +264,13 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
 
                 if (!claims_absent(trie_upd)) [[unlikely]] {
                     return {};
+                }
+                if (trie_upd.current_value().empty()) {
+                    // A read of a key absent from the trie: it leaves the extension inside its path. Nothing to
+                    // insert, as for an empty slot; the next seek starts from the parent branch.
+                    depth_ = grid_line.parent_depth;
+                    last_was_delete_ = true;
+                    break;
                 }
                 auto old_ext_line{grid_line};  // cache the value;
                 auto new_ext_len = old_ext_line.ext.path.len - m - 1;
@@ -353,6 +377,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
 
                 if (!claims_absent(trie_upd)) [[unlikely]] {
                     return {};
+                }
+                if (trie_upd.current_value().empty()) {
+                    break;  // a read of a key absent from the trie, which leaves this leaf's path: nothing to insert
                 }
                 LeafNode old_leaf{grid_[depth_].leaf};
                 BranchNode bn;
