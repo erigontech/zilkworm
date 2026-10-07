@@ -104,6 +104,17 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
         pop_back();
         return false;
     }
+    // Keys are 64 nibbles: a leaf's path ends its key, and an extension's leaves at least one nibble for the
+    // branch below it. A witness node is bound only to the hash that referenced it (a storage trie is walked
+    // before the account trie checks its root), and the walk relies on this: a shorter leaf path wraps
+    // old_leaf.path.len in the leaf split of calc_root_from_updates, an empty extension has no last nibble,
+    // and folds append paths within one nibbles64.
+    const unsigned parent_consumed = line.consumed - 1u;  // emplace_line counted the line as a branch
+    if (is_leaf ? parent_consumed + plen != 64 : (plen == 0 || parent_consumed + plen > 63)) [[unlikely]] {
+        failed_ = true;
+        pop_back();
+        return false;
+    }
     if (is_leaf) {
         LeafNode l{nibbles64{plen, path}, static_cast<uint8_t>(parent_slot_index), second};
         transform_line(line, std::move(l));
