@@ -925,6 +925,11 @@ bool DirectState::sanitize() {
         pa->deleted = false;
         pa->modified = true;    // To be unset during addr_hashes loop
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
+        // Execution reads a slot's current value, but check_root binds only its initial one to the
+        // storage root: the block starts from that, whatever current value the witness carries.
+        for (Slot& slot : slots_for(*pa)) {
+            std::memcpy(slot.current, slot.initial, sizeof(slot.current));
+        }
     };
     if (pre_state_meta_->n_accounts > 0) {
         pre_state_map_.for_each<20>(
