@@ -88,8 +88,8 @@ struct Tx {
     evmc::address sender;
 };
 
-Tx tx_to(const evmc::address& to, const intx::uint256& value = 0) {
-    Tx t{make_legacy_txn(to, kGas, value), {}};
+Tx tx_to(const evmc::address& to, const intx::uint256& value = 0, uint64_t gas_limit = kGas) {
+    Tx t{make_legacy_txn(to, gas_limit, value), {}};
     t.sender = recover_sender(t.tx);
     REQUIRE(t.sender != evmc::address{});
     REQUIRE(t.sender != kCaller);
@@ -899,4 +899,129 @@ TEST_CASE("from Cancun on, an account SELFDESTRUCT leaves in place binds its slo
     CHECK(honest.sr.storage(kCaller, 0) == word(5));
     CHECK_FALSE(honest.sr.ds->is_deleted(kHolder));
     expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
+}
+
+// ---------------------------------------------------------------------------
+// Create collisions
+// ---------------------------------------------------------------------------
+// A CREATE or CREATE2 to an account with a nonce, code or storage fails (EIP-7610, on every fork). The
+// guest used to take "has storage" from whether the witness carried a slot of the account, which is not
+// what its storage root says: a zero slot, the claim for an absent key, made a creation collide, and a
+// witness without the slots of an account whose storage root is not empty, which a creation does not
+// read, let one go ahead.
+
+namespace {
+
+/// kFactory CREATE2s an account at create2_stop_address(kFactory), which `target` describes.
+struct Create2Over {
+    Tx t;
+    evmc::address target;
+    std::vector<AcctSpec> state;
+};
+
+Create2Over create2_over(AcctSpec target) {
+    // A colliding CREATE2 burns the 63/64 of the gas it passes on, and the factory still has to store.
+    Create2Over c{tx_to(kFactory, /*value=*/0, /*gas_limit=*/3 * kGas), create2_stop_address(kFactory), {}};
+    REQUIRE(c.t.sender != c.target);
+    target.addr = c.target;
+    c.state = {
+        sender_of(c.t),
+        AcctSpec{.addr = kFactory, .nonce = 1, .code = create2_stop()},
+        std::move(target),
+    };
+    return c;
+}
+
+/// A pre-funded account at the target, with no storage: the CREATE2 creates it.
+Create2Over create2_over_funded() { return create2_over(AcctSpec{.nonce = 0, .balance = 1000}); }
+
+/// An account at the target with storage alone (EIP-7610): the CREATE2 collides.
+Create2Over create2_over_storage() {
+    return create2_over(AcctSpec{.nonce = 0, .balance = 0, .storage = {{word(1), word(5)}}});
+}
+
+/// The state after the CREATE2, which `created` says created the target or collided.
+std::vector<AcctSpec> after_create2(const Create2Over& c, bool created) {
+    std::vector<AcctSpec> post = c.state;
+    spec_of(post, c.t.sender).nonce = 1;
+    AcctSpec& factory = spec_of(post, kFactory);
+    factory.nonce = 2;  // a colliding CREATE2 bumps it all the same
+    factory.storage = {{word(1), word(1)}};
+    if (created) {
+        evmc::bytes32 target{};
+        std::memcpy(target.bytes + 12, c.target.bytes, 20);
+        factory.storage.emplace_back(word(0), target);
+        spec_of(post, c.target).nonce = 1;
+    }
+    return post;
+}
+
+/// The block a producer seals for `c` whose CREATE2 `created` the target or collided: the gas and
+/// receipts of a run against a witness whose target has the storage that decides so, and the state root
+/// of after_create2().
+Sealed seal_create2(const Create2Over& c, const Prestate& ps, bool created, const char* network) {
+    std::vector<AcctSpec> as_if = c.state;
+    spec_of(as_if, c.target).storage = created ? Slots{} : Slots{{word(1), word(5)}};
+    Sealed s = seal(c.t, ps.prev_root, build_prestate(as_if).blob, ps.nodestore, network);
+    REQUIRE((s.sr.storage(kFactory, 0) != evmc::bytes32{}) == created);
+    s.sr.post.root = build_prestate(after_create2(c, created)).prev_root;
+    return s;
+}
+
+/// A witness of `c`'s state whose record of the target carries `slots`.
+std::vector<uint8_t> target_slots(const Create2Over& c, Slots slots) {
+    std::vector<AcctSpec> witness = c.state;
+    spec_of(witness, c.target).storage = std::move(slots);
+    return witness_blob(c.state, witness);
+}
+
+}  // namespace
+
+TEST_CASE("the guest rejects a CREATE2 that collides with a zero slot the witness carries",
+          "[witness][binding][collision]") {
+    for (const char* network : {"Shanghai", "Cancun"}) {
+        DYNAMIC_SECTION(network) {
+            const Create2Over c = create2_over_funded();
+            const Prestate ps = build_prestate(c.state);
+            const std::vector<uint8_t> blob = target_slots(c, {{word(1), evmc::bytes32{}}});
+            const Sealed s = seal_create2(c, ps, /*created=*/false, network);
+            expect_rejected(run_guest(s, blob, ps.nodestore), "kWrongBlockGas");
+        }
+    }
+}
+
+TEST_CASE("the guest rejects a CREATE2 over storage whose slots the witness omits",
+          "[witness][binding][collision]") {
+    for (const char* network : {"Shanghai", "Cancun"}) {
+        DYNAMIC_SECTION(network) {
+            const Create2Over c = create2_over_storage();
+            const Prestate ps = build_prestate(c.state);
+            const std::vector<uint8_t> blob = target_slots(c, {});
+            const Sealed s = seal_create2(c, ps, /*created=*/true, network);
+            expect_rejected(run_guest(s, blob, ps.nodestore), "kWrongBlockGas");
+        }
+    }
+}
+
+// Both witnesses are honest: a zero slot is what an absent key holds, and a creation reads no slot.
+TEST_CASE("the guest decides a CREATE2 collision by its target's storage root",
+          "[witness][binding][collision][honest]") {
+    for (const char* network : {"Shanghai", "Cancun"}) {
+        DYNAMIC_SECTION("over a funded account, " << network) {
+            const Create2Over c = create2_over_funded();
+            const Prestate ps = build_prestate(c.state);
+            const Sealed s = seal(c.t, ps.prev_root, ps.blob, ps.nodestore, network);
+            REQUIRE(build_prestate(after_create2(c, /*created=*/true)).prev_root == s.sr.post.root);
+            expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
+            expect_accepted(run_guest(s, target_slots(c, {{word(1), evmc::bytes32{}}}), ps.nodestore), s);
+        }
+        DYNAMIC_SECTION("over storage, " << network) {
+            const Create2Over c = create2_over_storage();
+            const Prestate ps = build_prestate(c.state);
+            const Sealed s = seal(c.t, ps.prev_root, ps.blob, ps.nodestore, network);
+            REQUIRE(build_prestate(after_create2(c, /*created=*/false)).prev_root == s.sr.post.root);
+            expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
+            expect_accepted(run_guest(s, target_slots(c, {}), ps.nodestore), s);
+        }
+    }
 }
