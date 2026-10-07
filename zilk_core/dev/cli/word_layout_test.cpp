@@ -17,8 +17,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <evmone/test/state/host.hpp>
+#include <evmone/test/state/precompiles.hpp>
 #include <evmone/test/state/state.hpp>
 #include <evmone/vm.hpp>
+#include <evmone/word_layout.hpp>
 #include <evmone_precompiles/keccak.hpp>
 
 namespace {
@@ -34,11 +36,11 @@ constexpr address kSender = 0x5e00000000000000000000000000000000000004_address;
 constexpr address kIdentity = 0x0000000000000000000000000000000000000004_address;
 
 enum : uint8_t {
-    STOP = 0x00, SUB = 0x03, KECCAK = 0x20, CALLDATALOAD = 0x35, CALLDATASIZE = 0x36,
+    STOP = 0x00, ADD = 0x01, SUB = 0x03, KECCAK = 0x20, CALLDATALOAD = 0x35, CALLDATASIZE = 0x36,
     CALLDATACOPY = 0x37, CODECOPY = 0x39, EXTCODESIZE = 0x3b, RETURNDATASIZE = 0x3d,
-    RETURNDATACOPY = 0x3e, MLOAD = 0x51, MSTORE = 0x52, MSTORE8 = 0x53, MCOPY = 0x5e,
-    PUSH1 = 0x60, PUSH2 = 0x61, PUSH20 = 0x73, PUSH32 = 0x7f, DUP1 = 0x80, LOG0 = 0xa0,
-    CREATE = 0xf0, CALL = 0xf1, RETURN = 0xf3, REVERT = 0xfd
+    RETURNDATACOPY = 0x3e, POP = 0x50, MLOAD = 0x51, MSTORE = 0x52, MSTORE8 = 0x53, MCOPY = 0x5e,
+    PUSH1 = 0x60, PUSH2 = 0x61, PUSH4 = 0x63, PUSH20 = 0x73, PUSH32 = 0x7f, DUP1 = 0x80,
+    LOG0 = 0xa0, CREATE = 0xf0, CALL = 0xf1, RETURN = 0xf3, REVERT = 0xfd
 };
 
 struct Asm {
@@ -48,6 +50,12 @@ struct Asm {
         code.push_back(PUSH2);
         code.push_back(static_cast<uint8_t>(v >> 8));
         code.push_back(static_cast<uint8_t>(v));
+        return *this;
+    }
+    Asm& push4(uint32_t v) {
+        code.push_back(PUSH4);
+        for (int shift = 24; shift >= 0; shift -= 8)
+            code.push_back(static_cast<uint8_t>(v >> shift));
         return *this;
     }
     Asm& push_word(const bytes32& w) {
@@ -83,6 +91,10 @@ struct Outcome {
     evmc_status_code status = EVMC_INTERNAL_ERROR;
     bytes output;
     std::vector<bytes> logs;
+    int64_t gas_used = 0;
+#ifdef EVMONE_RV32_DISPATCH_TEST
+    uint64_t converted = 0;  // Bytes converted from the word layout into byte order.
+#endif
 };
 
 struct EmptyView final : evmone::state::StateView {
@@ -103,7 +115,8 @@ bytes echo_code() {
         .op(CALLDATASIZE).push(0).op(RETURN).code;
 }
 
-Outcome run(const bytes& code, const bytes& calldata, const bytes& echo = echo_code()) {
+Outcome run(const bytes& code, const bytes& calldata, const bytes& echo = echo_code(),
+           evmc_revision rev = EVMC_PRAGUE) {
     EmptyView view;
     NoHashes hashes;
     evmone::state::State state{view};
@@ -126,7 +139,7 @@ Outcome run(const bytes& code, const bytes& calldata, const bytes& echo = echo_c
     block.number = 1;
     block.timestamp = 1;
     evmone::state::Transaction tx;
-    evmone::state::Host host{EVMC_PRAGUE, vm, state, block, hashes, tx};
+    evmone::state::Host host{rev, vm, state, block, hashes, tx};
 
     evmc_message msg{};
     msg.kind = EVMC_CALL;
@@ -136,6 +149,9 @@ Outcome run(const bytes& code, const bytes& calldata, const bytes& echo = echo_c
     msg.sender = kSender;
     msg.input_data = calldata.data();
     msg.input_size = calldata.size();
+#ifdef EVMONE_RV32_DISPATCH_TEST
+    const auto converted_before = evmone::wl::usage.converted;
+#endif
     const auto result = host.call(msg);
 
     Outcome o;
@@ -143,6 +159,10 @@ Outcome run(const bytes& code, const bytes& calldata, const bytes& echo = echo_c
     o.output.assign(result.output_data, result.output_size);
     for (auto& l : host.take_logs())
         o.logs.push_back(l.data);
+    o.gas_used = msg.gas - result.gas_left;
+#ifdef EVMONE_RV32_DISPATCH_TEST
+    o.converted = evmone::wl::usage.converted - converted_before;
+#endif
     return o;
 }
 
@@ -346,3 +366,165 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
         CHECK(std::equal(out.output.begin(), out.output.end(), m.mem.begin()));
     }
 }
+
+#ifdef EVMONE_RV32_DISPATCH_TEST
+namespace {
+
+// Bytes that are not all zero, so that a precompile reading the wrong ones gives another result.
+bytes pattern(size_t n, uint8_t seed) {
+    bytes b(n, 0);
+    for (size_t i = 0; i < n; ++i)
+        b[i] = static_cast<uint8_t>(seed + 7 * i);
+    return b;
+}
+
+// A MODEXP input: the lengths of base, exponent and modulus, then @p payload bytes.
+bytes modexp_input(uint32_t base_len, uint32_t exp_len, uint32_t mod_len, size_t payload) {
+    bytes in(96, 0);
+    const uint32_t lens[] = {base_len, exp_len, mod_len};
+    for (size_t k = 0; k < 3; ++k)
+        for (size_t j = 0; j < 4; ++j)
+            in[32 * k + 28 + j] = static_cast<uint8_t>(lens[k] >> (24 - 8 * j));
+    const auto p = pattern(payload, 0x31);
+    in.insert(in.end(), p.begin(), p.end());
+    return in;
+}
+
+struct PrecompileCall {
+    evmc_revision rev;
+    uint16_t id;
+    bytes setup;  // The first bytes of the input; zeros follow.
+    uint64_t in_offset;
+    uint64_t size;
+    uint32_t gas;
+};
+
+address precompile_address(uint16_t id) {
+    address a{};
+    a.bytes[18] = static_cast<uint8_t>(id >> 8);
+    a.bytes[19] = static_cast<uint8_t>(id);
+    return a;
+}
+
+// Pays for 64 KiB of memory, copies the setup bytes from the code to the input and, with @p call,
+// calls the precompile on the input. With @p results it returns the success flag as a word and the
+// return data after it; without, it stops.
+bytes precompile_program(const PrecompileCall& c, bool call, bool results) {
+    const auto build = [&](uint64_t setup_at) {
+        Asm a;
+        a.mstore8(65535, 0);
+        if (!c.setup.empty())
+            a.copy(CODECOPY, c.in_offset, setup_at, c.setup.size());
+        if (call) {
+            a.push(0).push(0).push(c.size).push(c.in_offset).push(0);
+            a.push_addr(precompile_address(c.id)).push4(c.gas).op(CALL);
+            if (results)
+                a.push(0).op(MSTORE).op(RETURNDATASIZE).push(0).push(32).op(RETURNDATACOPY)
+                    .op(RETURNDATASIZE).push(32).op(ADD).push(0).op(RETURN);
+            else
+                a.op(POP);
+        }
+        return a.op(STOP);
+    };
+    auto a = build(0);
+    a = build(a.code.size());
+    a.code.insert(a.code.end(), c.setup.begin(), c.setup.end());
+    return a.code;
+}
+
+}  // namespace
+
+TEST_CASE("a precompile converts no more of its input than its gas pays for", "[word_layout]") {
+    // A precompile called from the EVM gets its input converted from the caller's memory into byte
+    // order. The memory is paid for once, and most precompiles cost the same for any input size:
+    // converting bytes that they never read made each call as expensive as its input is long. The
+    // bound is 11 bytes per gas unit of the call, above identity's 32 bytes per 3 gas. Each call
+    // must also give the precompile's own status, gas and output on the bytes of its input.
+    struct Kind {
+        uint16_t id;
+        uint64_t size;  // The input size the precompile is built around.
+    };
+    const Kind kinds[] = {{0x01, 128}, {0x02, 64}, {0x03, 64}, {0x04, 32}, {0x05, 96}, {0x06, 128},
+        {0x07, 96}, {0x08, 192}, {0x09, 213}, {0x0a, 192}, {0x0b, 256}, {0x0c, 160}, {0x0d, 512},
+        {0x0e, 288}, {0x0f, 384}, {0x10, 64}, {0x11, 128}, {0x100, 160}};
+    std::vector<PrecompileCall> calls;
+    for (const auto rev : {EVMC_PRAGUE, EVMC_OSAKA}) {
+        for (const auto& k : kinds) {
+            if (!evmone::state::is_precompile(rev, precompile_address(k.id)))
+                continue;
+            std::vector<bytes> setups{{}, pattern(k.size + 1, 0x5a)};
+            if (k.id == 0x05) {
+                // Short lengths, a long exponent with no modulus (the minimum price before Osaka),
+                // and lengths that cost more than the call has.
+                setups.push_back(modexp_input(1, 1, 1, 3));
+                setups.push_back(modexp_input(0, 50000, 0, 64));
+                setups.push_back(modexp_input(40, 40, 40, 120));
+                setups.push_back(modexp_input(2, 300, 3, 305));
+                setups.push_back(modexp_input(1024, 1, 1024, 64));
+            }
+            if (k.id == 0x09) {
+                auto in = pattern(213, 0x11);
+                in[0] = in[1] = in[2] = 0;
+                in[3] = 12;  // Rounds.
+                in[212] = 1;
+                setups.push_back(in);
+            }
+            for (const auto& setup : setups) {
+                std::vector<uint64_t> sizes{0, 1, k.size - 1, k.size, k.size + 1, 1000, 60000};
+                if (!setup.empty()) {
+                    sizes.push_back(setup.size() - 1);
+                    sizes.push_back(setup.size());
+                }
+                for (const auto size : sizes)
+                    for (const uint64_t in_offset : {uint64_t{0}, uint64_t{3}})
+                        for (const uint32_t gas : {0u, 1000000u})
+                            calls.push_back({rev, k.id, setup, in_offset, size, gas});
+            }
+        }
+    }
+
+    for (const auto& c : calls) {
+        INFO("rev " << c.rev << " precompile " << c.id << " setup " << c.setup.size() << " size "
+                    << c.size << " offset " << c.in_offset << " gas " << c.gas);
+        const auto with = run(precompile_program(c, true, false), {}, echo_code(), c.rev);
+        const auto without = run(precompile_program(c, false, false), {}, echo_code(), c.rev);
+        const auto results = run(precompile_program(c, true, true), {}, echo_code(), c.rev);
+        REQUIRE(with.status == EVMC_SUCCESS);
+        REQUIRE(without.status == EVMC_SUCCESS);
+        REQUIRE(results.status == EVMC_SUCCESS);
+
+        bytes input(c.size, 0);
+        std::copy_n(c.setup.begin(), std::min<size_t>(c.setup.size(), input.size()), input.begin());
+        evmc_message msg{};
+        msg.kind = EVMC_CALL;
+        msg.gas = c.gas;
+        msg.depth = 1;
+        msg.recipient = msg.code_address = precompile_address(c.id);
+        msg.sender = kCaller;
+        msg.input_data = input.data();
+        msg.input_size = input.size();
+        const auto expected = evmone::state::call_precompile(c.rev, msg);
+
+        // CALL (warm) 100, seven pushes 21, POP 2, and what the precompile used.
+        const auto call_gas = with.gas_used - without.gas_used;
+        CHECK(call_gas == 123 + c.gas - expected.gas_left);
+        bytes expected_output(32, 0);
+        expected_output[31] = expected.status_code == EVMC_SUCCESS ? 1 : 0;
+        if (expected.output_size != 0)
+            expected_output.append(expected.output_data, expected.output_size);
+        CHECK(results.output == expected_output);
+        CHECK(with.converted <= 11 * static_cast<uint64_t>(call_gas));
+    }
+}
+
+TEST_CASE("the precompile input buffer keeps its contents when it grows", "[word_layout]") {
+    // MODEXP converts the first bytes of its input before the gas check and the rest after it, into
+    // a buffer that may grow in between. The size is above any other use in the tests.
+    auto* const small = evmone::wl::scratch<4>(16);
+    for (uint8_t i = 0; i < 16; ++i)
+        small[i] = static_cast<uint8_t>(i + 1);
+    const auto* const grown = evmone::wl::scratch<4>(size_t{16} << 20);
+    for (uint8_t i = 0; i < 16; ++i)
+        CHECK(grown[i] == i + 1);
+}
+#endif
