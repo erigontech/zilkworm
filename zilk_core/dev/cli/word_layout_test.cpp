@@ -37,7 +37,7 @@ constexpr address kIdentity = 0x0000000000000000000000000000000000000004_address
 
 enum : uint8_t {
     STOP = 0x00, ADD = 0x01, SUB = 0x03, KECCAK = 0x20, CALLDATALOAD = 0x35, CALLDATASIZE = 0x36,
-    CALLDATACOPY = 0x37, CODECOPY = 0x39, EXTCODESIZE = 0x3b, RETURNDATASIZE = 0x3d,
+    CALLDATACOPY = 0x37, CODECOPY = 0x39, EXTCODESIZE = 0x3b, EXTCODECOPY = 0x3c, RETURNDATASIZE = 0x3d,
     RETURNDATACOPY = 0x3e, POP = 0x50, MLOAD = 0x51, MSTORE = 0x52, MSTORE8 = 0x53, MCOPY = 0x5e,
     PUSH1 = 0x60, PUSH2 = 0x61, PUSH4 = 0x63, PUSH20 = 0x73, PUSH32 = 0x7f, DUP1 = 0x80,
     LOG0 = 0xa0, CREATE = 0xf0, CALL = 0xf1, RETURN = 0xf3, REVERT = 0xfd
@@ -526,5 +526,80 @@ TEST_CASE("the precompile input buffer keeps its contents when it grows", "[word
     const auto* const grown = evmone::wl::scratch<4>(size_t{16} << 20);
     for (uint8_t i = 0; i < 16; ++i)
         CHECK(grown[i] == i + 1);
+}
+#endif
+
+TEST_CASE("EXTCODECOPY writes the code and its zero padding only in its range", "[word_layout]") {
+    // The code is written into the memory in byte order and turned into the layout there, so the
+    // words at both ends hold bytes of the copy next to bytes it must keep.
+    const bytes code = echo_code();
+    for (uint64_t dst = 0; dst < 8; ++dst) {
+        for (const uint64_t src :
+            {uint64_t{0}, uint64_t{1}, uint64_t{3}, code.size() - 2, code.size(), code.size() + 5}) {
+            for (const uint64_t size : {1u, 2u, 3u, 4u, 5u, 7u, 8u, 9u, 31u, 33u, 40u}) {
+                Asm a;
+                a.mstore(0, filled(0xff)).mstore(32, filled(0xff)).mstore(64, filled(0xff));
+                a.push(size).push(src).push(dst).push_addr(kEcho).op(EXTCODECOPY).ret(0, 96);
+                const auto out = run(a.code, {});
+                REQUIRE(out.status == EVMC_SUCCESS);
+                bytes expected(96, 0xff);
+                for (uint64_t i = 0; i < size; ++i)
+                    expected[dst + i] = src + i < code.size() ? code[src + i] : 0;
+                CHECK(out.output == expected);
+            }
+        }
+    }
+}
+
+#ifdef EVMONE_RV32_DISPATCH_TEST
+namespace {
+
+// Runs @p program with a growing size (start + 32 k for k = 0, 1, ...) and checks that the
+// buffers of the layout allocate less than 4 times the largest size in all: the guest never frees
+// memory, and buffers that grew to each larger size exactly took the sum of all the sizes.
+void check_allocation(const char* what, uint64_t largest, const bytes& code) {
+    INFO(what);
+    const auto allocated_before = evmone::wl::usage.allocated;
+    const auto out = run(code, {});
+    REQUIRE(out.status == EVMC_SUCCESS);
+    CHECK(evmone::wl::usage.allocated - allocated_before < 4 * (largest + 8));
+}
+
+}  // namespace
+
+TEST_CASE("growing uses of the layout's buffers allocate under 4 times the largest", "[word_layout]") {
+    // Sizes start + 32 k, k < steps, in memory paid for once.
+    const auto program = [](uint64_t start, uint64_t steps, auto&& step) {
+        Asm a;
+        a.push(0).push4(static_cast<uint32_t>(start + 32 * steps + 64)).op(MSTORE8);
+        for (uint64_t k = 0; k < steps; ++k)
+            step(a, start + 32 * k);
+        return a.op(STOP).code;
+    };
+    // From an account without code and from one with a short code: what is copied is the code,
+    // whatever the size.
+    for (const auto& from : {kSender, kEcho}) {
+        check_allocation("EXTCODECOPY", 0, program(70000, 200, [&](Asm& a, uint64_t size) {
+            a.push4(static_cast<uint32_t>(size)).push(0).push(1).push_addr(from).op(EXTCODECOPY);
+        }));
+    }
+    // Above the sizes before: the hash shares its buffer with the code copy before the fix.
+    check_allocation("KECCAK256", 160000 + 32 * 99, program(160000, 100, [](Asm& a, uint64_t size) {
+        a.push4(static_cast<uint32_t>(size)).push(0).op(KECCAK).op(POP);
+    }));
+    // The input of a precompile and the return data, from a precompile and from a frame.
+    const auto call = [](Asm& a, const address& to, uint64_t size) {
+        a.push(0).push(0).push4(static_cast<uint32_t>(size)).push(1).push(0).push_addr(to);
+        a.push4(1000000).op(CALL).op(POP);
+    };
+    check_allocation("identity", 70000 + 32 * 199,
+        program(70000, 200, [&](Asm& a, uint64_t size) { call(a, kIdentity, size); }));
+    check_allocation("return data", 70000 + 32 * 199,
+        program(70000, 200, [&](Asm& a, uint64_t size) { call(a, kEcho, size); }));
+    // The init code of CREATE (all zeros: it deploys nothing), within the limit of its size.
+    Asm creates;
+    for (uint64_t k = 0; k < 100; ++k)
+        creates.push(20000 + 32 * k).push(3).push(0).op(CREATE).op(POP);
+    check_allocation("CREATE", 20000 + 32 * 99, creates.op(STOP).code);
 }
 #endif
