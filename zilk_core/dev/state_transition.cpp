@@ -624,7 +624,11 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             storage_trie.reset(storage_root);
             storage_root = storage_trie.calc_root_from_updates(
                 {storage_updates.data(), storage_updates.size()});
-            assert(!storage_trie.failed());  // debug-only: in release caught by root compare below
+            // A failed walk binds none of the slots, and an unmodified account's root is not compared.
+            if (storage_trie.failed()) [[unlikely]] {
+                sys_println("ERROR: storage trie walk failed");
+                return false;
+            }
         }
 
         bool readonly = false;
@@ -713,6 +717,10 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                     storage_trie.reset(storage_root);
                     storage_root = storage_trie.calc_root_from_updates(
                         {storage_updates.data(), storage_updates.size()});
+                    if (storage_trie.failed()) [[unlikely]] {
+                        sys_println("ERROR: storage trie walk failed");
+                        return false;
+                    }
                 }
                 node.current_off = 0;
                 node.current_len = pa->rlp_into(node.buf + 0, storage_root);
@@ -732,9 +740,9 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     }
     mpt::GridMPT<true> acc_trie(direct_state, prev_root);
     auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
-    assert(!acc_trie.failed());  // debug-only: in release caught by root compare below
     sys_println(std::format("New Root: {}", to_hex(new_root)));
-    const bool ok = (new_root == header.state_root);
+    // A failed walk returns a zero root, which would match a header committing to one.
+    const bool ok = !acc_trie.failed() && new_root == header.state_root;
     for (const auto& addr : direct_state.changed_addresses_journal()) {
         if (direct_state.is_deleted(addr) || (clear_empty && direct_state.is_empty_account(addr))) continue;
         Account* pa = direct_state.read_account(addr);
