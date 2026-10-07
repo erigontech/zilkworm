@@ -281,8 +281,6 @@ class DirectState : public BlockState {
     ByteView read_code(const evmc::address& addr) const noexcept;
     /// read_code() for a record the caller already holds.
     [[gnu::always_inline]] inline ByteView read_code(const Account& pa) const noexcept;
-    // In-block created bytecode by code hash (created_code_ + key8 collision spill).
-    std::optional<ByteView> find_created_code(const evmc::bytes32& code_hash) const noexcept;
     ByteView read_code(const evmc::address& addr, const evmc::bytes32& /*code_hash*/) const noexcept {
         return read_code(addr);
     }
@@ -644,34 +642,34 @@ DirectState::read_code(const Account& pa) const noexcept {
     if (pa.deleted) [[unlikely]]
         return {};
 
-    const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa.code_hash);
-    if (pa.code_store_len == 0) {
-        if (std::memcmp(pa.code_hash, kEmptyHash.bytes, 32) == 0) [[likely]]
-            return {};
-        // The witness omits bytecode an earlier CREATE in the block already deployed
-        // (EIP-7928 code_writes satisfy the read).
-        if (const auto code = find_created_code(h)) [[likely]]
-            return *code;
-        // witness omitted code that is read
-        fatal("ERROR: read_code: code omitted from witness for non-empty code_hash");
+    if (pa.code_store_len != 0 && pa.code_store_offset != kCreatedCodeOffset) [[likely]]
+        return code_for(pa);
+
+    if (std::memcmp(pa.code_hash, kEmptyHash.bytes, 32) == 0)
         return {};
-    }
 
-    if (pa.code_store_offset == kCreatedCodeOffset) [[unlikely]]
-        return find_created_code(h).value_or(ByteView{});
-
-    return code_for(pa);
-}
-
-[[gnu::always_inline]] inline std::optional<ByteView>
-DirectState::find_created_code(const evmc::bytes32& h) const noexcept {
+    // Code is content-addressed: the witness may omit a body that an earlier write in the
+    // block already supplied (EIP-7928 code_writes satisfy the read), so look it up by hash
+    // in the witness code store, then in the in-block created code. A sealed code store is
+    // searchable only through the index USE_HASH_KEY keeps, see code_entry_by_hash_().
+    const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa.code_hash);
+#if USE_HASH_KEY
+    if (const auto e = code_entry_by_hash_(pa.code_hash))
+        return ByteView{e->data() + FlatKv::kPayloadOffset, e->size() - FlatKv::kPayloadOffset};
+#elif !ZILK_SEAL_CODE_STORE
+    if (auto b = code_store_map_.find<32, 0, &hash_key8>(h.bytes))
+        return ByteView{b->data() + FlatKv::kPayloadOffset, b->size() - FlatKv::kPayloadOffset};
+#endif
     if (auto it = created_code_.find(hash_key8(h)); it != created_code_.end() &&
                                                     bytes_equal<32>(it->second.full_hash.bytes, h.bytes)) [[likely]] {
         return ByteView{it->second.bytes.data(), it->second.bytes.size()};
     }
     if (auto cit = created_code_collisions_.find(h); cit != created_code_collisions_.end())
         return ByteView{cit->second.data(), cit->second.size()};
-    return std::nullopt;
+
+    // witness omitted code that is read
+    fatal("ERROR: read_code: code omitted from witness for non-empty code_hash");
+    return {};
 }
 
 [[gnu::always_inline]] inline const Account*

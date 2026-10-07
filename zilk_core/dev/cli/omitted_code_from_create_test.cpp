@@ -55,4 +55,29 @@ TEST_CASE("pre-state code omitted from the witness resolves from an in-block CRE
     CHECK(Bytes{served.begin(), served.end()} == code);
 }
 
+TEST_CASE("pre-state code without a record offset resolves from the witness code store by hash",
+          "[state_zz][direct_state][code]") {
+    Bytes code;
+    for (int i = 0; i < 40; ++i)
+        code.push_back(static_cast<uint8_t>(0x60 + (i % 16)));
+    const auto code_hash =
+        std::bit_cast<bytes32>(silkworm::keccak256(ByteView{code.data(), code.size()}));
+
+    evmc::address existing{};
+    existing.bytes[19] = 0x11;
+
+    // The body is in the witness code store, but the record carries no code_store_len.
+    std::vector<DirectState::AccountInfo> accounts{
+        test_util::make_contract(existing, 1, intx::uint256{0}, code_hash, /*code_len=*/0)};
+    auto blob = DirectState::build_blob_from_accounts(accounts, {},
+                                                      test_util::build_code_store({{code_hash, code}}));
+    std::vector<uint8_t> nodestore;
+    DirectState ds{std::span<uint8_t>{blob}, std::span<uint8_t>{nodestore}};
+    REQUIRE(ds.sanitize());
+
+    const auto served = ds.read_code(existing);
+    REQUIRE(served.size() == code.size());
+    CHECK(Bytes{served.begin(), served.end()} == code);
+}
+
 }  // namespace zilkworm
