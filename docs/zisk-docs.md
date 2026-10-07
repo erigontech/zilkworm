@@ -6,12 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 # ZisK Backend: Status and GPU Proving Guide
 
 Zilkworm runs on [ZisK](https://github.com/0xPolygonHermez/zisk) **v1.3.1-alpha** as a second zkVM
-next to SP1 Hypercube. The guest, the accelerators, the host prover and CI are in place, and the
-whole stack is validated in **execute-only** mode. **Nothing has been proven yet**: no proving key
-or GPU was available during development, so every proving command below is untested.
+next to SP1 Hypercube. The guest, the accelerators, the host prover and CI are in place, the whole
+stack is validated in **execute-only** mode, and the 200-block corpus has been **proven and verified
+on one GPU** (compressed proofs, §5.1). The `minimal` and `plonk` proof types, the `assembly`
+executor, `--remote` and the CI image are still untested.
 
 This guide covers setting up a fresh Linux machine with an NVIDIA GPU, checking that execution
-reproduces the reference results, and running the first proofs.
+reproduces the reference results, and running the proofs.
 
 ## 1. Status
 
@@ -78,18 +79,19 @@ MUL/EXP/DIV/MOD opcodes, and blst's 256-bit Fr arithmetic and curve formulas.
   - every forged fcall hint (secp256k1 sqrt and inverse, BLS Fp inverse, P-256 inverse) halts with
     error, both in the standalone tests and in the real guest.
 - **SP1 unaffected**: the SP1 guest ELF is byte-identical on every commit, and all three legs pass (§9).
+- **GPU proving** (2026-10-08, one RTX 5090): 200/200 corpus blocks proved with the default
+  `compressed` proof type and verified; every proof's step count equals the `ziskemu` run. Numbers in §5.1.
 
-Latest step totals (`ziskemu`, raw):
+Latest step totals (`ziskemu`, raw; the corpus row is after the intx bump in `e97f0823`):
 
 | Set | total | min | median | max |
 |---|---|---|---|---|
-| Corpus, 200 blocks | 21697693695 | 4477295 | 105592309 | 234804852 |
+| Corpus, 200 blocks | 21688407462 | 4477139 | 105580700 | 234814444 |
 | EEST, 8613 passing fixtures | 51978949913 | 66624 | 366517 | 1711581893 |
 
 ### Not done
 
-- Proving: `setup`, `prove` and `verify` have never run.
-- Any GPU build or GPU run.
+- `--proof-type minimal` and `plonk`; multi-GPU / `mpirun`.
 - The `assembly` executor, `--remote` with a coordinator, and `--service` against a live RPC.
 - The CI image `zilkworm-ci-zisk` has not been built, so no ZisK workflow has run yet.
 
@@ -118,8 +120,8 @@ environment is Ubuntu 25.10, the same as the CI image (`.github/docker/ci.Docker
 requires Ubuntu 22.04 or newer. The native build needs CMake ≥ 3.28 and a C++23 compiler at
 `/usr/bin/g++` (validated with GCC 15.2). Older compilers are unverified.
 
-The ziskup, GPU-build, proving and CI-image commands (§3.6, §3.7, §5, §6) were checked against the
-ZisK v1.3.1-alpha and repository sources but have never been run. Treat them as unverified.
+The ziskup, GPU-build and proving commands (§3.6, §3.7, §5) were run once, on the machine in §5.1
+(Ubuntu 25.10, no sudo). The CI-image commands (§6) have never been run; treat them as unverified.
 
 ### 3.1 Clone
 
@@ -162,6 +164,16 @@ optional; use it for the GCC A/B through `ZISK_GCC_BIN` (§8).
 
 The ZisK subset strictly needed to build the host is `libgmp-dev nlohmann-json3-dev nasm
 libsodium-dev libomp-dev libopenmpi-dev clang libclang-dev`, as in `.github/docker/zisk-ci.Dockerfile`.
+The host link line also needs `libiomp5.so` (from `libomp-dev`), `libcrypto.so` (`libssl-dev`) and
+`libmpi.so` (`libopenmpi-dev`, searched in `/usr/lib/x86_64-linux-gnu/openmpi/lib`).
+
+**Without sudo.** The §5.1 run was done on a box where none of this could be installed. The same
+packages were fetched with `apt-get download …` (plus the runtime libs `libgmp10 libsodium23
+libopenmpi40 libhwloc15 libpmix2t64 libevent-core-2.1-7t64 libevent-pthreads-2.1-7t64 libnuma1`),
+unpacked with `dpkg -x <deb> <prefix>`, and used through `CPATH`, `LIBRARY_PATH`,
+`LD_LIBRARY_PATH` (both `<prefix>/usr/lib/x86_64-linux-gnu` and `…/openmpi/lib`) and `PATH`
+(`<prefix>/usr/bin` for `nasm`; symlink `mpicc -> mpicc.openmpi` and `libiomp5.so -> libomp.so.5`
+by hand). Set `OPAL_PREFIX=<prefix>/usr` so the `mpicc` wrapper finds its data files.
 
 ### 3.3 NVIDIA driver and CUDA
 
@@ -191,6 +203,9 @@ If it does not, follow the ZisK install guide: add `DefaultLimitMEMLOCK=infinity
 *  soft  memlock  unlimited
 *  hard  memlock  unlimited
 ```
+
+The default `emulator` executor and the GPU prover do not need it: the §5.1 run was done with a
+hard limit of 8192 kB. Only the `assembly` executor locks memory.
 
 ### 3.5 Disk, RAM, TMPDIR
 
@@ -235,7 +250,27 @@ What ziskup does:
    This step is slow.
 
 Always pass `--version`. Without it ziskup installs the latest release, whose key and binaries no
-longer match the `zisk-sdk =1.3.1-alpha` that the host links. Check the result:
+longer match the `zisk-sdk =1.3.1-alpha` that the host links.
+
+Two things went wrong on Ubuntu 25.10:
+
+- The prebuilt binaries are linked against `libpsm2.so.2`, `libfabric.so.1` and UCX
+  (`libucp/libucs/libucm/libuct.so.0`), which are not installed by default. ziskup then dies at
+  `cargo-zisk toolchain install` right after extracting the bundle. Install `libpsm2-2 libfabric1
+  libucx0` (or unpack them as in §3.2) before running ziskup. `UCX_VFS_ENABLE=n` silences UCX's
+  `inotify_add_watch … No space left on device` warning on every start.
+- ziskup runs `check-setup … -a`, and in v1.3.1-alpha `-a` means **`--no-aggregation`**, so the
+  recursive setups are not checked. Run it yourself once the key is in place:
+  `cargo-zisk-dev check-setup --proving-key ~/.zisk/provingKey --gpu` (55 s on the §5.1 machine;
+  the key grows from 15 GB to 21 GB).
+
+If ziskup dies before the key step, finish by hand: download
+`https://storage.googleapis.com/zisk-setup/zisk-provingkey-1.3.1-alpha.tar.gz` and its `.md5`
+(5.1 GB), `md5sum -c`, then `tar --no-same-owner -xf … -C ~/.zisk` (about a minute), and run
+`check-setup` as above. The ZisK Rust toolchain that ziskup installs is only needed for Rust
+guests; the C++ guest does not use it.
+
+Check the result:
 
 ```sh
 cargo-zisk --version                            # 1.3.1-alpha [gpu] (…)
@@ -254,15 +289,20 @@ build auto-detects CUDA, and `CUDA_ARCHS` pins the GPU architectures. See §7 fo
 
 `make z6m_prover_zisk` builds the default **CPU-only** host (crate feature `cpu-only`). For GPU,
 build the guest first, then the host with the `gpu` feature. With that feature the host calls
-`.gpu()` on the SDK client. **Unverified: this build has never been run.**
+`.gpu()` on the SDK client.
 
 ```sh
 make z6m_guest_zisk
-(cd prover/prover_zisk && CUDA_ARCHS=89 cargo build --release --no-default-features --features gpu)
-# CUDA_ARCHS: optional, defaults to the local GPU (e.g. 89 = Ada, 90 = Hopper)
+(cd prover/prover_zisk && CUDA_ARCHS=120 cargo build --release --no-default-features --features gpu)
+# CUDA_ARCHS: optional, defaults to the local GPU (89 = Ada, 90 = Hopper, 120 = RTX 50xx)
 ```
 
-The cargo output must include `[BUILD INFO] STARKS compiled with GPU support`. If it says
+Verified with CUDA 13.2, g++ 15.2 as the nvcc host compiler and `CUDA_ARCHS=120` (about 3 minutes
+for `pil2-stark`, 55 s for the Rust side). Cargo hides build-script output of registry crates, so
+the `[BUILD INFO] STARKS compiled with GPU support` line is not on the terminal; read it from
+`prover/prover_zisk/target/release/build/proofman-starks-lib-c-*/output`, and check that
+`~/.cargo/registry/src/*/proofman-starks-src-1.3.1-alpha/.cuda_arch_stamp` names your arch
+(`pil2-stark` is built in place inside the registry checkout). If the output says
 `CPU-only support (CUDA not detected)`, cargo did not find `nvcc`. Both builds write the same
 `prover/prover_zisk/target/release/z6m_prover_zisk`, and running `make z6m_prover_zisk` again
 replaces the GPU binary with the CPU one.
@@ -325,11 +365,13 @@ make zisk-benchmark ZISK_EXECUTOR=ziskemu # 200 blocks via sp1_benchmark.py
 The full-tree `make zisk-eest` has not been run yet. A 200-fixture sample gave 198/200, and the 2
 failures were the OOM fixtures.
 
-## 5. Proving (next work)
+## 5. Proving
 
-Start small and record every run. `prove` runs setup itself, verifies the new proof before saving
-it, and appends a line to `<data-dir>/provingLogs.log` (default `temp/provingLogs.log`). `verify`
-needs the program VK from the setup cache (`~/.zisk/cache`), so run `setup` once per ELF.
+`prove` runs setup itself, verifies the new proof before saving it, and appends a line to
+`<data-dir>/provingLogs.log` (default `temp/provingLogs.log`). `verify` needs the program VK from
+the setup cache (`~/.zisk/cache`), so run `setup` once per ELF. Each `prove` process loads the
+proving key again (about 20 s and 21 GB of RSS before the first proof), so prove a corpus with the
+offline loop in §5.1 rather than one process per block.
 
 ```sh
 export TMPDIR=$PWD/temp/runtime/tmp RUST_LOG=info   # info shows "ZisK setup done in …s"
@@ -351,7 +393,43 @@ for N in 24545295 24491136 24521911; do
 done
 ```
 
-Variants, in this order once the default works:
+### 5.1 First GPU run: 200-block corpus (2026-10-08)
+
+Machine: 1× NVIDIA GeForce RTX 5090 (32607 MiB), driver 595.71.05, CUDA 13.2, AMD Ryzen 9 7945HX
+(32 threads), 103 GB RAM, Ubuntu 25.10, memlock 8192 kB; `cargo-zisk 1.3.1-alpha [gpu]`; guest
+ELF `c2c1490f…` (xPack GCC 14.2.0-3.1, tree `e97f0823` + this commit); host built as in §3.7.
+
+The offline loop proves every bundle under `<data-dir>/blocks/<N>/` in one process:
+
+```sh
+mkdir -p temp/zisk_gpu_run && ln -sfn ../200_benchmark_blocks_mfbd_v2 temp/zisk_gpu_run/blocks
+RUST_LOG=info /usr/bin/time -v $P --test-service --data-dir temp/zisk_gpu_run \
+  --start-block 24491136 --end-block 24640322 --prove-every 1
+# proofs: temp/zisk_gpu_run/<N>/proof<N>.bin; log: temp/zisk_gpu_run/provingLogs.log
+for f in temp/zisk_gpu_run/*/proof*.bin; do $P verify --proof-path $f; done
+```
+
+Blocks missing from the range are skipped; a failed proof is logged (`FAILED to prove block N`)
+and the loop goes on. Result, default `compressed` proofs:
+
+| | |
+|---|---|
+| Proved / verified | 200 / 200, 0 failures; steps identical to `ziskemu` on all 200 |
+| Total steps, gas | 21,688,407,462 steps; 6,036,444,409 gas |
+| Proving time (`proving_ms`, excludes verify) | 6524 s total; min 8.4 s, median 31.5 s, max 75.4 s (block 24498438, 218 M steps) |
+| Throughput | 3.32 M steps/s, 0.93 M gas/s, 32.6 s per block |
+| Wall clock (200 blocks, one process) | 1 h 49 min 33 s; 520 % CPU |
+| Setup | ROM setup 1.6 s; key load about 20 s |
+| Peak RSS / VRAM | 32.2 GB / 31.6 GB of 32.6 GB (mean 29.9 GB, GPU utilisation 82 %) |
+| Proof size | 415,300 bytes each (415,298 on one block) |
+| `verify` | 0.3 s per proof (200 in 49 s) |
+
+The smallest block alone (24545295, 4.48 M steps) takes 8.8 s of proving and 30.5 s wall in a
+fresh `prove` process. VRAM sits at the card's limit on every block (the prover sizes its stream
+pool to the card), so an input much heavier than the corpus may need `max_streams` or
+`minimal_memory` (`zisk_sdk::EmbeddedOpts`), neither of which the host exposes yet.
+
+Variants, in this order (not run yet):
 - `--proof-type minimal` (smaller proof, slower) and `--proof-type plonk` (needs `ziskup setup_snark`).
   The default is `compressed`, which is VadcopFinal.
 - `--executor assembly`, a global flag placed before the subcommand. It uses ziskup's
@@ -465,8 +543,9 @@ values are identical across the two compilers (§8).
 ## 8. Remaining Backlog
 
 1. **Proving benchmarks.**
-   - First run the proofs in §5, then the full 200-block corpus per proof type.
-   - Record proving time, peak RAM/VRAM and proof size.
+   - `compressed` on the 200-block corpus is done (§5.1). Repeat per proof type (`minimal`, `plonk`)
+     and record proving time, peak RAM/VRAM and proof size the same way.
+   - Expose `max_streams` / `minimal_memory` on the host for cards with less than 32 GB.
    - Then try `--executor assembly`, multi-process `mpirun`, and the `--remote` coordinator.
 2. **Compiler and flag sweep.**
    - GCC 15.2 vs 14.2 gave identical public values on all 8815 inputs, with −1.69% steps on the
@@ -502,7 +581,7 @@ before building.
 
 ```sh
 make z6m_prover                                         # SP1 guest + host, fresh
-sha256sum prover/guest_hypercube/build/z6m_guest.elf    # leg 0: e8e7201c586749e9cffd7ed9ee4ead7f00fddeae617339757a4b0936134d01a7
+sha256sum prover/guest_hypercube/build/z6m_guest.elf    # leg 0: 68b32dcaebca9c0bd8bf9ca6d911d108271d250c4e919c604878860097b5f676
 make eest-blockchain-tests                              # leg 1: 8654/8654 (8615 EEST fixtures + 39 unit tests)
 tools/scripts/release_state_root_check.sh --dir temp/200_benchmark_blocks_mfbd_v2 -l temp/runtime/leg2
                                                         # leg 2: 200/200, 0 state-root mismatches
@@ -512,8 +591,13 @@ python3 tools/scripts/sp1_benchmark.py --dir temp/200_benchmark_blocks_mfbd_v2
 
 - **Leg 0** needs xPack GCC 14.2.0-3.1. ZisK code sits behind `ZISK` gates, so the SP1 ELF must not
   change.
-- **Leg 3 totals at `93bcdac28`:** cycles 26,617,248,718; prover gas 50,605,949,665;
-  gas_used 6,036,444,409.
+- **Leg 3 totals at `e97f0823`:** cycles 26,575,390,325; prover gas 50,563,817,864;
+  gas_used 6,036,444,409. The intx bump in `e97f0823` changed the SP1 ELF (it was
+  `e8e7201c…` through `93bcdac28`, with 26,617,248,718 cycles and 50,605,949,665 prover gas).
+- **Stale compiler cache.** `make z6m_guest` reuses `prover/guest_hypercube/build/CMakeCache.txt`,
+  including the compiler path cached on the first configure. With 15.2.0-1.1 installed first and
+  14.2.0-3.1 added later, delete that directory once; otherwise leg 0 silently builds with GCC 15
+  (ELF `aee426fa…`, 26,132,211,190 cycles, which is −1.7%).
 - **Commits that touch the ZisK guest, shims or evmone ZisK code** must also pass `make zisk-emu-check`
   (200/200) and the full EEST `zisk_execute.py` run from §4 (8613 PASS, the 2 known OOMs). Report
   the raw step totals.
