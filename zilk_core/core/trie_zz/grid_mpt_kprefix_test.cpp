@@ -377,6 +377,7 @@ TEST_CASE("kprefix: GridMPT roots match HashBuilder", "[trie][gridmpt][kprefix]"
                 reused.reset(pre_root);
                 const bytes32 got = reused.calc_root_from_updates({u.updates.data(), u.updates.size()});
                 CHECK(got == hb_root(u.expected, nullptr));
+                CHECK_FALSE(reused.failed());
             }
         }
         for (const auto& u : batches) {
@@ -384,6 +385,7 @@ TEST_CASE("kprefix: GridMPT roots match HashBuilder", "[trie][gridmpt][kprefix]"
             GridMPT<true> fresh{w.state, pre_root};
             const bytes32 got = fresh.calc_root_from_updates({u.updates.data(), u.updates.size()});
             CHECK(got == hb_root(u.expected, nullptr));
+            CHECK_FALSE(fresh.failed());
         }
     }
 }
@@ -402,6 +404,7 @@ TEST_CASE("kprefix: the same node folded in two storage tries", "[trie][gridmpt]
         const Update u = make_update(pre, rng, Mode::kWritesOnly, 10, 0);
         grid.reset(pre_root);
         CHECK(grid.calc_root_from_updates({u.updates.data(), u.updates.size()}) == hb_root(u.expected, nullptr));
+        CHECK_FALSE(grid.failed());
     }
 }
 

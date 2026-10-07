@@ -137,9 +137,7 @@ void check_delete_all_then_insert(const Bytes32Map& pre, const Bytes32Map& post)
 
     CAPTURE(silkworm::to_hex(got), silkworm::to_hex(expected));
     CHECK(trie.missing_count() == 0);
-#ifndef NDEBUG
     CHECK_FALSE(trie.failed());
-#endif
     REQUIRE(got == expected);
 }
 
@@ -184,6 +182,7 @@ void check_partial_delete(const Bytes32Map& pre, const std::vector<bytes32>& del
 
     CAPTURE(silkworm::to_hex(got), silkworm::to_hex(expected));
     CHECK(trie.missing_count() == 0);
+    CHECK_FALSE(trie.failed());
     REQUIRE(got == expected);
 }
 
@@ -237,6 +236,7 @@ void check_mixed_updates(const Bytes32Map& pre, const std::vector<bytes32>& ro,
 
     CAPTURE(silkworm::to_hex(got), silkworm::to_hex(expected));
     CHECK(trie.missing_count() == 0);
+    CHECK_FALSE(trie.failed());
     REQUIRE(got == expected);
 }
 

@@ -137,6 +137,7 @@ void expect_witness_complete(const ShadowRun& sr) {
     REQUIRE(sr.sanitize_ok);
     CHECK(sr.post.missing == 0);   // no node the guest would have had to guess
     CHECK_FALSE(sr.post.clashed);  // created and existing address sets stayed disjoint
+    CHECK_FALSE(sr.post.rejected);  // every trie walk bound its claims
     // Independent from-scratch root: agreement pins the leaf set of the accepted root.
     const auto scratch = sr.ds->state_root_hash();
     REQUIRE(scratch.has_value());
