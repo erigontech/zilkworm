@@ -16,7 +16,11 @@ void* operator new(size_t size) {
     size_t heap_size = static_cast<size_t>(heap_end - heap_begin);
     // Align to 8 bytes so that any naturally-aligned type can be stored.
     allocated_bytes = (allocated_bytes + 7u) & ~static_cast<size_t>(7u);
-    if (allocated_bytes + size <= heap_size) {
+    // Compare against the remaining room: allocated_bytes + size wraps for a size near 4 GiB and
+    // would hand out memory already given out, which calloc's no-clear rule cannot allow. Both heap
+    // bounds are 2 MiB aligned (link.x), so heap_size is a multiple of every alignment used in this
+    // file, allocated_bytes never passes it, and the subtraction cannot wrap.
+    if (size <= heap_size - allocated_bytes) {
         void* ptr = heap_begin + allocated_bytes;
         allocated_bytes += size;
         return ptr;
