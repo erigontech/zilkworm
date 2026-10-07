@@ -11,6 +11,7 @@
 // way, is accepted, so a rejection is the forgery's doing. Every case asserts the line the check that
 // must fire prints, not just the rejection.
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -193,9 +194,8 @@ struct Outcome {
     std::string log;
 };
 
-/// Runs the guest on `s`'s block with `blob` and `nodestore` as its witness.
-Outcome run_guest(const Sealed& s, const std::vector<uint8_t>& blob, const std::vector<uint8_t>& nodestore) {
-    std::vector<uint8_t> env = make_envelope(s.chain, s.sr, blob, nodestore, s.network);
+/// Runs the guest on the MFBD envelope `env`.
+Outcome run_envelope(std::vector<uint8_t> env) {
     REQUIRE_FALSE(env.empty());
     StateTransition st{std::span<uint8_t>{env}};
     Outcome o{};
@@ -206,6 +206,11 @@ Outcome run_guest(const Sealed& s, const std::vector<uint8_t>& blob, const std::
     }
     o.failed = st.failed();
     return o;
+}
+
+/// Runs the guest on `s`'s block with `blob` and `nodestore` as its witness.
+Outcome run_guest(const Sealed& s, const std::vector<uint8_t>& blob, const std::vector<uint8_t>& nodestore) {
+    return run_envelope(make_envelope(s.chain, s.sr, blob, nodestore, s.network));
 }
 
 void expect_accepted(const Outcome& o, const Sealed& s) {
@@ -1023,5 +1028,301 @@ TEST_CASE("the guest decides a CREATE2 collision by its target's storage root",
             expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
             expect_accepted(run_guest(s, target_slots(c, {}), ps.nodestore), s);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The later blocks of a bundle
+// ---------------------------------------------------------------------------
+// Each block of a bundle after the first runs on the state the block before it left, and its state root
+// is rebuilt from the accounts and slots the witness holds (check_root_new_block), not walked from the
+// root before it. The first block's walk binds what the witness carries to its parent's root, but not
+// that the witness carries everything: an account or slot it left out was absent to a later block, and
+// the root rebuilt without it, the one a producer that executed so committed to, was accepted.
+
+namespace {
+
+const evmc::address kPayee = make_addr(0x66, 0x06);      // paid by block 1
+const evmc::address kRich = make_addr(0x77, 0x07);       // whose balance block 2 reads
+const evmc::address kBystander = make_addr(0x88, 0x08);  // no block touches it
+const evmc::address kEmpty = make_addr(0x99, 0x09);      // no nonce, balance or code; no block touches it
+
+/// Block 1 has its sender pay kPayee 1 wei, block 2 runs `t2` on the state block 1 leaves.
+struct TwoBlocks {
+    Tx t1;
+    Tx t2;
+    std::vector<AcctSpec> state;
+};
+
+/// Two blocks on read_through_call()'s state, where kCaller reads storage[1] of kHolder, which holds 5;
+/// block 1 touches neither.
+TwoBlocks two_blocks(Tx t2) {
+    TwoBlocks b{tx_to(kPayee, /*value=*/1), std::move(t2), {}};
+    REQUIRE(b.t1.sender != b.t2.sender);
+    b.state = read_through_call(b.t2, word(1), {{word(1), word(5)}});
+    b.state.push_back(sender_of(b.t1));
+    b.state.push_back(AcctSpec{.addr = kPayee, .nonce = 0, .balance = 1});
+    return b;
+}
+
+/// The state after block 1 of `b`.
+std::vector<AcctSpec> after_block_1(const TwoBlocks& b) {
+    std::vector<AcctSpec> post = b.state;
+    spec_of(post, b.t1.sender).nonce = 1;
+    spec_of(post, b.t1.sender).balance -= 1;
+    spec_of(post, kPayee).balance += 1;
+    return post;
+}
+
+/// The state after both blocks of `b`, whose block 2 had kCaller store `v` as the word it read.
+std::vector<AcctSpec> after_read(const TwoBlocks& b, const evmc::bytes32& v) {
+    std::vector<AcctSpec> post = after_block_1(b);
+    spec_of(post, b.t2.sender).nonce = 1;
+    spec_of(post, kCaller).storage = {{word(0), v}, {word(1), word(1)}};
+    return post;
+}
+
+/// The state after both blocks of `b`, whose block 2 paid kHolder 1 wei.
+std::vector<AcctSpec> after_payment(const TwoBlocks& b) {
+    std::vector<AcctSpec> post = after_block_1(b);
+    spec_of(post, b.t2.sender).nonce = 1;
+    spec_of(post, b.t2.sender).balance -= 1;
+    spec_of(post, kHolder).balance += 1;
+    return post;
+}
+
+std::vector<AcctSpec> without(std::vector<AcctSpec> specs, const evmc::address& a) {
+    std::erase_if(specs, [&](const AcctSpec& s) { return s.addr == a; });
+    return specs;
+}
+
+/// `s`'s block with the header fields its run yields, as make_envelope() seals it.
+silkworm::Block sealed_block(const Sealed& s) {
+    silkworm::Block b = s.chain.base;
+    b.header.gas_used = s.sr.gas_used;
+    b.header.receipts_root = s.sr.receipts_root;
+    b.header.logs_bloom = s.sr.logs_bloom;
+    b.header.state_root = s.sr.post.root;
+    return b;
+}
+
+/// The block after `first`'s as a producer seals it: `t` run on the state `first`'s run left, which it
+/// goes on to change, with the gas and receipts that yields and the state root `root`.
+silkworm::Block seal_next(Sealed& first, const Tx& t, const bytes32& root) {
+    const silkworm::BlockHeader parent = sealed_block(first).header;
+    silkworm::Block b{};
+    b.header.parent_hash = parent.hash();
+    b.header.number = parent.number + 1;
+    b.header.beneficiary = t.sender;
+    b.header.gas_limit = parent.gas_limit;
+    b.header.timestamp = parent.timestamp + 1;
+    b.header.ommers_hash = silkworm::kEmptyListHash;
+    b.header.base_fee_per_gas = silkworm::protocol::expected_base_fee_per_gas(parent);
+    b.transactions = {t.tx};
+    b.withdrawals = std::vector<silkworm::Withdrawal>{};
+    b.header.withdrawals_root = silkworm::protocol::compute_withdrawals_root(b);
+    b.header.transactions_root = silkworm::protocol::compute_transaction_root(b);
+
+    const silkworm::ChainConfig& cfg = silkworm::test::kNetworkConfig.at(first.network);
+    const auto rule_set = silkworm::protocol::rule_set_factory(cfg);
+    silkworm::ExecutionProcessor proc{b, *rule_set, *first.sr.ds, cfg};
+    const silkworm::Transaction& tx = b.transactions.front();
+    tx.set_data_non_zero_bytes(zilkworm::count_nonzero_bytes(tx.data));
+    std::vector<silkworm::Receipt> receipts(1);
+    proc.execute_transaction(tx, receipts.front());
+    REQUIRE(receipts.front().success);
+    b.header.gas_used = receipts.front().cumulative_gas_used;
+    b.header.receipts_root = silkworm::trie::root_hash(
+        receipts, [](Bytes& to, const silkworm::Receipt& r) { silkworm::rlp::encode(to, r); });
+    b.header.logs_bloom = receipts.front().bloom;
+    b.header.state_root = root;
+    return b;
+}
+
+/// Runs the guest on the bundle of `first`'s block and `second`, with `blob` and `nodestore` as its witness.
+Outcome run_guest(const Sealed& first, const silkworm::Block& second, const std::vector<uint8_t>& blob,
+                  const std::vector<uint8_t>& nodestore) {
+    Bytes first_rlp;
+    Bytes second_rlp;
+    silkworm::rlp::encode(first_rlp, sealed_block(first));
+    silkworm::rlp::encode(second_rlp, second);
+    const std::array<ByteView, 2> blocks{ByteView{first_rlp}, ByteView{second_rlp}};
+    const std::vector<uint8_t> flat =
+        build_flat_bundle(ByteView{first.chain.genesis_rlp}, std::span<const ByteView>{blocks},
+                          /*ancestors_rlp=*/ByteView{}, blob, nodestore, first.network);
+    REQUIRE_FALSE(flat.empty());
+    return run_envelope(wrap_mfbd(flat));
+}
+
+void expect_accepted(const Outcome& o, const Sealed& first, const silkworm::Block& second) {
+    CAPTURE(o.log);
+    CHECK_FALSE(o.failed);
+    CHECK(o.gas == first.sr.gas_used + second.header.gas_used);
+    CHECK(o.log.find("New Root (incremental): " + silkworm::to_hex(second.header.state_root)) !=
+          std::string::npos);
+}
+
+/// Two blocks whose block 2 has kCaller store the balance of kRich, which holds 1000, next to kBystander.
+TwoBlocks balance_read_in_block_2() {
+    TwoBlocks b = two_blocks(tx_to(kCaller));
+    spec_of(b.state, kCaller).code = store_balance(kRich);
+    b.state.push_back(AcctSpec{.addr = kRich, .nonce = 0, .balance = 1000});
+    b.state.push_back(AcctSpec{.addr = kBystander, .nonce = 0, .balance = 1});
+    return b;
+}
+
+}  // namespace
+
+TEST_CASE("the guest rejects a later block run without an account the witness omits",
+          "[witness][binding][later_block]") {
+    SECTION("read through a call") {
+        const TwoBlocks b = two_blocks(tx_to(kCaller));
+        const Prestate ps = build_prestate(b.state);
+        const std::vector<uint8_t> blob = witness_blob(b.state, without(b.state, kHolder));
+        Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
+        REQUIRE(s.sr.post.root == build_prestate(after_block_1(b)).prev_root);  // block 1 is the honest one
+        const silkworm::Block next =
+            seal_next(s, b.t2, build_prestate(without(after_read(b, evmc::bytes32{}), kHolder)).prev_root);
+        REQUIRE(s.sr.storage(kCaller, 1) == word(1));
+        REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});  // kHolder was absent to block 2
+        expect_rejected(run_guest(s, next, blob, ps.nodestore), "the witness is not the whole state");
+    }
+    SECTION("paid by a value transfer") {
+        const TwoBlocks b = two_blocks(tx_to(kHolder, /*value=*/1));
+        const Prestate ps = build_prestate(b.state);
+        const std::vector<uint8_t> blob = witness_blob(b.state, without(b.state, kHolder));
+        Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
+        // Block 2 created kHolder afresh: no nonce, code or storage, and the 1 wei it was paid.
+        std::vector<AcctSpec> post = without(after_payment(b), kHolder);
+        post.push_back(AcctSpec{.addr = kHolder, .nonce = 0, .balance = 1});
+        const silkworm::Block next = seal_next(s, b.t2, build_prestate(post).prev_root);
+        REQUIRE(s.sr.ds->get_nonce(kHolder) == 0);
+        expect_rejected(run_guest(s, next, blob, ps.nodestore), "the witness is not the whole state");
+    }
+}
+
+TEST_CASE("the guest rejects a later block that read a slot the witness omits",
+          "[witness][binding][later_block]") {
+    const TwoBlocks b = two_blocks(tx_to(kCaller));
+    const Prestate ps = build_prestate(b.state);
+    std::vector<AcctSpec> witness = b.state;
+    spec_of(witness, kHolder).storage = {};
+    const std::vector<uint8_t> blob = witness_blob(b.state, witness);
+    Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
+    // Block 2 loaded kHolder, so its storage root was rebuilt from the slots the witness carries: none.
+    std::vector<AcctSpec> post = after_read(b, evmc::bytes32{});
+    spec_of(post, kHolder).storage = {};
+    const silkworm::Block next = seal_next(s, b.t2, build_prestate(post).prev_root);
+    REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
+    expect_rejected(run_guest(s, next, blob, ps.nodestore), "the witness is not the whole state");
+}
+
+// A record the witness's address map does not lead to is walked and rebuilt like any other, but a lookup
+// misses it, and the block runs as if the account were absent. check_root rejects the record a lookup then
+// creates for the address; the rebuild of a later block's root also left out every record a lookup missed.
+TEST_CASE("the guest rejects a later block that missed an account record the witness hides",
+          "[witness][binding][later_block]") {
+    const TwoBlocks b = balance_read_in_block_2();
+    const Prestate ps = build_prestate(b.state);
+    std::vector<uint8_t> blob = ps.blob;
+    forge_slot_transposition(blob, kRich, kBystander);
+    Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
+    REQUIRE(s.sr.post.root == build_prestate(after_block_1(b)).prev_root);
+    const silkworm::Block next = seal_next(
+        s, b.t2, build_prestate(without(without(after_read(b, evmc::bytes32{}), kRich), kBystander)).prev_root);
+    REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});  // kRich was absent to block 2
+    expect_rejected(run_guest(s, next, blob, ps.nodestore), "Created and existing hashes clash");
+}
+
+// An empty account is in the trie until a transaction touches it (EIP-161). Since Paris mainnet holds none
+// (EIP-7523), but the guest does not assume so. The rebuild of a later block's root used to leave out
+// every empty account, so a block whose root dropped one no block touched was accepted, and the block that
+// kept it rejected.
+TEST_CASE("a later block's state root keeps an empty account no block touches",
+          "[witness][binding][later_block]") {
+    const Tx t1 = tx_to(kPayee, /*value=*/1);
+    const Tx t2 = tx_to(kPayee, /*value=*/2);
+    REQUIRE(t1.sender != t2.sender);
+    const std::vector<AcctSpec> state = {
+        sender_of(t1),
+        sender_of(t2),
+        AcctSpec{.addr = kPayee, .nonce = 0, .balance = 1},
+        AcctSpec{.addr = kEmpty},
+    };
+    const Prestate ps = build_prestate(state);
+    std::vector<AcctSpec> post = state;
+    spec_of(post, t1.sender).nonce = 1;
+    spec_of(post, t1.sender).balance -= 1;
+    spec_of(post, t2.sender).nonce = 1;
+    spec_of(post, t2.sender).balance -= 2;
+    spec_of(post, kPayee).balance = 4;
+    Sealed s = seal(t1, ps.prev_root, ps.blob, ps.nodestore);
+
+    SECTION("dropped from it") {
+        const silkworm::Block next = seal_next(s, t2, build_prestate(without(post, kEmpty)).prev_root);
+        expect_rejected(run_guest(s, next, ps.blob, ps.nodestore), "State Root Mismatch at block 1");
+    }
+    SECTION("kept in it") {
+        const silkworm::Block next = seal_next(s, t2, build_prestate(post).prev_root);
+        expect_accepted(run_guest(s, next, ps.blob, ps.nodestore), s, next);
+    }
+}
+
+// A value the witness forges for an account or slot only a later block reads is bound all the same: the
+// first block's walk checks every record and slot the witness carries, whichever block reads it.
+TEST_CASE("the guest rejects a value the witness forges for a later block",
+          "[witness][binding][later_block]") {
+    SECTION("a slot") {
+        const TwoBlocks b = two_blocks(tx_to(kCaller));
+        const Prestate ps = build_prestate(b.state);
+        const std::vector<uint8_t> blob = forge_slot(b.state, kHolder);
+        Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
+        s.sr.post.root = build_prestate(after_block_1(b)).prev_root;
+        std::vector<AcctSpec> post = after_read(b, word(0x77));
+        spec_of(post, kHolder).storage = {{word(1), word(0x77)}};
+        const silkworm::Block next = seal_next(s, b.t2, build_prestate(post).prev_root);
+        REQUIRE(s.sr.storage(kCaller, 0) == word(0x77));
+        expect_rejected(run_guest(s, next, blob, ps.nodestore), "Pre value mismatch in existing leaf");
+    }
+    SECTION("an account") {
+        // kRich does not exist; the witness invents it.
+        const TwoBlocks b = balance_read_in_block_2();
+        const std::vector<AcctSpec> state = without(b.state, kRich);
+        const Prestate ps = build_prestate(state);
+        const std::vector<uint8_t> blob = witness_blob(state, b.state);
+        Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
+        s.sr.post.root = build_prestate(without(after_block_1(b), kRich)).prev_root;
+        const silkworm::Block next = seal_next(s, b.t2, build_prestate(after_read(b, word(1000))).prev_root);
+        REQUIRE(s.sr.storage(kCaller, 0) == word(1000));
+        expect_rejected(run_guest(s, next, blob, ps.nodestore), "Pre value claimed for a key absent from the trie");
+    }
+}
+
+TEST_CASE("the guest accepts later blocks that read and pay accounts the first leaves alone",
+          "[witness][binding][later_block][honest]") {
+    SECTION("read through a call") {
+        const TwoBlocks b = two_blocks(tx_to(kCaller));
+        const Prestate ps = build_prestate(b.state);
+        Sealed s = seal(b.t1, ps.prev_root, ps.blob, ps.nodestore);
+        REQUIRE(s.sr.post.root == build_prestate(after_block_1(b)).prev_root);
+        const silkworm::Block next = seal_next(s, b.t2, build_prestate(after_read(b, word(5))).prev_root);
+        CHECK(s.sr.storage(kCaller, 0) == word(5));
+        expect_accepted(run_guest(s, next, ps.blob, ps.nodestore), s, next);
+    }
+    SECTION("paid by a value transfer") {
+        const TwoBlocks b = two_blocks(tx_to(kHolder, /*value=*/1));
+        const Prestate ps = build_prestate(b.state);
+        Sealed s = seal(b.t1, ps.prev_root, ps.blob, ps.nodestore);
+        const silkworm::Block next = seal_next(s, b.t2, build_prestate(after_payment(b)).prev_root);
+        CHECK(s.sr.ds->get_nonce(kHolder) == 1);
+        expect_accepted(run_guest(s, next, ps.blob, ps.nodestore), s, next);
+    }
+    SECTION("a balance read") {
+        const TwoBlocks b = balance_read_in_block_2();
+        const Prestate ps = build_prestate(b.state);
+        Sealed s = seal(b.t1, ps.prev_root, ps.blob, ps.nodestore);
+        const silkworm::Block next = seal_next(s, b.t2, build_prestate(after_read(b, word(1000))).prev_root);
+        CHECK(s.sr.storage(kCaller, 0) == word(1000));
+        expect_accepted(run_guest(s, next, ps.blob, ps.nodestore), s, next);
     }
 }

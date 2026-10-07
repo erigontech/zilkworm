@@ -4,6 +4,7 @@
 
 #include "state_transition.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cassert>
 #include <cstring>
@@ -439,14 +440,25 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         const evmc_revision rev = cfg_it->second.revision(block.header.number, block.header.timestamp);
         const bool root_ok = first_root_check
                                  ? check_root(bundle.direct, block.header, rev)
-                                 : check_root_new_block(bundle.direct, block.header, rev);
-        first_root_check = false;
+                                 : check_root_new_block(bundle.direct, block.header);
         if (!root_ok) {
             sys_println(std::format("ERROR: State Root Mismatch at block {}: expected {}",
                                     i, to_hex(block.header.state_root)));
             failed_ = true;
             return {0, false};
         }
+        // A later block's root is rebuilt from the accounts and slots the witness holds (check_root_new_block),
+        // so it is the root of the state that block ran on only if the witness holds all of it: an account or
+        // slot the witness left out was absent to the block, and no trie was asked. The walk of the first
+        // block binds what the witness carries, not that it carries everything, so the state it leaves has to
+        // rebuild to its root from the witness alone too.
+        if (first_root_check && bundle.block_rlps.size() > 1 &&
+            bundle.direct.state_root_hash() != block.header.state_root) [[unlikely]] {
+            sys_println(std::format("ERROR: the witness is not the whole state of block {}", i));
+            failed_ = true;
+            return {0, false};
+        }
+        first_root_check = false;
         // Last validated block in the run is the committed post-state root / block hash.
         post_state_root_ = block.header.state_root;
         block_hash_ = block.header.hash();
@@ -801,13 +813,10 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     return ok;
 }
 
-bool StateTransition::check_root_new_block(DirectState& direct_state,
-                                           BlockHeader& header,
-                                           evmc_revision rev) {
-    const bool clear_empty = rev >= EVMC_SPURIOUS_DRAGON;
+bool StateTransition::check_root_new_block(DirectState& direct_state, BlockHeader& header) {
     const auto& changed = direct_state.changed_addresses_journal();
     for (const auto& addr : changed) {
-        if (direct_state.is_deleted(addr) || (clear_empty && direct_state.is_empty_account(addr))) continue;
+        if (direct_state.is_deleted(addr)) continue;
         Account* pa = direct_state.read_account(addr);
         if (pa == nullptr) [[unlikely]] {
             sys_println("ERROR: check_root_new_block journaled addr resolves to nullptr");
@@ -825,19 +834,33 @@ bool StateTransition::check_root_new_block(DirectState& direct_state,
     std::vector<LeafRef> leaves;
     leaves.reserve(direct_state.addr_hashes().size() + direct_state.created_accounts().size());
 
-    for (const auto& e : direct_state.addr_hashes()) {
-        const auto& addr = *reinterpret_cast<const evmc::address*>(e.addr);
-        if (direct_state.is_deleted(addr) || (clear_empty && direct_state.is_empty_account(addr))) continue;
+    // Every account the state holds is a leaf, an empty one too: only a transaction touching it deletes it
+    // (EIP-161), and that leaves its record deleted. Each record says so itself; a lookup by address would
+    // miss a record the witness's address map does not lead to, and drop its leaf.
+    const auto existing = direct_state.addr_hashes();
+    for (const auto& e : existing) {
         const Account* pa = direct_state.account_at_offset(e.entry_offset);
+        if (pa->deleted) continue;
         LeafRef r;
         std::memcpy(r.addr_hash.bytes, e.addr_hash, 32);
         r.rlp = ByteView{pa->acc_rlp_buf, pa->acc_rlp_len};
         leaves.push_back(r);
     }
     for (const auto& [addr, pa] : direct_state.created_accounts()) {
-        if (direct_state.is_deleted(addr) || (clear_empty && direct_state.is_empty_account(addr))) continue;
-        LeafRef r;
         const auto h = silkworm::keccak256(ByteView{addr.bytes, 20});
+        // As in check_root: a lookup created this record because it missed the witness's record of the
+        // address, and the block ran as if the account were absent.
+        const auto twin = std::lower_bound(existing.begin(), existing.end(), h,
+                                           [](const zilkworm::AddrHashEntry& e, const ethash::hash256& k) {
+                                               return std::memcmp(e.addr_hash, k.bytes, 32) < 0;
+                                           });
+        if (twin != existing.end() && std::memcmp(twin->addr_hash, h.bytes, 32) == 0) [[unlikely]] {
+            sys_println("Created and existing hashes clash");
+            direct_state.clear_change_journal();
+            return false;
+        }
+        if (pa.deleted) continue;
+        LeafRef r;
         std::memcpy(r.addr_hash.bytes, h.bytes, 32);
         r.rlp = ByteView{pa.acc_rlp_buf, pa.acc_rlp_len};
         leaves.push_back(r);
