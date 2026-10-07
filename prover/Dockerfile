@@ -20,9 +20,15 @@ FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS airbender-builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git curl ca-certificates pkg-config \
+    build-essential git curl ca-certificates pkg-config \
     libssl-dev xz-utils python3 patch \
     && rm -rf /var/lib/apt/lists/*
+
+# CMake from Kitware: noble's 3.28 cannot parse the download step of the patched blst (its URL
+# carries a '#airbender-<hash>' tag).
+ARG CMAKE_VERSION=3.31.6
+RUN curl -fsSL -o /tmp/cmake.sh "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.sh" \
+    && sh /tmp/cmake.sh --skip-license --prefix=/usr/local && rm /tmp/cmake.sh
 
 # RISC-V bare-metal GCC for guest cross-compilation
 ARG RISCV_GCC_VERSION=15.2.0-1
