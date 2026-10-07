@@ -110,7 +110,8 @@ class DirectState : public BlockState {
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
     FlatHashSet<evmc::address> touched_;
     FlatHashMap<evmc::bytes32, BlockHeader> headers_;
-    std::vector<BlockHashEntry> created_block_hashes_;
+    // Set once a block has asked for the hash of an ancestor its headers do not lead to, see get_block_hash().
+    mutable bool ancestor_missing_{false};
 
     bool multi_block_{false};
     // Journal only used for multi-block cases
@@ -166,7 +167,11 @@ class DirectState : public BlockState {
     ByteView read_code(const evmc::address& addr, const evmc::bytes32& /*code_hash*/) const noexcept {
         return read_code(addr);
     }
-    evmc::bytes32 get_block_hash(BlockNum n) const noexcept;
+    /// The hash of block `n`, an ancestor of the block `header` heads, as BLOCKHASH reads it. Zero, and
+    /// ancestor_missing() set, if the headers held (genesis, ancestors, the blocks run) do not lead from
+    /// `header` back to block n + 1.
+    evmc::bytes32 get_block_hash(const BlockHeader& header, BlockNum n) const noexcept;
+    bool ancestor_missing() const noexcept { return ancestor_missing_; }
     [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr) const noexcept {
         // Materializing, and overlay-aware: a detached account must not report
         // "no storage" just because it is missing from the blob map.

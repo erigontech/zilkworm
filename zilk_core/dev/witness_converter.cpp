@@ -211,15 +211,17 @@ int convert_json_witness(ByteView input, std::vector<uint8_t>& out, std::string&
         silkworm::rlp::encode(prev_block_rlp, prev_block);
     }
 
+    // load_flat_bundle() reads each ancestor as an RLP string holding the header, as the legacy bundles
+    // carry it: BLOCKHASH reads an ancestor's hash from its child's header.
     silkworm::Bytes ancestors_rlp;
     {
-        size_t payload = 0;
-        for (const auto& hb : header_blobs) payload += hb.size();
-        silkworm::rlp::encode_header(ancestors_rlp,
-                                     {.list = true, .payload_length = payload});
+        silkworm::Bytes entries;
         for (const auto& hb : header_blobs) {
-            ancestors_rlp.insert(ancestors_rlp.end(), hb.begin(), hb.end());
+            silkworm::rlp::encode(entries, ByteView{hb.data(), hb.size()});
         }
+        silkworm::rlp::encode_header(ancestors_rlp,
+                                     {.list = true, .payload_length = entries.size()});
+        ancestors_rlp += entries;
     }
 
     std::vector<std::vector<uint8_t>> state_records;

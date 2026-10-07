@@ -70,7 +70,7 @@ evmc_revision ExecutionProcessor::revision() const noexcept {
 }
 
 evmc::bytes32 ExecutionProcessor::get_block_hash_for_evm(int64_t block_num) const noexcept {
-    return direct_.get_block_hash(static_cast<uint64_t>(block_num));
+    return direct_.get_block_hash(block_.header, static_cast<uint64_t>(block_num));
 }
 
 void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& receipt) noexcept {
