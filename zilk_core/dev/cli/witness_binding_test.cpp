@@ -655,6 +655,86 @@ TEST_CASE("the guest executes a slot with the value its storage root binds",
 }
 
 // ---------------------------------------------------------------------------
+// The order of a record's slots
+// ---------------------------------------------------------------------------
+// The guest finds a slot by a binary search of its record's slots by key, which assumed the keys ascend.
+// check_root sorts the slots it walks itself, so a witness that put them out of order still bound every
+// value it carries, but a search could miss a slot, and the block read zero for it.
+
+namespace {
+
+/// read_through_call()'s state, where kCaller reads storage[1] of kHolder, which holds storage[1] = 5 and
+/// storage[2] = 6, and its witness.
+struct HolderOfTwo {
+    Tx t;
+    std::vector<AcctSpec> state;
+    Prestate ps;
+};
+
+HolderOfTwo holder_of_two() {
+    const Tx t = tx_to(kCaller);
+    std::vector<AcctSpec> state = read_through_call(t, word(1), {{word(1), word(5)}, {word(2), word(6)}});
+    Prestate ps = build_prestate(state);
+    return {t, std::move(state), std::move(ps)};
+}
+
+/// The block a producer seals for `h` after reading `v` for storage[1]: the gas and receipts of a run that
+/// read it, and the root of the post-state.
+Sealed sealed_reading(const HolderOfTwo& h, const evmc::bytes32& v) {
+    std::vector<AcctSpec> with_v = h.state;
+    spec_of(with_v, kHolder).storage = {{word(1), v}, {word(2), word(6)}};
+    Sealed s = seal(h.t, h.ps.prev_root, witness_blob(h.state, with_v), h.ps.nodestore);
+    REQUIRE(s.sr.storage(kCaller, 0) == v);
+    std::vector<AcctSpec> post = h.state;
+    spec_of(post, h.t.sender).nonce = 1;
+    spec_of(post, kCaller).storage = {{word(0), v}, {word(1), word(1)}};
+    s.sr.post.root = build_prestate(post).prev_root;
+    return s;
+}
+
+/// kHolder's slots in `blob`, in the order the blob holds them.
+std::span<Slot> holder_slots(std::vector<uint8_t>& blob) {
+    DirectState ds{std::span<uint8_t>{blob}};
+    Account* pa = ds.find_pre_account_unchecked(kHolder);
+    REQUIRE(pa != nullptr);
+    return ds.slots_for(*pa);
+}
+
+}  // namespace
+
+TEST_CASE("the guest rejects a witness whose slots are out of order", "[witness][binding][slot_order]") {
+    const HolderOfTwo h = holder_of_two();
+
+    // storage[2] before storage[1]: the search for storage[1] (5) missed it, and the block read 0.
+    std::vector<uint8_t> blob = h.ps.blob;
+    const std::span<Slot> slots = holder_slots(blob);
+    REQUIRE(slots.size() == 2);
+    std::swap(slots[0], slots[1]);
+    expect_rejected(run_guest(sealed_reading(h, evmc::bytes32{}), blob, h.ps.nodestore),
+                    "sanitize: witness slot keys not in ascending order");
+
+    const Sealed honest = seal(h.t, h.ps.prev_root, h.ps.blob, h.ps.nodestore);
+    CHECK(honest.sr.storage(kCaller, 0) == word(5));
+    expect_accepted(run_guest(honest, h.ps.blob, h.ps.nodestore), honest);
+}
+
+// A key held twice does not ascend either. The search finds the first of the two; the walk checks each claim
+// in turn against the leaf, so a value apart from the committed one already failed it.
+TEST_CASE("the guest rejects a witness that holds a slot twice", "[witness][binding][slot_order]") {
+    const HolderOfTwo h = holder_of_two();
+
+    // storage[1] as 0, then as 5: the search for storage[1] found 0.
+    std::vector<uint8_t> blob = h.ps.blob;
+    const std::span<Slot> slots = holder_slots(blob);
+    REQUIRE(slots.size() == 2);
+    slots[1] = slots[0];
+    std::memset(slots[0].initial, 0, sizeof(slots[0].initial));
+    std::memset(slots[0].current, 0, sizeof(slots[0].current));
+    expect_rejected(run_guest(sealed_reading(h, evmc::bytes32{}), blob, h.ps.nodestore),
+                    "sanitize: witness slot keys not in ascending order");
+}
+
+// ---------------------------------------------------------------------------
 // Storage the block wipes
 // ---------------------------------------------------------------------------
 // Before Cancun SELFDESTRUCT deletes an account, storage and all, and a later transaction can create it
