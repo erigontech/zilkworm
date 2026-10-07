@@ -235,6 +235,22 @@ TEST_CASE("kprefix: a saved state is used only for the node it was saved for", "
     }
 }
 
+TEST_CASE("kprefix: a block count out of range stays inside kHeadSlots", "[trie][kprefix]") {
+    // verify_and_snap() only stores 1..3. Whatever a row holds, the resume check must not read past
+    // kHeadSlots nor return more blocks than a saved state covers.
+    std::mt19937_64 rng(9);
+    alignas(256) static uint8_t node[544];
+    fill_full_branch(node, rng);
+    const size_t row = 13;
+    for (const unsigned sb : {0u, 4u, 7u, 128u, 255u}) {
+        CAPTURE(sb);
+        save(node, row, 1);
+        kprefix::tag_sb[row] = static_cast<uint8_t>(sb);
+        const BranchNode b = unfold(node, kNode);
+        CHECK(take_resumable_blocks(b, row, encode_branch(b)) == (sb & 3u));
+    }
+}
+
 TEST_CASE("kprefix: a failed verification leaves no tag over the overwritten row", "[trie][kprefix]") {
     std::mt19937_64 rng(4);
     alignas(256) static uint8_t good[544], bad[544];
