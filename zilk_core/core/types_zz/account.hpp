@@ -32,6 +32,9 @@ struct alignas(8) Account {
     uint32_t code_store_len;
     uint32_t slot_count;
     mutable uint8_t  acc_rlp_buf[kAccRlpBufSize];
+    // The record's reads of slots the witness does not carry: 1 + the index of the newest one in
+    // DirectState's list, 0 for none (see DirectState::AbsentRead).
+    mutable uint32_t absent_reads;
 
     silkworm::Bytes rlp(const evmc::bytes32& storage_root_arg) const;
 
