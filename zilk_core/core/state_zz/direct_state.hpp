@@ -105,11 +105,22 @@ struct CreatedCodeEntry {
     std::vector<uint8_t> bytes;
 };
 
+/// A read of a slot the witness does not carry, which DirectState answers with zero: a claim that the key
+/// is absent from the storage trie of the record it was read from, which check_root walks. The witness
+/// carries the slots an account has, and only the walk shows that it did not leave out the one read.
+/// The reads of a record are a list, newest first, from Account::absent_reads.
+struct AbsentRead {
+    evmc::bytes32 key;
+    uint32_t prev;  // 1 + the index of the record's previous read, 0 for none
+};
+
 /// The witness slots of a pre-state account whose storage the block wiped, and the storage root of the
-/// account's pre-state leaf they have to be bound to.
+/// account's pre-state leaf they have to be bound to, as do its reads of slots the witness does not carry
+/// (`absent_reads`, the head of their list, see AbsentRead).
 struct WipedStorage {
     std::span<const Slot> slots;
     evmc::bytes32 storage_root;
+    uint32_t absent_reads;
 };
 
 class DirectState : public BlockState {
@@ -141,6 +152,8 @@ class DirectState : public BlockState {
     // the slots the witness carried for it, yet the block can have read them first: check_root still
     // binds them to the pre-state.
     std::vector<WipedStorage> wiped_storage_;
+    // Mutable: read_storage() notes the reads it answers with zero, see AbsentRead.
+    mutable std::vector<AbsentRead> absent_reads_;
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
     FlatHashSet<evmc::address> touched_;
@@ -165,6 +178,7 @@ class DirectState : public BlockState {
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
     // Called before the storage of `pa` is wiped, while its slots and storage root are the pre-state's.
     void note_wiped_storage_(const Account& pa);
+    void note_absent_read_(const Account& pa, const evmc::bytes32& key) const;
     void reserve_block_maps_() noexcept;
 
 #if USE_HASH_KEY
@@ -345,6 +359,10 @@ class DirectState : public BlockState {
 
     const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept { return created_accounts_; }
     std::span<const WipedStorage> wiped_storage() const noexcept { return wiped_storage_; }
+    std::span<const AbsentRead> absent_reads() const noexcept { return absent_reads_; }
+    /// Drops the reads of slots the witness does not carry once check_root has walked them; the lists of
+    /// the records must be empty by then.
+    void clear_absent_reads() noexcept { absent_reads_.clear(); }
 #if USE_HASH_KEY
     const std::vector<std::unique_ptr<Account>>& recovered_accounts() const noexcept { return recovered_accounts_; }
 

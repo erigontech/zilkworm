@@ -312,6 +312,7 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
 void DirectState::reserve_block_maps_() noexcept {
     created_accounts_.reserve(256);
     overflow_slots_.reserve(128);
+    absent_reads_.reserve(1024);
     created_code_.reserve(64);
     touched_.reserve(512);
     headers_.reserve(256);
@@ -338,6 +339,7 @@ DirectState::DirectState(DirectState&& other) noexcept
     created_accounts_ = std::move(other.created_accounts_);
     overflow_slots_ = std::move(other.overflow_slots_);
     wiped_storage_ = std::move(other.wiped_storage_);
+    absent_reads_ = std::move(other.absent_reads_);
     created_code_ = std::move(other.created_code_);
     created_code_collisions_ = std::move(other.created_code_collisions_);
     headers_ = std::move(other.headers_);
@@ -359,7 +361,6 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
                                         const evmc::bytes32& key) const noexcept {
     // Materializing: a storage read must leave the same record an account read
     // does. Only blob records carry inline slots; overlay records fall through.
-    // Blank reads aren't recorded: USE_HASH_KEY walks them (reth witness issue).
     return read_storage(*observe_account_(addr), addr, key);
 }
 
@@ -380,13 +381,25 @@ evmc::bytes32 DirectState::read_storage(const Account& pa, const evmc::address& 
     }
 #if USE_HASH_KEY
     if (!pa.deleted) {
-        if (const auto* rs = recover_slot_from_nodestore(pa, addr, key);
-            rs != nullptr && rs->found) {
-            return rs->current;
+        if (const auto* rs = recover_slot_from_nodestore(pa, addr, key); rs != nullptr) {
+            return rs->current;  // zero where the walk showed the key absent
         }
     }
 #endif
+    if (!pa.deleted) note_absent_read_(pa, key);
     return {};
+}
+
+// SOUNDNESS-CRITICAL: a slot the witness does not carry reads as zero, and only check_root's walk of the
+// key, against the storage root the zero was read under, shows that the witness did not leave it out.
+// Under the empty root (no storage; a record created or revived by the block) every key is absent. The
+// root of a pre-state record is the one its account leaf commits to until the block wipes its storage,
+// which hands its reads over with its witness slots (note_wiped_storage_). Out of line: read_storage() is
+// on the SLOAD path, and some 840 of its reads per block come here.
+[[gnu::noinline]] void DirectState::note_absent_read_(const Account& pa, const evmc::bytes32& key) const {
+    if (eq_hash32(std::assume_aligned<8>(pa.storage_root), kEmptyRoot.bytes)) return;
+    absent_reads_.push_back({key, pa.absent_reads});
+    pa.absent_reads = static_cast<uint32_t>(absent_reads_.size());
 }
 
 // "Not in state" is a materialized record, not a null pointer: the read itself
@@ -601,8 +614,9 @@ void DirectState::set_nonce(const evmc::address& addr, uint64_t nonce) {
 // Out of line: since Cancun no account a block wipes carries witness slots, and inlined into
 // apply_state_diff() the record cost its loop 0.31M cycles over the 200-block corpus.
 [[gnu::noinline]] void DirectState::note_wiped_storage_(const Account& pa) {
-    if (pa.slot_count == 0) return;
-    wiped_storage_.push_back({slots_for(pa), std::bit_cast<evmc::bytes32>(pa.storage_root)});
+    if (pa.slot_count == 0 && pa.absent_reads == 0) return;
+    wiped_storage_.push_back({slots_for(pa), std::bit_cast<evmc::bytes32>(pa.storage_root), pa.absent_reads});
+    pa.absent_reads = 0;  // handed over: a destructed record reads nothing, a revived one reads under the empty root
 }
 
 void DirectState::destruct(const evmc::address& addr) {
@@ -1013,6 +1027,7 @@ bool DirectState::sanitize() {
         }
         pa->deleted = false;
         pa->modified = true;    // To be unset during addr_hashes loop
+        pa->absent_reads = 0;
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
         // Execution reads a slot's current value, but check_root binds only its initial one to the
         // storage root: the block starts from that, whatever current value the witness carries. Copied
