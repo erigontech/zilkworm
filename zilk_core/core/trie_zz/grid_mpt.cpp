@@ -201,7 +201,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
         snap_writes_ = trie_upd.current_value().size() != 0;
 
         // MAIN LOOP
-        while (depth_ < 128) {  // Searching down
+        // Every step goes down at least one nibble of the key, and only a leaf is reached with all 64 of them
+        // consumed (a branch reads the nibble at the cursor). The bound is the key's, not the grid's: depth_ is
+        // a line index, and the grid holds up to kMaxLines lines.
+        while (search_nib_cursor_ < 64 || grid_[depth_].kind == kLeaf) {  // Searching down
             auto& grid_line = grid_[depth_];
             if (grid_line.kind == kBranch) {
                 unsigned nib = search_nibbles_[search_nib_cursor_];
@@ -209,6 +212,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 if (unfold_res == UnfoldResult::kEmpty) {
                     // Child is empty - insert here
                     auto l = make_cur_leaf(trie_upd.current_value());
+                    if (!has_room(1)) {
+                        return {};
+                    }
                     insert_line(l.parent_slot, depth_, std::move(l));
                     grid_[depth_].modified = true;
                     break;
@@ -263,6 +269,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 auto old_ext_line{grid_line};  // cache the value;
                 auto new_ext_len = old_ext_line.ext.path.len - m - 1;
                 unsigned d1{}, d2{};
+                // The split appends up to five lines: the old child moved twice, a branch, an extension, the leaf.
+                if (!has_room(5)) {
+                    return {};
+                }
                 if (m > 0 || new_ext_len > 0) {
                     d1 = depth_ + 1;
                     while (d1 < grid_.size() && grid_[d1].parent_depth != 0xFF) ++d1;
@@ -377,6 +387,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 LeafNode old_leaf{grid_[depth_].leaf};
                 BranchNode bn;
 
+                if (!has_room(3)) {  // the branch and both leaves
+                    return {};
+                }
                 if (cp > 0) {  // Need to put an extension before the branch
                     ExtensionNode ext_common{};
                     std::memcpy(ext_common.path.nib.data(), grid_[depth_].leaf.path.nib.data(), cp);
