@@ -180,11 +180,11 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
 
             // Extension: descend into its single child. decode_node returns `second` as
             // the raw 32-byte hash for a hash ref, or the full inline RLP for an embedded
-            // (<32-byte) child — the exact distinction unfold_node_from_rlp draws.
+            // (<32-byte) child — the exact distinction unfold_node_from_rlp draws. The
+            // store is probed straight from the hash's bytes in the node RLP (the size
+            // check above is the pointer overload's 32-byte guarantee).
             if (second.size() == 32) {
-                evmc::bytes32 h;
-                std::memcpy(h.bytes, second.data(), 32);
-                auto child = find_node_rlp(h);
+                auto child = find_node_rlp(second.data());
                 if (!child) {
                     // PRUNED BOUNDARY: this extension points into a pruned subtree (same rule
                     // as the branch-child case below). Stop descending; do NOT bump
@@ -222,15 +222,15 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
 
         const std::uint8_t clen = stack[top].branch.child_len[s];
         if (clen == 32) {
-            // 32-byte hash ref: read the hash (child_ptr into the node RLP, or the inline
-            // child.bytes — exactly unfold_slot's source pick, fold_unfold.hpp:524) and
-            // resolve it through the store.
-            evmc::bytes32 h;
+            // 32-byte hash ref: resolve it through the store straight from where the hash
+            // lies (child_ptr into the node RLP, or the inline child.bytes — exactly
+            // unfold_slot's source pick, fold_unfold.hpp:524), no copy into a bytes32. The
+            // clen == 32 check is the pointer overload's 32-byte guarantee, and the probe
+            // completes before descend() can push a frame, so the frame's bytes are stable.
             const std::uint8_t* hsrc = stack[top].branch.child_ptr[s]
                                            ? stack[top].branch.child_ptr[s]
                                            : stack[top].branch.child[s].bytes;
-            std::memcpy(h.bytes, hsrc, 32);
-            auto child = find_node_rlp(h);
+            auto child = find_node_rlp(hsrc);
             if (!child) {
                 // Pruned boundary (partial witness): do not descend, do not count as missing.
                 // See docs/hashstate.md, "Fail-closed policy".
@@ -337,11 +337,10 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
             if (branch.child_len[s] == 0) return true;
             ++consumed;
             if (branch.child_len[s] == 32) {  // 32-byte hash ref -> resolve through the store
-                evmc::bytes32 h;
+                // Probed in place (the == 32 check is the pointer overload's guarantee).
                 const std::uint8_t* hsrc = branch.child_ptr[s] ? branch.child_ptr[s]
                                                                : branch.child[s].bytes;
-                std::memcpy(h.bytes, hsrc, 32);
-                auto child = find_node_rlp(h);
+                auto child = find_node_rlp(hsrc);
                 if (!child) return false;  // needed node missing -> cannot confirm
                 node_rlp = *child;
                 continue;
@@ -370,11 +369,10 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
             return consumed == 64 ? false : true;
         }
 
-        // Extension: descend into its single child (hash ref -> store; embedded -> stable copy).
+        // Extension: descend into its single child (hash ref -> store, probed in place;
+        // embedded -> stable copy).
         if (second.size() == 32) {
-            evmc::bytes32 h;
-            std::memcpy(h.bytes, second.data(), 32);
-            auto child = find_node_rlp(h);
+            auto child = find_node_rlp(second.data());
             if (!child) return false;  // needed node missing -> cannot confirm
             node_rlp = *child;
             continue;

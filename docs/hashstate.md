@@ -102,6 +102,14 @@ or collision sidecar to serialize ahead of time.
 | node store | `keccak256(node)` | node RLP          | `find_node_rlp` |
 | code store | `keccak256(code)` | contract bytecode | `find_code`     |
 
+`find_node_rlp` has two forms that run the same probe. The `evmc::bytes32` form is the
+seam the trie fold and `DirectState` share. The raw-pointer form,
+`find_node_rlp(const uint8_t* hash32)`, reads the hash in place from any address: the
+trie sweep and the confirmation walk hand it the child hash ref inside a node's RLP (or
+inside a decoded branch), so no probe copies the hash into a stack `bytes32` first. A
+raw pointer carries no size, so every such caller keeps its own `== 32` length check as
+the guarantee that 32 bytes are readable there.
+
 The index maps each content hash straight to a view of the bytes (`StoredBytes`, a pointer
 and a `u32` length), so a hit is one probe with no length decode and no arena indirection.
 The bytes are not copied on the input path:
@@ -118,7 +126,7 @@ The bytes are not copied on the input path:
 
 The stores bind content to identity. `add_node` and `add_code` compute the real
 keccak256 of the bytes at add time and use it as the index key, and `HashIndex`
-confirms every probed bucket with a full-key `memcmp`. A forged lookup hash can
+confirms every probed bucket against the full key. A forged lookup hash can
 therefore never surface the wrong entry.
 
 ### Building state from the trie
@@ -474,6 +482,29 @@ MPHF maps and `HashIndex`:
   compiler: capacity is a runtime value, and GCC emits a division for the `%` (`divq` on
   x86-64, `remu` on RV64IM), even with `[[assume(std::has_single_bit(capacity))]]`.
 - Probing is linear and wraps around at the end of the table.
+- Every bucket is 8-byte aligned (`alignas(8)` on the bucket struct), so every stored
+  key starts on an 8-byte boundary and the bucket stride is a multiple of 8. A bucket is
+  40 bytes in the account index (32-byte key plus a `u32` offset, padded from 36), 72 in
+  the storage index (64-byte key, padded from 68) and 48 in the node and code stores
+  (32-byte key plus a 16-byte view), where the alignment was already natural.
+- `find_ptr(const uint8_t*)` takes the probe key as a raw pointer and reads it in place,
+  at any alignment; `find` (array reference) is a thin wrapper over it, and `insert`
+  uses the same compare. The caller guarantees `KeySize` readable bytes. This is what
+  lets the trie sweep and the confirmation walk probe straight from a child hash ref
+  inside node RLP: the sweep probes the node index once per present child ref (most of
+  them pruned-sibling misses), and a 32-byte copy per probe was a library `memcpy` call
+  from an arbitrarily aligned blob pointer.
+- The full-key compare is inline, word by word, with no library `memcmp` or `memcpy`
+  call. The stored key loads as whole aligned 64-bit words (the bucket alignment above,
+  asserted at compile time). The probe key goes through an 8-byte `memcpy` into a local
+  per word, which the strict-alignment guest target compiles to byte loads (a misaligned
+  `ld` traps there) and the host to one load. The leading word is tested first, since
+  keys that share a home bucket without sharing a key8 differ there, and the remaining
+  words are folded with XOR/OR so a hit is reported only when every word is equal. The
+  stored key's first word is never compared against the key8: that shortcut is right for
+  `hash_key8` only, while `storage_key8` and `addr_key8` fold more than the leading
+  bytes, and the gate must be the full key. A key size that is not a multiple of 8 (none
+  of HashState's) keeps `memcmp`.
 - Capacity is sized to about twice the expected entry count (load factor about 0.5).
   This keeps probe runs short and guarantees that a free bucket exists, so every lookup
   terminates on the empty sentinel. A value-initialized `Value` is reserved as that
@@ -483,10 +514,10 @@ MPHF maps and `HashIndex`:
 ### Collision safety
 
 Two distinct keys can share a key8, and therefore a home bucket. Every occupied bucket a
-probe visits is confirmed with a full-key `memcmp` before it counts as a hit, and a
-bucket whose full key differs is skipped. A collision can therefore never return the
-wrong key's value. This is the same invariant `MphfMap::find` upholds with its
-embedded-key `memcmp`.
+probe visits is confirmed against the full key (the inline word compare above) before it
+counts as a hit, and a bucket whose full key differs is skipped. A collision can
+therefore never return the wrong key's value. This is the same invariant `MphfMap::find`
+upholds with its embedded-key `memcmp`.
 
 ### Growth past the size hint
 
@@ -1015,13 +1046,25 @@ a plain open-addressed hash table instead of a serialized minimal perfect hash. 
 same key8 derivations as `MphfMap` (`hash_key8` for 32-byte hashes, `addr_key8` for 20-byte
 addresses) and the same `mix64_body` mixer, so two distinct keys can land in the same home bucket.
 
-Lookup soundness therefore rests on the full-key `memcmp` done at every occupied bucket the probe
-visits. A collision must never return the wrong key's offset.
+Lookup soundness therefore rests on the full-key compare done at every occupied bucket the probe
+visits (see "Buckets and probing"). A collision must never return the wrong key's offset.
 
 The forced-collision cases build keys that share a key8, and so share a home bucket. They check
 that each key still resolves to its own value, and that an absent key stops at the empty
 sentinel. `HashIndex forced collision resolved by probe + full-key compare` covers 32-byte keys,
-and `HashIndex 20-byte address keys` adds a collision between two addresses.
+and `HashIndex 20-byte address keys` adds a collision between two addresses (a 20-byte key is
+not a multiple of 8, so this one exercises the `memcmp` fallback). `HashIndex 64-byte storage
+keys` covers the storage index: two keys with the same `storage_key8` (the same XOR of the two
+halves' prefixes) but different leading words each resolve to their own value, which a compare
+of the stored key's first word against the key8 would wrongly miss.
+
+The collision, sentinel and wraparound cases run every lookup through `find_ptr` as well as
+`find`. `HashIndex find_ptr through an unaligned pointer` probes from offsets 1, 3, 5 and 7 of
+an 8-aligned buffer and expects the same hit, value and miss as the array form. `HashIndex
+full-key compare covers every byte of a 32-byte key` (and the per-byte loop in the 64-byte
+case) flips one bit at every byte position of a stored key and expects a miss from each, so a
+word the compare skipped would show. The bucket sizes (40, 72, 24 and 48 bytes) are asserted at
+compile time through `bucket_bytes()`.
 
 ### Node and code store
 
@@ -1031,11 +1074,14 @@ record a view of a stored copy in an open-addressed `HashIndex<32, &hash_key8, S
 `find_node_rlp` and `find_code` return that view.
 
 The store tests cover round-trip, dedupe, a definitive miss, and the case that carries the most
-weight: the full-key `memcmp` gate under a home-bucket collision.
+weight: the full-key compare gate under a home-bucket collision.
 
 `HashState full-key gate on home-bucket collision` checks that two distinct real keccak hashes
 forced into the same index home bucket each resolve to their own payload (open-address probe plus
-full-key `memcmp`), and that a third colliding hash that was never added still misses.
+full-key compare), and that a third colliding hash that was never added still misses.
+`HashState find_node_rlp by raw pointer matches the bytes32 overload` checks the raw-pointer
+form the sweep and the confirmation walk use: from an unaligned pointer it returns the very
+same stored view as the `bytes32` form, and misses on a never-added hash.
 
 A literal 8-byte key8 collision cannot feasibly be constructed under real keccak, so the test uses
 a home-bucket collision instead, where the home bucket is `mix64_body(hash_key8(h)) &

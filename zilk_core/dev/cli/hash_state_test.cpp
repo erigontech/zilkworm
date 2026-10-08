@@ -127,6 +127,36 @@ TEST_CASE("HashState miss on never-added node hash", "[hash_state]") {
     CHECK_FALSE(hs.find_node_rlp(h).has_value());
 }
 
+// The raw-pointer find_node_rlp (the form the trie sweep and the confirmation walk use on a
+// child hash ref inside node RLP) is the same probe as the bytes32 form: the same view on a
+// hit and a miss on a never-added hash, from an unaligned pointer.
+TEST_CASE("HashState find_node_rlp by raw pointer matches the bytes32 overload", "[hash_state]") {
+    HashState hs;
+    const Bytes rlp = payload(0xB17E5ULL);
+    const evmc::bytes32 h = hs.add_node(view_of(rlp));
+    const evmc::bytes32 never = keccak32(view_of(payload(0x0FFULL)));
+
+    const auto by_hash = hs.find_node_rlp(h);
+    REQUIRE(by_hash.has_value());
+
+    for (const std::size_t off : {std::size_t{1}, std::size_t{3}, std::size_t{6}}) {
+        CAPTURE(off);
+        alignas(8) std::array<std::uint8_t, 40> buf{};
+        REQUIRE(reinterpret_cast<std::uintptr_t>(buf.data() + off) % 8 != 0);
+
+        std::memcpy(buf.data() + off, h.bytes, 32);
+        const auto by_ptr = hs.find_node_rlp(buf.data() + off);
+        REQUIRE(by_ptr.has_value());
+        CHECK(by_ptr->data() == by_hash->data());  // the very same stored view
+        CHECK(by_ptr->size() == by_hash->size());
+        REQUIRE(by_ptr->size() == rlp.size());
+        CHECK(std::memcmp(by_ptr->data(), rlp.data(), rlp.size()) == 0);
+
+        std::memcpy(buf.data() + off, never.bytes, 32);
+        CHECK_FALSE(hs.find_node_rlp(buf.data() + off).has_value());
+    }
+}
+
 // Two distinct keccak hashes sharing a home bucket each find their own node; a third one misses.
 // See docs/hashstate.md, "Node and code store".
 TEST_CASE("HashState full-key gate on home-bucket collision", "[hash_state]") {
@@ -166,7 +196,7 @@ TEST_CASE("HashState full-key gate on home-bucket collision", "[hash_state]") {
     CHECK(eq32(hs.add_node(view_of(p_b)), h_b));
     CHECK(hs.node_count() == 2u);
 
-    // The full-key memcmp gate routes each colliding lookup to its OWN payload.
+    // The full-key compare gate routes each colliding lookup to its OWN payload.
     auto ga = hs.find_node_rlp(h_a);
     auto gb = hs.find_node_rlp(h_b);
     REQUIRE(ga.has_value());

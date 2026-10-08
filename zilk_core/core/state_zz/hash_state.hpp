@@ -63,12 +63,23 @@ class HashState : public BlockState {
     evmc::bytes32 add_node_borrowed(ByteView rlp);
     evmc::bytes32 add_code_borrowed(ByteView code);
 
-    // Hot lookup: EXACT DirectState::find_node_rlp seam shape — hit -> ByteView over
-    // the stored RLP, miss -> std::nullopt (NOT an empty ByteView).
+    // Hot lookup by a raw 32-byte hash, read in place: the caller guarantees 32 readable
+    // bytes at `hash32` (a raw pointer carries no size, so every caller keeps its own
+    // size == 32 guard), at any alignment. The trie sweep and the confirmation walk probe
+    // straight from a child hash ref inside a node's RLP this way, with no copy into a
+    // stack bytes32 first. Hit -> ByteView over the stored RLP, miss -> std::nullopt.
+    [[gnu::always_inline]] inline std::optional<ByteView>
+    find_node_rlp(const uint8_t* hash32) const noexcept {
+        if (auto v = node_index_.find_ptr(hash32)) return ByteView{v->data, v->size};
+        return std::nullopt;
+    }
+
+    // Hot lookup: EXACT DirectState::find_node_rlp seam shape (the fold and DirectState
+    // parity need this form) — hit -> ByteView over the stored RLP, miss -> std::nullopt
+    // (NOT an empty ByteView). Same probe as the pointer overload.
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
-        if (auto v = node_index_.find(node_hash.bytes)) return ByteView{v->data, v->size};
-        return std::nullopt;
+        return find_node_rlp(node_hash.bytes);
     }
 
     // Hot lookup: matches DirectState::read_code miss semantics — hit -> ByteView over
