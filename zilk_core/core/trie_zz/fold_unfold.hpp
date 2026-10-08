@@ -32,8 +32,20 @@ namespace rlp = ::silkworm::rlp;
     if (from.size() < 8) [[unlikely]] {
         return {false, from.size()};
     }
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+    // Only bytes 0..3 are read below. Strict alignment turns the 8-byte memcpy into byte copies through the
+    // stack; one word load does for a word-aligned payload, and a misaligned one copies just the four bytes.
+    typedef uint32_t __attribute__((may_alias)) w32;
+    uint32_t word;
+    if ((reinterpret_cast<uintptr_t>(from.data()) & 3) == 0) [[likely]] {
+        word = *reinterpret_cast<const w32*>(from.data());
+    } else {
+        std::memcpy(&word, from.data(), 4);
+    }
+#else
     uint64_t word;
     std::memcpy(&word, from.data(), 8);
+#endif
     uint8_t first = word & 0xFF;
 
     if (first < 0x80) return {false, 1};
@@ -367,7 +379,7 @@ inline LeafNode GridMPT<DeletionEnabled>::make_cur_leaf(ByteView value_rlp) {
     l.parent_slot = search_nibbles_[search_nib_cursor_];
     l.path.len = 64 - (search_nib_cursor_ + 1);
     std::memcpy(l.path.nib.data(),
-                &search_nibbles_[search_nib_cursor_ + 1],
+                search_nibbles_.nib.data() + search_nib_cursor_ + 1,
                 l.path.len);
     l.value = value_rlp;
     return l;
