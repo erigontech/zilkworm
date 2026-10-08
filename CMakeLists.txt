@@ -140,6 +140,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/direct_state_handle_test.cpp
     zilk_core/dev/cli/code_store_collision_len_test.cpp
     zilk_core/dev/cli/storage_host_path_test.cpp
+    zilk_core/dev/cli/call_frame_result_test.cpp
     zilk_core/dev/cli/word_layout_test.cpp
     zilk_core/dev/cli/jumpdest_map_test.cpp
     zilk_core/dev/cli/jumpdest_single_bound_test.cpp
