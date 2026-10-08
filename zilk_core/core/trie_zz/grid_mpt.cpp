@@ -366,12 +366,14 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
                                         grid_line.leaf.path.len);
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
                     // Pre-value bind + read-only short-circuit. Kept verbatim for
-                    // DirectState (state_keeps_prevalue_check<DirectState> == true),
-                    // compiled out for HashState: its update set carries no
-                    // initial_value (289 would read an unset value) and no read-only
-                    // entries (293 is unreachable) — reads are already bound to
-                    // prev_root at derive time. See active_state.hpp / the HashState
-                    // specialisation in hash_state.hpp.
+                    // DirectState (state_keeps_prevalue_check<DirectState> == true).
+                    // Compiled down for HashState, whose reads were bound to prev_root
+                    // when its caches were built from the trie: the update of a built
+                    // account or slot carries no pre-value, and no other read-only
+                    // entry reaches a leaf. The one claim it makes is that a key is
+                    // absent (0x80: an account the block read as absent or created),
+                    // which a leaf at the key refutes. See active_state.hpp / the
+                    // HashState specialisation in hash_state.hpp.
                     if constexpr (state_keeps_prevalue_check<StateT>) {
                         // check pre-value matches
                         if (grid_line.leaf.value != trie_upd.initial_value()) {
@@ -382,6 +384,11 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
                         if (trie_upd.current_value().size() == 0) {
                             break;  // read-only check
                         }
+                    } else if (const ByteView claim = trie_upd.initial_value();
+                               claim.size() == 1 && claim[0] == 0x80) [[unlikely]] {
+                        failed_ = true;
+                        sys_println("Leaf found for a key claimed absent");
+                        return {};
                     }
                     if constexpr (DeletionEnabled) {
                         if (trie_upd.current_value() == ByteView{{0x80}}) {

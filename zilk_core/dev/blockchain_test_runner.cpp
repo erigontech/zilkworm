@@ -556,9 +556,10 @@ namespace {
             }
 
             // 7. Accept via the S5 gather overload: gather this block's writes from the HashState
-            //    overlay, fold them over prev_root, require the recomputed root to match the
-            //    header AND both witness-completeness counters (missing / unconfirmed reads) to
-            //    be zero. (The overload prints the recomputed root itself.)
+            //    overlay, fold them over prev_root, require the walk to go through (every claim
+            //    of absence held), the recomputed root to match the header AND both
+            //    witness-completeness counters (missing / unconfirmed reads) to be zero. (The
+            //    overload prints the recomputed root itself.)
             if (!::zilkworm::check_root_hashstate(hs, prev_root, block.header.state_root)) {
                 sys_println(std::format(
                                 "ERROR: HashState accept failed at block {}: expected state_root {}",

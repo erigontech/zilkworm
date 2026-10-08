@@ -1801,8 +1801,8 @@ TEST_CASE("HashState set_code then read_code resolves in-block created code", "[
     CHECK(hs.unconfirmed_read_count() == 0u);  // created code resolves cleanly
 }
 
-// find_or_create_account on a CONFIRMED-ABSENT key (empty trie): a fresh, usable record and
-// NO unconfirmed read.
+// find_or_create_account on an address the empty trie does not have: a fresh, usable record
+// and NO unconfirmed read (the miss is not walked at read time).
 TEST_CASE("HashState find_or_create_account on a confirmed-absent key is fresh, no unconfirmed",
           "[hash_state]") {
     HashState hs;
@@ -1812,40 +1812,93 @@ TEST_CASE("HashState find_or_create_account on a confirmed-absent key is fresh, 
     Account* pa = hs.find_or_create_account(addr);
     REQUIRE(pa != nullptr);  // never null
     CHECK(pa->deleted);      // materialized fresh (a subsequent write revives it)
-    CHECK(hs.unconfirmed_read_count() == 0u);  // the empty trie proves absence
+    CHECK(hs.unconfirmed_read_count() == 0u);  // no walk at read time
 }
 
-// find_or_create_account on a PRUNED-BOUNDARY key: a usable record is still returned, but the
-// unprovable miss bumps unconfirmed_read_count_ so the accept gate rejects.
-TEST_CASE("HashState find_or_create_account on a pruned-boundary key is usable but unconfirmed",
-          "[hash_state]") {
-    HashState hs;
+// find_or_create_account on an address the pre-state trie does not have: a usable (deleted)
+// record and NO walk at read time (unconfirmed_read_count stays 0). The record's account-trie
+// update claims the key absent, and the accept check walks the claim: proven where the key
+// leaves the trie (accepted, the root unchanged), unprovable at a pruned boundary (the walk
+// fails, rejected), refuted by a leaf at the key the build did not decode (rejected).
+TEST_CASE("HashState find_or_create_account claims the address absent at accept time",
+          "[hash_state][accept]") {
     const evmc::address addr = s2_addr(0xA0);
     const evmc::bytes32 ah = keccak_addr(addr);
+    const auto ah_path = nibbles_of(ah);
     const std::uint8_t first = static_cast<std::uint8_t>(ah.bytes[0] >> 4);
     const std::uint8_t other = static_cast<std::uint8_t>((first + 1) & 0xF);
+    const std::uint8_t third = static_cast<std::uint8_t>((first + 2) & 0xF);
 
-    // A present leaf at another root-branch slot so the root itself exists in the store.
+    // Present leaves at two other root-branch slots, so the root exists in the store.
     const Key kP = key_with(other, 3, 5);
     const Bytes accP = account_leaf_value(1, silkworm::kEmptyRoot);
     const LeafNode leafP = make_leaf(&kP.nib[1], 63, ByteView{accP});
+    const Key kQ = key_with(third, 5, 2);
+    const Bytes accQ = account_leaf_value(2, silkworm::kEmptyRoot);
+    const LeafNode leafQ = make_leaf(&kQ.nib[1], 63, ByteView{accQ});
+
+    HashState hs;
     const evmc::bytes32 hP = hs.add_node(ByteView{zilkworm::encode_leaf(leafP)});
-
-    // A dangling (pruned) child ref at the slot the address's path descends into.
-    evmc::bytes32 dangling{};
-    for (int i = 0; i < 32; ++i) dangling.bytes[i] = static_cast<std::uint8_t>(0xDE - i);
+    const evmc::bytes32 hQ = hs.add_node(ByteView{zilkworm::encode_leaf(leafQ)});
     BranchNode root;
-    root.set_child(first, ByteView{dangling.bytes, 32});
     root.set_child(other, ByteView{hP.bytes, 32});
-    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+    root.set_child(third, ByteView{hQ.bytes, 32});
 
-    REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
-    REQUIRE(hs.missing_count() == 0u);           // pruned boundary, not a missing node
-    REQUIRE(hs.unconfirmed_read_count() == 0u);  // reset by the build
+    SECTION("proven: the address's root-branch slot is empty") {
+        const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+        REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
 
-    Account* pa = hs.find_or_create_account(addr);
-    REQUIRE(pa != nullptr);                   // never null, even at a pruned boundary
-    CHECK(hs.unconfirmed_read_count() > 0u);  // confirm_absent could not prove absence
+        Account* pa = hs.find_or_create_account(addr);
+        REQUIRE(pa != nullptr);
+        CHECK(pa->deleted);                        // materialized fresh, never written
+        CHECK(hs.unconfirmed_read_count() == 0u);  // no walk at read time
+        REQUIRE(hs.created_accounts().size() == 1u);
+
+        // The read-only claim inserts nothing: the root is the pre-state's.
+        CHECK(zilkworm::check_root_hashstate(hs, root_hash, root_hash));
+        CHECK(hs.unconfirmed_read_count() == 0u);
+    }
+
+    SECTION("unprovable: a pruned boundary at the address's slot") {
+        evmc::bytes32 dangling{};
+        for (int i = 0; i < 32; ++i) dangling.bytes[i] = static_cast<std::uint8_t>(0xDE - i);
+        root.set_child(first, ByteView{dangling.bytes, 32});
+        const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+        REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
+        REQUIRE(hs.missing_count() == 0u);  // pruned boundary, not a missing node
+
+        Account* pa = hs.find_or_create_account(addr);
+        REQUIRE(pa != nullptr);                    // never null, even at a pruned boundary
+        CHECK(hs.unconfirmed_read_count() == 0u);  // nothing is walked at read time
+
+        // The claim's walk needs the pruned node: it fails, and the block is rejected.
+        CHECK_FALSE(zilkworm::check_root_hashstate(hs, root_hash, root_hash));
+    }
+
+    SECTION("refuted: a leaf at the address the build did not decode") {
+        // A leaf at the address's full path whose value is no account RLP: the build skips it,
+        // so the address is a total miss, while the trie has the key.
+        const Bytes garbage{0x01};
+        const LeafNode leafA = make_leaf(&ah_path[1], 63, ByteView{garbage});
+        const evmc::bytes32 hA = hs.add_node(ByteView{zilkworm::encode_leaf(leafA)});
+        root.set_child(first, ByteView{hA.bytes, 32});
+        const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+        REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
+        REQUIRE(hs.find_built_account(ah) == nullptr);
+
+        Account* pa = hs.find_or_create_account(addr);
+        REQUIRE(pa != nullptr);
+        CHECK(hs.unconfirmed_read_count() == 0u);
+
+        // Read as absent and left deleted: the claim meets the leaf, and the walk fails.
+        CHECK_FALSE(zilkworm::check_root_hashstate(hs, root_hash, root_hash));
+
+        // Created: the same claim with the account's new leaf, refuted the same way.
+        hs.set_nonce(addr, 7);
+        REQUIRE(hs.read_account(addr) != nullptr);
+        CHECK_FALSE(hs.read_account(addr)->deleted);
+        CHECK_FALSE(zilkworm::check_root_hashstate(hs, root_hash, root_hash));
+    }
 }
 
 // apply_code_diff contract creation WIPES pre-state storage via the storage_wiped_ flag
@@ -2223,13 +2276,21 @@ TEST_CASE("check_root_hashstate gather overload reconstructs the overlay write s
     std::vector<HashStateAccountWrite> manual;
     manual.push_back({keccak_addr(aB), sr_B_pre,
                       std::span<const zilkworm::TrieNodeFlat>{b_storage}, hs.read_account(aB)});
-    manual.push_back({keccak_addr(aC), silkworm::kEmptyRoot, {}, hs.read_account(aC)});
+    // C is created: its write claims the key absent, as the gather marks it.
+    manual.push_back({keccak_addr(aC), silkworm::kEmptyRoot, {}, hs.read_account(aC), /*absent=*/true});
     std::sort(manual.begin(), manual.end(),
               [](const HashStateAccountWrite& a, const HashStateAccountWrite& b) {
                   return std::memcmp(a.addr_hash.bytes, b.addr_hash.bytes, 32) < 0;
               });
     CHECK(zilkworm::check_root_hashstate(hs, prev_root, manual, expected_root));   // == gather accept
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, manual, bad_root));  // == gather reject
+
+    // --- (C) a claim of absence for B, whose leaf the pre-state trie has, is refuted: the walk
+    // meets B's leaf and fails, whatever the header root. ---
+    std::vector<HashStateAccountWrite> claimed = manual;
+    for (auto& w : claimed)
+        if (eq32(w.addr_hash, keccak_addr(aB))) w.absent = true;
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, claimed, expected_root));
 }
 
 // A run that leaves unconfirmed_read_count() > 0 must REJECT through the gather overload too:

@@ -267,6 +267,21 @@ zero for a slot), so a value-returning caller proceeds. The accept gate rejects
 later if and only if the unconfirmed count is non-zero. The failure is closed,
 never a silent wrong-empty.
 
+`find_or_create_account`, the first write to an address, is the third kind of
+miss, and it is not walked at read time. A total miss (neither the overlay nor
+the built cache has the address) materializes a fresh, deleted overlay record,
+as `DirectState::materialize_absent_account_` does, and the claim that the
+pre-state trie has no leaf for the address goes into the block's write set at
+accept time instead: the gather marks the account `absent`
+(`HashStateAccountWrite::absent`), and the fold checks the claim on the walk
+that recomputes the root (see [Accept check](#accept-check)). A read that never
+writes the address leaves the record deleted and emits a read-only claim, which
+inserts nothing; a write that creates the account carries the claim with its
+leaf. This is the protocol `check_root` uses for the reads of absent accounts
+and slots over `DirectState`, applied to the one HashState miss that reaches
+the overlay. The reads that do not (`get_account`, `get_storage`) keep the
+confirmation walk above.
+
 The handlers are defined in the .cpp, so the hot lookups in the header stay
 small and the confirm and counter logic sits next to `sweep`. They are `const`,
 and `unconfirmed_read_count_` is `mutable`: a read never mutates the caches,
@@ -599,13 +614,25 @@ is compiled out for the `HashState` instantiation
 witness-completeness counters that the `HashState` build and reads accumulate:
 
 ```
-accept  <=>  new_root == header_state_root
+accept  <=>  !acc_trie.failed()
+             && new_root == header_state_root
              && hash_state.missing_count()          == 0
              && hash_state.unconfirmed_read_count() == 0
 ```
 
 In words, a block is accepted only when all of these hold:
 
+- No walk failed. A storage walk that fails rejects at once; the account walk's
+  `failed()` is part of the gate. A failed walk (a node missing or malformed, a
+  claim of absence refuted) returns a zero root, which only a header committing
+  to one would match.
+- Every account the block read as absent, or created, is absent from the
+  pre-state trie. Its update claims so with a `0x80` pre-value
+  (`HashStateAccountWrite::absent`). The walk accepts the claim where the key
+  leaves the trie (`GridMPT::claims_absent`: an empty branch slot or a
+  diverging path, where a read inserts nothing) and refutes it at a leaf (the
+  HashState arm of the leaf match in `grid_mpt.cpp`, the one pre-value check
+  that stays compiled in).
 - The recomputed root matches the header.
 - The seeding account root was present. `missing_count()` flags only a broken
   root: a real EIP-8025 partial witness prunes untouched subtrees to bare hash
@@ -613,10 +640,9 @@ In words, a block is accepted only when all of these hold:
 - Every read either hit the cache or was proven genuinely empty (fail-closed;
   see the read path in `hash_state.hpp`).
 
-A write whose fold has to descend into a pruned boundary is still caught
-without a fourth condition: `GridMPT` cannot unfold the absent node, so it
-recomputes a non-matching (zero) root and `new_root == header_state_root`
-fails.
+A write or a claim whose fold has to descend into a pruned boundary is caught
+the same way: `GridMPT` cannot unfold the absent node and flags the walk
+failed.
 
 ### Supplying the write set
 
@@ -640,12 +666,18 @@ it, with no hand-supplied span. It mirrors `check_root`'s gather step for step:
   structurally: read-only accounts never enter.
 - **Hash the address.** For each account, the 20-byte address is hashed with
   keccak to its `addr_hash`.
+- **Absent accounts.** Whether the pre-state trie has a leaf for the address
+  is the side-effect-free `find_built_account` probe, not `get_account`, so a
+  legitimate miss never bumps `unconfirmed_read_count_` and wrongly rejects
+  the block. An address the probe misses is one `find_or_create_account`
+  materialized on a total miss, and its write is marked `absent`: the span
+  overload gives its update the `0x80` pre-value, the claim that the key is
+  absent, which the fold checks (see [Accept decision](#accept-decision)).
 - **Destructed accounts.** A destructed account (`deleted`) that has a
-  pre-trie leaf (`find_built_account` hits) emits an `account == nullptr`
-  write, which becomes a `0x80` leaf delete. A created-then-destructed account
-  (`find_built_account` misses) is skipped. The probe is the side-effect-free
-  `find_built_account`, not `get_account`, so a legitimate miss never bumps
-  `unconfirmed_read_count_` and wrongly rejects the block.
+  pre-trie leaf emits an `account == nullptr` write, which becomes a `0x80`
+  leaf delete. One without a pre-trie leaf (read as absent, or created and
+  destructed again) emits an `account == nullptr` write marked `absent`: a
+  read-only claim of absence, which inserts nothing.
 - **Storage writes of a live account.** The account's overlay storage writes
   become a `TrieNodeFlat` set sorted by slot hash (raw-key order is not
   `keccak(key)` order). Each value is encoded the way `check_root` encodes it,
