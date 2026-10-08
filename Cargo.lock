@@ -6265,8 +6265,8 @@ dependencies = [
 
 [[package]]
 name = "stateless-validator-common"
-version = "0.16.0"
-source = "git+https://github.com/eth-act/ere-guests?rev=eaa3f4601e9686e1fc540a00c039532b85550879#eaa3f4601e9686e1fc540a00c039532b85550879"
+version = "0.18.0"
+source = "git+https://github.com/eth-act/ere-guests?tag=v0.18.0#d31055cf3d4283003833fe6f9b83f3d098c97e88"
 dependencies = [
  "libssz",
  "libssz-derive",

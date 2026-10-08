@@ -64,6 +64,7 @@ impl StatelessValidatorZilkwormInput {
             1 => "Amsterdam", // generated EEST corpus (tests-zkevm-benchmark), Amsterdam from genesis
             0x1a62c8cb6 => "glamsterdam-devnet-7",
             0x1a6a8cc6e => "glamsterdam-devnet-8",
+            11155111 => "sepolia",
             id => bail!("unknown chain id {id:#x}: no guest-side network config"),
         };
 
