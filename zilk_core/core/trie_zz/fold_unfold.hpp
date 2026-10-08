@@ -72,7 +72,7 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
         failed_ = true;
 #endif
         sys_println(("ERROR: unfold_node_from_rlp Invalid Payload Header, parent_slot_index: "
-            + std::to_string(parent_slot_index) 
+            + std::to_string(parent_slot_index)
             + " parent_depth: " + std::to_string(parent_depth)).c_str());
         return false;
     }
@@ -97,7 +97,10 @@ bool GridMPT<DeletionEnabled>::unfold_node_from_rlp(ByteView payload, unsigned p
         if (node_size >= 32 && node_size <= UINT16_MAX) {
             line.branch.orig = node_begin;
             line.branch.orig_size = static_cast<uint16_t>(node_size);
-            line.branch.orig_child_len = line.branch.child_len;
+            if (!line.branch.uniform)
+                line.branch.orig_child_len = line.branch.child_len;
+        } else {
+            line.branch.uniform = false;  // lazy slots are unreachable without the origin view
         }
         return true;
     }
@@ -220,10 +223,8 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
             }
             ExtensionNode ext{nibbles64{1, {static_cast<uint8_t>(non_empty_nib)}}};
             if (grid_.back().kind == kBranch) {
-                auto clen = grid_line.branch.child_len[non_empty_nib];
-                const uint8_t* src = (clen == 32 && grid_line.branch.child_ptr[non_empty_nib])
-                                         ? grid_line.branch.child_ptr[non_empty_nib]
-                                         : grid_line.branch.child[non_empty_nib].bytes;
+                const auto clen = grid_line.branch.slot_len(non_empty_nib);
+                const uint8_t* src = grid_line.branch.slot_bytes(non_empty_nib);
                 ext.child_len = clen;
                 ext.set_child(ByteView{src, clen});
                 transform_line(grid_line, std::move(ext));
@@ -246,10 +247,8 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
             if (parent.kind == kBranch && parent.branch.has_single_child()) {
                 unsigned kept_nib = parent.branch.first_set_bit();
                 ExtensionNode ext{nibbles64{1, {static_cast<uint8_t>(kept_nib)}}};
-                auto clen = parent.branch.child_len[kept_nib];
-                const uint8_t* src = (clen == 32 && parent.branch.child_ptr[kept_nib])
-                                         ? parent.branch.child_ptr[kept_nib]
-                                         : parent.branch.child[kept_nib].bytes;
+                const auto clen = parent.branch.slot_len(kept_nib);
+                const uint8_t* src = parent.branch.slot_bytes(kept_nib);
                 ext.set_child(ByteView{src, clen});
                 transform_line(parent, std::move(ext));
                 parent.modified = true;
@@ -425,7 +424,7 @@ inline void GridMPT<DeletionEnabled>::link_to_parent(GridLine& line, unsigned de
         auto& parent = grid_[parent_depth];
         line.consumed += parent.consumed;
         parent.child_depth[parent_slot] = static_cast<uint8_t>(depth);
-        if (parent.kind == kBranch && parent.branch.child_len[parent_slot] == 0) {
+        if (parent.kind == kBranch && parent.branch.slot_len(parent_slot) == 0) {
             parent.branch.mask |= 1 << parent_slot;
             parent.branch.child_len[parent_slot] = 1;  // Placeholder, update during fold_line
             parent.branch.dirty |= static_cast<uint16_t>(1u << parent_slot);
@@ -568,20 +567,18 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         return UnfoldResult::kSuccess;
     }
 
-    auto child_len = grid_line.branch.child_len[slot];
-    auto& child = grid_line.branch.child[slot];
+    const auto child_len = grid_line.branch.slot_len(slot);
 
-    if (child_len == 0 || 
-        (child_len == 1 && child.bytes[0] == 0x80)) {  // empty, nothing to "unfold"
+    if (child_len == 0 ||
+        (child_len == 1 && grid_line.branch.slot_bytes(slot)[0] == 0x80)) {  // empty
         return UnfoldResult::kEmpty;
     }
 
     ByteView rlp;
     if (child_len == 32) {
-        // Hash ref
+        // Hash ref; copy to an aligned key (evmc_bytes32 is alignas(size_t)).
         bytes32 ck;
-        const uint8_t* hs = grid_line.branch.child_ptr[slot] ? grid_line.branch.child_ptr[slot] : child.bytes;
-        std::memcpy(ck.bytes, hs, 32);
+        std::memcpy(ck.bytes, grid_line.branch.slot_bytes(slot), 32);
         auto rlp_opt = state_->find_node_rlp(ck);
         if (!rlp_opt) [[unlikely]] {
             ++missing_count_;
@@ -594,7 +591,8 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         rlp = *rlp_opt;
     } else {
         // Must move this outside of this object
-        embedded_rlp_copies_.emplace_back(child);
+        embedded_rlp_copies_.emplace_back();
+        std::memcpy(embedded_rlp_copies_.back().bytes, grid_line.branch.slot_bytes(slot), child_len);
         rlp = ByteView{embedded_rlp_copies_.back().bytes, child_len};
     }
     if (rlp.size() == 0) [[unlikely]] {
