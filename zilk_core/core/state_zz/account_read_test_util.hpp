@@ -474,7 +474,7 @@ struct MirrorRoot {
 /// the node store surfaces in `MirrorRoot::missing` instead of hiding behind a matching root.
 inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, Account& pa,
                                    bool has_existing, bool acc_modified,
-                                   GridMPT<true>& storage_trie, unsigned& missing_out) {
+                                   GridMPT<true, DirectState>& storage_trie, unsigned& missing_out) {
     std::span<const Slot> existing_slots;
     if (has_existing && pa.slot_count > 0) {
         existing_slots = ds.slots_for(pa).first(pa.slot_count);
@@ -547,7 +547,7 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
     ups.reserve(ds.addr_hashes().size() + created.size());
 
     // One instance hoisted out of the walk and `reset()` per account, as check_root does.
-    GridMPT<true> storage_trie{ds, silkworm::kEmptyRoot};
+    GridMPT<true, DirectState> storage_trie{ds, silkworm::kEmptyRoot};
 
     auto it_ex = ds.addr_hashes().begin();
     const auto end_ex = ds.addr_hashes().end();
@@ -607,7 +607,7 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
         }
     }
 
-    GridMPT<true> acc_trie{ds, prev_root};
+    GridMPT<true, DirectState> acc_trie{ds, prev_root};
     out.root = acc_trie.calc_root_from_updates({ups.data(), ups.size()});
     out.missing += acc_trie.missing_count();
     return out;

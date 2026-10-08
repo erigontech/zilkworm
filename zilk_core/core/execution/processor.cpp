@@ -32,7 +32,7 @@ namespace {
 }  // namespace
 
 ExecutionProcessor::ExecutionProcessor(const Block& block, protocol::RuleSet& rule_set,
-                                       DirectState& direct, const ChainConfig& config)
+                                       ActiveState& direct, const ChainConfig& config)
     : direct_{direct},
       rule_set_{rule_set},
       block_{block},
@@ -74,7 +74,7 @@ evmc::bytes32 ExecutionProcessor::get_block_hash_for_evm(int64_t block_num) cons
 }
 
 void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& receipt) noexcept {
-    DirectStateView evm1_state_view{direct_};
+    ActiveStateView evm1_state_view{direct_};
     BlockHashes evm1_block_hashes{*this};
 
     evmone::state::Transaction evm1_txn{
@@ -179,7 +179,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     // Block-start system calls (EIP-4788 beacon roots, EIP-2935 history storage)
     {
-        DirectStateView state_view{direct_};
+        ActiveStateView state_view{direct_};
         BlockHashes block_hashes{*this};
         const evmone::state::BalStateView bal_view{state_view, bal_builder_};
         const auto& sys_view = rev >= EVMC_AMSTERDAM
@@ -239,7 +239,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         if (!flat_requests.extract_deposits_from_logs(logs))
             return ValidationResult::kRequestsProcessingFailure;
 
-        DirectStateView state_view{direct_};
+        ActiveStateView state_view{direct_};
         BlockHashes block_hashes{*this};
         const evmone::state::BalStateView bal_view{state_view, bal_builder_};
         const auto& sys_view = rev >= EVMC_AMSTERDAM
@@ -277,7 +277,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         // StateDiff the BAL can record; rule_set_.finalize mutates DirectState
         // in place and leaves nothing to record. Amsterdam is always
         // post-merge, so the block reward is absent.
-        DirectStateView state_view{direct_};
+        ActiveStateView state_view{direct_};
         const evmone::state::BalStateView bal_view{state_view, bal_builder_};
         const auto fin_diff =
             evmone::state::finalize(bal_view, rev, block_.header.beneficiary,
