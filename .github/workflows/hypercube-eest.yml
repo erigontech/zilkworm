@@ -14,6 +14,19 @@ on:
       - 'zilk_core/dev/**'
       - 'third_party/evmone/lib/**'
       - 'third_party/evmone'
+  pull_request:
+    branches: [master, main, release/*]
+    paths:
+      - '.github/workflows/hypercube-eest.yml'
+      - 'tools/scripts/eest_runner.py'
+      - 'prover/guest_hypercube/**'
+      - 'prover/prover_hypercube/**'
+      - 'prover/witness_ffi/**'
+      - 'prover/common/**'
+      - 'zilk_core/core/**'
+      - 'zilk_core/dev/**'
+      - 'third_party/evmone/lib/**'
+      - 'third_party/evmone'
   workflow_dispatch:
 
 jobs:
