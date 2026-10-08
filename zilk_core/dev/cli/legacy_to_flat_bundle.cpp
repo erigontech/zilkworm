@@ -32,37 +32,13 @@
 
 #include <zilk_core/core/types_zz/flat_bundle.hpp>
 
+#include "legacy_witness.hpp"
+
 using silkworm::ByteView;
 using silkworm::Bytes;
 using zilkworm::DirectState;
 using ::zilkworm::build_flat_bundle;
-
-namespace {
-
-std::vector<uint8_t> read_file(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    return std::vector<uint8_t>(
-        std::istreambuf_iterator<char>(f),
-        std::istreambuf_iterator<char>{});
-}
-
-bool write_file(const std::string& path, const std::vector<uint8_t>& data) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    f.write(reinterpret_cast<const char*>(data.data()),
-            static_cast<std::streamsize>(data.size()));
-    return f.good();
-}
-
-// Peels the outer RLP string wrap; returns inner payload bytes.
-ByteView take_item(ByteView& cur) {
-    auto h = silkworm::rlp::decode_header(cur);
-    if (!h) return {};
-    ByteView payload = cur.substr(0, h->payload_length);
-    cur.remove_prefix(h->payload_length);
-    return payload;
-}
-
-}  // namespace
+namespace legacy = ::zilkworm::legacy;
 
 int main(int argc, char** argv) {
     if (argc != 3) {
@@ -71,31 +47,23 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto raw = read_file(argv[1]);
+    auto raw = legacy::read_file(argv[1]);
     if (raw.empty()) {
         std::cerr << argv[1] << ": empty or missing\n";
         return 1;
     }
 
-    ByteView view{raw.data(), raw.size()};
-    auto outer = silkworm::rlp::decode_header(view);
-    if (!outer || !outer->list) {
-        std::cerr << argv[1] << ": bad outer RLP header\n";
+    std::string err;
+    const auto sections = legacy::split_sections(ByteView{raw.data(), raw.size()}, err);
+    if (!sections) {
+        std::cerr << argv[1] << ": " << err << "\n";
         return 1;
     }
-    ByteView pv = view.substr(0, outer->payload_length);
-
-    ByteView genesis_rlp   = take_item(pv);
-    ByteView block_rlp     = take_item(pv);
-    ByteView pre_state_rlp = take_item(pv);
-    ByteView ancestors_rlp = take_item(pv);
-    ByteView pre_trie_rlp  = take_item(pv);
-
-    if (genesis_rlp.empty() || block_rlp.empty() ||
-        pre_state_rlp.empty() || pre_trie_rlp.empty()) {
-        std::cerr << argv[1] << ": missing section\n";
-        return 1;
-    }
+    const ByteView genesis_rlp = sections->genesis_rlp;
+    const ByteView block_rlp = sections->block_rlp;
+    const ByteView pre_state_rlp = sections->pre_state_rlp;
+    const ByteView ancestors_rlp = sections->ancestors_rlp;
+    const ByteView pre_trie_rlp = sections->pre_trie_rlp;
 
     std::vector<DirectState::AccountInfo> accounts;
     std::unordered_map<evmc::address, size_t> addr_to_idx;
@@ -200,25 +168,16 @@ int main(int argc, char** argv) {
             }
         }
 
-        // codes_list: flat sequence of (code_hash, code) pairs
-        auto cl_h = silkworm::rlp::decode_header(psp);
-        if (cl_h) {
-            ByteView cl = psp.substr(0, cl_h->payload_length);
-            using silkworm::rlp::decode;
-            using silkworm::rlp::Leftover;
-            while (!cl.empty()) {
-                evmc::bytes32 code_hash;
-                Bytes code;
-                if (!decode(cl, code_hash, Leftover::kAllow) ||
-                    !decode(cl, code, Leftover::kAllow)) {
-                    std::cerr << "bad code entry\n";
-                    return 1;
-                }
-                // Empty code: guest never looks it up.
-                if (!code.empty()) {
-                    code_map.emplace(code_hash, std::move(code));
-                }
-            }
+    }
+
+    {
+        std::vector<std::pair<evmc::bytes32, Bytes>> codes;
+        if (!legacy::parse_codes(pre_state_rlp, codes, err)) {
+            std::cerr << err << "\n";
+            return 1;
+        }
+        for (auto& [code_hash, code] : codes) {
+            code_map.emplace(code_hash, std::move(code));
         }
     }
 
@@ -232,66 +191,31 @@ int main(int argc, char** argv) {
         }
     }
 
-    // pre_trie entries: `0xA0 hash[32]` followed by the node's RLP.
-    std::vector<std::pair<silkworm::bytes32, ByteView>> ns_entries;
-    {
-        ByteView pt = pre_trie_rlp;
-        auto pt_h = silkworm::rlp::decode_header(pt);
-        if (!pt_h || !pt_h->list) {
-            std::cerr << "bad pre_trie header\n";
-            return 1;
-        }
-        ByteView ptp = pt.substr(0, pt_h->payload_length);
-
-        while (!ptp.empty()) {
-            if (ptp.size() < 33 || ptp[0] != 0xA0) {
-                std::cerr << "bad hash prefix in pre_trie\n";
-                return 1;
-            }
-            silkworm::bytes32 h;
-            std::memcpy(h.bytes, ptp.data() + 1, 32);
-            ptp.remove_prefix(33);
-
-            // Strip the legacy RLP string wrap; downstream expects raw node RLP.
-            auto body_h = silkworm::rlp::decode_header(ptp);
-            if (!body_h || body_h->list) {
-                std::cerr << "bad node body header\n";
-                return 1;
-            }
-            ByteView body_payload = ptp.substr(0, body_h->payload_length);
-            ptp.remove_prefix(body_h->payload_length);
-
-            ns_entries.emplace_back(h, body_payload);
-        }
+    // pre_trie entries: (hash, raw node RLP), the legacy string wrap already stripped.
+    std::vector<std::pair<evmc::bytes32, ByteView>> ns_entries;
+    if (!legacy::parse_trie_nodes(pre_trie_rlp, ns_entries, err)) {
+        std::cerr << err << "\n";
+        return 1;
     }
 
     std::vector<zilkworm::BlockHashEntry> block_hashes;
     {
-        ByteView v = ancestors_rlp;
-        if (!v.empty()) {
-            auto inner = silkworm::rlp::decode_header(v);
-            if (inner.has_value() && inner->list) {
-                ByteView lv = v.substr(0, inner->payload_length);
-                while (!lv.empty()) {
-                    auto eh = silkworm::rlp::decode_header(lv);
-                    if (!eh.has_value()) {
-                        std::cerr << argv[1] << ": bad ancestor entry\n";
-                        return 1;
-                    }
-                    ByteView ev = lv.substr(0, eh->payload_length);
-                    silkworm::BlockHeader header;
-                    if (!silkworm::rlp::decode(ev, header).has_value()) {
-                        std::cerr << argv[1] << ": ancestor header decode failed\n";
-                        return 1;
-                    }
-                    zilkworm::BlockHashEntry e{};
-                    e.block_number = header.number;
-                    const auto h = header.hash();
-                    std::memcpy(e.block_hash, h.bytes, 32);
-                    block_hashes.push_back(e);
-                    lv.remove_prefix(eh->payload_length);
-                }
+        std::vector<ByteView> headers;
+        if (!legacy::parse_headers(ancestors_rlp, headers, err)) {
+            std::cerr << argv[1] << ": " << err << "\n";
+            return 1;
+        }
+        for (ByteView ev : headers) {
+            silkworm::BlockHeader header;
+            if (!silkworm::rlp::decode(ev, header).has_value()) {
+                std::cerr << argv[1] << ": ancestor header decode failed\n";
+                return 1;
             }
+            zilkworm::BlockHashEntry e{};
+            e.block_number = header.number;
+            const auto h = header.hash();
+            std::memcpy(e.block_hash, h.bytes, 32);
+            block_hashes.push_back(e);
         }
     }
 
@@ -356,7 +280,7 @@ int main(int argc, char** argv) {
     std::memcpy(envelope.data() + zilkworm::kInputHeaderSizeMFBD,
                 bundle.data(), bundle.size());
 
-    if (!write_file(argv[2], envelope)) {
+    if (!legacy::write_file(argv[2], envelope)) {
         std::cerr << argv[2] << ": write failed\n";
         return 1;
     }

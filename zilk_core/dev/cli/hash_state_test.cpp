@@ -26,6 +26,7 @@
 #include <zilk_core/core/rlp/encode.hpp>            // silkworm::rlp::encode (storage-value encode)
 #include <zilk_core/core/common_zz/mphf_map.hpp>  // mix64_body (public)
 #include <zilk_core/core/state_zz/hash_state.hpp>
+#include <zilk_core/core/state_zz/slib_encode.hpp>  // encode_stateless_input
 #include <zilk_core/core/state_zz/slib_input.hpp>  // decode/parse/run_slib (the SSZ front-end)
 #include <zilk_core/core/trie_zz/mpt.hpp>        // GridMPT<DeletionEnabled, StateT>, TrieNodeFlat
 #include <zilk_core/core/trie_zz/rlp_sw.hpp>     // encode_leaf/branch/ext + node types
@@ -2303,32 +2304,21 @@ using zilkworm::Bytes;
     return out;
 }
 
-// --- minimal SSZ encoders mirroring slib_input.cpp's decoders (test-only) ---
-void put_u32(Bytes& b, std::uint32_t v) {
-    for (int i = 0; i < 4; ++i) b.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
-}
-void put_u64(Bytes& b, std::uint64_t v) {
-    for (int i = 0; i < 8; ++i) b.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
-}
+// --- SSZ helpers for the hand-built blobs: the shared encoder's primitives (test-only) ---
+using zilkworm::slib_encode_detail::put_u32;
+using zilkworm::slib_encode_detail::put_u64;
+
 void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
     for (std::size_t i = 0; i < 4; ++i) b[off + i] = static_cast<std::uint8_t>(v >> (8u * i));
 }
 
-// [N u32 LE offset table][concatenated elements], offsets relative to this blob.
-[[nodiscard]] Bytes encode_bytelist_list(const std::vector<Bytes>& els) {
-    Bytes out;
-    const std::uint32_t table = static_cast<std::uint32_t>(els.size()) * 4u;
-    std::uint32_t off = table;
-    for (const auto& e : els) {
-        put_u32(out, off);
-        off += static_cast<std::uint32_t>(e.size());
-    }
-    for (const auto& e : els) out.insert(out.end(), e.begin(), e.end());
-    return out;
+[[nodiscard]] std::vector<ByteView> views_of(const std::vector<Bytes>& els) {
+    return {els.begin(), els.end()};
 }
 
 // schema_id||SSZ StatelessInput around already-encoded state and codes list blobs, with
-// empty new_payload_request/headers/public_keys.
+// empty new_payload_request/headers/public_keys. Assembled by hand so a test can wrap a list
+// blob the shared encoder would refuse.
 [[nodiscard]] Bytes encode_stateless_input_lists(const Bytes& state_blob, const Bytes& codes_blob,
                                                  std::uint64_t chain_id) {
     // SszExecutionWitness: [off_state=12][off_codes][off_headers] + state++codes++headers.
@@ -2358,15 +2348,63 @@ void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
     return blob;
 }
 
-// schema_id||SSZ StatelessInput with empty new_payload_request/headers/public_keys.
+// schema_id||SSZ StatelessInput with no headers, through the shared encoder.
 [[nodiscard]] Bytes encode_stateless_input(const std::vector<Bytes>& state,
                                            const std::vector<Bytes>& codes,
                                            std::uint64_t chain_id) {
-    return encode_stateless_input_lists(encode_bytelist_list(state), encode_bytelist_list(codes),
-                                        chain_id);
+    return zilkworm::encode_stateless_input(views_of(state), views_of(codes), {}, chain_id).value();
 }
 
 }  // namespace
+
+// The encoder is the decoder's inverse: every list comes back element for element, and a
+// list over a limit the decoder enforces is refused rather than encoded.
+TEST_CASE("encode_stateless_input round-trips through decode_stateless_input",
+          "[hash_state][slib]") {
+    const auto same = [](const std::vector<ByteView>& got, const std::vector<Bytes>& want) {
+        if (got.size() != want.size()) return false;
+        for (std::size_t i = 0; i < got.size(); ++i)
+            if (got[i] != ByteView{want[i]}) return false;
+        return true;
+    };
+
+    SECTION("lists at the size limits") {
+        const std::vector<Bytes> state{Bytes(3, 0xAA), Bytes(zilkworm::kMaxBytesPerWitnessNode, 0x01)};
+        const std::vector<Bytes> codes{Bytes(zilkworm::kMaxBytesPerCode, 0x60), Bytes(1, 0x00)};
+        const std::vector<Bytes> headers{Bytes(600, 0xF9), Bytes(zilkworm::kMaxBytesPerHeader, 0xF8)};
+        const auto blob = zilkworm::encode_stateless_input(views_of(state), views_of(codes),
+                                                           views_of(headers), /*chain_id=*/1);
+        REQUIRE(blob.has_value());
+        const auto dec = zilkworm::decode_stateless_input(ByteView{*blob});
+        REQUIRE(dec.has_value());
+        CHECK(dec->chain_id == 1);
+        CHECK(dec->new_payload_request.empty());
+        CHECK(dec->public_keys.empty());
+        CHECK(same(dec->state, state));
+        CHECK(same(dec->codes, codes));
+        CHECK(same(dec->headers, headers));
+    }
+    SECTION("empty lists") {
+        const auto blob = zilkworm::encode_stateless_input({}, {}, {}, /*chain_id=*/7);
+        REQUIRE(blob.has_value());
+        const auto dec = zilkworm::decode_stateless_input(ByteView{*blob});
+        REQUIRE(dec.has_value());
+        CHECK(dec->chain_id == 7);
+        CHECK(dec->state.empty());
+        CHECK(dec->codes.empty());
+        CHECK(dec->headers.empty());
+    }
+    SECTION("over a limit") {
+        const std::vector<Bytes> big_node{Bytes(zilkworm::kMaxBytesPerWitnessNode + 1, 0x01)};
+        const std::vector<Bytes> big_code{Bytes(zilkworm::kMaxBytesPerCode + 1, 0x60)};
+        const std::vector<Bytes> big_header{Bytes(zilkworm::kMaxBytesPerHeader + 1, 0xF9)};
+        const std::vector<Bytes> many_headers(zilkworm::kMaxWitnessHeaders + 1, Bytes(1, 0xC0));
+        CHECK_FALSE(zilkworm::encode_stateless_input(views_of(big_node), {}, {}, 1).has_value());
+        CHECK_FALSE(zilkworm::encode_stateless_input({}, views_of(big_code), {}, 1).has_value());
+        CHECK_FALSE(zilkworm::encode_stateless_input({}, {}, views_of(big_header), 1).has_value());
+        CHECK_FALSE(zilkworm::encode_stateless_input({}, {}, views_of(many_headers), 1).has_value());
+    }
+}
 
 // The load-bearing cross-check: parse the REAL statelessInputBytes blob, then build the
 // pre-state from its genesis-anchored witness trie and confirm every account the witness
