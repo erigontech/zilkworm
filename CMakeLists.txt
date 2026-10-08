@@ -110,6 +110,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/word_layout_test.cpp
     zilk_core/dev/cli/jumpdest_map_test.cpp
     zilk_core/dev/cli/cmp_jumpi_fusion_test.cpp
+    zilk_core/dev/cli/call_message_test.cpp
     zilk_core/dev/cli/code_store_stream_test.cpp
     zilk_core/dev/cli/code_store_verified_test.cpp
   )
