@@ -34,6 +34,14 @@
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/core/types_zz/flat_bundle.hpp>
 #include <zilk_core/print.hpp>
+#ifdef Z6M_HASH_STATE
+#include <optional>
+#include <span>
+#include <string>
+#include <zilk_core/core/state_zz/hash_state.hpp>
+#include <zilk_core/core/state_zz/slib_input.hpp>
+#include <zilk_core/dev/check_root_hashstate.hpp>
+#endif
 
 namespace silkworm::cmd::state_transition {
 
@@ -616,6 +624,9 @@ StateTransition::Result StateTransition::run() {
             case ::zilkworm::kInputMagicMFBD:
                 gas = run_mfbd();
                 break;
+            case ::zilkworm::kInputMagicSLIB:
+                gas = run_slib_input();
+                break;
             default:
                 // TODO: detect and dispatch a raw StatelessInput blob (schema_id 0x1501) here.
                 // See docs/hashstate.md, "Raw StatelessInput dispatch".
@@ -681,6 +692,126 @@ uint64_t StateTransition::run_mfbd() {
     if (n_bundles == 0)
         return kRunSkipped;
     return cumulative_gas;
+#endif  // Z6M_HASH_STATE
+}
+
+#ifdef Z6M_HASH_STATE
+namespace {
+    // Decodes the witness ancestor headers (oldest first) and requires them to form one
+    // contiguous parent-hash chain before any is trusted for BLOCKHASH.
+    [[nodiscard]] std::optional<std::vector<BlockHeader>> decode_witness_headers_slib(
+        std::span<const ByteView> header_rlps) {
+        std::vector<BlockHeader> ancestors;
+        ancestors.reserve(header_rlps.size());
+        for (const ByteView hdr_rlp : header_rlps) {
+            BlockHeader ancestor;
+            ByteView hv{hdr_rlp};
+            if (!rlp::decode(hv, ancestor)) {
+                sys_println("ERROR: witness header RLP decode failed");
+                return std::nullopt;
+            }
+            ancestors.push_back(std::move(ancestor));
+        }
+        for (std::size_t i = 1; i < ancestors.size(); ++i) {
+            if (ancestors[i].parent_hash != ancestors[i - 1].hash()) {
+                sys_println(std::format("STRICT: witness ancestor headers are not a contiguous "
+                                        "parent-hash chain at index {} (number {})",
+                                        i, ancestors[i].number)
+                                .c_str());
+                return std::nullopt;
+            }
+        }
+        return ancestors;
+    }
+}  // namespace
+#endif
+
+// One block from a SLIB envelope: the binary form of the JSON slib arm, with no JSON parse and
+// no hex decode. The pre-state root is the parent header's, and the parent header must be in
+// the witness. Returns the block's gas, or kRunFailure.
+uint64_t StateTransition::run_slib_input() {
+#ifndef Z6M_HASH_STATE
+    sys_println("ERROR: SLIB input needs the Z6M_HASH_STATE build");
+    failed_ = true;
+    return kRunFailure;
+#else
+    const auto fail = [this](const std::string& msg) {
+        sys_println(msg.c_str());
+        failed_ = true;
+        return kRunFailure;
+    };
+    if (envelope_.size() < ::zilkworm::kInputHeaderSizeSLIB) [[unlikely]]
+        return fail("ERROR: SLIB envelope too small");
+    uint32_t version = 0;
+    uint32_t network_len = 0;
+    uint32_t block_len = 0;
+    std::memcpy(&version, envelope_.data() + 4, sizeof(uint32_t));
+    std::memcpy(&network_len, envelope_.data() + 8, sizeof(uint32_t));
+    std::memcpy(&block_len, envelope_.data() + 12, sizeof(uint32_t));
+    if (version != ::zilkworm::kInputVersionSLIB) [[unlikely]]
+        return fail("ERROR: SLIB envelope bad version");
+    const uint64_t body_size = envelope_.size() - ::zilkworm::kInputHeaderSizeSLIB;
+    if (uint64_t{network_len} + block_len > body_size) [[unlikely]]
+        return fail("ERROR: SLIB envelope sections out of range");
+    const uint8_t* body = envelope_.data() + ::zilkworm::kInputHeaderSizeSLIB;
+    const std::string network{reinterpret_cast<const char*>(body), network_len};
+    const ByteView block_rlp{body + network_len, block_len};
+    const ByteView blob{body + network_len + block_len, body_size - network_len - block_len};
+
+    const auto config_it = test::kNetworkConfig.find(network);
+    if (config_it == test::kNetworkConfig.end()) [[unlikely]]
+        return fail("ERROR: unknown network in SLIB envelope");
+    const ChainConfig& config = config_it->second;
+    chain_id_ = config.chain_id;
+
+    Block block;
+    ByteView block_view{block_rlp};
+    if (!rlp::decode(block_view, block)) return fail("ERROR: SLIB block RLP decode failed");
+    if (block_rlp.size() > kMaxRlpBlockSize &&
+        config.revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA)
+        return fail("ERROR: SLIB block RLP size exceeds kMaxRlpBlockSize");
+
+    ::zilkworm::HashState hs;
+    const auto input = ::zilkworm::parse_stateless_input(blob, hs);
+    if (!input) return fail("ERROR: malformed StatelessInputBytes");
+    const auto ancestors = decode_witness_headers_slib(input->headers);
+    if (!ancestors) {
+        failed_ = true;
+        return kRunFailure;
+    }
+    const BlockHeader* parent = nullptr;
+    for (const BlockHeader& ancestor : *ancestors) {
+        if (ancestor.hash() == block.header.parent_hash) {
+            parent = &ancestor;
+            break;
+        }
+    }
+    if (parent == nullptr)
+        return fail("STRICT: block parent header absent from witness ancestor set");
+
+    const evmc::bytes32 prev_root = parent->state_root;
+    if (hs.build_state_from_trie(prev_root) != ::zilkworm::HashState::BuildStatus::kOk)
+        return fail("ERROR: build_state_from_trie missing seeding root");
+    for (const BlockHeader& ancestor : *ancestors) hs.insert_header(ancestor);
+
+    Block parent_block;
+    parent_block.header = *parent;
+    Blockchain blockchain{hs, config, parent_block};
+    if (const ValidationResult err{blockchain.insert_block(block, /*check_state_root=*/false)};
+        err != ValidationResult::kOk)
+        return fail(std::format("ERROR: validation error: {} ({})", magic_enum::enum_name(err),
+                                magic_enum::enum_integer(err)));
+    if (!::zilkworm::check_root_hashstate(hs, prev_root, block.header.state_root))
+        return fail(std::format("ERROR: HashState accept failed: expected state_root {}, "
+                                "missing_count={} unconfirmed_read_count={}",
+                                to_hex(block.header.state_root), hs.missing_count(),
+                                hs.unconfirmed_read_count()));
+
+    pre_state_root_ = prev_root;
+    pre_root_set_ = true;
+    post_state_root_ = block.header.state_root;
+    block_hash_ = block.header.hash();
+    return block.header.gas_used;
 #endif  // Z6M_HASH_STATE
 }
 
