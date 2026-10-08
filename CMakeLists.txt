@@ -119,6 +119,7 @@ if(BUILD_TESTING)
     zilk_core/core/common_zz/data_byte_count_test.cpp
     zilk_core/core/execution/div_mod_frontend_test.cpp
     zilk_core/core/execution/precompile_lookup_test.cpp
+    zilk_core/core/execution/exp_pow2_base_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/receipt_logs_test.cpp
