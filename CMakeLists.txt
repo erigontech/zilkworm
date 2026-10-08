@@ -120,6 +120,7 @@ if(BUILD_TESTING)
     zilk_core/core/execution/div_mod_frontend_test.cpp
     zilk_core/core/execution/precompile_lookup_test.cpp
     zilk_core/core/execution/exp_pow2_base_test.cpp
+    zilk_core/core/execution/kzg_pairing_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/receipt_logs_test.cpp
@@ -188,7 +189,8 @@ if(BUILD_TESTING)
   else()
     set(ZILK_TEST_LIBS -Wl,--start-group silkworm_dev silkworm_core silkworm_types_zz -Wl,--end-group)
   endif()
-  target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} Catch2::Catch2WithMain)
+  # kzg_pairing_test builds proofs and its reference pairing with blst.
+  target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} blst::blst Catch2::Catch2WithMain)
   include(Catch)
   catch_discover_tests(zilkworm.tests)
 endif()
