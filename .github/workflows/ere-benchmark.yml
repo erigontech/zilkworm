@@ -22,11 +22,11 @@ on:
       catalog_url:
         description: Public R2 catalog root, index.html URL, or manifest.json URL
         type: string
-        default: https://pub-760ad8b3dd9547539f829c1ea30f18b5.r2.dev/devnets/glamsterdam-devnet-8/index.html
+        default: https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia/index.html
       batch_count:
-        description: Number of latest batches to run (10 blocks each)
+        description: Number of latest batches to run
         type: string
-        default: "10"
+        default: "1"
       compare:
         description: Also estimate SP1 prover cost against Reth
         type: boolean
@@ -69,8 +69,8 @@ defaults:
     shell: bash
 
 env:
-  CATALOG_URL: ${{ inputs.catalog_url || 'https://pub-760ad8b3dd9547539f829c1ea30f18b5.r2.dev/devnets/glamsterdam-devnet-8/index.html' }}
-  BATCH_COUNT: ${{ inputs.batch_count || '10' }}
+  CATALOG_URL: ${{ inputs.catalog_url || 'https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia/index.html' }}
+  BATCH_COUNT: ${{ inputs.batch_count || '1' }}
   # Temporary: erigontech forks carry the zilkworm client and ere-guests entry until upstreamed.
   WORKLOAD_REPO: erigontech/zkevm-benchmark-workload
   WORKLOAD_REF: ${{ inputs.workload_ref || 'canepat/zilkworm_mfbd' }}
