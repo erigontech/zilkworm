@@ -64,6 +64,16 @@ struct nibbles64 {
         return out;
     }
 
+    // from_bytes32 in place: that one value-initializes its result (a 68-byte memset) for the caller to copy.
+    void assign_bytes32(const bytes32& k) noexcept {
+        len = 64;
+        for (size_t i = 0; i < 32; ++i) {
+            uint8_t b = k.bytes[i];
+            nib[2 * i] = (b >> 4) & 0x0F;
+            nib[2 * i + 1] = b & 0x0F;
+        }
+    }
+
     void append(const nibbles64& other) {
         [[assume(len + other.len <= 64)]];
         std::memcpy(nib.data() + len, other.nib.data(), other.len);
@@ -287,6 +297,22 @@ struct TrieNodeFlat {
     }
 };
 
+// Leading nibbles two keys share, read from the keys themselves: equal to lcp_nibbles over their 64-nibble
+// expansions. Word compares need the 4-byte alignment of TrieNodeFlat::key, which a bytes32 elsewhere (in a
+// witness node, say) need not have; no ctz, which rv32im lacks (ctzll is a __ctzdi2 call).
+[[gnu::always_inline]] inline unsigned key_lcp_nibbles(const TrieNodeFlat& a, const TrieNodeFlat& b) noexcept {
+    static_assert(offsetof(TrieNodeFlat, key) == 0 && alignof(TrieNodeFlat) >= 4);
+    typedef uint32_t __attribute__((may_alias)) w32;
+    const w32* const wa = reinterpret_cast<const w32*>(std::assume_aligned<4>(a.key.bytes));
+    const w32* const wb = reinterpret_cast<const w32*>(std::assume_aligned<4>(b.key.bytes));
+    unsigned i = 0;
+    while (i < 8 && wa[i] == wb[i]) ++i;
+    if (i == 8) return 64;
+    unsigned j = 4 * i;  // the first differing byte is in word i
+    while (a.key.bytes[j] == b.key.bytes[j]) ++j;
+    return 2 * j + (((a.key.bytes[j] ^ b.key.bytes[j]) & 0xF0) == 0);
+}
+
 /// Sorts n nodes by key. A node is 155 bytes, so a sort that moves nodes (n^2/4 moves for the
 /// insertion sort below 17, n log n for std::sort) spends most of its time copying; this sorts
 /// indices and then applies the permutation, moving each node at most once (cycle following).
@@ -433,7 +459,7 @@ class GridMPT {
     void pop_back();
     unsigned move_line(unsigned from_depth);
     UnfoldResult unfold_slot(unsigned slot);
-    void seek_with_last_insert(nibbles64& new_nibbles);
+    void seek_with_last_insert(const TrieNodeFlat& cur, const TrieNodeFlat* prev);
 
     // Main algorithm
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
