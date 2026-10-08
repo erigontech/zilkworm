@@ -125,6 +125,14 @@ set_target_properties(z6m_guest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
+# Dead-code guard: see cmake/check_no_dead_code.cmake.
+add_custom_command(TARGET z6m_guest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DELF=$<TARGET_FILE:z6m_guest>
+            -P ${CMAKE_CURRENT_LIST_DIR}/cmake/check_no_dead_code.cmake
+    COMMENT "Checking z6m_guest.elf for dead-code clusters"
+    VERBATIM
+)
+
 if(NOT CMAKE_OBJCOPY)
     find_program(CMAKE_OBJCOPY NAMES llvm-objcopy objcopy)
 endif()
