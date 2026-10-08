@@ -122,6 +122,7 @@ if(BUILD_TESTING)
     zilk_core/core/execution/exp_pow2_base_test.cpp
     zilk_core/core/execution/kzg_pairing_test.cpp
     zilk_core/core/execution/mulmod_sparse_test.cpp
+    zilk_core/core/execution/secp256k1_ecrecover_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/receipt_logs_test.cpp
