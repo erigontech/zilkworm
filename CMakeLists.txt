@@ -150,6 +150,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/underflow_bounds_test.cpp
     zilk_core/dev/cli/const_mask_and_fusion_test.cpp
     zilk_core/dev/cli/push1_alu_fusion_test.cpp
+    zilk_core/dev/cli/sar_words_test.cpp
     zilk_core/dev/cli/code_store_stream_test.cpp
     zilk_core/dev/cli/code_store_verified_test.cpp
     zilk_core/dev/cli/env_push_log_test.cpp
