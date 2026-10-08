@@ -255,7 +255,7 @@ bytes32 recompute_storage_root(DirectState& direct, const evmc::address& addr,
         }
     }
     std::sort(upds.begin(), upds.end());
-    GridMPT<true> st{direct, anchor};
+    GridMPT<true, DirectState> st{direct, anchor};
     return st.calc_root_from_updates({upds.data(), upds.size()});
 }
 #endif

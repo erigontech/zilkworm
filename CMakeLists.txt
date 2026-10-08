@@ -50,6 +50,15 @@ option(SILKWORM_FUZZER_SANITIZERS "CLang sanitizer options for fuzzers" OFF)
 option(SILKWORM_USE_MIMALLOC "Enable using mimalloc for dynamic memory management" ON)
 option(SILKWORM_ALLOW_UNUSED_VAR_WARNINGS "Turn unused variable errors into warnings" OFF)
 
+# Compile-time selection of the trie fold's read-side state backend. OFF (default) =>
+# ActiveState is DirectState and the build is byte/behaviour-identical to today. ON =>
+# ActiveState is HashState (the SSZ/slib input path). Defines the Z6M_HASH_STATE macro
+# for all targets created below (zilk_core, zilkworm.tests, ...); see active_state.hpp.
+option(Z6M_HASH_STATE "Use the HashState (SSZ/slib) read-side state backend instead of DirectState" OFF)
+if(Z6M_HASH_STATE)
+  add_compile_definitions(Z6M_HASH_STATE)
+endif()
+
 get_filename_component(SILKWORM_MAIN_DIR . ABSOLUTE)
 set(SILKWORM_MAIN_SRC_DIR "${SILKWORM_MAIN_DIR}/zilk_core")
 
@@ -95,14 +104,23 @@ if(BUILD_TESTING)
     zilk_core/core/trie_zz/encode_branch_patch_test.cpp
     zilk_core/core/trie_zz/grid_mpt_capacity_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
-    zilk_core/dev/cli/addr_hash_orphan_test.cpp
-    zilk_core/dev/cli/account_read_spoof_test.cpp
-    zilk_core/dev/cli/account_read_honest_test.cpp
-    zilk_core/dev/cli/delegation_clearing_storage_test.cpp
-    zilk_core/dev/cli/code_store_collision_len_test.cpp
-    zilk_core/dev/cli/witness_binding_test.cpp
-    zilk_core/dev/cli/state_transition_chain_test.cpp
+    zilk_core/dev/cli/hash_index_test.cpp
+    zilk_core/core/state_zz/hash_state.cpp
+    zilk_core/core/state_zz/slib_input.cpp
+    zilk_core/dev/cli/hash_state_test.cpp
   )
+  # These drive block execution over a DirectState witness; the flag-ON processor takes HashState.
+  if(NOT Z6M_HASH_STATE)
+    target_sources(zilkworm.tests PRIVATE
+      zilk_core/dev/cli/addr_hash_orphan_test.cpp
+      zilk_core/dev/cli/account_read_spoof_test.cpp
+      zilk_core/dev/cli/account_read_honest_test.cpp
+      zilk_core/dev/cli/delegation_clearing_storage_test.cpp
+      zilk_core/dev/cli/code_store_collision_len_test.cpp
+      zilk_core/dev/cli/witness_binding_test.cpp
+      zilk_core/dev/cli/state_transition_chain_test.cpp
+    )
+  endif()
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
   # silkworm_core<->types_zz archive cycle globally; --start-group is GNU-ld-only.
   if(APPLE)

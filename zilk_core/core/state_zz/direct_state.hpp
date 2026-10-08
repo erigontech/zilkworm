@@ -18,6 +18,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/hash_maps.hpp>
+#include <zilk_core/core/common_zz/index_key.hpp>
 #include <zilk_core/core/common_zz/mphf_map.hpp>
 #include <zilk_core/core/state/block_state.hpp>
 #include <zilk_core/core/state_zz/pre_state.hpp>
@@ -55,18 +56,6 @@ using ::silkworm::kEmptyRoot;
 #if USE_HASH_KEY
 struct nibbles64;  // trie_zz/mpt.hpp
 #endif
-
-[[gnu::always_inline]] inline uint64_t hash_key8(const uint8_t (&h)[32]) noexcept {
-    uint64_t v; std::memcpy(&v, h, 8); return v;
-}
-[[gnu::always_inline]] inline uint64_t hash_key8(const evmc::bytes32& hash) noexcept { return hash_key8(hash.bytes); }
-
-// 7 MSBs + 19th byte (LSB): precompile addrs vary only in byte 19
-[[gnu::always_inline]] inline uint64_t addr_key8(const uint8_t (&a)[20]) noexcept {
-    uint64_t k; std::memcpy(&k, a, 8);
-    k = (k & 0x00FFFFFFFFFFFFFFull) | (uint64_t(a[19]) << 56); return k;
-}
-[[gnu::always_inline]] inline uint64_t addr_key8(const evmc::address& a) noexcept { return addr_key8(a.bytes); }
 
 inline constexpr uint32_t kMphfAddrMapMagic = 0x4148504Du;    // 'MPHA'
 inline constexpr uint32_t kMphfCodeStoreMagic = 0x4348504Du;  // 'MPHC'

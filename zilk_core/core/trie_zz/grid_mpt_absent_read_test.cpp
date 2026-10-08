@@ -122,7 +122,7 @@ bytes32 walk(const Bytes32Map& pre, std::vector<Update> updates, bool valid = tr
         node.current_len = static_cast<uint8_t>(u.current.size());
         if (!u.current.empty()) std::memcpy(node.buf + 40, u.current.data(), u.current.size());
     }
-    GridMPT<true> trie{direct, pre_root};
+    GridMPT<true, DirectState> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({flat.data(), flat.size()});
     if (valid) {
         CHECK(trie.missing_count() == 0);

@@ -18,6 +18,14 @@
 #include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/rlp/encode.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
+// The HashState fold instantiation (GridMPT<*, HashState>) is emitted whenever the
+// HashState backend is selected (Z6M_HASH_STATE) OR this is a host/native build
+// (!__riscv) — the latter so the fold-over-HashState unit test links in the default
+// build. The rv64im DirectState guest (Z6M_HASH_STATE off, __riscv) pulls in NEITHER
+// hash_state.hpp NOR the HashState instantiation, so no HashState code reaches its ELF.
+#if defined(Z6M_HASH_STATE) || !defined(__riscv)
+#include <zilk_core/core/state_zz/hash_state.hpp>
+#endif
 #include <zilk_core/print.hpp>
 
 #include "fold_unfold.hpp"
@@ -49,8 +57,8 @@ namespace zilkworm {
     return i;
 }
 // Find the least common path of current key from the top, with the last key as reference
-template <bool DeletionEnabled>
-inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbles) {
+template <bool DeletionEnabled, class StateT>
+inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(nibbles64& new_nibbles) {
     //================================================
     // The last leaf must have been inserted to a branch, or deleted from it
     //  --> lcp: lowest common point (between the last inserted and new_nibbles) <--
@@ -141,8 +149,8 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
 // with that no leaf binds; a read-only update inserts nothing, so the root would not show it. Each insertion
 // site checks it first, ahead of the return of a read.
 // Out of line: insertions are rare, and the check stays out of the descent loop.
-template <bool DeletionEnabled>
-[[gnu::noinline]] bool GridMPT<DeletionEnabled>::claims_absent(const TrieNodeFlat& u) {
+template <bool DeletionEnabled, class StateT>
+[[gnu::noinline]] bool GridMPT<DeletionEnabled, StateT>::claims_absent(const TrieNodeFlat& u) {
     const ByteView v = u.initial_value();
     if (v.empty() || (v.size() == 1 && v[0] == 0x80)) [[likely]] {
         return true;
@@ -152,8 +160,8 @@ template <bool DeletionEnabled>
     return false;
 }
 
-template <bool DeletionEnabled>
-bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
+template <bool DeletionEnabled, class StateT>
+bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
     if (failed_) [[unlikely]] {
         return {};  // the root node could not be read: there is no trie to walk
     }
@@ -357,14 +365,23 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                                         search_nibbles_.nib.data() + search_nib_cursor_,
                                         grid_line.leaf.path.len);
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
-                    // check pre-value matches
-                    if (grid_line.leaf.value != trie_upd.initial_value()) {
-                        failed_ = true;
-                        sys_println("Pre value mismatch in existing leaf");
-                        return {};
-                    }
-                    if (trie_upd.current_value().size() == 0) {
-                        break;  // read-only check
+                    // Pre-value bind + read-only short-circuit. Kept verbatim for
+                    // DirectState (state_keeps_prevalue_check<DirectState> == true),
+                    // compiled out for HashState: its update set carries no
+                    // initial_value (289 would read an unset value) and no read-only
+                    // entries (293 is unreachable) — reads are already bound to
+                    // prev_root at derive time. See active_state.hpp / the HashState
+                    // specialisation in hash_state.hpp.
+                    if constexpr (state_keeps_prevalue_check<StateT>) {
+                        // check pre-value matches
+                        if (grid_line.leaf.value != trie_upd.initial_value()) {
+                            failed_ = true;
+                            sys_println("Pre value mismatch in existing leaf");
+                            return {};
+                        }
+                        if (trie_upd.current_value().size() == 0) {
+                            break;  // read-only check
+                        }
                     }
                     if constexpr (DeletionEnabled) {
                         if (trie_upd.current_value() == ByteView{{0x80}}) {
@@ -447,8 +464,8 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
     return keccak_bytes(encoded);
 }
 
-template <bool DeletionEnabled>
-void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
+template <bool DeletionEnabled, class StateT>
+void GridMPT<DeletionEnabled, StateT>::init_from_root(bytes32 previous_root_hash) {
     if (previous_root_hash != kEmptyRoot) {
         auto rlp = state_->find_node_rlp(previous_root_hash);
         if (!rlp) [[unlikely]] {
@@ -463,8 +480,17 @@ void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
     }
 }
 
-// Explicit template instantiations
-template class GridMPT<false>;
-template class GridMPT<true>;
+// Explicit template instantiations; DirectState is named rather than left to the default.
+// See docs/hashstate.md, "Trie fold under HashState".
+template class GridMPT<false, DirectState>;
+template class GridMPT<true, DirectState>;
+
+// HashState fold: emitted on the HashState guest build and on every host/native build
+// (so the unit test links); never on the rv64im DirectState guest (see the include
+// guard above), so no HashState code reaches that ELF.
+#if defined(Z6M_HASH_STATE) || !defined(__riscv)
+template class GridMPT<false, HashState>;
+template class GridMPT<true, HashState>;
+#endif
 
 }  // namespace zilkworm

@@ -254,7 +254,7 @@ bytes32 post_root(DirectState& ds, const bytes32& prev_root,
     std::sort(ups.begin(), ups.end(), [](const TrieNodeFlat& x, const TrieNodeFlat& y) {
         return std::memcmp(x.key.bytes, y.key.bytes, 32) < 0;
     });
-    GridMPT<true> acc_trie{ds, prev_root};
+    GridMPT<true, DirectState> acc_trie{ds, prev_root};
     const bytes32 root = acc_trie.calc_root_from_updates({ups.data(), ups.size()});
     missing = acc_trie.missing_count();
     return root;
@@ -529,7 +529,7 @@ bytes32 post_root_ro(DirectState& ds, const bytes32& prev_root,
     std::sort(ups.begin(), ups.end(), [](const TrieNodeFlat& x, const TrieNodeFlat& y) {
         return std::memcmp(x.key.bytes, y.key.bytes, 32) < 0;
     });
-    GridMPT<true> acc_trie{ds, prev_root};
+    GridMPT<true, DirectState> acc_trie{ds, prev_root};
     const bytes32 root = acc_trie.calc_root_from_updates({ups.data(), ups.size()});
     missing = acc_trie.missing_count();
     return root;

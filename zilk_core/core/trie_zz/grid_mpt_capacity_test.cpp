@@ -103,7 +103,7 @@ bytes32 walk(const Bytes32Map& pre, const std::map<bytes32, Bytes, Bytes32Less>&
         }
     }
     want = hashbuilder_root(post, nullptr);
-    GridMPT<true> trie{direct, pre_root};
+    GridMPT<true, DirectState> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({flat.data(), flat.size()});
     CHECK(trie.missing_count() == 0);
     CHECK(trie.failed() == !fits);
