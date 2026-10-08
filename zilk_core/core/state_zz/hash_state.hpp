@@ -49,6 +49,16 @@ class HashState : public BlockState {
     HashState(const HashState&) = delete;
     HashState& operator=(const HashState&) = delete;
 
+    // Size the stores for the counts the input announces, before the first insert: each index
+    // is pre-sized by HashIndex::reserve (the constructor's 2x rule, so a table that is still
+    // empty grows to its final capacity once instead of doubling and rehashing on the way),
+    // and the two arenas reserve their final byte size. Hints only, as the constructor's are:
+    // growth still backstops a larger count. A store that already holds entries keeps its
+    // table (reserve is a no-op there); arena offsets and the 8-byte front pad are unchanged.
+    // parse_stateless_input calls this with the SSZ element counts.
+    void reserve_stores(std::uint32_t nodes, std::uint32_t codes,
+                        std::uint32_t accounts, std::uint32_t storage_slots);
+
     // Store a copy of `rlp` under its real keccak256 and return that hash. A repeated node
     // is deduped (no second copy) and the same hash is returned. Defined in the .cpp
     // because it computes keccak.
@@ -63,12 +73,23 @@ class HashState : public BlockState {
     evmc::bytes32 add_node_borrowed(ByteView rlp);
     evmc::bytes32 add_code_borrowed(ByteView code);
 
-    // Hot lookup: EXACT DirectState::find_node_rlp seam shape — hit -> ByteView over
-    // the stored RLP, miss -> std::nullopt (NOT an empty ByteView).
+    // Hot lookup by a raw 32-byte hash, read in place: the caller guarantees 32 readable
+    // bytes at `hash32` (a raw pointer carries no size, so every caller keeps its own
+    // size == 32 guard), at any alignment. The trie sweep and the confirmation walk probe
+    // straight from a child hash ref inside a node's RLP this way, with no copy into a
+    // stack bytes32 first. Hit -> ByteView over the stored RLP, miss -> std::nullopt.
+    [[gnu::always_inline]] inline std::optional<ByteView>
+    find_node_rlp(const uint8_t* hash32) const noexcept {
+        if (auto v = node_index_.find_ptr(hash32)) return ByteView{v->data, v->size};
+        return std::nullopt;
+    }
+
+    // Hot lookup: EXACT DirectState::find_node_rlp seam shape (the fold and DirectState
+    // parity need this form) — hit -> ByteView over the stored RLP, miss -> std::nullopt
+    // (NOT an empty ByteView). Same probe as the pointer overload.
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
-        if (auto v = node_index_.find(node_hash.bytes)) return ByteView{v->data, v->size};
-        return std::nullopt;
+        return find_node_rlp(node_hash.bytes);
     }
 
     // Hot lookup: matches DirectState::read_code miss semantics — hit -> ByteView over
@@ -101,7 +122,9 @@ class HashState : public BlockState {
     // See docs/hashstate.md, "Account and storage caches".
     [[gnu::always_inline]] inline evmc::bytes32
     get_storage(const evmc::bytes32& addr_hash, const evmc::bytes32& slot_hash) const noexcept {
-        std::uint8_t key[64];
+        // 8-aligned: note_storage_miss_ reads the slot_hash half through an evmc::bytes32
+        // reference, whose alignment the array must honour.
+        alignas(8) std::uint8_t key[64];
         std::memcpy(key, addr_hash.bytes, 32);
         std::memcpy(key + 32, slot_hash.bytes, 32);
         if (auto off = storage_index_.find(key)) {
@@ -109,7 +132,7 @@ class HashState : public BlockState {
             std::memcpy(v.bytes, storage_arena_.data() + *off, 32);
             return v;
         }
-        note_storage_miss_(addr_hash, slot_hash);
+        note_storage_miss_(key);
         return {};
     }
 
@@ -133,6 +156,9 @@ class HashState : public BlockState {
     // same way as missing_count(): the accept gate accepts only when BOTH are zero, i.e.
     // every read either hit the cache or was confirmed genuinely empty (fail-closed).
     std::uint32_t unconfirmed_read_count() const noexcept { return unconfirmed_read_count_; }
+    // Storage slots a read miss since the last build proved absent and memoized, so a
+    // repeated miss of the same slot is answered without another walk (diagnostic).
+    std::uint32_t absent_slot_count() const noexcept { return absent_slots_.size(); }
 
     // --- silkworm::BlockState interface + BLOCKHASH store ------------------------------
     // See docs/hashstate.md, "Block headers and BLOCKHASH".
@@ -239,7 +265,7 @@ class HashState : public BlockState {
     [[gnu::always_inline]] inline bool
     find_built_storage(const evmc::bytes32& addr_hash,
                        const evmc::bytes32& slot_hash) const noexcept {
-        std::uint8_t key[64];
+        alignas(8) std::uint8_t key[64];
         std::memcpy(key, addr_hash.bytes, 32);
         std::memcpy(key + 32, slot_hash.bytes, 32);
         return storage_index_.find(key).has_value();
@@ -275,15 +301,29 @@ class HashState : public BlockState {
     template <class EmitLeaf>
     bool sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf);
 
+    // One frame of sweep's stack: a branch whose children are still being visited. It holds
+    // no decoded node, only a cursor into the branch's RLP list payload, which lives in the
+    // input blob or owned_bytes_ and so outlives the sweep: `cur` is the next unread child
+    // item, `end` one past the payload, `next_slot` the slot that item belongs to (0..15)
+    // and `path_len` the number of nibbles from the root down to the branch, the prefix the
+    // sweep's shared path buffer holds while the frame is live.
+    struct SweepFrame {
+        const std::uint8_t* cur;
+        const std::uint8_t* end;
+        std::uint8_t next_slot;
+        std::uint8_t path_len;
+    };
+
     // Single-path walk toward target_hash; true only when it proves the key absent below root.
     // See docs/hashstate.md, "Read-miss confirmation".
     bool confirm_absent(const evmc::bytes32& root, const evmc::bytes32& target_hash) const noexcept;
 
     // Miss handlers for get_account / get_storage: count a miss that cannot be proven empty.
+    // The storage handler takes the 64-byte addr_hash || slot_hash key get_storage probed
+    // the storage index with, which is also the memo's key.
     // See docs/hashstate.md, "Read-miss confirmation".
     void note_account_miss_(const evmc::bytes32& addr_hash) const noexcept;
-    void note_storage_miss_(const evmc::bytes32& addr_hash,
-                            const evmc::bytes32& slot_hash) const noexcept;
+    void note_storage_miss_(const std::uint8_t (&key)[64]) const noexcept;
 
     // Decode `leaf_value` (an account-leaf RLP) and cache it under `addr_hash`. Bumps
     // leaf_count_ for every leaf reached; on a successful decode also inserts into the
@@ -319,7 +359,8 @@ class HashState : public BlockState {
         return {bytes.data() != nullptr ? bytes.data() : &kNoBytes,
                 static_cast<std::uint32_t>(bytes.size())};
     }
-    // Dedupe on the real keccak256, then index `bytes` (which must already be stable).
+    // Index `bytes` (which must already be stable) under its real keccak256 unless that hash
+    // is already present (one probe: the first view added wins, a repeat is the same content).
     evmc::bytes32 add_view_(HashIndex<32, &hash_key8, StoredBytes>& index, ByteView bytes);
 
     std::deque<Bytes> owned_bytes_;
@@ -366,12 +407,38 @@ class HashState : public BlockState {
     // Reset by build_state_from_trie so it scopes to the reads following one build.
     mutable std::uint32_t unconfirmed_read_count_{0};
 
+    // Memo of the storage slots (addr_hash || slot_hash) whose read miss a confirm_absent walk
+    // since the last build proved absent, so a repeated miss of the same slot (a block often
+    // reads a cold slot more than once) is answered without walking again. Only a PROVEN miss
+    // is entered (value 1; HashIndex's empty sentinel is 0): an unprovable one is recorded on
+    // every read, as before. Sound because a proof reads nothing that can change between
+    // builds: the account's storage_root sits in the append-only arena record the build
+    // wrote, and the nodes the walk reads are keccak-bound, so a later add_node can neither
+    // alter them nor turn an empty slot or a diverging path into the key. Cleared by
+    // build_state_from_trie with the other read-miss state. Consulted by note_storage_miss_
+    // only, after its account and empty-root early-outs; read_storage returns before
+    // get_storage for a wiped account, so no wiped account reaches it, and find_built_storage
+    // and the accept check's gather never probe it. mutable as unconfirmed_read_count_ is.
+    mutable HashIndex<64, &storage_key8, std::uint8_t> absent_slots_{1024};
+
+    // sweep's frame stack, reserved once (constructor) past the deepest well-formed trie: a
+    // frame is pushed only with a path shorter than 64 nibbles and every frame below it has a
+    // strictly shorter path, so at most 64 are live and no push reallocates. Empty between
+    // sweeps (each drains it) and cleared again at every sweep entry. sweep is not reentrant;
+    // confirm_absent keeps its own stackless walk.
+    std::vector<SweepFrame> sweep_stack_;
+
     // --- Write overlay (S2): copy-on-write over the pristine built caches ---------------
     // Reuses DirectState's container TYPES exactly (direct_state.hpp:82-89) so the later
     // DirectState->ActiveState retype is a drop-in. Keyed by the 20-byte address (as
     // DirectState is), while the built caches above are keyed by the 32-byte addr_hash;
     // reads consult the overlay first, the built cache second.
-    FlatHashMap<evmc::address, Account> created_accounts_;                                  // every written account
+    // Invariant the accept check's gather relies on (check_root_hashstate.hpp): a built account
+    // enters created_accounts_ on its first READ as a verbatim copy of its leaf with `modified`
+    // false; any change to a leaf field (nonce, balance, code_hash, storage) and any wipe or
+    // revive sets `modified`, and destruct sets `deleted`. A built record with neither flag is
+    // its unchanged pre-state leaf and is not folded. Every future mutator must preserve this.
+    FlatHashMap<evmc::address, Account> created_accounts_;                                  // every loaded account, read or written
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;  // every storage write (zeros RETAINED — divergence a)
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;                                  // in-block created code (fills the old TODO)
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;              // key8-collision spill

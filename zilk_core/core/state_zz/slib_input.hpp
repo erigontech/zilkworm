@@ -69,6 +69,12 @@ struct StatelessInputView {
 // fields. `hs` keeps views into `blob`, so `blob` must outlive every use of `hs`, as it must
 // already outlive the returned view. Does NOT call build_state_from_trie (the caller
 // supplies the anchoring prev_root). Returns std::nullopt on malformed input.
+//
+// The state and code lists are streamed straight into the stores as they are validated,
+// after hs.reserve_stores has sized the stores from the element counts the lists announce
+// (so the one-pass feed grows no table). On std::nullopt `hs` may therefore already hold
+// the elements that preceded the malformed one: a failed parse leaves `hs` unusable, and
+// the caller must discard it (both production callers run on a fresh HashState per block).
 std::optional<StatelessInputView> parse_stateless_input(ByteView blob, HashState& hs);
 
 // Convenience: parse_stateless_input followed by hs.build_state_from_trie(prev_root),

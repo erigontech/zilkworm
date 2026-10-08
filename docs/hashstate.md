@@ -102,6 +102,14 @@ or collision sidecar to serialize ahead of time.
 | node store | `keccak256(node)` | node RLP          | `find_node_rlp` |
 | code store | `keccak256(code)` | contract bytecode | `find_code`     |
 
+`find_node_rlp` has two forms that run the same probe. The `evmc::bytes32` form is the
+seam the trie fold and `DirectState` share. The raw-pointer form,
+`find_node_rlp(const uint8_t* hash32)`, reads the hash in place from any address: the
+trie sweep and the confirmation walk hand it the child hash ref inside a node's RLP (or
+inside a decoded branch), so no probe copies the hash into a stack `bytes32` first. A
+raw pointer carries no size, so every such caller keeps its own `== 32` length check as
+the guarantee that 32 bytes are readable there.
+
 The index maps each content hash straight to a view of the bytes (`StoredBytes`, a pointer
 and a `u32` length), so a hit is one probe with no length decode and no arena indirection.
 The bytes are not copied on the input path:
@@ -112,13 +120,22 @@ The bytes are not copied on the input path:
   had to, since the retained `StatelessInputView` points into it too.
 - `add_node` and `add_code` copy the bytes into `owned_bytes_` (a `std::deque<Bytes>`, whose
   elements never move) and index a view of the copy. Tests use these for temporaries.
+- A borrowed add is one index probe (`HashIndex::try_insert`): an absent hash claims a
+  bucket, a present one is left as it is. A repeated node or code therefore keeps the view
+  added first (the same bytes under the same hash) and costs no separate lookup before the
+  insert. No mainnet witness in the benchmark corpus repeats a node or a code.
+- `parse_stateless_input` sizes both stores, and the account and storage caches, from the
+  element counts the SSZ lists announce before the first add (`HashState::reserve_stores`,
+  see "Growth past the size hint" and "Store sizing from the offset tables"), so a witness
+  larger than the constructor's hints fills tables of their final size instead of growing
+  them on the way.
 - Because the stores hold views, `HashState` is not copyable.
 - A stored view's pointer is never null (an empty input points at a static byte), so it can
   never equal the index's empty sentinel, the value-initialized `{nullptr, 0}`.
 
 The stores bind content to identity. `add_node` and `add_code` compute the real
 keccak256 of the bytes at add time and use it as the index key, and `HashIndex`
-confirms every probed bucket with a full-key `memcmp`. A forged lookup hash can
+confirms every probed bucket against the full key. A forged lookup hash can
 therefore never surface the wrong entry.
 
 ### Building state from the trie
@@ -135,8 +152,53 @@ through the node store:
 The sweep uses an explicit stack, not recursion, which keeps it safe on rv64im.
 It borrows GridMPT's unfold/fold terms but is read-only and insert-only, so it
 has none of GridMPT's delete, cascade or modified-flag machinery. It reuses the
-shared node types (`mpt.hpp`) and the free RLP decoders (`decode_node`,
-`rlp::decode_header`), and never calls a GridMPT method.
+shared `nibbles64` path type (`mpt.hpp`) and the size-safe `rlp::decode_header`,
+and never calls a GridMPT method. It decodes no whole node:
+
+- A stack frame (`HashState::SweepFrame`, 24 bytes) is a branch whose children
+  are still being visited. It holds a cursor into the branch's RLP list payload
+  (`cur`, `end`), the slot the cursor is at (`next_slot`) and the length of the
+  path down to the branch (`path_len`). Node bytes live in the input blob or in
+  `owned_bytes_` and never move, so a frame points at them directly and nothing
+  is copied. The stack is a member, reserved once for the deepest well-formed
+  trie (one frame per branch on a 64-nibble path, so at most 64 are live) and
+  cleared at every sweep entry.
+- A node is classified by the extents of its first two items, the rule
+  `decode_node` applies: exactly two items is an extension or leaf, more is a
+  branch. An extension's or leaf's two items are decoded with
+  `rlp::decode_header`, and the HP path nibbles are appended straight into the
+  sweep's path buffer (the grammar of `hp_decode`). A branch is only pushed; its
+  children are read one item at a time as the main loop reaches them, with the
+  three-case child grammar of `fill_branch_child_rlp` (`0x80` empty, `0xa0` plus
+  32 bytes a hash ref, `0xc0..0xf7` an embedded node of at most 31 payload
+  bytes) and a bounds check against the payload's end on every item. A hash ref
+  is probed in place, and an embedded child is decoded in place from the
+  parent's bytes.
+- One `nibbles64` path buffer serves the whole sweep. Each child visit resets
+  its length to the frame's `path_len` and appends the child's nibble; an
+  extension or leaf then appends its own nibbles. A write only ever lands at or
+  past the top frame's `path_len`, so the prefixes of the frames below stay
+  intact. A branch is pushed only while the path is shorter than 64 nibbles,
+  and an extension or leaf whose nibbles would pass 64 stops the descent, so
+  every write stays inside the buffer.
+- A leaf's value is decoded straight into its arena slot. An account leaf grows
+  the account arena by one `Account` (value-initialised, so every field the
+  decode does not set is zero) and `decode_trie_account` fills it in place; the
+  slot is given back when the value is not an account. A storage leaf grows the
+  storage arena by 32 bytes and right-aligns the trimmed word into them.
+
+Child validation is lazy. `decode_node` validated the child items before any
+child was visited (items 2 to 15 strictly, items 0 and 1 through the looser
+`fill_branch_child`, which tolerated a string item there), so a malformed item
+in a branch dropped the whole branch; the sweep applies the strict grammar to
+all sixteen slots and stops a branch at the first malformed item, after the
+children before it were swept, and counts nothing for it. This is sound
+because every node the sweep reaches is genuine: it was fetched by its keccak
+from the node index (`add_view_` keys a view by the real keccak and a lookup
+compares all 32 bytes), or it sits embedded inside such a node, so a malformed
+item is unreachable from a keccak-bound root. The 17th item of a branch, its
+value, is never read: the account and storage tries have fixed-length keys, so
+every key ends at a leaf and no branch carries a value.
 
 The traversal lives in one private helper, `sweep(root, emit_leaf)`, and both
 kinds of pass run through it:
@@ -260,7 +322,20 @@ a single-path confirmation walk, `confirm_absent`, and bump
   recorded). This also catches a storage root that the build legitimately
   skipped because its node was never added: `find_node_rlp` misses inside
   `confirm_absent`, so the read is recorded rather than passed off as a silent
-  zero.
+  zero. A miss the walk proves absent is memoized for the build under its
+  `addr_hash ‖ slot_hash` key (`absent_slots_`, a
+  `HashIndex<64, &storage_key8, uint8_t>` holding a constant 1 per entry), so a
+  repeated miss of the same slot, which a block often makes, is answered from
+  the memo without another walk. Only a proven miss is entered; an unprovable
+  one is recorded on every read, as before. The memo is sound because a proof
+  reads nothing that changes between builds: the account's `storage_root` in
+  the append-only arena record the build wrote, and keccak-bound nodes that a
+  later add can neither alter nor turn into the key. `build_state_from_trie`
+  clears it (`HashIndex::clear`) with the counter. It is consulted only by
+  `note_storage_miss_`, after the account and empty-root early-outs:
+  `read_storage` returns before `get_storage` for a wiped account, so a wiped
+  account never reaches it, and `find_built_storage` and the accept check's
+  gather never probe it.
 
 Either way the read still returns its blank value (`nullptr` for an account,
 zero for a slot), so a value-returning caller proceeds. The accept gate rejects
@@ -291,17 +366,44 @@ only this diagnostic.
 store, starting at `root`, toward `target_hash`, a 32-byte trie path (an
 `addr_hash` for the account trie, or a `slot_hash` for a storage trie). It
 returns `true` only when it proves `target_hash` absent below `root`, and
-`false` when it cannot. It uses the same decoders as the sweep
-(`rlp::decode_header` to strip the outer list header, then `decode_node` from
-`rlp_sw.hpp` for the branch / extension / leaf split), so a read confirmation
-reads trie bytes exactly the way the build did.
+`false` when it cannot. It reads a node the way the sweep does, and only as
+much of it as the one path needs:
+
+- It strips the outer list header with `rlp::decode_header` and classifies the
+  node by the extents of its first two items (exactly two is an extension or
+  leaf, more a branch), the rule `decode_node` applies. No node is decoded
+  whole: there is no `BranchNode`, no unpacked path and no copy of a child.
+- At a branch, the target's next nibble selects the slot. The nibble is read in
+  place from the key byte (`target_nibble`) rather than from a 64-nibble unpack
+  of the key, since a walk looks at only a few of them. The walk reads the
+  child items from the first up to that slot, one at a time with the strict
+  three-case child grammar (`next_branch_child`, shared with the sweep: `0x80`
+  is an empty slot, `0xa0` plus 32 bytes a hash ref, `0xc0..0xf7` an embedded
+  node of at most 31 payload bytes; anything else, or an item past the
+  payload's end, is malformed), and stops there. The siblings past the slot and
+  the value item are never read. A hash child is fetched from the store
+  straight from its bytes in the node; an embedded child is followed in place,
+  since node bytes live in the input blob or `owned_bytes_` and never move
+  (should node storage ever become transient, an embedded child would need a
+  stable copy again).
+- At an extension or leaf, the two items are decoded with `rlp::decode_header`
+  (the canonical-form checks `decode_node` has), and the HP-encoded path is
+  compared nibble by nibble in place against the target's remainder, with a
+  running byte pointer and a high/low toggle, under `hp_decode`'s grammar and
+  its 64-nibble bound. The compare stops at the first mismatch, which usually
+  comes within a few nibbles.
+
+Validation is lazy, as it is in the sweep: a malformed child item at or before
+the target's slot stops the walk unconfirmed, one past it is not seen. Both are
+confined to shapes a keccak-bound root cannot reach (see
+[Building state from the trie](#building-state-from-the-trie)); the slot of a
+genuine branch is read exactly.
 
 It proves absence (returns `true`) in these cases, mirroring the sweep's own
 node handling:
 
 - At a branch, the child slot for the target's next nibble is the empty marker
-  `0x80` (`decode_node` reports it as `child_len == 0`), so nothing hangs below
-  that nibble.
+  `0x80`, so nothing hangs below that nibble.
 - At an extension or leaf, the node's own path nibbles diverge from the target:
   a nibble mismatch, or a path that outlasts the target. The target cannot lie
   below this node.
@@ -310,8 +412,12 @@ node handling:
 It cannot prove absence (returns `false`) when:
 
 - A node the walk needs (the seeding root or a hash-referenced child) is missing
-  from the store, or a node on the path is malformed or undecodable. Emptiness
-  is then unknown and must not be guessed.
+  from the store, or a node on the path is malformed where the walk reads it: an
+  outer item that is not a list, a truncated first or second item, a child item
+  at or before the target's slot that is not in the child grammar, a branch at
+  depth 64 (no nibble is left to index it), a path of more than 64 nibbles, a
+  leaf without a value, or an extension whose child is not a 32-byte hash.
+  Emptiness is then unknown and must not be guessed.
 - A leaf's path matches the target exactly. The key is then actually present,
   not absent.
 
@@ -474,6 +580,36 @@ MPHF maps and `HashIndex`:
   compiler: capacity is a runtime value, and GCC emits a division for the `%` (`divq` on
   x86-64, `remu` on RV64IM), even with `[[assume(std::has_single_bit(capacity))]]`.
 - Probing is linear and wraps around at the end of the table.
+- Every bucket is 8-byte aligned (`alignas(8)` on the bucket struct), so every stored
+  key starts on an 8-byte boundary and the bucket stride is a multiple of 8. A bucket is
+  40 bytes in the account index (32-byte key plus a `u32` offset, padded from 36), 72 in
+  the storage index (64-byte key, padded from 68) and 48 in the node and code stores
+  (32-byte key plus a 16-byte view), where the alignment was already natural.
+- `find_ptr(const uint8_t*)` takes the probe key as a raw pointer and reads it in place,
+  at any alignment; `find` (array reference) is a thin wrapper over it, and `insert`
+  uses the same compare. The caller guarantees `KeySize` readable bytes. This is what
+  lets the trie sweep and the confirmation walk probe straight from a child hash ref
+  inside node RLP: the sweep probes the node index once per present child ref (most of
+  them pruned-sibling misses), and a 32-byte copy per probe was a library `memcpy` call
+  from an arbitrarily aligned blob pointer.
+- The full-key compare is inline, word by word, with no library `memcmp` or `memcpy`
+  call. The stored key loads as whole aligned 64-bit words (the bucket alignment above,
+  asserted at compile time). The probe key goes through an 8-byte `memcpy` into a local
+  per word, which the strict-alignment guest target compiles to byte loads (a misaligned
+  `ld` traps there) and the host to one load. The leading word is tested first, since
+  keys that share a home bucket without sharing a key8 differ there, and the remaining
+  words are folded with XOR/OR so a hit is reported only when every word is equal. The
+  stored key's first word is never compared against the key8: that shortcut is right for
+  `hash_key8` only, while `storage_key8` and `addr_key8` fold more than the leading
+  bytes, and the gate must be the full key. A key size that is not a multiple of 8 (none
+  of HashState's) keeps `memcmp`.
+- The bucket claim (`insert`, `try_insert` and the growth rehash) writes the key the same
+  way, word by word through an 8-aligned bucket pointer, and then the value as one struct
+  store. A plain `memcpy` of the key bytes into the bucket compiled, in the guest, to a
+  library `memcpy` call per claim (a 32- or 64-byte block move with an unknown-alignment
+  side is over the strict-alignment inline limit) followed by byte stores of the 16-byte
+  view value through `memcpy`'s untyped return pointer: about fifty avoidable
+  instructions per witness node and code added, and per entry rehashed.
 - Capacity is sized to about twice the expected entry count (load factor about 0.5).
   This keeps probe runs short and guarantees that a free bucket exists, so every lookup
   terminates on the empty sentinel. A value-initialized `Value` is reserved as that
@@ -483,10 +619,10 @@ MPHF maps and `HashIndex`:
 ### Collision safety
 
 Two distinct keys can share a key8, and therefore a home bucket. Every occupied bucket a
-probe visits is confirmed with a full-key `memcmp` before it counts as a hit, and a
-bucket whose full key differs is skipped. A collision can therefore never return the
-wrong key's value. This is the same invariant `MphfMap::find` upholds with its
-embedded-key `memcmp`.
+probe visits is confirmed against the full key (the inline word compare above) before it
+counts as a hit, and a bucket whose full key differs is skipped. A collision can
+therefore never return the wrong key's value. This is the same invariant `MphfMap::find`
+upholds with its embedded-key `memcmp`.
 
 ### Growth past the size hint
 
@@ -502,6 +638,23 @@ embedded-key `memcmp`.
 - The check runs before the probe, so an update of a key that is already present (a
   dedupe, which adds no entry) can still trigger growth. This can over-grow the table by
   at most one doubling, which is harmless.
+- `reserve(expected)` pre-sizes an EMPTY table by the constructor's rule (the power of two
+  at or above twice the count, never below the minimum), for a caller that learns the entry
+  count only after construction. The final capacity is the one growth would have reached,
+  so lookups cost the same; what is saved is every intermediate doubling, each of which
+  zero-fills a new table and rehashes every entry (a 1,024-node hint against an average
+  mainnet witness of about 11,500 nodes doubled the node index four times). It never
+  shrinks, and it is a no-op once the table holds an entry, so it can never reset a table
+  in use. `HashState::reserve_stores` calls it on the four indexes and reserves the two
+  arenas; `parse_stateless_input` supplies the counts.
+- `try_insert(key, value)` is the one-probe "insert if absent": an empty bucket is
+  claimed (`kInserted`), a full-key match is left with its existing value (`kExisted`,
+  first wins), and the sentinel value is rejected (`kFull`, also the cannot-happen
+  no-free-bucket case). It grows the table exactly as `insert` does. `insert` keeps its
+  overwrite semantics; the node and code stores add through `try_insert`.
+- `clear()` empties a table in place, keeping its capacity: every bucket goes back to the
+  sentinel and the count to zero, with no reallocation. HashState's memo of proven-absent
+  storage slots is cleared this way at every build.
 
 ## Trie fold under HashState
 
@@ -584,6 +737,43 @@ public_keys   : ProgressiveList[ByteVector[65]]    fixed 65-byte stride, no offs
 - It is additive and host-testable, and it is kept out of the DirectState
   rv64im guest, in the same way as `HashState` itself.
 
+### Store sizing from the offset tables
+
+`parse_stateless_input` does not materialise the state and code lists. It validates the
+outer framing (the schema marker, the two fixed regions and the section offsets), reads
+the element count of each of the two lists from its first offset (`N = first_offset / 4`,
+with the list-level checks: a positive multiple of 4 within the section, and `N` at or
+below the count cap; a count over the cap rejects the blob before anything is sized),
+sizes the stores with `HashState::reserve_stores`, and then streams each list straight into
+`add_node_borrowed` / `add_code_borrowed`: one `u32` read per element (the element's end
+offset, carried into the next iteration as its start), the same checks as the materialising
+decoder in the same order, and the element fed as soon as it is validated. The headers and
+public keys keep the vector form; `decode_stateless_input`, the materialising decoder the
+tests use, shares the framing split and the per-element checks.
+
+The hints handed to `reserve_stores`:
+
+| Store | Hint |
+| --- | --- |
+| node store | the state list's count, capped at 65,536 |
+| code store | the codes list's count, capped at 65,536 |
+| account cache | `max(1024, nodes / 8)` |
+| storage cache | 4,096 (the constructor's value) |
+
+The cap is 2.6x the largest mainnet witness in the benchmark corpus (24,678 nodes), so a
+real block pays no growth, while a hostile offset table announcing the count cap (2^20
+elements, a 4 MB table) cannot make the guest zero-fill on the order of 100 MB of buckets
+per store up front. Growth still backstops any count above a hint. Accounts run near
+`nodes / 15` on the corpus (at most 1,685), so `nodes / 8` covers them; the storage cache's
+4,096 covers the corpus maximum of 3,606 slots, and a bigger storage table would only cost
+its zero-fill of 72-byte buckets.
+
+Because the lists are fed as they are validated, a malformed element part-way through
+leaves the `HashState` holding the elements before it. `parse_stateless_input` returns
+`std::nullopt` and the caller discards that `HashState`; both production callers (the
+`state_transition` slib runner and the blockchain-test runner's slib arm) run on a fresh
+`HashState` per block.
+
 ## Accept check
 
 `zilk_core/dev/check_root_hashstate.hpp` holds `check_root_hashstate`, the
@@ -661,9 +851,11 @@ The gather overload is the analog of the gather `check_root` runs over
 substrate, so the real execution path can accept a block right after running
 it, with no hand-supplied span. It mirrors `check_root`'s gather step for step:
 
-- **Iterate the overlay.** It walks `created_accounts()`. Only written
-  accounts live there, so this is `check_root`'s `modified` split expressed
-  structurally: read-only accounts never enter.
+- **Iterate the overlay.** It walks `created_accounts()`. Every account the
+  block loaded lives there, not only the written ones: `HashStateView::get_account`
+  and `apply_state_diff` (evmone's `build_diff` reports every loaded account)
+  go through `find_or_create_account`, which copies a built account into the
+  overlay on its first read, with `modified` false.
 - **Hash the address.** For each account, the 20-byte address is hashed with
   keccak to its `addr_hash`.
 - **Absent accounts.** Whether the pre-state trie has a leaf for the address
@@ -678,6 +870,24 @@ it, with no hand-supplied span. It mirrors `check_root`'s gather step for step:
   leaf delete. One without a pre-trie leaf (read as absent, or created and
   destructed again) emits an `account == nullptr` write marked `absent`: a
   read-only claim of absence, which inserts nothing.
+- **Built accounts the block only read.** A built record that is neither
+  `deleted` nor `modified` is a verbatim copy of its pre-state leaf: every
+  mutator that changes a leaf field (nonce, balance, code hash, a storage
+  slot) and every wipe or revive sets `modified`, and destruct sets `deleted`
+  (the invariant is stated at `created_accounts_` in `hash_state.hpp`). The
+  gather skips such a record. This is sound because its update would carry
+  the leaf's own value, which the fold treats as not modified, so the root is
+  unchanged either way: `rlp_into` reproduces the decoded leaf byte for byte,
+  since a built record carries no stamped RLP cache (`acc_rlp_sroot_off ==
+  0`) and re-encodes its fields canonically. No claim is needed for it: the
+  value was bound to `prev_root` by the build sweep, unlike `check_root` over
+  `DirectState`, whose witness values are bound only by the fold's walk and
+  which therefore folds every read-only account too. This is `check_root`'s
+  `modified` split; it saves the leaf encode, the sort entry and the unfolds
+  down to each such leaf (about a quarter of the overlay records of a mainnet
+  block). The skip requires `built`: a materialized-absent record stays
+  `deleted` until a revive, which sets `modified`, so a record without a
+  pre-trie leaf is never skipped.
 - **Storage writes of a live account.** The account's overlay storage writes
   become a `TrieNodeFlat` set sorted by slot hash (raw-key order is not
   `keccak(key)` order). Each value is encoded the way `check_root` encodes it,
@@ -995,13 +1205,39 @@ a plain open-addressed hash table instead of a serialized minimal perfect hash. 
 same key8 derivations as `MphfMap` (`hash_key8` for 32-byte hashes, `addr_key8` for 20-byte
 addresses) and the same `mix64_body` mixer, so two distinct keys can land in the same home bucket.
 
-Lookup soundness therefore rests on the full-key `memcmp` done at every occupied bucket the probe
-visits. A collision must never return the wrong key's offset.
+Lookup soundness therefore rests on the full-key compare done at every occupied bucket the probe
+visits (see "Buckets and probing"). A collision must never return the wrong key's offset.
 
 The forced-collision cases build keys that share a key8, and so share a home bucket. They check
 that each key still resolves to its own value, and that an absent key stops at the empty
 sentinel. `HashIndex forced collision resolved by probe + full-key compare` covers 32-byte keys,
-and `HashIndex 20-byte address keys` adds a collision between two addresses.
+and `HashIndex 20-byte address keys` adds a collision between two addresses (a 20-byte key is
+not a multiple of 8, so this one exercises the `memcmp` fallback). `HashIndex 64-byte storage
+keys` covers the storage index: two keys with the same `storage_key8` (the same XOR of the two
+halves' prefixes) but different leading words each resolve to their own value, which a compare
+of the stored key's first word against the key8 would wrongly miss.
+
+The collision, sentinel and wraparound cases run every lookup through `find_ptr` as well as
+`find`. `HashIndex find_ptr through an unaligned pointer` probes from offsets 1, 3, 5 and 7 of
+an 8-aligned buffer and expects the same hit, value and miss as the array form. `HashIndex
+full-key compare covers every byte of a 32-byte key` (and the per-byte loop in the 64-byte
+case) flips one bit at every byte position of a stored key and expects a miss from each, so a
+word the compare skipped would show. The bucket sizes (40, 72, 24 and 48 bytes) are asserted at
+compile time through `bucket_bytes()`.
+
+`HashIndex reserve pre-sizes an empty table` checks `reserve` against the constructor's sizing
+rule for a range of counts, that the reserved number of inserts then triggers no growth (the
+capacity is unchanged afterwards and the load factor is at most 0.5), that a smaller reserve
+never shrinks the table, and that a reserve on a table holding an entry is a no-op. `HashIndex
+try_insert is first-wins where insert overwrites` checks the three outcomes: a first
+`try_insert` claims the bucket, a repeat reports the key present and leaves the first value in
+place (also after an `insert` overwrote it), a colliding neighbour is claimed by probing rather
+than taken for the first key, the sentinel value is rejected, and filling past the hint grows
+the table with every key still findable.
+
+`HashIndex clear empties the table in place` checks `clear` on a memo-shaped table (64-byte
+keys, `uint8_t` values): a no-op when empty, then every key misses, the count is zero and
+the capacity unchanged, and the table takes keys again with no growth.
 
 ### Node and code store
 
@@ -1011,11 +1247,19 @@ record a view of a stored copy in an open-addressed `HashIndex<32, &hash_key8, S
 `find_node_rlp` and `find_code` return that view.
 
 The store tests cover round-trip, dedupe, a definitive miss, and the case that carries the most
-weight: the full-key `memcmp` gate under a home-bucket collision.
+weight: the full-key compare gate under a home-bucket collision.
 
 `HashState full-key gate on home-bucket collision` checks that two distinct real keccak hashes
 forced into the same index home bucket each resolve to their own payload (open-address probe plus
-full-key `memcmp`), and that a third colliding hash that was never added still misses.
+full-key compare), and that a third colliding hash that was never added still misses.
+`HashState find_node_rlp by raw pointer matches the bytes32 overload` checks the raw-pointer
+form the sweep and the confirmation walk use: from an unaligned pointer it returns the very
+same stored view as the `bytes32` form, and misses on a never-added hash.
+`HashState reserve_stores then borrowed adds dedupe first-wins` sizes a tiny-hinted store for
+3,000 nodes through `reserve_stores`, adds them borrowed and finds each as the borrowed view
+itself, then adds a repeat from a different buffer and checks the count is unchanged and the
+view added first is the one indexed (for the code store too); a later `reserve_stores` on the
+populated stores changes nothing.
 
 A literal 8-byte key8 collision cannot feasibly be constructed under real keccak, so the test uses
 a home-bucket collision instead, where the home bucket is `mix64_body(hash_key8(h)) &
@@ -1029,14 +1273,14 @@ The `build_state_from_trie` tests hand-build small account tries with the projec
 encoders (`encode_leaf`, `encode_branch` and `encode_ext` in `rlp_sw.hpp`). They add the
 referenced nodes to the store under their real keccak, run `build_state_from_trie(root)`, and
 check the account cache it produces. Using the shared encoders rather than raw RLP bytes keeps the
-fixtures canonical and readable: they are the same bytes `decode_node` reads back.
+fixtures canonical and readable: they are the same bytes the sweep reads back.
 
 `HashState build_state_from_trie account sweep` includes an embedded inline leaf E under a deep
 branch: `root[0x8]` -> extension (60 nibbles) -> `branch2` -> embedded leaf (2 nibbles, 1-byte
 value).
 
 - Embedded inline children only ever hang off a branch. An extension's child is always a 32-byte
-  hash reference, and `decode_node` rejects an inline list as an extension child.
+  hash reference; the sweep, like `decode_node`, stops at an inline list as an extension child.
 - The 60-nibble extension puts the branch deep enough that the leaf's 2-nibble remainder plus its
   1-byte value fit in fewer than 32 bytes, so the leaf is inlined into `branch2`'s RLP instead of
   being hash-referenced.
@@ -1045,6 +1289,31 @@ value).
 - Its 1-byte value is not a decodable account. A real account leaf is always longer than 32 bytes
   (it holds two 32-byte hashes), so it can never be embedded. The leaf is counted as reached but
   never cached.
+
+The sweep's frames and shared path buffer have their own fixtures:
+
+- `resets the path per child across sibling extensions`: two subtrees of the root behind
+  extensions of 50 and 2 nibbles, the long one first and ending in a branch with two leaves,
+  then a direct leaf. All four accounts key correctly only if each child visit resets the
+  shared path buffer to the root's prefix.
+- `sweeps a branch at depth 63 and stops past 64 nibbles`: a branch at depth 63 whose
+  children are empty-path leaves (HP byte `0x20`) at exactly 64 nibbles, a 63-nibble extension
+  ending in an empty-path leaf, and two malformed subtrees (a branch at depth 64, a 71-nibble
+  leaf path) that stop without emitting or touching a counter. The 62- and 63-nibble extension
+  paths are 32-byte strings, the item shape a hash ref also has.
+- `stops a branch at its first malformed child item`: a hand-built branch with hash refs at
+  slots 0 and 1, a 1-byte string at slot 2 and a hash ref at slot 5. The leaves under slots 0
+  and 1 are cached, nothing under slot 5 is, and no counter moves: the lazy child validation
+  described under [Building state from the trie](#building-state-from-the-trie). The earlier
+  whole-node decode cached nothing for this branch.
+- `decodes one-nibble leaf paths, hashed and embedded`: a one-nibble HP path is a single byte
+  below `0x80`, carried with no RLP header, here as a hash-referenced account leaf and as a
+  3-byte embedded storage leaf decoded in place from its branch's bytes.
+- `after a missing-root build derives the next root`: a build from an absent root followed by
+  a build from a present one on the same instance.
+- `caches nothing for an undecodable hashed leaf`: a leaf whose value is not an account is
+  counted, not cached, and the accounts swept after it land intact, so the arena slot it was
+  decoded into was given back.
 
 ### Partial-witness reads
 
@@ -1061,6 +1330,45 @@ confirmation walk (`confirm_absent`) down the key's path:
   rejects later.
 
 These fixtures are hand-built with the same MPT encoders as the build-sweep fixtures.
+
+The walk's own cases (`HashState confirm_absent ...`) pin its decision table along every kind
+of path a miss can take, with the same fixtures:
+
+- `reads the probe's root-branch slot, first to last`: diverging leaves at root slots 0, 1, 7
+  and 15 (the first two are the items the walk classifies the node by, the last is reached
+  after every sibling was skipped) and the empty slots 2 and 14, all proven.
+- `skips to a pruned storage slot and records the read`: the same through `get_storage`, with
+  a pruned child at slot 15 that leaves every read of it unconfirmed.
+- `follows an embedded child in place`: root -> ext(60) -> branch -> embedded leaf(2). Probes
+  that diverge inside the extension, at an empty slot of the deep branch, or on either nibble
+  of the embedded leaf are proven; the leaf's own key, which the build did not cache (its
+  value is no account), is refuted.
+- `at a branch at depth 63 and past 64 nibbles`: an empty slot of a branch at depth 63 and a
+  divergence inside its 62-nibble extension are proven, so is a leaf path that outlasts the
+  key, while a branch at depth 64 and a 66-nibble HP path cannot confirm.
+- `compares one-nibble and even HP paths`: divergences on a hashed and on an embedded
+  one-nibble leaf, on the last nibble of an even extension and the first of an odd one, and
+  at an empty slot of a deep storage branch.
+- `refutes a leaf at the key the build did not cache`: the exact key is recorded on every
+  read; a key one nibble off is proven by the same leaf.
+- `stops at a malformed sibling before the probe's slot`: the hand-built branch with a 1-byte
+  string at slot 2. The slots before it are proven exactly as the sweep swept them; every
+  slot from it on, the empty marker right after it included, is left unconfirmed.
+- `HP compare matches hp_decode on random paths`: 1,000 random single-node tries (a leaf or
+  an extension with 0..64 path nibbles) probed with keys that share a random-length prefix
+  with the path; the expected answer is computed from `hp_decode` over the node's own HP
+  string and `nibbles64::from_bytes32` over the probe.
+
+The memo of proven-absent slots (`absent_slot_count()` is its size):
+
+- `HashState get_storage memoizes a proven-absent slot until the next build`: a proven miss
+  enters the memo once and a repeat of it adds no entry and no record; an unprovable miss is
+  never entered and is recorded on every read; a miss answered before the memo (an account the
+  cache lacks, an empty storage root) enters nothing; a rebuild clears it and the first read
+  after it walks again.
+- `HashState read_storage of a wiped account never reaches the absent-slot memo`: before the
+  wipe a cold slot is entered and a pruned one recorded; after it the memoized, the pruned and
+  a fresh cold slot read zero with no entry and no record added.
 
 ### GridMPT fold over HashState
 
@@ -1102,8 +1410,13 @@ DirectState, and delegates to the span-based overload. The gather tests drive re
 the overlay mutators (see "Write overlay and mutators") and check that:
 
 - the gathered decision matches an independent hand-built oracle,
-- it also matches the span-based overload given a hand-built span for the same writes, and
-- an unconfirmed read still makes it reject.
+- it also matches the span-based overload given a hand-built span for the same writes,
+- an unconfirmed read still makes it reject,
+- a built account the block only read is skipped: the root stays the pre-state's, the same
+  account is folded once `set_nonce` modifies it, and one read and then destructed still folds
+  as an `0x80` delete next to a skipped one, and
+- over the real witness sample, the fold recomputes the same root whether the accounts the block
+  only read are folded or left out, before and after a write, and the gather accepts it.
 
 ### Omitted BLOCKHASH ancestor
 
@@ -1139,7 +1452,15 @@ then run `build_state_from_trie`. There are two kinds of input:
    those on its own.
 
 Malformed-input tests must also fail cleanly: they return `std::nullopt` with no out-of-bounds read
-and no crash.
+and no crash. Two of them cover the streamed feed. `slib stops the streamed feed at a
+non-monotone state-list offset` corrupts the third offset of a three-node state list and expects
+`std::nullopt` with exactly the first node fed (the element before the violation) and neither of
+the others present, so the contract that a failed parse leaves a partially fed `HashState` for
+the caller to discard is pinned. `slib rejects a state list announcing more than the node count
+cap` builds a state list whose offset table really is `(cap + 1) * 4` bytes long (every entry the
+table end, so the elements are well-formed and empty) and expects `std::nullopt` with nothing
+fed, which is the count check rejecting it before any store is sized; the same shape with three
+elements parses.
 
 `slib_sample_fixture.hpp` is generated; do not edit it by hand. Its source is the tests-zkevm@v0.8.0
 release tarball `fixtures_zkevm.tar.gz`, streamed with the command below, followed by
