@@ -23,6 +23,11 @@
 #include <zilk_core/core/types/transaction.hpp>
 #include <zilk_core/print.hpp>
 
+#if USE_HASH_KEY
+#include <zilk_core/core/rlp/decode.hpp>
+#include <zilk_core/core/trie_zz/mpt.hpp>     // nibbles64, BranchNode
+#include <zilk_core/core/trie_zz/rlp_sw.hpp>  // decode_node
+#endif
 namespace zilkworm {
 
 namespace trie = ::silkworm::trie;
@@ -82,38 +87,6 @@ namespace {
             return true;
         };
 
-        if (meta->n_accounts > 0) {
-            if (!bound_bytes(meta->prestate_offset, sizeof(MphfMapHeader),
-                             "DirectState: prestate MphfMapHeader header out of range")) [[unlikely]]
-                return false;
-            if ((meta->prestate_offset % alignof(MphfMapHeader)) != 0) [[unlikely]] {
-                sys_println("DirectState: prestate_offset misaligned");
-                return false;
-            }
-            const auto* m = reinterpret_cast<const MphfMapHeader*>(blob.data() + meta->prestate_offset);
-            if (m->magic != kMphfAddrMapMagic) [[unlikely]] {
-                sys_println("DirectState: prestate MphfMapHeader bad magic");
-                return false;
-            }
-            if (m->version != kMphfMapVersion) [[unlikely]] {
-                sys_println("DirectState: prestate MphfMapHeader bad version");
-                return false;
-            }
-            if (m->n_keys == 0) [[unlikely]] {
-                sys_println("DirectState: prestate MphfMapHeader has zero keys but n_accounts > 0");
-                return false;
-            }
-            if (m->n_buckets == 0) [[unlikely]] {
-                sys_println("DirectState: prestate MphfMapHeader n_buckets == 0");
-                return false;
-            }
-            // displacement_factors[n_buckets] sits at displacement_offset.
-            if (!bound_bytes(static_cast<uint64_t>(meta->prestate_offset) + m->displacement_offset,
-                             static_cast<uint64_t>(m->n_buckets) * 8u,
-                             "DirectState: prestate MphfMapHeader displacement table out of range")) [[unlikely]]
-                return false;
-        }
-
         if (!bound_typed(meta->addr_hashes_offset, meta->n_accounts, sizeof(AddrHashEntry),
                          alignof(AddrHashEntry),
                          "DirectState: addr_hashes section out of range")) [[unlikely]]
@@ -122,53 +95,53 @@ namespace {
                          alignof(BlockHashEntry),
                          "DirectState: block_hashes section out of range")) [[unlikely]]
             return false;
-        if (!bound_bytes(meta->code_store_offset, meta->code_store_size,
-                         "DirectState: code_store section out of range")) [[unlikely]]
-            return false;
-        if (meta->code_store_size > 0 &&
-            (meta->code_store_offset % alignof(MphfMapHeader)) != 0) [[unlikely]] {
-            sys_println("DirectState: code_store_offset misaligned for MphfMapHeader");
-            return false;
-        }
-
+        // The addr map runs from prestate_offset up to addr_hashes_offset; a size-0
+        // region would skip validate_mphf.
         if (meta->n_accounts > 0) {
-            const uint32_t addr_mphf_size =
-                meta->addr_hashes_offset > meta->prestate_offset
-                    ? meta->addr_hashes_offset - meta->prestate_offset
-                    : 0u;
-            if (!validate_mphf<20>(blob, meta->prestate_offset, addr_mphf_size,
+            if (meta->addr_hashes_offset <= meta->prestate_offset) [[unlikely]] {
+                sys_println("DirectState: prestate MphfMap region empty");
+                return false;
+            }
+            if (!validate_mphf<20>(blob, meta->prestate_offset,
+                                   meta->addr_hashes_offset - meta->prestate_offset,
                                    kMphfAddrMapMagic)) [[unlikely]] {
                 return false;
             }
-        }
-        if (meta->code_store_size > 0) {
-            if (!validate_mphf<32>(blob, meta->code_store_offset, meta->code_store_size,
-                                   kMphfCodeStoreMagic)) [[unlikely]] {
+            const auto* m = reinterpret_cast<const MphfMapHeader*>(blob.data() + meta->prestate_offset);
+            if (m->n_keys == 0) [[unlikely]] {
+                sys_println("DirectState: prestate MphfMapHeader has zero keys but n_accounts > 0");
                 return false;
             }
+        }
+        if (!validate_mphf<32>(blob, meta->code_store_offset, meta->code_store_size,
+                               kMphfCodeStoreMagic)) [[unlikely]] {
+            return false;
         }
 
         if (meta->n_accounts > 0) {
             const auto* mhdr = reinterpret_cast<const MphfMapHeader*>(
                 blob.data() + meta->prestate_offset);
             const uint8_t* mbase = reinterpret_cast<const uint8_t*>(mhdr);
-            const uint32_t data_size = mhdr->data_size;
+            const uint8_t* data = mbase + mhdr->data_offset;
             const auto* slot_offsets = reinterpret_cast<const uint32_t*>(
                 mbase + mhdr->slot_offsets_offset);
-            auto check_entry = [&](uint32_t off) -> bool {
+            // Account-specific, on top of validate_mphf<20>: 8-alignment for the in-place
+            // Account, and the Account plus its inline slots must fit in the body its
+            // header declares.
+            auto check_entry = [&](uint64_t off) -> bool {
                 if ((off % alignof(Account)) != 0) [[unlikely]] {
                     sys_println("DirectState: addr-map entry misaligned for Account");
                     return false;
                 }
-                if (static_cast<uint64_t>(off) + 8u + sizeof(Account) > data_size) [[unlikely]] {
-                    sys_println("DirectState: addr-map entry header OOB");
+                uint64_t body_len; std::memcpy(&body_len, data + off, 8);
+                if (body_len < sizeof(Account)) [[unlikely]] {
+                    sys_println("DirectState: addr-map entry body smaller than Account");
                     return false;
                 }
-                const auto* acc = reinterpret_cast<const Account*>(mbase + mhdr->data_offset + off + 8u);
-                const uint64_t slots_end = static_cast<uint64_t>(off) + 8u + sizeof(Account) +
-                                           static_cast<uint64_t>(acc->slot_count) * sizeof(Slot);
-                if (slots_end > data_size) [[unlikely]] {
-                    sys_println("DirectState: addr-map entry slots OOB");
+                const auto* acc = reinterpret_cast<const Account*>(data + off + 8u);
+                const uint64_t slots_bytes = static_cast<uint64_t>(acc->slot_count) * sizeof(Slot);
+                if (slots_bytes > body_len - sizeof(Account)) [[unlikely]] {
+                    sys_println("DirectState: addr-map entry slots exceed body");
                     return false;
                 }
                 return true;
@@ -191,6 +164,21 @@ namespace {
             }
         }
         return true;
+    }
+
+    // The node store is the third MphfMap this class builds. Checked here so every
+    // caller of the constructor is covered, not only load_flat_bundle.
+    bool validate_nodestore_layout(std::span<const uint8_t> ns) noexcept {
+        if (ns.empty()) return true;
+        if ((reinterpret_cast<uintptr_t>(ns.data()) % alignof(MphfMapHeader)) != 0) [[unlikely]] {
+            sys_println("DirectState: node store not 8-byte aligned");
+            return false;
+        }
+        if (ns.size() > UINT32_MAX) [[unlikely]] {
+            sys_println("DirectState: node store larger than an MphfMap region");
+            return false;
+        }
+        return validate_mphf<32>(ns, 0, static_cast<uint32_t>(ns.size()), kMphfNodeStoreMagic);
     }
 
     inline const PreStateMeta* validate_or_abort(std::span<const uint8_t> v) noexcept {
@@ -230,7 +218,7 @@ namespace detail {
 DirectState::DirectState(std::span<uint8_t> prestate_bytes) noexcept
     : DirectState{prestate_bytes, std::span<uint8_t>{}} {}
 
-// validate_or_abort runs validate_prestate_layout before any field is read.
+// Both layouts are validated before any field is read or any MphfMap is built.
 // On failure it aborts; future wiring will route `false` to a 0-gas proof.
 DirectState::DirectState(std::span<uint8_t> prestate_bytes,
                          std::span<uint8_t> nodestore_bytes) noexcept
@@ -245,6 +233,9 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
       addr_hashes_{reinterpret_cast<const AddrHashEntry*>(prestate_view_.data() + pre_state_meta_->addr_hashes_offset), pre_state_meta_->n_accounts},
       block_hashes_{reinterpret_cast<const BlockHashEntry*>(prestate_view_.data() + pre_state_meta_->block_hashes_offset), pre_state_meta_->n_block_hashes} {
     if (!nodestore_bytes.empty()) {
+        if (!validate_nodestore_layout(nodestore_bytes)) [[unlikely]] {
+            std::abort();
+        }
         node_store_map_.reset(reinterpret_cast<MphfMapHeader*>(nodestore_bytes.data()));
     }
     reserve_block_maps_();
@@ -297,9 +288,10 @@ DirectState::DirectState(DirectState&& other) noexcept
 evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
                                         const evmc::bytes32& key) const noexcept {
     // Materializing: a storage read must leave the same record an account read
-    // does. Only blob records carry inline slots, so an overlay record (always
-    // slot_count == 0) falls through to overflow_slots_ exactly as before.
-    if (const auto* pa = observe_account_(addr); pa->slot_count > 0) {
+    // does. Only blob records carry inline slots; overlay records fall through.
+    // Blank reads aren't recorded: USE_HASH_KEY walks them (reth witness issue).
+    const auto* pa = observe_account_(addr);
+    if (pa->slot_count > 0) {
         if (pa->deleted) [[unlikely]]
             return {};
         const auto storage_slots = slots_for(*pa);
@@ -317,6 +309,14 @@ evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
             return kv->second;
         }
     }
+#if USE_HASH_KEY
+    if (!pa->deleted) {
+        if (const auto* rs = recover_slot_from_nodestore(*pa, addr, key);
+            rs != nullptr && rs->found) {
+            return rs->current;
+        }
+    }
+#endif
     return {};
 }
 
@@ -360,6 +360,9 @@ bool DirectState::revive_if_deleted_slow(const evmc::address& addr, Account& pa)
     pa.nonce = 0;
     store_be_u256(pa.balance, intx::uint256{0});
     overflow_slots_.erase(addr);
+#if USE_HASH_KEY
+    recovered_slots_.erase(addr);
+#endif
     // created_code_ is hash-keyed and possibly shared across addresses.
     pa.modified = true;
     pa.acc_rlp_sroot_off = 0;
@@ -383,6 +386,14 @@ void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
         }
         // Builder enforces slot_capacity == slot_count, so no in-place insert.
     }
+
+#if USE_HASH_KEY
+    // Negative entries fall through to overflow.
+    if (auto* r = find_recovered_slot(addr, key); r != nullptr && r->found) {
+        r->current = value;
+        return;
+    }
+#endif
 
     // Zero writes must remove from overflow so storage-trie iteration never
     // sees a stale zero slot.
@@ -412,6 +423,9 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
     if (!eip7702::is_code_delegated(code)) {
         pa.slot_count = 0;
         overflow_slots_.erase(addr);
+#if USE_HASH_KEY
+        recovered_slots_.erase(addr);
+#endif
     }
 
     const auto h_eth = silkworm::keccak256(code);
@@ -527,6 +541,12 @@ void DirectState::destruct(const evmc::address& addr) {
     if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
         it->second.deleted = true;
     overflow_slots_.erase(addr);
+#if USE_HASH_KEY
+    for (auto& up : recovered_accounts_) {
+        if (std::memcmp(up->addr, addr.bytes, sizeof(addr.bytes)) == 0) up->deleted = true;
+    }
+    recovered_slots_.erase(addr);
+#endif
     // created_code_ is hash-keyed and shared across addresses; do not erase here.
     touched_.insert(addr);
     journal_address_changed(addr);
@@ -574,6 +594,14 @@ evmc::bytes32 DirectState::account_storage_root(const evmc::address& addr) const
             live[k] = v;
         }
     }
+#if USE_HASH_KEY
+    if (auto it = recovered_slots_.find(addr); it != recovered_slots_.end()) {
+        // Keys never collide with flat/overflow (preimage was missing there).
+        for (const auto& [k, rs] : it->second) {
+            if (rs.found && !evmc::is_zero(rs.current)) live[k] = rs.current;
+        }
+    }
+#endif
 
     if (live.empty()) return kEmptyRoot;
 
@@ -607,18 +635,15 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
 
     if (pre_state_meta_->n_accounts > 0) {
         auto handle = [&](std::span<const uint8_t> body) {
-            if (body.size() < sizeof(Account)) [[unlikely]]
-                return;
-            const auto* pa = reinterpret_cast<const Account*>(body.data());
+            const auto* pa = reinterpret_cast<const Account*>(body.data());  // sized by validate_prestate_layout
             evmc::address addr;
             std::memcpy(addr.bytes, pa->addr, 20);
             emit(addr, *pa);
         };
-        if (!pre_state_map_.for_each<20>(
-                               [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
-                                   handle(std::span<const uint8_t>{body.data(), body.size()});
-                               }))
-            return std::nullopt;
+        pre_state_map_.for_each<20>(
+            [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
+                handle(std::span<const uint8_t>{body.data(), body.size()});
+            });
     }
     for (const auto& [addr, pa] : created_accounts_) {
         emit(addr, pa);
@@ -658,6 +683,175 @@ std::optional<BlockHeader> DirectState::read_header(BlockNum,
     return it->second;
 }
 
+#if USE_HASH_KEY
+// Returned view may alias embedded_scratch.
+std::expected<ByteView, DirectState::WalkMiss>
+DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
+                                 std::array<uint8_t, 32>& embedded_scratch) const {
+    if (is_zero_quick(root) || root == kEmptyRoot) return std::unexpected{WalkMiss::kAbsent};
+
+    evmc::bytes32 node_hash = root;
+    ByteView node_rlp;
+    bool node_is_embedded = false;
+    size_t depth = 0;
+
+    for (unsigned guard = 0; guard < 70; ++guard) {
+        if (!node_is_embedded) {
+            auto rlp = find_node_rlp(node_hash);
+            if (!rlp) return std::unexpected{WalkMiss::kInvalid};  // witness incomplete
+            node_rlp = *rlp;
+        }
+
+        auto outer = silkworm::rlp::decode_header(node_rlp);
+        if (!outer || !outer->list) return std::unexpected{WalkMiss::kInvalid};
+        ByteView nbody = node_rlp.substr(0, outer->payload_length);
+
+        BranchNode br{};
+        bool is_leaf = false;
+        std::array<uint8_t, 64> ext_path{};
+        uint8_t plen = 0;
+        ByteView second{};
+        const Kind kind = decode_node(nbody, br, is_leaf, ext_path, plen, second);
+        if (kind == ::zilkworm::kInvalid) return std::unexpected{WalkMiss::kInvalid};
+
+        if (kind == kBranch) {
+            if (depth >= 64) return std::unexpected{WalkMiss::kInvalid};
+            const uint8_t nib = want[depth];
+            if ((br.mask & (1u << nib)) == 0) return std::unexpected{WalkMiss::kAbsent};  // 0x80 child
+            const uint8_t clen = br.child_len[nib];
+            ++depth;
+            if (clen == 32) {
+                // child_ptr set only for 0xa0 hash refs
+                const uint8_t* href = br.child_ptr[nib] ? br.child_ptr[nib] : br.child[nib].bytes;
+                std::memcpy(node_hash.bytes, href, 32);
+                node_is_embedded = false;
+            } else {
+                std::memcpy(embedded_scratch.data(), br.child[nib].bytes, clen);
+                node_rlp = ByteView{embedded_scratch.data(), clen};
+                node_is_embedded = true;
+            }
+            continue;
+        }
+
+        if (depth + plen > 64) return std::unexpected{WalkMiss::kInvalid};
+        for (uint8_t i = 0; i < plen; ++i) {
+            if (want[depth + i] != ext_path[i]) return std::unexpected{WalkMiss::kAbsent};  // path diverges
+        }
+        depth += plen;
+
+        if (is_leaf) {
+            if (depth != 64) return std::unexpected{WalkMiss::kInvalid};
+            return second;
+        }
+
+        if (second.size() == 32) {
+            std::memcpy(node_hash.bytes, second.data(), 32);
+            node_is_embedded = false;
+        } else {
+            if (second.size() > embedded_scratch.size()) return std::unexpected{WalkMiss::kInvalid};
+            // memmove: second may already alias embedded_scratch
+            std::memmove(embedded_scratch.data(), second.data(), second.size());
+            node_rlp = ByteView{embedded_scratch.data(), second.size()};
+            node_is_embedded = true;
+        }
+    }
+    return std::unexpected{WalkMiss::kInvalid};
+}
+
+const Account*
+DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
+    if (!node_store_map_.valid() || headers_.empty()) return nullptr;
+
+    // Dedupe: a fresh walk would lose in-place writes and reallocate recovered_accounts_ under live iterators.
+    for (const auto& up : recovered_accounts_) {
+        if (std::memcmp(up->addr, addr.bytes, sizeof(addr.bytes)) == 0) {
+            return up.get();
+        }
+    }
+
+    // Account-trie pre-root = parent block's state_root. get_account has no
+    // header context here; the highest-numbered header in headers_ is the
+    // pre-state parent (ancestors are inserted before execution).
+    const BlockHeader* parent = nullptr;
+    for (const auto& [h, hdr] : headers_) {
+        if (!parent || hdr.number > parent->number) parent = &hdr;
+    }
+    if (!parent) return nullptr;
+
+    const auto hashed = to_bytes32(keccak256(ByteView{addr.bytes, sizeof(addr.bytes)}).bytes);
+    const nibbles64 want = nibbles64::from_bytes32(hashed);
+
+    std::array<uint8_t, 32> embedded_scratch;  // embedded RLP outlives walker-local BranchNode
+    const auto leaf = walk_nodestore_leaf(parent->state_root, want, embedded_scratch);
+    if (!leaf) {
+        if (leaf.error() == WalkMiss::kAbsent) return nullptr;  // valid empty; caller materializes
+        [[unlikely]] fatal("ERROR: USE_HASH_KEY: account walk hit missing/malformed node");
+    }
+
+    auto acc = std::make_unique<Account>();
+    std::memset(acc.get(), 0, sizeof(Account));
+    std::memcpy(acc->addr, addr.bytes, sizeof(addr.bytes));
+    std::memcpy(acc->storage_root, kEmptyRoot.bytes, 32);
+    if (!decode_trie_account(*leaf, *acc)) [[unlikely]]
+        fatal("ERROR: USE_HASH_KEY: malformed account leaf RLP");
+    if (std::memcmp(acc->code_hash, kEmptyHash.bytes, 32) != 0) {
+        // Setting acc->code_store_len is fine here, checked in read_code
+        if (auto b = code_store_map_.find<32, 0, &hash_key8>(acc->code_hash)) {
+            acc->code_store_offset = static_cast<uint32_t>(b->data() - code_store_map_.data());
+            acc->code_store_len    = static_cast<uint32_t>(b->size() - FlatKv::kPayloadOffset);
+        }
+    }
+    // Snapshot the pre-state leaf RLP before execution mutates the copy (mutators only clear acc_rlp_sroot_off).
+    acc->rlp_into_cache(std::bit_cast<evmc::bytes32>(acc->storage_root));
+    sys_println("USE_HASH_KEY: recovered account " +
+                to_hex(ByteView{addr.bytes, sizeof(addr.bytes)}, true) +
+                " from node-store (preimage missing from keys)");
+    // The leaf is already in prev_root; this account is treated as a
+    // read-only prestate account (not in addr_hashes / created), so it is
+    // intentionally excluded from the state-root recompute updates. Cache
+    // the owned copy so the returned pointer outlives the call.
+    const Account* ret = acc.get();
+    recovered_accounts_.push_back(std::move(acc));
+    return ret;
+}
+
+const DirectState::RecoveredSlot*
+DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address& addr,
+                                         const evmc::bytes32& key) const {
+    if (!node_store_map_.valid()) return nullptr;
+
+    auto& per_acct = recovered_slots_[addr];
+    if (auto it = per_acct.find(key); it != per_acct.end()) {
+        return &it->second;
+    }
+
+    const auto sroot = std::bit_cast<evmc::bytes32>(pa.storage_root);
+    const nibbles64 want = nibbles64::from_bytes32(keccak_bytes32(key));
+    std::array<uint8_t, 32> embedded_scratch;  // embedded RLP outlives walker-local BranchNode
+    const auto leaf = walk_nodestore_leaf(sroot, want, embedded_scratch);
+    if (!leaf) {
+        if (leaf.error() == WalkMiss::kAbsent) return &per_acct[key];  // negative: walk proved absence
+        [[unlikely]] fatal("ERROR: USE_HASH_KEY: slot walk hit missing/malformed node");
+    }
+
+    intx::uint256 v;
+    ByteView body = *leaf;
+    if (!silkworm::rlp::decode(body, v)) [[unlikely]]
+        fatal("ERROR: USE_HASH_KEY: malformed slot leaf RLP");
+    const auto value = intx::be::store<evmc::bytes32>(v);
+
+    auto& e = per_acct[key];
+    e.initial = value;
+    e.current = value;
+    e.found = true;
+    sys_println("USE_HASH_KEY: recovered slot " + to_hex(ByteView{key.bytes, 32}, true) +
+                " of account " + to_hex(ByteView{addr.bytes, sizeof(addr.bytes)}, true) +
+                " = " + to_hex(ByteView{value.bytes, 32}, true) +
+                " from node-store (preimage missing from keys)");
+    return &e;
+}
+#endif
+
 void DirectState::insert_header(const BlockHeader& header) {
     headers_[header.hash()] = header;
 
@@ -690,20 +884,18 @@ std::optional<intx::uint256> DirectState::total_difficulty(uint64_t, const evmc:
 bool DirectState::sanitize() {
     // SOUNDNESS-CRITICAL: binds each leaf's identity to its trie-key hash.
     bool code_keccak_ok = true;
-    if (!code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-            code_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
-        }))
-        return false;
+    code_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
+        code_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+    });
     if (!code_keccak_ok) {
         sys_println("sanitize: code-hash mismatch in witness bundle ");
         return false;
     }
 
     bool nodes_keccak_ok = true;
-    if (!node_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
-            nodes_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
-        }))
-        return false;
+    node_store_map_.for_each([&](const uint8_t* hash_ptr, std::span<uint8_t> body) {
+        nodes_keccak_ok &= std::memcmp(silkworm::keccak256(FlatKv::payload(ByteView{body.data(), body.size()})).bytes, hash_ptr, 32) == 0;
+    });
     if (!nodes_keccak_ok) {
         sys_println("sanitize: node-hash mismatch in witness bundle ");
         return false;
@@ -712,11 +904,7 @@ bool DirectState::sanitize() {
     bool acc_walk_ok = true;
     auto handle_account_body = [&](std::span<uint8_t> body) {
         if (!acc_walk_ok) return;
-        if (body.size() < sizeof(Account)) [[unlikely]] {
-            acc_walk_ok = false;
-            return;
-        }
-        auto* pa = reinterpret_cast<Account*>(body.data());
+        auto* pa = reinterpret_cast<Account*>(body.data());  // sized by validate_prestate_layout
         if (pa->code_store_len > 0) {
             const auto code_hash = std::bit_cast<evmc::bytes32>(pa->code_hash);
             if (auto b = code_store_map_.find<32, 0, &hash_key8>(code_hash.bytes)) {
@@ -739,11 +927,10 @@ bool DirectState::sanitize() {
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
     };
     if (pre_state_meta_->n_accounts > 0) {
-        if (!pre_state_map_.for_each<20>(
-                               [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
-                                   handle_account_body(body);
-                               }))
-            return false;
+        pre_state_map_.for_each<20>(
+            [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
+                handle_account_body(body);
+            });
     }
     if (!acc_walk_ok) return false;
 
@@ -762,11 +949,11 @@ bool DirectState::sanitize() {
 
     bool addr_hash_skipped = false;
     if (pre_state_meta_->n_accounts > 0) {
-        if (!pre_state_map_.for_each<20>(
-                               [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
-                                   auto* pa = reinterpret_cast<Account*>(body.data());
-                                    addr_hash_skipped = pa->modified || addr_hash_skipped;   // Should be all false
-                               })) return false;
+        pre_state_map_.for_each<20>(
+            [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
+                auto* pa = reinterpret_cast<Account*>(body.data());
+                addr_hash_skipped = pa->modified || addr_hash_skipped;   // Should be all false
+            });
     }
     if (addr_hash_skipped) return false;
 

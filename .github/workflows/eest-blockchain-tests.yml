@@ -93,7 +93,7 @@ jobs:
           name: eest-test-logs
           path: |
             output.log
-            build/eest/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/LastTest.log
           retention-days: 30
 
       - name: Check failure threshold

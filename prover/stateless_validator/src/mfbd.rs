@@ -26,7 +26,7 @@ pub const MFBD_HEADER_SIZE: usize = 16;
 
 // FlatBundle inner header.
 const FLAT_BUNDLE_MAGIC: u32 = 0x444E4246; // "FBND"
-const FLAT_BUNDLE_VERSION: u32 = 13;
+const FLAT_BUNDLE_VERSION: u32 = 14;
 const FLAT_BUNDLE_HEADER_SIZE: usize = 56;
 
 // PreStateMeta.
@@ -36,7 +36,7 @@ const PRESTATE_VERSION: u32 = 4;
 const PRESTATE_META_SIZE: usize = 68;
 
 // MphfMapHeader.
-const MPHF_MAP_VERSION: u32 = 2;
+const MPHF_MAP_VERSION: u32 = 3;
 const MPHF_MAP_HEADER_SIZE: usize = 56;
 const MPHF_ADDR_MAP_MAGIC: u32 = 0x4148504D; // "MPHA"
 const MPHF_CODE_STORE_MAGIC: u32 = 0x4348504D; // "MPHC"
@@ -114,8 +114,7 @@ fn fast_mod_u32(x: u32, n: u32) -> u32 {
 #[derive(Clone)]
 struct CollisionEntry {
     key: u64,
-    offset: u32,
-    len: u32,
+    offset: u64,
 }
 
 /// CHD result. `idx_for_key[i]` is the slot for `distinct_keys[i]`; keys whose
@@ -270,10 +269,10 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
     for (k, body) in entries {
         if let Some(existing) = unique.get_mut(k) {
             if !existing.is_empty() {
-                collision_keys.push(CollisionEntry { key: *k, offset: 0, len: 0 });
+                collision_keys.push(CollisionEntry { key: *k, offset: 0 });
                 collision_bodies.push(std::mem::take(existing));
             }
-            collision_keys.push(CollisionEntry { key: *k, offset: 0, len: 0 });
+            collision_keys.push(CollisionEntry { key: *k, offset: 0 });
             collision_bodies.push(body.clone());
         } else {
             unique.insert(*k, body.clone());
@@ -288,7 +287,7 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
         let k = distinct_keys[i as usize];
         if let Some(body) = unique.get_mut(&k) {
             if !body.is_empty() {
-                collision_keys.push(CollisionEntry { key: k, offset: 0, len: 0 });
+                collision_keys.push(CollisionEntry { key: k, offset: 0 });
                 collision_bodies.push(std::mem::take(body));
             }
         }
@@ -366,8 +365,7 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
     // Collision-sidecar entries.
     for (i, body) in collision_bodies.iter().enumerate() {
         let body_len = body.len() as u64;
-        collision_keys[i].offset = data_cur;
-        collision_keys[i].len = body.len() as u32;
+        collision_keys[i].offset = u64::from(data_cur);
         let entry_off = data_offset as usize + data_cur as usize;
         write_u64(&mut blob, entry_off, body_len);
         blob[entry_off + 8..entry_off + 8 + body.len()].copy_from_slice(body);
@@ -379,8 +377,7 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
     for (i, ce) in collision_keys.iter().enumerate() {
         let off = collisions_offset as usize + i * MPHF_COLLISION_ENTRY_SIZE;
         write_u64(&mut blob, off, ce.key);
-        write_u32(&mut blob, off + 8, ce.offset);
-        write_u32(&mut blob, off + 12, ce.len);
+        write_u64(&mut blob, off + 8, ce.offset);
     }
 
     Ok(blob)
@@ -453,7 +450,9 @@ fn mphf_addr_lookup(mphf: &[u8], addr20: &[u8; 20]) -> u32 {
             if ek != key8 {
                 break;
             }
-            let off_data = u32::from_le_bytes(mphf[off_i + 8..off_i + 12].try_into().unwrap());
+            let off_data = u64::from_le_bytes(mphf[off_i + 8..off_i + 16].try_into().unwrap());
+            let off_data =
+                u32::try_from(off_data).expect("mphf sidecar offset exceeds the u32 data arena");
             let body_off = data_offset as usize + off_data as usize + 8;
             if &mphf[body_off..body_off + 20] == addr20.as_slice() {
                 return off_data;

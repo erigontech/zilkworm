@@ -80,7 +80,8 @@ inline Transaction sample_tx1() {
     tx.gas_limit = 1'000'000;
     tx.to = {};
     tx.value = 0;
-    tx.data = *from_hex("602a6000556101c960015560068060166000396000f3600035600055");
+    static const Bytes kTx1Data{*from_hex("602a6000556101c960015560068060166000396000f3600035600055")};
+    tx.data = kTx1Data;
     // SILKWORM_ASSERT(tx.set_v(37));
     tx.r = intx::from_string<intx::uint256>("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb");
     tx.s = intx::from_string<intx::uint256>("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb");
@@ -193,7 +194,8 @@ inline std::shared_ptr<Block> generate_sample_child_blocks(const BlockHeader& pa
         block.transactions[0].gas_limit = 1'000'000;
         block.transactions[0].to = {};
         block.transactions[0].value = 0;
-        block.transactions[0].data = *from_hex("602a6000556101c960015560068060166000396000f3600035600055");
+        static const Bytes kTx1Data{*from_hex("602a6000556101c960015560068060166000396000f3600035600055")};
+        block.transactions[0].data = kTx1Data;
         CHECK(block.transactions[0].set_v(37));
         block.transactions[0].r = 0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb_u256;
         block.transactions[0].s = 0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb_u256;

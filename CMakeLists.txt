@@ -87,9 +87,11 @@ add_subdirectory(zilk_core)
 # but without Catch2 (qemu_runner) are unaffected.
 if(BUILD_TESTING)
   add_executable(zilkworm.tests
+    zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
     zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp
+    zilk_core/core/trie_zz/encode_branch_patch_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
     zilk_core/dev/cli/addr_hash_orphan_test.cpp
     zilk_core/dev/cli/account_read_spoof_test.cpp

@@ -72,7 +72,7 @@ struct UnsignedTransaction {
     uint64_t gas_limit{0};
     std::optional<evmc::address> to{std::nullopt};
     intx::uint256 value{0};
-    Bytes data{};
+    ByteView data{};
 
     std::vector<AccessListEntry> access_list{};  // EIP-2930
 
@@ -153,12 +153,21 @@ class Transaction : public UnsignedTransaction {
 
     evmc::bytes32 hash() const;
 
+    //! Non-zero calldata byte count, so the gas functions need not rescan `data`.
+    //! Written once by pre_validate_transaction; execution reads it. Callers pass the value on
+    //! explicitly rather than have the gas functions reach for it.
+    //! \pre set_data_non_zero_bytes() has run, i.e. pre_validate_block_body returned kOk.
+    size_t data_non_zero_bytes() const noexcept { return data_non_zero_bytes_; }
+    void set_data_non_zero_bytes(size_t n) const noexcept { data_non_zero_bytes_ = n; }
+
     //! Reset the computed values
     void reset();
 
   private:
     mutable std::optional<evmc::address> sender_{std::nullopt};
     mutable bool sender_recovered_ = false;
+
+    mutable size_t data_non_zero_bytes_{0};
 
     // cached value for hash if already computed
     mutable evmc::bytes32 cached_hash_;

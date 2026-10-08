@@ -138,9 +138,9 @@ def get_available_memory_gb() -> float:
     return 16.0
 
 
-def compute_parallelism(total_blocks: int) -> int:
+def compute_parallelism(total_blocks: int, ram_gb: int) -> int:
     mem_gb = get_available_memory_gb()
-    mem_based = max(1, int((mem_gb - 4) / 8))
+    mem_based = max(1, int((mem_gb - 4) / ram_gb))
     block_based = max(1, total_blocks // 25)
     actual = max(1, min(mem_based, block_based))
     print(f"  Available memory: {mem_gb:.1f} GB")
@@ -185,8 +185,8 @@ RAM_PER_INSTANCE_GB = 8
 RAM_WAIT_INTERVAL = 15
 
 
-def run_prover_chunks(prover: str, data_dir: str,
-                      chunks: List[ChunkInfo]) -> bool:
+def run_prover_chunks(prover: str, data_dir: str, chunks: List[ChunkInfo],
+                      ram_gb: int = RAM_PER_INSTANCE_GB) -> bool:
     """Launch prover processes with memory-aware scheduling.
 
     Each chunk is a single prover invocation with --start-block/--end-block.
@@ -205,9 +205,9 @@ def run_prover_chunks(prover: str, data_dir: str,
             print(f"  Waiting {RAM_WAIT_INTERVAL}s for last instance of z6m_prover to init...")
             time.sleep(RAM_WAIT_INTERVAL)
 
-        while get_available_memory_gb() < RAM_PER_INSTANCE_GB:
+        while get_available_memory_gb() < ram_gb:
             print(f"  Waiting for memory: {get_available_memory_gb():.1f} GB "
-                  f"available, need {RAM_PER_INSTANCE_GB} GB. "
+                  f"available, need {ram_gb} GB. "
                   f"Retrying in {RAM_WAIT_INTERVAL}s...")
             time.sleep(RAM_WAIT_INTERVAL)
 
@@ -380,6 +380,11 @@ def main() -> int:
                         help="First block number (default: first available)")
     parser.add_argument("--count", type=int, default=None,
                         help="Number of blocks to run (default: all from --start)")
+    parser.add_argument("--prover", default=None,
+                        help="Prover binary run with --test-service "
+                             "(default: prover/target/release/z6m_prover)")
+    parser.add_argument("--ram-per-instance", type=int, default=RAM_PER_INSTANCE_GB,
+                        help=f"GB reserved per prover instance (default: {RAM_PER_INSTANCE_GB})")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -392,7 +397,8 @@ def main() -> int:
         print("ERROR: Not inside a git repository.", file=sys.stderr)
         return 1
 
-    prover = os.path.join(git_root, "prover", "target", "release", "z6m_prover")
+    prover = os.path.abspath(args.prover) if args.prover else \
+        os.path.join(git_root, "prover", "target", "release", "z6m_prover")
     if not os.path.isfile(prover) or not os.access(prover, os.X_OK):
         print(f"ERROR: Prover not found or not executable: {prover}",
               file=sys.stderr)
@@ -421,7 +427,7 @@ def main() -> int:
           f"(range: {block_list[0]}..{block_list[-1]})")
 
     print(f"\n  Computing parallelism...")
-    actual_parallel = compute_parallelism(len(block_list))
+    actual_parallel = compute_parallelism(len(block_list), args.ram_per_instance)
 
     git_commit, git_branch, git_message = get_git_info()
     print(f"\n  Git: {git_commit} ({git_branch})")
@@ -440,7 +446,7 @@ def main() -> int:
 
     # Execution
     print(f"\n[Execution]")
-    ok = run_prover_chunks(prover, prover_data_dir, chunks)
+    ok = run_prover_chunks(prover, prover_data_dir, chunks, args.ram_per_instance)
     if not ok:
         print("\nWARNING: Some chunks failed. Proceeding with available data.")
 

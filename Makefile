@@ -20,20 +20,63 @@ endif
         eest-blockchain-tests-json eest-prover-test-json tests-json \
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
         ere-workload-checkout ere-fixtures ere-validate ere-compare \
-        release-artifacts
+        release-artifacts z6m_guest_zisk zisk-emu-check \
+        z6m_prover_zisk zisk-eest zisk-benchmark
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
 	rm -rf prover/target
+	rm -rf prover/guest_zisk/build*/
+	rm -rf prover/prover_zisk/target
 	
+# USE_HASH_KEY=ON enables node-store account recovery.
+USE_HASH_KEY ?= OFF
 z6m_guest:
 	cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
 		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_hypercube/cmake/riscv64im-sp1.cmake \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DSP1=ON
+		-DSP1=ON \
+		-DUSE_HASH_KEY=$(USE_HASH_KEY)
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
 z6m_prover: z6m_guest
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
+
+# ZisK v1.3.1-alpha. ZISK_GCC_BIN: xPack bin dir.
+ZISK_GCC_BIN   ?=
+ZISK_BUILD_DIR ?= prover/guest_zisk/build
+ZISKEMU        ?= ziskemu
+ZISK_ENV := $(if $(ZISK_GCC_BIN),PATH=$(ZISK_GCC_BIN):$$PATH,)
+
+z6m_guest_zisk:
+	$(ZISK_ENV) cmake -S prover/guest_zisk -B $(ZISK_BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_zisk/cmake/riscv64im-zisk.cmake \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DZISK=ON \
+		-DUSE_HASH_KEY=$(USE_HASH_KEY)
+	$(ZISK_ENV) cmake --build $(ZISK_BUILD_DIR) -j$$(nproc)
+
+# ziskemu vs native public values on BENCH_CORPUS_DIR.
+zisk-emu-check: z6m_guest_zisk
+	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S .
+	cmake --build build --target state_transition -j$$(nproc)
+	python3 tools/scripts/zisk_execute.py --elf $(ZISK_BUILD_DIR)/z6m_guest.elf \
+		--dir $(BENCH_CORPUS_DIR) --native build/zilk_core/dev/cli/state_transition --ziskemu "$(ZISKEMU)"
+
+# zisk-sdk host; execute needs no key.
+# ZISK_EXECUTOR: emulator, assembly or ziskemu.
+ZISK_PROVER     := prover/prover_zisk/target/release/z6m_prover_zisk
+ZISK_EXECUTOR   ?= emulator
+ZISK_EEST_FLAGS ?=
+z6m_prover_zisk: z6m_guest_zisk
+	cd prover/prover_zisk && cargo build --release
+
+zisk-eest: z6m_prover_zisk eest-mfbd-build
+	Z6M_ZISK_EXECUTOR=$(ZISK_EXECUTOR) python3 tools/scripts/eest_runner.py --prover $(ZISK_PROVER) \
+		--fixtures $(EEST_MFBD_DIR) --log-dir target/zisk-eest-logs $(ZISK_EEST_FLAGS)
+
+zisk-benchmark: z6m_prover_zisk sp1-benchmark-corpus
+	Z6M_ZISK_EXECUTOR=$(ZISK_EXECUTOR) python3 tools/scripts/sp1_benchmark.py --prover $(ZISK_PROVER) \
+		--dir $(BENCH_CORPUS_DIR)
 
 test_hc: z6m_prover
 	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp
@@ -97,11 +140,11 @@ EEST_MFBD_DIR ?= $(FIXTURES_CACHE)/mfbd-$(EEST_SHA)
 # output bytes (eest_to_flat_bundle.cpp, direct_state_builder.cpp, flat_bundle.*,
 # account.hpp, ...); ninja only relinks it when those change, so the hash is
 # stable across no-op runs and self-heals a stale corpus automatically.
-eest-mfbd-build: z6m_eest_convert test-fixtures
+eest-mfbd-build: z6m_eest_convert
 	@conv_sha=$$(sha256sum "$(EEST_CONVERT_BIN)" | cut -c1-16); \
 	if [ -f "$(EEST_MFBD_DIR)/manifest.json" ] && \
 	   grep -q "\"converter_sha\": *\"$$conv_sha\"" "$(EEST_MFBD_DIR)/manifest.json"; then \
-	    echo "  $(EEST_MFBD_DIR) up to date (converter $$conv_sha); skipping bulk-convert"; \
+	    echo "  $(EEST_MFBD_DIR) up to date (converter $$conv_sha); skipping fixtures fetch + bulk-convert"; \
 	else \
 	    echo "  Regenerating MFBD corpus (converter $$conv_sha)"; \
 	    tools/test-fixtures.sh test-fixtures.json $(FIXTURES_CACHE) $(EEST_KEY); \
@@ -114,10 +157,10 @@ eest-mfbd-build: z6m_eest_convert test-fixtures
 	fi
 
 eest-blockchain-tests: eest-mfbd-build
-	cmake -B build/eest -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+	cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
 		-DEEST_MFBD_DIR=$(EEST_MFBD_DIR)
-	cmake --build build/eest
-	ctest --test-dir build/eest --parallel
+	cmake --build build
+	ctest --test-dir build --parallel
 
 eest-prover-test: z6m_prover eest-mfbd-build
 	prover/target/release/z6m_prover --test-service --test-dir $(EEST_MFBD_DIR)

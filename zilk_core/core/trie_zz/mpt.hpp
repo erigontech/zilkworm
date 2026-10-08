@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <memory>
 #include <optional>
@@ -15,6 +16,7 @@
 #include <evmone_precompiles/keccak.hpp>
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
+#include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
 
@@ -26,10 +28,10 @@ using ::silkworm::Bytes;
 class DirectState;  // node-store lookups go through DirectState::find_node_rlp
 using bytes32 = evmc::bytes32;
 inline bytes32 keccak_bytes(const ByteView x) noexcept {
-    return std::bit_cast<bytes32>(ethash_keccak256(x.data(), x.size()).bytes);
+    return std::bit_cast<bytes32>(silkworm::keccak256(x).bytes);
 }
 inline bytes32 keccak_bytes32(const bytes32& x) noexcept {
-    return std::bit_cast<bytes32>(ethash_keccak256_32(x.bytes));
+    return std::bit_cast<bytes32>(silkworm::keccak256({x.bytes, 32}).bytes);
 }
 }  // namespace zilkworm
 
@@ -71,9 +73,24 @@ struct BranchNode {
     // read
     std::array<bytes32, 16> child;
     std::array<const uint8_t*, 16> child_ptr;
-    std::array<uint8_t, 16> child_len{};
+    alignas(8) std::array<uint8_t, 16> child_len{};
     uint16_t mask{};
     ByteView value{};
+    // Original witness RLP this branch was unfolded from (null for branches built in-grid).
+    // encode_branch copy-and-patches it, rewriting only `dirty` slots while no slot changed length class.
+    const uint8_t* orig{nullptr};
+    uint16_t orig_size{0};
+    uint16_t dirty{0};
+    alignas(8) std::array<uint8_t, 16> orig_child_len{};
+
+    // Layout of the witness encoding is unchanged iff no slot changed length class.
+    // Both child_len and orig_child_len arrays must stay 8-aligned.
+    inline bool same_layout_as_orig() const noexcept {
+        uint64_t lens[2], lens_orig[2];  // 2×u64 = all 16 slots
+        std::memcpy(lens, child_len.data(), 16);
+        std::memcpy(lens_orig, orig_child_len.data(), 16);
+        return ((lens[0] ^ lens_orig[0]) | (lens[1] ^ lens_orig[1])) == 0;
+    }
 
     inline uint8_t child_count() const noexcept {
         return static_cast<uint8_t>(std::popcount(mask));
@@ -91,6 +108,7 @@ struct BranchNode {
 
     inline void set_child(unsigned slot, ByteView b) noexcept {
         [[assume(slot < 16)]];
+        dirty |= static_cast<uint16_t>(1u << slot);
         mask |= 1 << slot;
         if (b.size() == 0) {
             child_len[slot] = 1;
@@ -104,6 +122,7 @@ struct BranchNode {
 
     inline void delete_child(unsigned slot) noexcept {
         [[assume(slot < 16)]];
+        dirty |= static_cast<uint16_t>(1u << slot);
         child_len[slot] = 0;
         child_ptr[slot] = nullptr;
         mask &= ~(1 << slot);

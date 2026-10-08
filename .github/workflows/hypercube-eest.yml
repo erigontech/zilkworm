@@ -8,7 +8,11 @@ on:
       - 'tools/scripts/eest_runner.py'
       - 'prover/guest_hypercube/**'
       - 'prover/prover_hypercube/**'
+      - 'prover/witness_ffi/**'
+      - 'prover/common/**'
       - 'zilk_core/core/**'
+      - 'zilk_core/dev/**'
+      - 'third_party/evmone/lib/**'
       - 'third_party/evmone'
   workflow_dispatch:
 
@@ -51,6 +55,18 @@ jobs:
             mv prover/target/* /cargo-cache/target/ 2>/dev/null || true
             rm -rf prover/target
             ln -s /cargo-cache/target prover/target
+          fi
+
+      - name: Ensure C++23 host compiler (project standard g++-15)
+        # The prover build now compiles the C++ witness converter via
+        # prover/witness_ffi/build.rs, which needs g++ >= 14 on the host.
+        # The z6m_ci_base image (Ubuntu 25.10) already ships g++-15, so this
+        # normally no-ops; the fallback installs the project-standard g++-15.
+        run: |
+          ver=$(g++ -dumpversion 2>/dev/null | cut -d. -f1 || true)
+          if { [ -z "$ver" ] || [ "$ver" -lt 14 ]; } \
+             && ! command -v g++-15 >/dev/null && ! command -v g++-14 >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends gcc-15 g++-15
           fi
 
       - name: Build prover

@@ -1,0 +1,7 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
+[toolchain]
+channel = "1.93.1"
+components = ["rustfmt", "rust-src"]
+profile = "default"

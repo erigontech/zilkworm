@@ -355,6 +355,9 @@ def main() -> int:
                         help="Max test file size in MB (0=no limit, default: 20)")
     parser.add_argument("--filter", default=None,
                         help="Only run shards matching this substring")
+    parser.add_argument("--prover", default=None,
+                        help="Prover binary run with --test-service "
+                             "(default: prover/target/release/z6m_prover)")
     args = parser.parse_args()
 
     fixtures_arg = args.fixtures or default_fixtures_dir(args.format)
@@ -375,7 +378,8 @@ def main() -> int:
         print("ERROR: not in a git repository", file=sys.stderr)
         return 1
 
-    prover = os.path.join(git_root, "prover", "target", "release", "z6m_prover")
+    prover = os.path.abspath(args.prover) if args.prover else \
+        os.path.join(git_root, "prover", "target", "release", "z6m_prover")
     if not os.path.isfile(prover) or not os.access(prover, os.X_OK):
         print(f"ERROR: prover not found: {prover}", file=sys.stderr)
         return 1

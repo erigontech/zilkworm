@@ -58,7 +58,8 @@ for name in sorted(entries):
     if keys and name not in keys:
         continue
     e = entries[name]
-    print(f"{name}\t{e['url']}\t{e['sha256']}")
+    paths = e.get('paths', [])
+    print(f"{name}\t{e['url']}\t{e['sha256']}\t{' '.join(paths)}")
 PYEOF
 ); then
 	echo "test-fixtures: failed to parse manifest $manifest" >&2
@@ -98,7 +99,7 @@ ensure_tarball() {
 	mv "$tar_path.tmp" "$tar_path"
 }
 
-while IFS=$'\t' read -r name url want; do
+while IFS=$'\t' read -r name url want paths_str; do
 	tar_path="$cache/${name}.tar.gz"
 	out_dir="$cache/${name}"
 	sentinel="$out_dir/.sha256"
@@ -118,7 +119,16 @@ while IFS=$'\t' read -r name url want; do
 	echo "$name: extracting"
 	rm -rf "$out_dir.tmp" "$out_dir"
 	mkdir -p "$out_dir.tmp"
-	tar --no-same-owner --no-same-permissions -xzf "$tar_path" -C "$out_dir.tmp"
+	# Optional per-entry `paths` allowlist restricts extraction to just those
+	# tar members (e.g. only fixtures/blockchain_tests instead of the whole
+	# archive), sparing disk. An empty allowlist extracts everything, so
+	# entries without `paths` keep their original behavior.
+	read -r -a paths_arr <<< "$paths_str"
+	if (( ${#paths_arr[@]} )); then
+		tar --no-same-owner --no-same-permissions -xzf "$tar_path" -C "$out_dir.tmp" "${paths_arr[@]}"
+	else
+		tar --no-same-owner --no-same-permissions -xzf "$tar_path" -C "$out_dir.tmp"
+	fi
 	echo "$want" > "$out_dir.tmp/.sha256"
 	mv "$out_dir.tmp" "$out_dir"
 	echo "$name: ok"

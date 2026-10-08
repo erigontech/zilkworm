@@ -33,7 +33,8 @@ std::vector<Transaction> sample_transactions() {
     transactions[1].gas_limit = 1'000'000;
     transactions[1].to = {};
     transactions[1].value = 0;
-    transactions[1].data = *from_hex("602a6000556101c960015560068060166000396000f3600035600055");
+    static const Bytes kTx1Data{*from_hex("602a6000556101c960015560068060166000396000f3600035600055")};
+    transactions[1].data = kTx1Data;
     static_cast<void>(transactions[1].set_v(37));
     transactions[1].r =
         intx::from_string<intx::uint256>("0x52f8f61201b2b11a78d6e866abc9c3db2ae8631fa656bfe5cb53668255367afb");

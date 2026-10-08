@@ -214,7 +214,10 @@ int main(int argc, char** argv) {
                     std::cerr << "bad code entry\n";
                     return 1;
                 }
-                code_map.emplace(code_hash, std::move(code));
+                // Empty code: guest never looks it up.
+                if (!code.empty()) {
+                    code_map.emplace(code_hash, std::move(code));
+                }
             }
         }
     }

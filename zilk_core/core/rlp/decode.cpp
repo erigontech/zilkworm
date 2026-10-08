@@ -75,7 +75,7 @@ std::expected<Header, DecodingError> decode_header(ByteView& from) noexcept {
     return h;
 }
 
-DecodingResult decode(ByteView& from, Bytes& to, Leftover mode) noexcept {
+DecodingResult decode(ByteView& from, ByteView& to, Leftover mode) noexcept {
     const auto h{decode_header(from)};
     if (!h) {
         return std::unexpected{h.error()};
@@ -88,6 +88,15 @@ DecodingResult decode(ByteView& from, Bytes& to, Leftover mode) noexcept {
     if (mode != Leftover::kAllow && !from.empty()) {
         return std::unexpected{DecodingError::kInputTooLong};
     }
+    return {};
+}
+
+DecodingResult decode(ByteView& from, Bytes& to, Leftover mode) noexcept {
+    ByteView view;
+    if (DecodingResult res{decode(from, view, mode)}; !res) {
+        return res;
+    }
+    to = view;
     return {};
 }
 

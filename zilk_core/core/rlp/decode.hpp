@@ -31,6 +31,7 @@ enum class Leftover {
 std::expected<Header, DecodingError> decode_header(ByteView& from) noexcept;
 
 DecodingResult decode(ByteView& from, Bytes& to, Leftover mode = Leftover::kProhibit) noexcept;
+DecodingResult decode(ByteView& from, ByteView& to, Leftover mode = Leftover::kProhibit) noexcept;
 
 template <UnsignedIntegral T>
 DecodingResult decode(ByteView& from, T& to, Leftover mode = Leftover::kProhibit) noexcept {

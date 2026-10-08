@@ -465,6 +465,7 @@ void Transaction::set_sender(const evmc::address& sender) {
 
 void Transaction::reset() {
     sender_recovered_ = false;
+    data_non_zero_bytes_ = 0;
     hash_computed_.reset();
 }
 

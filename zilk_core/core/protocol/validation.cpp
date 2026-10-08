@@ -17,6 +17,8 @@
 
 #include <zilk_core/print.hpp>
 
+#include <zilk_core/core/common_zz/data_byte_count.hpp>
+
 #include "intrinsic_gas.hpp"
 #include "param.hpp"
 
@@ -37,7 +39,10 @@ bool transaction_type_is_supported(TransactionType type, evmc_revision rev) {
 ValidationResult pre_validate_transaction(const Transaction& txn, const evmc_revision rev, const uint64_t chain_id,
                                           const std::optional<intx::uint256>& base_fee_per_gas,
                                           const std::optional<intx::uint256>& blob_gas_price) {
-    if (const auto common_check = pre_validate_common_base(txn, rev, chain_id); common_check != ValidationResult::kOk) {
+    const auto non_zero_bytes = zilkworm::count_nonzero_bytes(txn.data);
+    txn.set_data_non_zero_bytes(non_zero_bytes);
+
+    if (const auto common_check = pre_validate_common_base(txn, rev, chain_id, non_zero_bytes); common_check != ValidationResult::kOk) {
         return common_check;
     }
 
@@ -56,7 +61,7 @@ ValidationResult pre_validate_transaction(const Transaction& txn, const evmc_rev
         }
     }
 
-    if (const auto forks_check = pre_validate_common_forks(txn, rev, blob_gas_price); forks_check != ValidationResult::kOk) {
+    if (const auto forks_check = pre_validate_common_forks(txn, rev, blob_gas_price, non_zero_bytes); forks_check != ValidationResult::kOk) {
         return forks_check;
     }
 
@@ -115,7 +120,8 @@ ValidationResult pre_validate_transactions(const Block& block, const ChainConfig
     return ValidationResult::kOk;
 }
 
-ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision revision, uint64_t chain_id) noexcept {
+ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision revision, uint64_t chain_id,
+                                          size_t non_zero_bytes) noexcept {
     if (txn.chain_id.has_value()) {
         if (revision < EVMC_SPURIOUS_DRAGON) {
             // EIP-155 transaction before EIP-155 was activated
@@ -134,7 +140,7 @@ ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision 
     // charges are made at the top frame, not here.
     intx::uint128 g0;
     if (revision >= EVMC_AMSTERDAM) {
-        const auto cost = amsterdam_tx_gas_cost(txn);
+        const auto cost = amsterdam_tx_gas_cost(txn, non_zero_bytes);
         // EIP-8037 transaction-validation condition 1: the reservoir model needs
         // regular_gas_budget = TX_MAX_GAS_LIMIT - intrinsic_regular_gas to stay
         // non-negative, so the regular intrinsic and the calldata floor are each
@@ -146,7 +152,7 @@ ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision 
         }
         g0 = static_cast<uint64_t>(cost.regular);
     } else {
-        g0 = intrinsic_gas(txn, revision);
+        g0 = intrinsic_gas(txn, revision, non_zero_bytes);
     }
     if (txn.gas_limit < g0) {
         return ValidationResult::kIntrinsicGas;
@@ -164,7 +170,9 @@ ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision 
     return ValidationResult::kOk;
 }
 
-ValidationResult pre_validate_common_forks(const Transaction& txn, const evmc_revision rev, const std::optional<intx::uint256>& blob_gas_price) noexcept {
+ValidationResult pre_validate_common_forks(const Transaction& txn, evmc_revision rev,
+                                           const std::optional<intx::uint256>& blob_gas_price,
+                                           size_t non_zero_bytes) noexcept {
     // EIP-3860: Limit and meter initcode.
     // EIP-7954 (Amsterdam): MAX_INITCODE_SIZE doubles to 2 * 0x10000.
     // TODO(chfast): duplicate of evmone lib/evmone/constants.hpp.
@@ -209,8 +217,8 @@ ValidationResult pre_validate_common_forks(const Transaction& txn, const evmc_re
         }
         // EIP-7623 (Prague) / EIP-7976 + EIP-7981 (Amsterdam): revision-aware floor.
         const auto floor = rev >= EVMC_AMSTERDAM
-                               ? static_cast<uint64_t>(amsterdam_tx_gas_cost(txn).floor)
-                               : protocol::floor_cost(txn);
+                               ? static_cast<uint64_t>(amsterdam_tx_gas_cost(txn, non_zero_bytes).floor)
+                               : protocol::floor_cost(txn, non_zero_bytes);
         if (txn.gas_limit < floor) {
             return ValidationResult::kFloorCost;
         }

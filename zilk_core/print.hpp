@@ -5,6 +5,8 @@
 #include <sp1_syscalls.hpp>
 #elif defined(QEMU_DEBUG)
 #include <semihosting.hpp>
+#elif defined(ZISK)
+#include <zisk_syscalls.hpp>
 #else
 #include <iostream>
 #include <string_view>
@@ -26,3 +28,8 @@ inline void sys_print(std::string_view msg) {
 }
 
 #endif
+
+[[noreturn]] inline void fatal(const char* msg) {
+    sys_println(msg);
+    syscall_halt(1);
+}

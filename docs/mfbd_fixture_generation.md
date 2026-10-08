@@ -218,7 +218,7 @@ requires a version bump + regen):
 **Procedure for a wire-format change:**
 ```bash
 # 1. In the SAME commit as the layout change:
-#    edit zilk_core/core/types_zz/flat_bundle.hpp  ->  kFlatBundleVersion = 14 (next)
+#    edit zilk_core/core/types_zz/flat_bundle.hpp  ->  kFlatBundleVersion = 15 (next)
 # 2. Regenerate EEST (auto, since the converter binary changed):
 make eest-mfbd-build
 # 3. Regenerate the benchmark corpus (MANUAL — it has no staleness check):

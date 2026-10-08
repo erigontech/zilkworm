@@ -24,6 +24,11 @@ if(SP1)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_hypercube/src/include)
 endif()
 
+if(ZISK)
+    add_compile_definitions(-DZISK)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_zisk/src/include)
+endif()
+
 if(SILKWORM_WASM_API)
   add_compile_definitions(EVMC_LOADER_MOCK)
 endif()
@@ -89,6 +94,10 @@ target_link_libraries(
   evmone
   PUBLIC evmc intx::intx blst::blst
 )
+
+# evmone's built-in tracers reference std::clog, pulling the standard library stream and
+# locale machinery into the guest. Nothing in z6m enables a tracer, so compile them out.
+target_compile_definitions(evmone PRIVATE EVMONE_TRACING=0)
 
 if(MSVC)
   target_compile_options(evmone PRIVATE /EHsc /w)

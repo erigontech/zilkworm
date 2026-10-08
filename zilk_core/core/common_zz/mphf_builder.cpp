@@ -195,11 +195,11 @@ void MphfBuilder<KeySize>::add(uint64_t key, ByteView body) {
     auto it = unique_kv_entries_.find(key);
     if (it != unique_kv_entries_.end()) {
         if (!it->second.empty()) {
-            collision_keys_.emplace_back(key, 0u);
+            collision_keys_.push_back({key, 0u});
             collision_bodies_.emplace_back(std::move(it->second));
             it->second.clear();
         }
-        collision_keys_.emplace_back(key, 0u);
+        collision_keys_.push_back({key, 0u});
         collision_bodies_.emplace_back(body.begin(), body.end());
         return;
     }
@@ -228,7 +228,7 @@ std::vector<uint8_t> MphfBuilder<KeySize>::finalize() && {
     for (uint32_t i : spilled) {
         auto& body = unique_kv_entries_.at(distinct_keys[i]);
         if (!body.empty()) {
-            collision_keys_.emplace_back(distinct_keys[i], 0u);
+            collision_keys_.push_back({distinct_keys[i], 0u});
             collision_bodies_.emplace_back(std::move(body));
             body.clear();
         }

@@ -14,11 +14,24 @@ set(CMAKE_RANLIB       riscv-none-elf-ranlib)
 set(BUILD_SHARED_LIBS OFF)
 
 set(common_flags "-march=rv64im -mabi=lp64 -ffunction-sections -fdata-sections -fno-PIC")
-set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap")
+# SP1 charges one cycle per instruction retired, so the only optimizations that
+# pay here are the ones that remove instructions. GCC's inlining defaults trade
+# instruction count away for compile time and I-cache pressure, neither of which
+# this target has, so they are widened (defaults: inline-unit-growth 40,
+# max-inline-insns-auto 30, large-function-growth 100 -- each roughly doubled,
+# deliberately modest since -flto showed maximum inlining loses badly here).
+# Measured -2.298% guest cycles on the 200-block corpus; see the commit message
+# for the full flag sweep.
+set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap \
+-funroll-loops \
+--param inline-unit-growth=100 --param max-inline-insns-auto=60 \
+--param large-function-growth=200")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
-set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags}" CACHE STRING "" FORCE)
-set(CMAKE_CXX_FLAGS "${common_flags} ${opt_flags} ${no_cxx}" CACHE STRING "" FORCE)
+# Not in common_flags: CMAKE_ASM_FLAGS must not force-include a C header.
+set(bswap_inc "-include ${CMAKE_CURRENT_LIST_DIR}/../bswap_inline.h")
+set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags} ${bswap_inc}" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS "${common_flags} ${opt_flags} ${no_cxx} ${bswap_inc}" CACHE STRING "" FORCE)
 set(CMAKE_ASM_FLAGS "${common_flags}" CACHE STRING "" FORCE)
 
 # Override CMake's default Release flags (-O3 -DNDEBUG) so that the opt_flags

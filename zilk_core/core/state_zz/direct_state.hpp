@@ -25,6 +25,16 @@
 #include <zilk_core/core/types_zz/flat_kv.hpp>
 #include <zilk_core/print.hpp>
 
+// CMake option; default only for out-of-tree parses.
+#ifndef USE_HASH_KEY
+#define USE_HASH_KEY 0
+#endif
+
+#if USE_HASH_KEY
+#include <array>
+#include <expected>
+#endif
+
 namespace evmone::state {
 struct StateDiff;
 }
@@ -41,6 +51,10 @@ using ::silkworm::FlatHashMap;
 using ::silkworm::FlatHashSet;
 using ::silkworm::kEmptyHash;
 using ::silkworm::kEmptyRoot;
+
+#if USE_HASH_KEY
+struct nibbles64;  // trie_zz/mpt.hpp
+#endif
 
 [[gnu::always_inline]] inline uint64_t hash_key8(const uint8_t (&h)[32]) noexcept {
     uint64_t v; std::memcpy(&v, h, 8); return v;
@@ -104,6 +118,23 @@ class DirectState : public BlockState {
     Account* materialize_absent_account_(const evmc::address& addr) const;
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
     void reserve_block_maps_() noexcept;
+
+#if USE_HASH_KEY
+    // Preimage-gap fallback; see USE_HASH_KEY option.
+    mutable std::vector<std::unique_ptr<Account>> recovered_accounts_;
+    const Account* recover_account_from_nodestore(const evmc::address& addr) const;
+    struct RecoveredSlot {
+        evmc::bytes32 initial;
+        evmc::bytes32 current;  // == initial until an SSTORE lands
+        bool found;             // false = walk proved absence
+    };
+    mutable FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, RecoveredSlot>> recovered_slots_;
+    enum class WalkMiss : uint8_t { kAbsent, kInvalid };  // kInvalid halts; see fatal()
+    std::expected<ByteView, WalkMiss> walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
+                                                          std::array<uint8_t, 32>& embedded_scratch) const;
+    const RecoveredSlot* recover_slot_from_nodestore(const Account& pa, const evmc::address& addr,
+                                                     const evmc::bytes32& key) const;
+#endif
 
   public:
     explicit DirectState(std::span<uint8_t> prestate_bytes) noexcept;
@@ -236,6 +267,24 @@ class DirectState : public BlockState {
     }
 
     const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept { return created_accounts_; }
+#if USE_HASH_KEY
+    const std::vector<std::unique_ptr<Account>>& recovered_accounts() const noexcept { return recovered_accounts_; }
+
+    [[gnu::always_inline]] inline const FlatHashMap<evmc::bytes32, RecoveredSlot>*
+    recovered_slots_for(const evmc::address& addr) const noexcept {
+        const auto it = recovered_slots_.find(addr);
+        if (it == recovered_slots_.end()) return nullptr;
+        return &it->second;
+    }
+    [[gnu::always_inline]] inline RecoveredSlot*
+    find_recovered_slot(const evmc::address& addr, const evmc::bytes32& key) noexcept {
+        const auto it = recovered_slots_.find(addr);
+        if (it == recovered_slots_.end()) return nullptr;
+        const auto kv = it->second.find(key);
+        if (kv == it->second.end()) return nullptr;
+        return &kv->second;
+    }
+#endif
 
     void set_multi_block(bool v) noexcept { multi_block_ = v; }
 
@@ -315,14 +364,9 @@ DirectState::read_code(const evmc::address& addr) const noexcept {
         return {};
 
     if (pa->code_store_len == 0) {
-        // Pre-state already checked, the following not necessary
-        // if (std::memcmp(pa->code_hash, kEmptyHash.bytes, 32) != 0) [[unlikely]] {
-        //     // Witness producer dropped this account's bytecode — abort.
-        //     [&]() __attribute__((cold, noreturn)) {
-        //         sys_println("ERROR: read_code on account whose code was omitted from witness");
-        //         std::abort();
-        //     }();
-        // }
+        // witness omitted code that is read
+        if (std::memcmp(pa->code_hash, silkworm::kEmptyHash.bytes, 32) != 0) [[unlikely]]
+            fatal("ERROR: read_code: code omitted from witness for non-empty code_hash");
         return {};
     }
 
@@ -350,6 +394,9 @@ DirectState::lookup_account_(const evmc::address& addr) const noexcept {
         if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
             return &it->second;
     }
+#if USE_HASH_KEY
+    if (const auto* rec = recover_account_from_nodestore(addr)) [[unlikely]] return rec;
+#endif
     return nullptr;
 }
 
@@ -360,6 +407,10 @@ DirectState::lookup_account_(const evmc::address& addr) noexcept {
         if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
             return &it->second;
     }
+#if USE_HASH_KEY
+    if (const auto* rec = recover_account_from_nodestore(addr)) [[unlikely]]
+        return const_cast<Account*>(rec);
+#endif
     return nullptr;
 }
 

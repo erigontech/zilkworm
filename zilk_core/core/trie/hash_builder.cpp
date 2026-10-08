@@ -79,7 +79,7 @@ void HashBuilder::add_leaf(Bytes key, ByteView value) {
         gen_struct_step(key_, key);
     }
     key_ = std::move(key);
-    value_ = Bytes{value};
+    value_ = value;
 }
 
 void HashBuilder::add_branch_node(Bytes nibbled_key, const evmc::bytes32& hash, bool is_in_db_trie) {
@@ -99,7 +99,7 @@ void HashBuilder::finalize() {
     if (!key_.empty()) {
         gen_struct_step(key_, {});
         key_.clear();
-        value_ = Bytes{};
+        value_ = ByteView{};
     }
 }
 
@@ -154,7 +154,7 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
 
         const ByteView short_node_key{current.substr(from)};
         if (!build_extensions) {
-            if (const Bytes* leaf_value{std::get_if<Bytes>(&value_)}) {
+            if (const auto* leaf_value{std::get_if<ByteView>(&value_)}) {
                 const ByteView leaf_rlp{leaf_node_rlp(short_node_key, *leaf_value)};
                 if (rlp_collector && leaf_rlp.size() >= kHashLength) [[unlikely]] {
                     rlp_collector(leaf_rlp);
@@ -297,7 +297,7 @@ std::vector<Bytes> HashBuilder::branch_ref(uint16_t state_mask, uint16_t hash_ma
 
 void HashBuilder::reset() {
     key_.clear();
-    value_ = Bytes();
+    value_ = ByteView{};
     is_in_db_trie_ = false;
     groups_.clear();
     tree_masks_.clear();

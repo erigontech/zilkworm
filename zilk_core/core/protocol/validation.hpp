@@ -142,9 +142,12 @@ namespace protocol {
     ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::DirectState& state,
                                           uint64_t available_gas) noexcept;
 
-    ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision revision, uint64_t chain_id) noexcept;
+    ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision revision, uint64_t chain_id,
+                                              size_t non_zero_bytes) noexcept;
 
-    ValidationResult pre_validate_common_forks(const Transaction& txn, evmc_revision rev, const std::optional<intx::uint256>& blob_gas_price) noexcept;
+    ValidationResult pre_validate_common_forks(const Transaction& txn, evmc_revision rev,
+                                               const std::optional<intx::uint256>& blob_gas_price,
+                                               size_t non_zero_bytes) noexcept;
 
     //! \see EIP-1559: Fee market change for ETH 1.0 chain
     intx::uint256 expected_base_fee_per_gas(const BlockHeader& parent);

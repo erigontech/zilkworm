@@ -1,0 +1,10 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Overrides the root config's prover/target.
+[build]
+target-dir = "target"
+
+# uutils mkdir fails autoconf's probe (libffi-sys).
+[env]
+MKDIR_P = "mkdir -p"
