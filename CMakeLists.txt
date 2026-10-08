@@ -86,7 +86,33 @@ add_subdirectory(zilk_core)
 # (not in zilk_core/) so projects embedding zilk_core with BUILD_TESTING=ON
 # but without Catch2 (qemu_runner) are unaffected.
 if(BUILD_TESTING)
+  # The Airbender guest's bump allocator defines the global operator new/delete and malloc, so it
+  # cannot be linked into a host test: it would replace the allocator of the whole process. The
+  # test compiles its text with those names mapped to guest_*, so it runs the guest file itself
+  # (a change to it shows up here) without taking over the host's allocation.
+  set(GUEST_ALLOCATOR_SRC ${CMAKE_CURRENT_SOURCE_DIR}/prover/guest_airbender/src/simple_allocator.cpp)
+  set(GUEST_ALLOCATOR_TEST_SOURCES)
+  if(EXISTS ${GUEST_ALLOCATOR_SRC})
+    set(GUEST_ALLOCATOR_TEST_SRC ${CMAKE_CURRENT_BINARY_DIR}/guest_allocator_test/simple_allocator_renamed.cpp)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GUEST_ALLOCATOR_SRC})
+    file(READ ${GUEST_ALLOCATOR_SRC} guest_allocator_text)
+    string(REPLACE "operator new[]" "guest_new_array" guest_allocator_text "${guest_allocator_text}")
+    string(REPLACE "operator delete[]" "guest_delete_array" guest_allocator_text "${guest_allocator_text}")
+    string(REPLACE "operator new" "guest_new" guest_allocator_text "${guest_allocator_text}")
+    string(REPLACE "operator delete" "guest_delete" guest_allocator_text "${guest_allocator_text}")
+    set(guest_allocator_prelude "#include <cerrno>\n#include <cstddef>\n#include <cstdint>\n#include <cstdlib>\n#include <new>\n")
+    foreach(name malloc free calloc realloc memalign aligned_alloc posix_memalign
+                 _malloc_r _free_r _realloc_r _calloc_r _memalign_r)
+      string(APPEND guest_allocator_prelude "#define ${name} guest_${name}\n")
+    endforeach()
+    # configure_file leaves the output alone when the content is unchanged, so no needless rebuilds.
+    file(WRITE ${GUEST_ALLOCATOR_TEST_SRC}.in "${guest_allocator_prelude}${guest_allocator_text}")
+    configure_file(${GUEST_ALLOCATOR_TEST_SRC}.in ${GUEST_ALLOCATOR_TEST_SRC} COPYONLY)
+    set(GUEST_ALLOCATOR_TEST_SOURCES ${GUEST_ALLOCATOR_TEST_SRC} zilk_core/dev/cli/guest_allocator_test.cpp)
+  endif()
+
   add_executable(zilkworm.tests
+    ${GUEST_ALLOCATOR_TEST_SOURCES}
     zilk_core/core/execution/bn254_mul_test.cpp
     zilk_core/core/execution/delegation_probe_test.cpp
     zilk_core/core/common_zz/data_byte_count_test.cpp
