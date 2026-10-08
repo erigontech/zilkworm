@@ -45,6 +45,22 @@ HashState::HashState(std::uint32_t expected_nodes, std::uint32_t expected_codes,
     storage_arena_.resize(8, 0);
 }
 
+void HashState::reserve_stores(std::uint32_t nodes, std::uint32_t codes,
+                               std::uint32_t accounts, std::uint32_t storage_slots) {
+    node_index_.reserve(nodes);
+    code_index_.reserve(codes);
+    account_index_.reserve(accounts);
+    storage_index_.reserve(storage_slots);
+    // The arenas hold the 8-byte front pad plus one fixed-size entry per cached account
+    // (a whole Account) / slot (a 32-byte word); see emit_account_ / emit_slot_. Like the
+    // index reserves, these are no-ops once a build has filled the stores: a reallocation
+    // would move the records the overlay and the read path point into.
+    if (account_index_.size() == 0)
+        accounts_arena_.reserve(8u + static_cast<std::size_t>(accounts) * sizeof(Account));
+    if (storage_index_.size() == 0)
+        storage_arena_.reserve(8u + static_cast<std::size_t>(storage_slots) * 32u);
+}
+
 namespace {
 
 // Inverse of nibbles64::from_bytes32 (mpt.hpp:50): pack a full 64-nibble path back into
@@ -409,9 +425,11 @@ void HashState::note_storage_miss_(const evmc::bytes32& addr_hash,
 evmc::bytes32 HashState::add_view_(HashIndex<32, &hash_key8, StoredBytes>& index,
                                    ByteView bytes) {
     // Identity binding: the index key IS the real keccak256 of the bytes (matches the
-    // direct_state.cpp:417-418 idiom exactly).
+    // direct_state.cpp:417-418 idiom exactly). One probe inserts or finds the key present:
+    // a repeat is the same content under the same hash, so the first view stays (first
+    // wins, which is what a find followed by an insert-if-absent would do, at one probe).
     const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(bytes));
-    if (!index.find(h.bytes)) index.insert(h.bytes, stored_view_(bytes));  // dedupe
+    index.try_insert(h.bytes, stored_view_(bytes));
     return h;
 }
 

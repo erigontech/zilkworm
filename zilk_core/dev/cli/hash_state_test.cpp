@@ -238,6 +238,56 @@ TEST_CASE("HashState code round-trips by code_hash", "[hash_state]") {
     CHECK(miss.empty());
 }
 
+// reserve_stores sizes the stores for the counts the input announces before the first add
+// (the slib parser's path), and the borrowed adds that follow dedupe by content with the
+// FIRST view kept: one probe inserts or finds the hash present, and a repeat is the same
+// bytes under the same hash.
+TEST_CASE("HashState reserve_stores then borrowed adds dedupe first-wins", "[hash_state]") {
+    HashState hs{4, 4, 4, 4};  // tiny constructor hints: the reserve below does the sizing
+    hs.reserve_stores(3000, 10, 100, 100);
+
+    std::vector<Bytes> nodes;
+    nodes.reserve(3000);
+    for (uint64_t i = 0; i < 3000; ++i) nodes.push_back(payload(0x5E5E00000000ULL + i));
+    for (const auto& n : nodes) {
+        const ByteView v = view_of(n);
+        CHECK(eq32(hs.add_node_borrowed(v), keccak32(v)));  // identity binding, as add_node
+    }
+    CHECK(hs.node_count() == 3000u);
+    for (const auto& n : nodes) {
+        auto got = hs.find_node_rlp(keccak32(view_of(n)));
+        REQUIRE(got.has_value());
+        CHECK(got->data() == n.data());  // the borrowed view itself, not a copy
+        CHECK(got->size() == n.size());
+    }
+
+    // A repeat from a different buffer with the same content is deduped, and the view added
+    // first stays indexed.
+    const Bytes again = nodes[7];
+    REQUIRE(again.data() != nodes[7].data());
+    CHECK(eq32(hs.add_node_borrowed(view_of(again)), keccak32(view_of(nodes[7]))));
+    CHECK(hs.node_count() == 3000u);
+    REQUIRE(hs.find_node_rlp(keccak32(view_of(nodes[7]))).has_value());
+    CHECK(hs.find_node_rlp(keccak32(view_of(nodes[7])))->data() == nodes[7].data());
+
+    // The code store behaves the same.
+    const Bytes code = payload(0xC0DE4E5EULL);
+    const Bytes code_again = code;
+    REQUIRE(code_again.data() != code.data());
+    hs.add_code_borrowed(view_of(code));
+    hs.add_code_borrowed(view_of(code_again));
+    CHECK(hs.code_count() == 1u);
+    CHECK(hs.find_code(keccak32(view_of(code))).data() == code.data());
+
+    // A later reserve_stores on stores that already hold entries changes nothing.
+    hs.reserve_stores(100000, 100000, 1, 1);
+    CHECK(hs.node_count() == 3000u);
+    CHECK(hs.code_count() == 1u);
+    CHECK(hs.find_node_rlp(keccak32(view_of(nodes[0]))).has_value());
+    CHECK(hs.find_node_rlp(keccak32(view_of(nodes[2999]))).has_value());
+    CHECK(hs.find_code(keccak32(view_of(code))).data() == code.data());
+}
+
 // build_state_from_trie account sweep over small tries built with the shared MPT encoders.
 // See docs/hashstate.md, "Trie sweep tests".
 
@@ -1394,12 +1444,10 @@ void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
     return out;
 }
 
-// schema_id||SSZ StatelessInput with empty new_payload_request/headers/public_keys.
-[[nodiscard]] Bytes encode_stateless_input(const std::vector<Bytes>& state,
-                                           const std::vector<Bytes>& codes,
-                                           std::uint64_t chain_id) {
-    const Bytes state_blob = encode_bytelist_list(state);
-    const Bytes codes_blob = encode_bytelist_list(codes);
+// schema_id||SSZ StatelessInput around already-encoded state and codes list blobs, with
+// empty new_payload_request/headers/public_keys.
+[[nodiscard]] Bytes encode_stateless_input_lists(const Bytes& state_blob, const Bytes& codes_blob,
+                                                 std::uint64_t chain_id) {
     // SszExecutionWitness: [off_state=12][off_codes][off_headers] + state++codes++headers.
     Bytes wit;
     const std::uint32_t off_state = 12u;
@@ -1425,6 +1473,14 @@ void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
     blob.push_back(0x01);
     blob.insert(blob.end(), body.begin(), body.end());
     return blob;
+}
+
+// schema_id||SSZ StatelessInput with empty new_payload_request/headers/public_keys.
+[[nodiscard]] Bytes encode_stateless_input(const std::vector<Bytes>& state,
+                                           const std::vector<Bytes>& codes,
+                                           std::uint64_t chain_id) {
+    return encode_stateless_input_lists(encode_bytelist_list(state), encode_bytelist_list(codes),
+                                        chain_id);
 }
 
 }  // namespace
@@ -1626,6 +1682,80 @@ TEST_CASE("slib rejects malformed StatelessInputBytes blobs", "[hash_state][slib
         b.push_back(0x00);  // one stray trailing byte -> pk region size % 65 != 0
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
+}
+
+// The state and code lists are streamed into the stores as they are validated, so a
+// malformed element part-way through stops the feed there: parse returns std::nullopt, the
+// elements before the violation have been fed (the caller discards the HashState), and
+// nothing at or past it was. Element 2's offset is forced below element 1's, which the
+// monotonicity check catches while validating element 1 (its end offset).
+TEST_CASE("slib stops the streamed feed at a non-monotone state-list offset",
+          "[hash_state][slib]") {
+    const Key kA = key_with(0x1, 3, 5);
+    const Key kB = key_with(0x4, 5, 2);
+    const Key kC = key_with(0x9, 2, 7);
+    const Bytes accA = account_leaf_value(11, silkworm::kEmptyRoot);
+    const Bytes accB = account_leaf_value(22, silkworm::kEmptyRoot);
+    const Bytes accC = account_leaf_value(33, silkworm::kEmptyRoot);
+    const Bytes leafA_rlp{zilkworm::encode_leaf(make_leaf(&kA.nib[0], 64, ByteView{accA}))};
+    const Bytes leafB_rlp{zilkworm::encode_leaf(make_leaf(&kB.nib[0], 64, ByteView{accB}))};
+    const Bytes leafC_rlp{zilkworm::encode_leaf(make_leaf(&kC.nib[0], 64, ByteView{accC}))};
+    const Bytes good =
+        encode_stateless_input({leafA_rlp, leafB_rlp, leafC_rlp}, /*codes=*/{}, /*chain_id=*/1);
+    {  // sanity: the good blob feeds all three
+        HashState hs;
+        auto v = zilkworm::parse_stateless_input(ByteView{good}, hs);
+        REQUIRE(v.has_value());
+        CHECK(v->node_count == 3u);
+        CHECK(hs.node_count() == 3u);
+    }
+
+    // The state list begins at blob offset 2 (marker) + 20 (top-level fixed) + 12 (witness
+    // fixed); its 3-entry offset table holds element i's start at +4*i. Element 1 starts
+    // right after element 0; element 2's entry is forced one byte before that.
+    Bytes b = good;
+    const std::size_t state_at = 2 + 20 + 12;
+    const std::uint32_t off1 = 3u * 4u + static_cast<std::uint32_t>(leafA_rlp.size());
+    put_u32_at(b, state_at + 8, off1 - 1u);
+
+    HashState hs;
+    CHECK_FALSE(zilkworm::parse_stateless_input(ByteView{b}, hs).has_value());
+    CHECK(hs.node_count() == 1u);  // element 0 was fed; element 1 failed on its end offset
+    CHECK(hs.find_node_rlp(keccak32(ByteView{leafA_rlp})).has_value());
+    CHECK_FALSE(hs.find_node_rlp(keccak32(ByteView{leafB_rlp})).has_value());
+    CHECK_FALSE(hs.find_node_rlp(keccak32(ByteView{leafC_rlp})).has_value());
+    // The materialising decoder rejects the same blob.
+    CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
+}
+
+// A state list whose first offset announces more elements than kMaxWitnessStateNodes is
+// rejected by the count check before any store is sized or fed. For that check, and not the
+// bounds check on the first offset, to be the one that rejects it, the offset table has to
+// really be (cap + 1) * 4 bytes long: the blob carries a 4 MB table whose every entry is the
+// table end, i.e. cap + 1 empty elements, well-formed in every other respect.
+TEST_CASE("slib rejects a state list announcing more than the node count cap",
+          "[hash_state][slib]") {
+    const std::uint32_t n = zilkworm::kMaxWitnessStateNodes + 1u;
+    Bytes state(static_cast<std::size_t>(n) * 4u, 0);
+    for (std::uint32_t i = 0; i < n; ++i)
+        put_u32_at(state, static_cast<std::size_t>(i) * 4u, n * 4u);
+    const Bytes blob = encode_stateless_input_lists(state, /*codes_blob=*/{}, /*chain_id=*/1);
+
+    HashState hs;
+    CHECK_FALSE(zilkworm::parse_stateless_input(ByteView{blob}, hs).has_value());
+    CHECK(hs.node_count() == 0u);  // rejected at the count: nothing was fed
+    CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{blob}).has_value());
+
+    // The same shape at a small count is well-formed, so the rejection above was the count:
+    // three empty elements parse, are counted as fed, and dedupe to one stored entry.
+    Bytes small(3u * 4u, 0);
+    for (std::uint32_t i = 0; i < 3u; ++i) put_u32_at(small, i * 4u, 12u);
+    const Bytes small_blob = encode_stateless_input_lists(small, /*codes_blob=*/{}, /*chain_id=*/1);
+    HashState hs_small;
+    auto v = zilkworm::parse_stateless_input(ByteView{small_blob}, hs_small);
+    REQUIRE(v.has_value());
+    CHECK(v->node_count == 3u);
+    CHECK(hs_small.node_count() == 1u);
 }
 
 // Write overlay, mutators and address-keyed readers, plus the two DirectState divergences.

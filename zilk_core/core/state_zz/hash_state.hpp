@@ -49,6 +49,16 @@ class HashState : public BlockState {
     HashState(const HashState&) = delete;
     HashState& operator=(const HashState&) = delete;
 
+    // Size the stores for the counts the input announces, before the first insert: each index
+    // is pre-sized by HashIndex::reserve (the constructor's 2x rule, so a table that is still
+    // empty grows to its final capacity once instead of doubling and rehashing on the way),
+    // and the two arenas reserve their final byte size. Hints only, as the constructor's are:
+    // growth still backstops a larger count. A store that already holds entries keeps its
+    // table (reserve is a no-op there); arena offsets and the 8-byte front pad are unchanged.
+    // parse_stateless_input calls this with the SSZ element counts.
+    void reserve_stores(std::uint32_t nodes, std::uint32_t codes,
+                        std::uint32_t accounts, std::uint32_t storage_slots);
+
     // Store a copy of `rlp` under its real keccak256 and return that hash. A repeated node
     // is deduped (no second copy) and the same hash is returned. Defined in the .cpp
     // because it computes keccak.
@@ -330,7 +340,8 @@ class HashState : public BlockState {
         return {bytes.data() != nullptr ? bytes.data() : &kNoBytes,
                 static_cast<std::uint32_t>(bytes.size())};
     }
-    // Dedupe on the real keccak256, then index `bytes` (which must already be stable).
+    // Index `bytes` (which must already be stable) under its real keccak256 unless that hash
+    // is already present (one probe: the first view added wins, a repeat is the same content).
     evmc::bytes32 add_view_(HashIndex<32, &hash_key8, StoredBytes>& index, ByteView bytes);
 
     std::deque<Bytes> owned_bytes_;

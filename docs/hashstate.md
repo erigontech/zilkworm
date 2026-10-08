@@ -120,6 +120,15 @@ The bytes are not copied on the input path:
   had to, since the retained `StatelessInputView` points into it too.
 - `add_node` and `add_code` copy the bytes into `owned_bytes_` (a `std::deque<Bytes>`, whose
   elements never move) and index a view of the copy. Tests use these for temporaries.
+- A borrowed add is one index probe (`HashIndex::try_insert`): an absent hash claims a
+  bucket, a present one is left as it is. A repeated node or code therefore keeps the view
+  added first (the same bytes under the same hash) and costs no separate lookup before the
+  insert. No mainnet witness in the benchmark corpus repeats a node or a code.
+- `parse_stateless_input` sizes both stores, and the account and storage caches, from the
+  element counts the SSZ lists announce before the first add (`HashState::reserve_stores`,
+  see "Growth past the size hint" and "Store sizing from the offset tables"), so a witness
+  larger than the constructor's hints fills tables of their final size instead of growing
+  them on the way.
 - Because the stores hold views, `HashState` is not copyable.
 - A stored view's pointer is never null (an empty input points at a static byte), so it can
   never equal the index's empty sentinel, the value-initialized `{nullptr, 0}`.
@@ -505,6 +514,13 @@ MPHF maps and `HashIndex`:
   `hash_key8` only, while `storage_key8` and `addr_key8` fold more than the leading
   bytes, and the gate must be the full key. A key size that is not a multiple of 8 (none
   of HashState's) keeps `memcmp`.
+- The bucket claim (`insert`, `try_insert` and the growth rehash) writes the key the same
+  way, word by word through an 8-aligned bucket pointer, and then the value as one struct
+  store. A plain `memcpy` of the key bytes into the bucket compiled, in the guest, to a
+  library `memcpy` call per claim (a 32- or 64-byte block move with an unknown-alignment
+  side is over the strict-alignment inline limit) followed by byte stores of the 16-byte
+  view value through `memcpy`'s untyped return pointer: about fifty avoidable
+  instructions per witness node and code added, and per entry rehashed.
 - Capacity is sized to about twice the expected entry count (load factor about 0.5).
   This keeps probe runs short and guarantees that a free bucket exists, so every lookup
   terminates on the empty sentinel. A value-initialized `Value` is reserved as that
@@ -533,6 +549,20 @@ upholds with its embedded-key `memcmp`.
 - The check runs before the probe, so an update of a key that is already present (a
   dedupe, which adds no entry) can still trigger growth. This can over-grow the table by
   at most one doubling, which is harmless.
+- `reserve(expected)` pre-sizes an EMPTY table by the constructor's rule (the power of two
+  at or above twice the count, never below the minimum), for a caller that learns the entry
+  count only after construction. The final capacity is the one growth would have reached,
+  so lookups cost the same; what is saved is every intermediate doubling, each of which
+  zero-fills a new table and rehashes every entry (a 1,024-node hint against an average
+  mainnet witness of about 11,500 nodes doubled the node index four times). It never
+  shrinks, and it is a no-op once the table holds an entry, so it can never reset a table
+  in use. `HashState::reserve_stores` calls it on the four indexes and reserves the two
+  arenas; `parse_stateless_input` supplies the counts.
+- `try_insert(key, value)` is the one-probe "insert if absent": an empty bucket is
+  claimed (`kInserted`), a full-key match is left with its existing value (`kExisted`,
+  first wins), and the sentinel value is rejected (`kFull`, also the cannot-happen
+  no-free-bucket case). It grows the table exactly as `insert` does. `insert` keeps its
+  overwrite semantics; the node and code stores add through `try_insert`.
 
 ## Trie fold under HashState
 
@@ -614,6 +644,43 @@ public_keys   : ProgressiveList[ByteVector[65]]    fixed 65-byte stride, no offs
   are used.
 - It is additive and host-testable, and it is kept out of the DirectState
   rv64im guest, in the same way as `HashState` itself.
+
+### Store sizing from the offset tables
+
+`parse_stateless_input` does not materialise the state and code lists. It validates the
+outer framing (the schema marker, the two fixed regions and the section offsets), reads
+the element count of each of the two lists from its first offset (`N = first_offset / 4`,
+with the list-level checks: a positive multiple of 4 within the section, and `N` at or
+below the count cap; a count over the cap rejects the blob before anything is sized),
+sizes the stores with `HashState::reserve_stores`, and then streams each list straight into
+`add_node_borrowed` / `add_code_borrowed`: one `u32` read per element (the element's end
+offset, carried into the next iteration as its start), the same checks as the materialising
+decoder in the same order, and the element fed as soon as it is validated. The headers and
+public keys keep the vector form; `decode_stateless_input`, the materialising decoder the
+tests use, shares the framing split and the per-element checks.
+
+The hints handed to `reserve_stores`:
+
+| Store | Hint |
+| --- | --- |
+| node store | the state list's count, capped at 65,536 |
+| code store | the codes list's count, capped at 65,536 |
+| account cache | `max(1024, nodes / 8)` |
+| storage cache | 4,096 (the constructor's value) |
+
+The cap is 2.6x the largest mainnet witness in the benchmark corpus (24,678 nodes), so a
+real block pays no growth, while a hostile offset table announcing the count cap (2^20
+elements, a 4 MB table) cannot make the guest zero-fill on the order of 100 MB of buckets
+per store up front. Growth still backstops any count above a hint. Accounts run near
+`nodes / 15` on the corpus (at most 1,685), so `nodes / 8` covers them; the storage cache's
+4,096 covers the corpus maximum of 3,606 slots, and a bigger storage table would only cost
+its zero-fill of 72-byte buckets.
+
+Because the lists are fed as they are validated, a malformed element part-way through
+leaves the `HashState` holding the elements before it. `parse_stateless_input` returns
+`std::nullopt` and the caller discards that `HashState`; both production callers (the
+`state_transition` slib runner and the blockchain-test runner's slib arm) run on a fresh
+`HashState` per block.
 
 ## Accept check
 
@@ -1066,6 +1133,16 @@ case) flips one bit at every byte position of a stored key and expects a miss fr
 word the compare skipped would show. The bucket sizes (40, 72, 24 and 48 bytes) are asserted at
 compile time through `bucket_bytes()`.
 
+`HashIndex reserve pre-sizes an empty table` checks `reserve` against the constructor's sizing
+rule for a range of counts, that the reserved number of inserts then triggers no growth (the
+capacity is unchanged afterwards and the load factor is at most 0.5), that a smaller reserve
+never shrinks the table, and that a reserve on a table holding an entry is a no-op. `HashIndex
+try_insert is first-wins where insert overwrites` checks the three outcomes: a first
+`try_insert` claims the bucket, a repeat reports the key present and leaves the first value in
+place (also after an `insert` overwrote it), a colliding neighbour is claimed by probing rather
+than taken for the first key, the sentinel value is rejected, and filling past the hint grows
+the table with every key still findable.
+
 ### Node and code store
 
 `HashState` is the node and code store for the SSZ input path, parallel to `DirectState`'s
@@ -1082,6 +1159,11 @@ full-key compare), and that a third colliding hash that was never added still mi
 `HashState find_node_rlp by raw pointer matches the bytes32 overload` checks the raw-pointer
 form the sweep and the confirmation walk use: from an unaligned pointer it returns the very
 same stored view as the `bytes32` form, and misses on a never-added hash.
+`HashState reserve_stores then borrowed adds dedupe first-wins` sizes a tiny-hinted store for
+3,000 nodes through `reserve_stores`, adds them borrowed and finds each as the borrowed view
+itself, then adds a repeat from a different buffer and checks the count is unchanged and the
+view added first is the one indexed (for the code store too); a later `reserve_stores` on the
+populated stores changes nothing.
 
 A literal 8-byte key8 collision cannot feasibly be constructed under real keccak, so the test uses
 a home-bucket collision instead, where the home bucket is `mix64_body(hash_key8(h)) &
@@ -1210,7 +1292,15 @@ then run `build_state_from_trie`. There are two kinds of input:
    those on its own.
 
 Malformed-input tests must also fail cleanly: they return `std::nullopt` with no out-of-bounds read
-and no crash.
+and no crash. Two of them cover the streamed feed. `slib stops the streamed feed at a
+non-monotone state-list offset` corrupts the third offset of a three-node state list and expects
+`std::nullopt` with exactly the first node fed (the element before the violation) and neither of
+the others present, so the contract that a failed parse leaves a partially fed `HashState` for
+the caller to discard is pinned. `slib rejects a state list announcing more than the node count
+cap` builds a state list whose offset table really is `(cap + 1) * 4` bytes long (every entry the
+table end, so the elements are well-formed and empty) and expects `std::nullopt` with nothing
+fed, which is the count check rejecting it before any store is sized; the same shape with three
+elements parses.
 
 `slib_sample_fixture.hpp` is generated; do not edit it by hand. Its source is the tests-zkevm@v0.8.0
 release tarball `fixtures_zkevm.tar.gz`, streamed with the command below, followed by
