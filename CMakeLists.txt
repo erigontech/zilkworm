@@ -219,6 +219,32 @@ if(BUILD_TESTING)
   else()
     message(STATUS "blst cyclotomic differential test skipped (needs Python3 on a host build)")
   endif()
+  # The Airbender guest's blst mul_mont_384 only exists inside evmone's patch script. The test
+  # extracts the script's text with Python and runs it on a host emulation of the BigInt
+  # delegation, so it needs a host toolchain with Python.
+  if(Python3_Interpreter_FOUND AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING)
+    set(BLST_MONT384_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/blst_mont384")
+    set(BLST_PATCH_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/cmake/patch_blst_airbender.sh")
+    set(BLST_MONT384_GEN "${CMAKE_CURRENT_BINARY_DIR}/blst_mont384_gen")
+    add_custom_command(
+      OUTPUT "${BLST_MONT384_GEN}/cand_block.inc"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${BLST_MONT384_GEN}"
+      COMMAND ${Python3_EXECUTABLE} -I "${BLST_MONT384_DIR}/extract.py" "${BLST_PATCH_SCRIPT}" cand
+              "${BLST_MONT384_GEN}/cand_block.inc"
+      DEPENDS "${BLST_PATCH_SCRIPT}" "${BLST_MONT384_DIR}/extract.py"
+      VERBATIM
+    )
+    add_library(blst_mont384_diff STATIC "${BLST_MONT384_DIR}/blst_mont384_diff.c"
+                                         "${BLST_MONT384_GEN}/cand_block.inc")
+    target_include_directories(blst_mont384_diff PRIVATE "${BLST_MONT384_DIR}" "${BLST_MONT384_GEN}")
+    # blst's C, not the repository's: the project's -Werror -pedantic set does not apply to it
+    target_compile_options(blst_mont384_diff PRIVATE -w -O2)
+    target_sources(zilkworm.tests PRIVATE "${BLST_MONT384_DIR}/blst_mont384_test.cpp")
+    target_include_directories(zilkworm.tests PRIVATE "${BLST_MONT384_DIR}")
+    target_link_libraries(zilkworm.tests PRIVATE blst_mont384_diff)
+  else()
+    message(STATUS "blst mul_mont_384 differential test skipped (needs Python3 on a host build)")
+  endif()
   include(Catch)
   catch_discover_tests(zilkworm.tests)
 endif()
