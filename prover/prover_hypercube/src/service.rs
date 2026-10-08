@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
-use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_mfbd};
+use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_mfbd, build_stdin_from_slib};
 use alloy_primitives::B256;
 use alloy_provider::{Provider, ProviderBuilder};
 use eyre::{bail, Context, Result};
@@ -236,6 +236,11 @@ pub struct VerifyOptions {
     pub proof_path: PathBuf,
     pub vk_path: PathBuf,
 }
+
+/// Guest return protocol (see "Public output" in docs/architecture.md): the block's gas on
+/// success, RUN_FAILURE for a block the guest rejected, RUN_SKIPPED for one it skipped.
+pub const RUN_FAILURE: u64 = u64::MAX;
+pub const RUN_SKIPPED: u64 = u64::MAX - 1;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ExecutionLog {
@@ -917,6 +922,8 @@ impl Z6mProverService {
         execute_every: Option<u64>,
         data_dir: PathBuf,
         execution_log_file: Option<PathBuf>,
+        is_test: bool,
+        slib: bool,
     ) -> Result<()> {
         if start_block > end_block {
             bail!("--start-block ({}) must be <= --end-block ({})", start_block, end_block);
@@ -942,13 +949,24 @@ impl Z6mProverService {
                 continue;
             }
 
-            let input_path = Self::resolve_input_path(block_number, None, false, &data_dir)?;
+            let input_path = if slib {
+                data_dir.join(format!("blocks/{block_number}/statelessInput{block_number}.slib"))
+            } else {
+                Self::resolve_input_path(block_number, None, is_test, &data_dir)?
+            };
             if !input_path.exists() {
                 warn!("block {} not found at {}, skipping", block_number, input_path.display());
                 continue;
             }
 
-            let stdin = match build_stdin_from_mfbd(&input_path) {
+            let built = if is_test {
+                build_stdin_from_eth_tests(&input_path)
+            } else if slib {
+                build_stdin_from_slib(&input_path)
+            } else {
+                build_stdin_from_mfbd(&input_path)
+            };
+            let stdin = match built {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("block {} failed to build stdin: {}, skipping", block_number, e);
@@ -968,18 +986,35 @@ impl Z6mProverService {
             let prover_gas = report.gas().unwrap_or_default();
             let syscall_count = report.total_syscall_count();
 
-            if gas_used == 0 {
-                error!(%block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used=0)");
-                println!(
-                    "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
-                    block_number, cycle_count, prover_gas, syscall_count
-                );
-            } else {
-                println!(
-                    "Executed block {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
-                    block_number, gas_used, cycle_count, prover_gas, syscall_count
-                );
-            }
+            // A rejected or skipped block is logged with gas_used=0, which the benchmark
+            // scripts leave out of their summaries.
+            let gas_used = match gas_used {
+                0 | RUN_FAILURE => {
+                    error!(%block_number, cycles = cycle_count, prover_gas, "block execution FAILED (guest rejected the block)");
+                    println!(
+                        "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
+                        block_number, cycle_count, prover_gas, syscall_count
+                    );
+                    0
+                }
+                RUN_SKIPPED => {
+                    println!("SKIP block {} (guest reported skipped)", block_number);
+                    0
+                }
+                gas => {
+                    println!(
+                        "Executed block {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
+                        block_number, gas, cycle_count, prover_gas, syscall_count
+                    );
+                    let mut labels: Vec<&String> = report.cycle_tracker.keys().collect();
+                    labels.sort();
+                    for l in labels {
+                        println!("cycle-tracker {} cycles={} calls={}", l, report.cycle_tracker[l],
+                                 report.invocation_tracker.get(l).copied().unwrap_or(0));
+                    }
+                    gas
+                }
+            };
 
             let log = ExecutionLog {
                 block_number,
@@ -1078,8 +1113,6 @@ impl Z6mProverService {
             let syscall_count = report.total_syscall_count();
 
             // Guest return protocol (see "Public output" docs/architecture.md).
-            const RUN_FAILURE: u64 = u64::MAX;
-            const RUN_SKIPPED: u64 = u64::MAX - 1;
             let gas_used = match result {
                 RUN_FAILURE => {
                     error!(test = %file_name, cycles = cycle_count, prover_gas, "test execution FAILED");
@@ -1170,18 +1203,28 @@ impl Z6mProverService {
         let cycle_count = report.total_instruction_count();
         let prover_gas = report.gas().unwrap_or_default();
         let syscall_count = report.total_syscall_count();
-        if gas_used == 0 {
-            error!(block_number = opts.block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used=0)");
-            println!(
-                "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
-                opts.block_number, cycle_count, prover_gas, syscall_count
-            );
-        } else {
-            info!(
-                "execution complete, block={} gas_used={}, cycle_count={}, prover_gas={}, syscall_count={}",
-                opts.block_number, gas_used, cycle_count, prover_gas, syscall_count
-            );
-        }
+        // A rejected or skipped block is reported with gas_used=0; the caller exits non-zero.
+        let gas_used = match gas_used {
+            0 | RUN_FAILURE => {
+                error!(block_number = opts.block_number, cycles = cycle_count, prover_gas, "block execution FAILED (guest rejected the block)");
+                println!(
+                    "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
+                    opts.block_number, cycle_count, prover_gas, syscall_count
+                );
+                0
+            }
+            RUN_SKIPPED => {
+                println!("SKIP block {} (guest reported skipped)", opts.block_number);
+                0
+            }
+            gas => {
+                info!(
+                    "execution complete, block={} gas_used={}, cycle_count={}, prover_gas={}, syscall_count={}",
+                    opts.block_number, gas, cycle_count, prover_gas, syscall_count
+                );
+                gas
+            }
+        };
 
         let log = ExecutionLog {
             block_number: opts.block_number,

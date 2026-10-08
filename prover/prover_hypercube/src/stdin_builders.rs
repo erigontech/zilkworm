@@ -37,3 +37,9 @@ pub fn build_stdin_from_mfbd(path: &Path) -> Result<SP1Stdin> {
     stdin.write_vec(raw);
     Ok(stdin)
 }
+
+/// Build an SP1Stdin carrying a SLIB envelope (one block for the HashState guest). Like an
+/// MFBD file, the envelope is complete on disk and goes to the guest as one Vec.
+pub fn build_stdin_from_slib(path: &Path) -> Result<SP1Stdin> {
+    build_stdin_from_mfbd(path)
+}

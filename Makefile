@@ -22,7 +22,8 @@ endif
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
         ere-workload-checkout ere-fixtures ere-validate ere-compare \
         release-artifacts \
-        zkevm-benchmark-fixtures z6m_guest_slib z6m_prover_slib slib-benchmark
+        zkevm-benchmark-fixtures z6m_guest_slib z6m_prover_slib slib-benchmark \
+        slib-mainnet-corpus slib-mainnet-benchmark
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
@@ -210,6 +211,27 @@ sp1-benchmark-corpus:
 # Run the SP1 benchmark. Regenerate the corpus and rebuild the prover first.
 sp1-benchmark: z6m_prover sp1-benchmark-corpus
 	python3 tools/scripts/sp1_benchmark.py --dir $(BENCH_CORPUS_DIR)
+
+# The same mainnet blocks for HashState: binary SLIB envelopes (block RLP plus
+# statelessInputBytes), converted from the same raw witness files by legacy_to_slib_fixture.
+SLIB_MAINNET_DIR ?= temp/200_benchmark_blocks_slib
+
+slib-mainnet-corpus:
+	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S .
+	cmake --build build --target legacy_to_slib_fixture -j$$(nproc)
+	@echo "  Converting $(BENCH_SRC_DIR) into HashState fixtures in $(SLIB_MAINNET_DIR)"
+	@for d in $(BENCH_SRC_DIR)/*/; do \
+		N=$$(basename $$d); \
+		src=$$d/unifiedBlockAndStateRlp$$N.bin; \
+		[ -f $$src ] || { echo "  skip $$N (no $$src)"; continue; }; \
+		mkdir -p $(SLIB_MAINNET_DIR)/$$N; \
+		build/zilk_core/dev/cli/legacy_to_slib_fixture $$src $(SLIB_MAINNET_DIR)/$$N/statelessInput$$N.slib || exit 1; \
+	done
+	@echo "  HashState mainnet corpus ready in $(SLIB_MAINNET_DIR)"
+
+# Run the mainnet benchmark blocks through the HashState guest.
+slib-mainnet-benchmark: z6m_prover_slib slib-mainnet-corpus
+	python3 tools/scripts/sp1_benchmark.py --dir $(SLIB_MAINNET_DIR) --slib
 
 # Stage release artifacts into ./temp/
 RELEASE_DIR := temp

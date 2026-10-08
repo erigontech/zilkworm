@@ -338,8 +338,11 @@ namespace {
 #endif  // Z6M_HASH_STATE
 
     // https://ethereum-tests.readthedocs.io/en/latest/test_types/blockchain_tests.html
+    // gas_used accumulates the gas of every block the HashState arm accepts, so a passing
+    // EJSN run can report it; the DirectState arm leaves it untouched.
     RunResults blockchain_test([[maybe_unused]] std::string_view fixture_name,
-                               const nlohmann::json& json_test) {
+                               const nlohmann::json& json_test,
+                               [[maybe_unused]] uint64_t& gas_used) {
 #ifdef Z6M_HASH_STATE
         // slib arm: per-block statelessInputBytes -> HashState -> execute -> accept.
         // See docs/hashstate.md, "Slib arm".
@@ -573,6 +576,7 @@ namespace {
 
             // 8. Accepted: advance the anchor to this block's post-state root for the next block.
             prev_root = block.header.state_root;
+            gas_used += block.header.gas_used;
             ++block_index;
         }
         return Status::kPassed;
@@ -660,9 +664,10 @@ uint64_t StateTransition::run_ejsn() {
 
     bool any_failed = false;
     bool any_skipped = false;
+    uint64_t gas_used = 0;
     const auto base_json = nlohmann::json::parse(json_str);
     for (const auto& [name, test] : base_json.items()) {
-        const auto result = blockchain_test(name, test);
+        const auto result = blockchain_test(name, test, gas_used);
         if (result.failed != 0) {
             any_failed = true;
             sys_println("    FAILED");
@@ -679,7 +684,9 @@ uint64_t StateTransition::run_ejsn() {
     }
     if (any_skipped)
         return kRunSkipped;
-    return 0;
+    // The prover reads a zero as a failed block, so a pass reports the gas it executed. Only
+    // the HashState arm sums gas; the DirectState arm still reports 0.
+    return gas_used;
 }
 
 }  // namespace silkworm::cmd::state_transition

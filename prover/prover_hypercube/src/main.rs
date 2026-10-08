@@ -98,6 +98,17 @@ struct Args {
     #[arg(long, default_value = "20971520")]
     max_file_size: u64,
 
+    /// --test-service without --test-dir: read each block from <data-dir>/blocks/<N>/ethTests<N>.json
+    /// (a blockchain-test JSON, e.g. a HashState statelessInputBytes fixture) instead of its
+    /// flatWitnessBundle<N>.mfbd bundle
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    is_test: bool,
+
+    /// --test-service without --test-dir: read each block from <data-dir>/blocks/<N>/statelessInput<N>.slib
+    /// (a SLIB envelope for the HashState guest) instead of its flatWitnessBundle<N>.mfbd bundle
+    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "is_test")]
+    slib: bool,
+
     /// Proving key path; currently unused (the key is generated in-process at startup)
     #[arg(long, default_value = "pk.bin")]
     pk_path: PathBuf,
@@ -249,6 +260,8 @@ async fn main() -> Result<()> {
                 args.execute_every,
                 args.data_dir.clone(),
                 args.execution_log_file.clone(),
+                args.is_test,
+                args.slib,
             )
             .await?;
         }
@@ -374,7 +387,7 @@ async fn main() -> Result<()> {
             let log = Z6mProverService::execute_block_static(opts).await.unwrap();
 
             if log.gas_used == 0 {
-                // execute_block_static already emitted the FAILED block + error! line.
+                // execute_block_static already printed the FAILED or SKIP line for the block.
                 std::process::exit(1);
             }
             println!(

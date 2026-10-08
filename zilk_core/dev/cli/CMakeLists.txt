@@ -25,6 +25,12 @@ target_link_libraries(json_witness_to_flat_bundle PRIVATE ${ZILK_CLI_TRIE_LIBS})
 add_executable(legacy_to_flat_bundle "legacy_to_flat_bundle.cpp")
 target_link_libraries(legacy_to_flat_bundle PRIVATE ${ZILK_CLI_TRIE_LIBS})
 
+# Legacy unifiedBlockAndStateRlp → SLIB envelope (or, for a .json output path, a one-block
+# blockchain-test JSON) carrying statelessInputBytes, for running the mainnet benchmark blocks
+# through HashState.
+add_executable(legacy_to_slib_fixture "legacy_to_slib_fixture.cpp")
+target_link_libraries(legacy_to_slib_fixture PRIVATE ${ZILK_CLI_TRIE_LIBS})
+
 # EEST JSON → MFBD-wrapped FlatBundle converter. Two modes:
 #   emit         --json <PATH> --index <N>          single subtest → stdout
 #   bulk-convert --input-dir <D> --output-dir <D>   parallel mirror tree
