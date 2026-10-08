@@ -89,10 +89,13 @@ if(BUILD_TESTING)
   add_executable(zilkworm.tests
     zilk_core/core/execution/bn254_mul_test.cpp
     zilk_core/core/execution/delegation_probe_test.cpp
+    zilk_core/core/common_zz/data_byte_count_test.cpp
     zilk_core/core/execution/div_mod_frontend_test.cpp
+    zilk_core/core/execution/precompile_lookup_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/receipt_logs_test.cpp
+    zilk_core/core/types/max_gas_cost_test.cpp
     zilk_core/core/types/receipt_test.cpp
     zilk_core/core/types/transaction_rlp_view_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp

@@ -579,7 +579,10 @@ intx::uint512 UnsignedTransaction::maximum_gas_cost() const {
     // See https://github.com/ethereum/EIPs/pull/3594
     intx::uint512 max_gas_cost{intx::umul(intx::uint256{gas_limit}, max_fee_per_gas)};
     // and https://eips.ethereum.org/EIPS/eip-4844#gas-accounting
-    max_gas_cost += intx::umul(intx::uint256{total_blob_gas()}, max_fee_per_blob_gas);
+    // Only blob transactions have blob gas; for the rest the product is zero and the 512-bit
+    // multiply and add are skipped.
+    if (const auto blob_gas = total_blob_gas(); blob_gas != 0)
+        max_gas_cost += intx::umul(intx::uint256{blob_gas}, max_fee_per_blob_gas);
     return max_gas_cost;
 }
 
