@@ -198,6 +198,8 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     cumulative_gas_used_ = 0;
 
+    recover_senders(block_.transactions);
+
     receipts.resize(block_.transactions.size());
     auto receipt_it{receipts.begin()};
 

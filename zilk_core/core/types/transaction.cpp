@@ -7,6 +7,7 @@
 #include <bit>
 
 #include <evmone_precompiles/keccak.hpp>
+#include <evmone_precompiles/secp256k1.hpp>
 #include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/crypto/ecdsa.h>
 #include <zilk_core/core/protocol/param.hpp>
@@ -477,6 +478,40 @@ std::optional<evmc::address> Transaction::sender() const {
         }
     }
     return sender_;
+}
+
+void recover_senders(std::span<const Transaction> txns) {
+    struct Sig {
+        uint8_t hash[kHashLength];
+        uint8_t r[kHashLength];
+        uint8_t s[kHashLength];
+    };
+    std::vector<Sig> sigs;
+    std::vector<evmone::crypto::secp256k1::EcrecoverInput> in;
+    std::vector<const Transaction*> pending;
+    sigs.reserve(txns.size());
+    in.reserve(txns.size());
+    pending.reserve(txns.size());
+    Bytes rlp;
+    for (const auto& txn : txns) {
+        if (txn.sender_recovered_) continue;
+        auto& sig = sigs.emplace_back();
+        rlp.clear();
+        txn.encode_for_signing(rlp);
+        std::memcpy(sig.hash, keccak256(rlp).bytes, kHashLength);
+        intx::be::unsafe::store(sig.r, txn.r);
+        intx::be::unsafe::store(sig.s, txn.s);
+        pending.push_back(&txn);
+    }
+    for (size_t i = 0; i < sigs.size(); ++i) {
+        in.push_back({sigs[i].hash, sigs[i].r, sigs[i].s, pending[i]->odd_y_parity});
+    }
+    std::vector<std::optional<evmc::address>> out(in.size());
+    evmone::crypto::secp256k1::ecrecover_batch(in, out);
+    for (size_t i = 0; i < pending.size(); ++i) {
+        pending[i]->sender_ = out[i];
+        pending[i]->sender_recovered_ = true;
+    }
 }
 
 void Transaction::set_sender(const evmc::address& sender) {
