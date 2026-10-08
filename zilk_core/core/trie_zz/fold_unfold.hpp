@@ -638,9 +638,11 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     ByteView rlp;
     if (child_len == 32) {
         // Hash ref
-        bytes32 ck;
+        // Plain bytes, not a bytes32: handed to the keccak compare out of line, a bytes32 gets its
+        // zero initialization emitted again here.
+        alignas(8) uint8_t ck[32];
         const uint8_t* hs = grid_line.branch.child_ptr[slot] ? grid_line.branch.child_ptr[slot] : child.bytes;
-        std::memcpy(ck.bytes, hs, 32);
+        std::memcpy(ck, hs, 32);
         auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
             return kprefix::SnapRequest{snap_writes_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
                                                                                 : kprefix::kNoSlot,
