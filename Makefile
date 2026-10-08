@@ -220,8 +220,8 @@ ERE_BIN_PATH        ?=
 # source from a path dependency, so the reth leg of ere-compare needs the artifact base URL. Taken
 # from the registry of the ere-guests the workload actually resolves (dirname of the reth sp1 elf_url).
 ERE_RETH_ARTIFACT_URL ?= $(shell python3 $(CURDIR)/tools/ere_workload.py "$(ERE_WORKLOAD_DIR)" reth-artifact-url 2>/dev/null)
-# Fixture folder passed to ere-hosts (--input-folder); default: cached devnet-8 batch.
-ERE_INPUT_FOLDER    ?= $(FIXTURES_CACHE)/ere-glamsterdam-devnet-8/eest_batch
+# Fixture folder passed to ere-hosts (--input-folder); default: cached Sepolia batch.
+ERE_INPUT_FOLDER    ?= $(FIXTURES_CACHE)/ere-sepolia/eest_batch
 # Opt-in: set non-empty to (re)generate EEST fixtures via witness-generator-cli first.
 ERE_GEN_FIXTURES    ?=
 ERE_FIXTURE_ENV     := EF_TEST_TRIE=default RUST_MIN_STACK=16388608 RUST_LOG=info
