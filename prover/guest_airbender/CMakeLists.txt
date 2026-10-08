@@ -65,8 +65,12 @@ target_include_directories(z6m_guest SYSTEM PRIVATE
 # Prevent GCC/LTO from pattern-matching our custom memcpy/memmove/memset
 # loops back into library calls.  Also compile without LTO so the strong
 # symbol definition survives into the final link and overrides newlib.
+# -fno-toplevel-reorder keeps the functions in source order: memcpy_large() is memcpy()'s callee
+# and GCC would emit it first, moving memcpy() and the functions after it nearly four kilobytes up,
+# which pushes the call sites at the end of their jal range out of it (each then costs an auipc +
+# jalr).
 set_source_files_properties(src/mem_builtins.c PROPERTIES
-    COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto"
+    COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto;-fno-toplevel-reorder"
 )
 
 # src/hashtable_policy.cpp defines the __wrap_ target of the --wrap below. Like mem_builtins.c it is

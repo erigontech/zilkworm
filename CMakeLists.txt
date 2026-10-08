@@ -116,7 +116,22 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/code_store_stream_test.cpp
     zilk_core/dev/cli/code_store_verified_test.cpp
     zilk_core/dev/cli/env_push_log_test.cpp
+    zilk_core/dev/cli/mem_builtins_test.cpp
+    zilk_core/dev/cli/mem_builtins_host.c
   )
+  # The guest's memcpy and friends, built for the host with the guest's code-generation flags: the
+  # byte loops must not be turned into the libc calls this file replaces. The guest is built with
+  # -mstrict-align, where a misaligned word access traps but x86 runs it silently, so the alignment
+  # sanitizer stands in for it.
+  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    set(MEM_BUILTINS_HOST_FLAGS -fno-builtin -fno-tree-loop-distribute-patterns -fsanitize=alignment
+                                -fno-sanitize-recover=alignment
+    )
+    set_source_files_properties(
+      zilk_core/dev/cli/mem_builtins_host.c PROPERTIES COMPILE_OPTIONS "${MEM_BUILTINS_HOST_FLAGS}"
+    )
+    target_link_options(zilkworm.tests PRIVATE -fsanitize=alignment)
+  endif()
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
   # silkworm_core<->types_zz archive cycle globally; --start-group is GNU-ld-only.
   if(APPLE)
