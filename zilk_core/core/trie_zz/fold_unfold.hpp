@@ -25,6 +25,34 @@
 
 namespace zilkworm {
 
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+// Copies 32 bytes from src (any alignment: witness bytes) to the word-aligned dst. Kept out of line
+// like memcpy: inlined into unfold_slot it makes GCC move the lookup state onto s0-s6, costing seven
+// callee-saved saves and restores per call. Source words are read aligned-down (no misaligned access),
+// so the first word holds src[0] and the last one src[31]; like the guest memcpy it never touches a
+// word that holds none of the 32 bytes. The phase branch is needed: nx << 32 is undefined.
+// EVMONE_RV32_DISPATCH_TEST builds it on the host for testing (little-endian, like the guest).
+[[gnu::noinline]] inline void copy32_to_aligned(unsigned char* dst, const uint8_t* src) noexcept {
+    typedef uint32_t __attribute__((may_alias)) w32;
+    w32* const dw = reinterpret_cast<w32*>(dst);
+    const auto a = reinterpret_cast<uintptr_t>(src);
+    const w32* const sw = reinterpret_cast<const w32*>(a & ~uintptr_t{3});
+    if ((a & 3) == 0) {
+#pragma GCC unroll 8
+        for (int k = 0; k < 8; ++k) dw[k] = sw[k];
+        return;
+    }
+    const unsigned sh = static_cast<unsigned>(a & 3) * 8;
+    uint32_t prev = sw[0];
+#pragma GCC unroll 8
+    for (int k = 0; k < 8; ++k) {
+        const uint32_t nx = sw[k + 1];
+        dw[k] = (prev >> sh) | (nx << (32 - sh));
+        prev = nx;
+    }
+}
+#endif
+
 // rlp helpers live in silkworm::rlp; alias for local readability.
 namespace rlp = ::silkworm::rlp;
 
@@ -642,7 +670,11 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         // zero initialization emitted again here.
         alignas(8) uint8_t ck[32];
         const uint8_t* hs = grid_line.branch.child_ptr[slot] ? grid_line.branch.child_ptr[slot] : child.bytes;
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+        copy32_to_aligned(ck, hs);
+#else
         std::memcpy(ck, hs, 32);
+#endif
         auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
             return kprefix::SnapRequest{snap_writes_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
                                                                                 : kprefix::kNoSlot,

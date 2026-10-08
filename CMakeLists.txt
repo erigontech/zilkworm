@@ -134,6 +134,7 @@ if(BUILD_TESTING)
     zilk_core/core/trie_zz/grid_mpt_word_loads_test.cpp
     zilk_core/core/trie_zz/account_leaf_rlp_test.cpp
     zilk_core/core/state_zz/node_verify_test.cpp
+    zilk_core/core/trie_zz/unfold_hash_copy_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
     zilk_core/dev/cli/addr_hash_orphan_test.cpp
     zilk_core/dev/cli/account_read_spoof_test.cpp
