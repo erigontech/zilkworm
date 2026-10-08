@@ -18,8 +18,7 @@ class EthashRuleSet : public RuleSet {
     void initialize(const Block& block, DirectState& direct) override;
 
     //! \brief See [YP] Section 11.3 "Reward Application".
-    ValidationResult finalize(DirectState& direct, const Block& block,
-                              const std::vector<Log>& logs) override;
+    ValidationResult finalize(DirectState& direct, const Block& block) override;
 
     BlockReward compute_reward(const Block& block) override;
 

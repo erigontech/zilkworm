@@ -50,11 +50,10 @@ void MergeRuleSet::initialize(const Block& block, DirectState& direct) {
     // using evmone's system_call_block_start().
 }
 
-ValidationResult MergeRuleSet::finalize(DirectState& direct, const Block& block,
-                                        const std::vector<Log>& logs) {
+ValidationResult MergeRuleSet::finalize(DirectState& direct, const Block& block) {
     if (block.header.difficulty != 0) {
         if (pre_merge_rule_set_) {
-            return pre_merge_rule_set_->finalize(direct, block, logs);
+            return pre_merge_rule_set_->finalize(direct, block);
         }
     }
 

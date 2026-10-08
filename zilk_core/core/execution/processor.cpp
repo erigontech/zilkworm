@@ -154,7 +154,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     receipt.logs.reserve(evm1_receipt.logs.size());
     for (auto& [addr, data, topics] : evm1_receipt.logs)
         receipt.logs.emplace_back(Log{addr, std::move(topics), std::move(data)});
-    receipt.bloom = logs_bloom(receipt.logs);
+    logs_bloom(receipt.bloom, receipt.logs);
 
     apply_state_diff(evm1_receipt.state_diff);
 }
@@ -231,19 +231,17 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         ++receipt_it;
     }
 
-    std::vector<Log> logs;
-    logs.reserve(receipts.size());
-    for (const auto& receipt : receipts) {
-        std::ranges::copy(receipt.logs, std::back_inserter(logs));
-    }
     direct_.clear_touched();
 
     // Block-end system calls (EIP-7002 withdrawals, EIP-7251 consolidations) + requests hash validation
     if (rev >= EVMC_PRAGUE && block_.header.requests_hash) {
-        // Collect deposit requests from logs (EIP-6110)
+        // Collect deposit requests from logs (EIP-6110), in block order: receipt by receipt, each
+        // receipt's logs in order (the receipts own the logs; no block-wide copy of them is made).
         FlatRequests flat_requests;
-        if (!flat_requests.extract_deposits_from_logs(logs))
-            return ValidationResult::kRequestsProcessingFailure;
+        for (const Receipt& receipt : receipts) {
+            if (!flat_requests.extract_deposits_from_logs(receipt.logs))
+                return ValidationResult::kRequestsProcessingFailure;
+        }
 
         DirectStateView state_view{direct_};
         BlockHashes block_hashes{*this};
@@ -294,7 +292,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
             state_view);
         apply_state_diff(fin_diff);
     } else {
-        const auto finalization_result = rule_set_.finalize(direct_, block_, logs);
+        const auto finalization_result = rule_set_.finalize(direct_, block_);
         if (finalization_result != ValidationResult::kOk) {
             if (rev >= EVMC_SPURIOUS_DRAGON) {
                 direct_.destruct_dead_among(direct_.touched());
@@ -329,7 +327,10 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     Bloom bloom{};  // zero initialization
     for (const Receipt& receipt : receipts) {
-        join(bloom, receipt.bloom);
+        // execute_transaction sets the bloom of a receipt without logs to all zeros.
+        if (!receipt.logs.empty()) {
+            join(bloom, receipt.bloom);
+        }
     }
     if (bloom != header.logs_bloom) {
         return ValidationResult::kWrongLogsBloom;
