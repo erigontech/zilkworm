@@ -11,6 +11,7 @@
 #include <evmc/evmc.hpp>
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/types_zz/account.hpp>
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
 
 namespace zilkworm {
 
@@ -69,7 +70,7 @@ struct alignas(8) AddrHashEntry {
     uint32_t entry_offset;
 
     bool operator<(const AddrHashEntry& other) const {
-        return std::memcmp(addr_hash, other.addr_hash, 32) < 0;
+        return lt_bytes32(addr_hash, other.addr_hash);  // alignas(8), addr_hash first
     }
 };
 

@@ -19,6 +19,7 @@
 #include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
 
 namespace zilkworm {
 using ::silkworm::kEmptyRoot;
@@ -219,7 +220,7 @@ struct TrieNodeFlat {
     }
 
     bool operator<(const TrieNodeFlat& other) const {
-        return std::memcmp(key.bytes, other.key.bytes, 32) < 0;
+        return zilkworm::lt_bytes32(key.bytes, other.key.bytes);  // bytes32 is alignas(8)
     }
 };
 
