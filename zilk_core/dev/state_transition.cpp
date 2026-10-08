@@ -452,6 +452,9 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
     return {cumulative_gas, true};
 }
 
+// check_root encodes account leaves (at most kAccRlpBufSize bytes) into TrieNodeFlat::buf.
+static_assert(sizeof(mpt::TrieNodeFlat::buf) >= zilkworm::kAccRlpBufSize);
+
 bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                                  evmc_revision rev) {
     const bool clear_empty = rev >= EVMC_SPURIOUS_DRAGON;

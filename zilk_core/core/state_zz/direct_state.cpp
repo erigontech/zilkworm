@@ -868,7 +868,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
         }
     }
     // Snapshot the pre-state leaf RLP before execution mutates the copy (mutators only clear acc_rlp_sroot_off).
-    acc->rlp_into_cache(std::bit_cast<evmc::bytes32>(acc->storage_root));
+    acc->rlp_into_cache();
     sys_println("USE_HASH_KEY: recovered account " +
                 to_hex(ByteView{addr.bytes, sizeof(addr.bytes)}, true) +
                 " from node-store (preimage missing from keys)");
@@ -1000,7 +1000,7 @@ bool DirectState::sanitize() {
         }
         pa->deleted = false;
         pa->modified = true;    // To be unset during addr_hashes loop
-        pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
+        pa->rlp_into_cache();
     };
     if (pre_state_meta_->n_accounts > 0) {
         pre_state_map_.for_each<20>(

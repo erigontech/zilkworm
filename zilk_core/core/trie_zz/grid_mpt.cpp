@@ -345,7 +345,15 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 }
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
                     // check pre-value matches
-                    if (grid_line.leaf.value != trie_upd.initial_value()) {
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+                    const ByteView initial = trie_upd.initial_value();
+                    const bool pre_value_ok = grid_line.leaf.value.size() == initial.size() &&
+                                              bytes_equal_any(grid_line.leaf.value.data(), initial.data(),
+                                                              initial.size());
+#else
+                    const bool pre_value_ok = grid_line.leaf.value == trie_upd.initial_value();
+#endif
+                    if (!pre_value_ok) {
 #ifndef NDEBUG
                         failed_ = true;
 #endif

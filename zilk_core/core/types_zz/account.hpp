@@ -40,6 +40,8 @@ struct alignas(8) Account {
 
     // Encodes into acc_rlp_buf and stamps acc_rlp_len + acc_rlp_sroot_off. Returns length.
     uint8_t rlp_into_cache(const evmc::bytes32& storage_root_arg) const;
+    // The same with this account's own storage_root, which is word-aligned (unlike a bytes32).
+    uint8_t rlp_into_cache() const;
 };
 
 bool decode_trie_account(silkworm::ByteView leaf_value, Account& out);
