@@ -446,6 +446,60 @@ TEST_CASE("secp256k1 recovery: the sum ends at the point at infinity") {
     }
 }
 
+TEST_CASE("secp256k1 recovery: exceptional cases on negated G and phi(G) digits") {
+    // G digits whose sign differs from the sign of their half are added as the negated table point
+    // (x, -y) without -y being computed (madd_inplace's NegY, and the restart that stores -y after
+    // scaling): u1 = -V (and -V lambda for the phi(G) half) has a negative half, so every digit of V
+    // is negated. With u2 = 2^m the R digit 1 sits at bit m, as V's top digit d does, so with
+    // R = -d G (or -d phi(G)) the accumulator meets the negated table point itself (a doubling inside
+    // the NegY addition), and with R = +d G it meets its negation (cancellation: the next, negated
+    // digit f restarts the sum at bit 0). Both parities of R give both. Random d and f, the table's
+    // extremes among them, and m from 0 (both digits at the same bit) to 100.
+    std::mt19937_64 rng{19};
+    std::vector<uint64_t> ds{3, 5, 1023, 1025, 2045, 2047};
+    for (int i = 0; i < 6; ++i)
+        ds.push_back((rng() % 2045 + 3) | 1);
+    size_t n = 0;
+    size_t infinity = 0;
+    for (const bool phi_half : {false, true}) {
+        const Fr scale = phi_half ? Fr{Curve::LAMBDA} : Fr{1};
+        for (const unsigned m : {0u, 1u, 20u, 64u, 100u}) {
+            for (const auto d : ds) {
+                const uint64_t f = m == 0 ? 0 : (rng() % 2048) | 1;
+                const uint256 v = (uint256{d} << m) + f;
+                const auto u1 = neg_mod_n((Fr{v} * scale).value());
+                const uint256 u2 = uint256{1} << m;
+                const auto R0 = multiple_of_g((Fr{d} * scale).value());
+                for (const bool odd : {false, true}) {
+                    const auto R = with_parity(R0, odd);
+                    infinity += check(sig_for(u1, u2, R),
+                                    std::string{phi_half ? "phiG" : "G"} + " d=" + std::to_string(d) +
+                                        " m=" + std::to_string(m) + (odd ? " odd" : " even")) ?
+                                    size_t{1} : size_t{0};
+                    ++n;
+                }
+            }
+        }
+    }
+    // With m = 0 and R = +d G the sum is the point at infinity, which ecrecover() rejects.
+    REQUIRE(n == 2 * 5 * ds.size() * 2);
+    REQUIRE(infinity >= 2 * ds.size() / 2);
+
+    // A negated G digit and a negated phi(G) digit around the same cancellation: u1 = -d 2^m - e
+    // lambda has the halves (-d 2^m, -e), so the phi(G) digit e sits at bit 0.
+    for (const unsigned m : {30u, 60u, 90u}) {
+        for (int i = 0; i < 6; ++i) {
+            const uint64_t d = (rng() % 2045 + 3) | 1;
+            const uint64_t e = (rng() % 2045 + 3) | 1;
+            const auto u1 = lattice(neg_mod_n(uint256{d} << m), neg_mod_n(uint256{e}));
+            const auto R0 = multiple_of_g(d);
+            for (const bool odd : {false, true})
+                check(sig_for(u1, uint256{1} << m, with_parity(R0, odd)),
+                    "mixed d=" + std::to_string(d) + " e=" + std::to_string(e) + " m=" + std::to_string(m));
+        }
+    }
+}
+
 TEST_CASE("secp256k1 recovery: rejected inputs") {
     const auto n = Curve::ORDER;
     const Bytes zero = to_bytes(0);
