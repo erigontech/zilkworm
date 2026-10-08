@@ -485,6 +485,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     auto end_created_hashes = created_acc_hashes.end();
 
     std::vector<mpt::TrieNodeFlat> storage_spill;
+    std::vector<const mpt::TrieNodeFlat*> storage_order_spill;
 
     mpt::GridMPT<true> storage_trie{direct_state, kEmptyRoot};
 
@@ -600,22 +601,26 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                 }
             }
 #endif
-            // Raw-key order != keccak(key) order; sort required.
-            if (storage_updates.size() > 1) [[likely]] {
-                auto* const data = storage_updates.data();
-                const std::size_t n = storage_updates.size();
+            // Raw-key order != keccak(key) order; sort required. Sort pointers: the records are
+            // 168 bytes and the walk only reads them.
+            const std::size_t n = storage_updates.size();
+            zilkworm::InlineVec<const mpt::TrieNodeFlat*, 32> order(n, storage_order_spill);
+            for (std::size_t i = 0; i < n; ++i) order.emplace_back(&storage_updates[i]);
+            if (n > 1) [[likely]] {
+                auto* const data = order.data();
                 if (n <= 16) [[likely]] {
                     for (std::size_t i = 1; i < n; ++i) {
-                        mpt::TrieNodeFlat key = std::move(data[i]);
+                        const mpt::TrieNodeFlat* key = data[i];
                         std::size_t j = i;
-                        while (j > 0 && key < data[j - 1]) {
-                            data[j] = std::move(data[j - 1]);
+                        while (j > 0 && *key < *data[j - 1]) {
+                            data[j] = data[j - 1];
                             --j;
                         }
-                        data[j] = std::move(key);
+                        data[j] = key;
                     }
                 } else {
-                    std::sort(data, data + n);
+                    std::sort(data, data + n,
+                              [](const mpt::TrieNodeFlat* a, const mpt::TrieNodeFlat* b) { return *a < *b; });
                 }
             }
             if (mpt::is_zero_quick(storage_root)) {  // new account
@@ -623,7 +628,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             }
             storage_trie.reset(storage_root);
             storage_root = storage_trie.calc_root_from_updates(
-                {storage_updates.data(), storage_updates.size()});
+                std::span<const mpt::TrieNodeFlat* const>{order.data(), order.size()});
             assert(!storage_trie.failed());  // debug-only: in release caught by root compare below
         }
 

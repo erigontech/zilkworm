@@ -137,11 +137,27 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     }
 }
 
+namespace {
+[[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat& u) noexcept { return u; }
+[[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat* u) noexcept { return *u; }
+}  // namespace
+
 template <bool DeletionEnabled>
 bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
+    return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
+}
+
+template <bool DeletionEnabled>
+bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted) {
+    return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
+}
+
+template <bool DeletionEnabled>
+template <typename It>
+bytes32 GridMPT<DeletionEnabled>::calc_root_impl(It updates_it, const It updates_end) {
     assert(!failed());
-    for (auto updates_it = updates_sorted.begin(); updates_it != updates_sorted.end(); ++updates_it) {
-        const auto& trie_upd = *updates_it;
+    for (; updates_it != updates_end; ++updates_it) {
+        const TrieNodeFlat& trie_upd = deref_update(*updates_it);
 
         auto new_nibbles = nibbles64::from_bytes32(trie_upd.key);
         search_nib_cursor_ = 0;
