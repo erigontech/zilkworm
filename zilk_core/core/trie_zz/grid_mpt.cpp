@@ -430,6 +430,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
     if (root_unfolded_ && !grid_[0].modified) {
         return prev_root_;
     }
+    // As fold_line() hashes such a branch, from the start: init_from_root() saves no keccak state.
+    if (grid_[0].kind == kBranch && hashes_from_witness(grid_[0].branch)) {
+        return std::bit_cast<bytes32>(grid_[0].branch.full_branch_hash(nullptr, 0));
+    }
     auto encoded = encode_line(grid_[0]);
     return keccak_bytes(encoded);
 }

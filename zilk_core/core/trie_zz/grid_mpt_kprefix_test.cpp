@@ -78,9 +78,12 @@ Folded fold(const BranchNode& b, size_t row) {
     const ByteView encoded = encode_branch(b);
     Folded f{};
     f.plain = ethash_keccak256(encoded.data(), encoded.size());
-    f.blocks = take_resumable_blocks(b, row, encoded);
-    f.got = f.blocks != 0 ? ethash_keccak256_resume(kprefix::pool[row], f.blocks, encoded.data(), encoded.size())
-                          : f.plain;
+    if (hashes_from_witness(b)) {
+        f.blocks = take_resumable_blocks(b, row);
+        f.got = b.full_branch_hash(kprefix::pool[row], f.blocks);
+    } else {
+        f.got = f.plain;
+    }
     return f;
 }
 
@@ -133,7 +136,7 @@ TEST_CASE("kprefix: a resumed hash equals the keccak of the patched node", "[tri
                 ++resumed;
                 // Consumed: the state was permuted in place, so a second fold cannot take it.
                 CHECK(kprefix::tag_orig[row] == nullptr);
-                CHECK(take_resumable_blocks(b, row, encode_branch(b)) == 0);
+                CHECK(take_resumable_blocks(b, row) == 0);
             }
             REQUIRE(std::memcmp(f.got.bytes, f.plain.bytes, 32) == 0);
         }
@@ -226,10 +229,11 @@ TEST_CASE("kprefix: a saved state is used only for the node it was saved for", "
         BranchNode b = unfold(changed, kNode);
         dirty_slot(b, 14, rng);
         kprefix::tag_orig[row] = changed;  // forge the tag over the changed node
-        const ByteView enc = encode_branch(b);
-        const unsigned blocks = take_resumable_blocks(b, row, enc);
+        REQUIRE(hashes_from_witness(b));
+        const unsigned blocks = take_resumable_blocks(b, row);
         REQUIRE(blocks == 2);
-        const ethash::hash256 stale = ethash_keccak256_resume(kprefix::pool[row], blocks, enc.data(), enc.size());
+        const ethash::hash256 stale = b.full_branch_hash(kprefix::pool[row], blocks);
+        const ByteView enc = encode_branch(b);
         const ethash::hash256 plain = ethash_keccak256(enc.data(), enc.size());
         CHECK(std::memcmp(stale.bytes, plain.bytes, 32) != 0);
     }

@@ -311,34 +311,45 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         return;
     }
 
-    const ByteView encoded = encode_line(grid_line);
-    // A full branch the lookup saved the keccak state of the leading blocks of, which this update left as
-    // they were, is hashed from that state.
-    const size_t row = depth & (kprefix::kRows - 1);
-    const unsigned resume_blocks =
-        grid_line.kind == kBranch ? take_resumable_blocks(grid_line.branch, row, encoded) : 0;
     const unsigned slot = grid_line.parent_slot;
     auto& parent = grid_[grid_line.parent_depth];
     parent.modified = true;
     parent.child_depth[slot] = 0;  // clear
+    // A full branch that differs from its witness node only in hash references is hashed from that
+    // node and its new hashes, with no encoding: before the line goes, as the hash reads it. If the
+    // lookup saved the keccak state of the node's leading blocks and this update left them as they
+    // were, the hash resumes from that state.
+    if (grid_line.kind == kBranch && hashes_from_witness(grid_line.branch)) {
+        const size_t row = depth & (kprefix::kRows - 1);
+        const unsigned blocks = take_resumable_blocks(grid_line.branch, row);
+        switch (parent.kind) {
+            case kBranch:
+                parent.branch.set_child_hash_of(slot, grid_line.branch, kprefix::pool[row], blocks);
+                break;
+            case kExt:
+                parent.ext.set_child_hash_of(grid_line.branch, kprefix::pool[row], blocks);
+                break;
+            default:
+                std::unreachable();
+        }
+        delete_line(depth);
+        return;
+    }
+    const ByteView encoded = encode_line(grid_line);
     // The line goes before its reference is written into the parent (its encoding is in
     // static_buffer, and the parent does not move): the keccak of an encoding of 32 bytes or more,
     // which returns straight into the parent's slot, then ends fold_line() with nothing live across it.
     delete_line(depth);
     switch (parent.kind) {
         case kBranch:
-            if (resume_blocks != 0) {
-                parent.branch.set_child_hash_resumed(slot, encoded, row, resume_blocks);
-            } else if (encoded.size() >= 32) {
+            if (encoded.size() >= 32) {
                 parent.branch.set_child_hash(slot, encoded);
             } else {
                 parent.branch.set_child(slot, encoded);
             }
             break;
         case kExt:
-            if (resume_blocks != 0) {
-                parent.ext.set_child_hash_resumed(encoded, row, resume_blocks);
-            } else if (encoded.size() >= 32) {
+            if (encoded.size() >= 32) {
                 parent.ext.set_child_hash(encoded);
             } else {
                 parent.ext.set_child(encoded);

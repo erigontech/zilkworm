@@ -140,16 +140,22 @@ struct BranchNode {
         ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(silkworm::keccak256(rlp));
     }
 
-    // set_child_hash() for a full branch whose keccak state after its first `blocks` blocks is in
-    // kprefix::pool[row]: the hash of `rlp` (see take_resumable_blocks()), which the call consumes.
-    inline void set_child_hash_resumed(unsigned slot, ByteView rlp, size_t row, unsigned blocks) noexcept {
+    // The keccak of the encoding of this branch, which hashes_from_witness() (rlp_sw.hpp) must accept:
+    // read from the witness node and the new hashes of the dirty slots, with no copy. With `blocks`
+    // nonzero, `state` holds the state of the node's first blocks (see take_resumable_blocks()),
+    // which the call consumes.
+    inline ethash::hash256 full_branch_hash(uint64_t* state, unsigned blocks) const noexcept {
+        return ethash_keccak256_full_branch(state, blocks, orig, dirty, child[0].bytes, child_ptr.data());
+    }
+
+    // set_child_hash() for the full branch `node`: its full_branch_hash().
+    inline void set_child_hash_of(unsigned slot, const BranchNode& node, uint64_t* state, unsigned blocks) noexcept {
         [[assume(slot < 16)]];
         dirty |= static_cast<uint16_t>(1u << slot);
         mask |= 1 << slot;
         child_len[slot] = 32;
         child_ptr[slot] = nullptr;
-        ::new (static_cast<void*>(child[slot].bytes))
-            ethash::hash256(ethash_keccak256_resume(kprefix::pool[row], blocks, rlp.data(), rlp.size()));
+        ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(node.full_branch_hash(state, blocks));
     }
 
     inline void delete_child(unsigned slot) noexcept {
@@ -181,9 +187,9 @@ struct ExtensionNode {
         child_len = 32;
     }
 
-    // set_child_hash() resumed from kprefix::pool[row], as BranchNode::set_child_hash_resumed().
-    inline void set_child_hash_resumed(ByteView rlp, size_t row, unsigned blocks) noexcept {
-        const ethash::hash256 h = ethash_keccak256_resume(kprefix::pool[row], blocks, rlp.data(), rlp.size());
+    // set_child_hash() for the full branch `node`, as BranchNode::set_child_hash_of().
+    inline void set_child_hash_of(const BranchNode& node, uint64_t* state, unsigned blocks) noexcept {
+        const ethash::hash256 h = node.full_branch_hash(state, blocks);
         typedef uint32_t __attribute__((may_alias)) w32;
         w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
         for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
