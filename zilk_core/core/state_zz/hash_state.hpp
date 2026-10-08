@@ -296,6 +296,19 @@ class HashState : public BlockState {
     template <class EmitLeaf>
     bool sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf);
 
+    // One frame of sweep's stack: a branch whose children are still being visited. It holds
+    // no decoded node, only a cursor into the branch's RLP list payload, which lives in the
+    // input blob or owned_bytes_ and so outlives the sweep: `cur` is the next unread child
+    // item, `end` one past the payload, `next_slot` the slot that item belongs to (0..15)
+    // and `path_len` the number of nibbles from the root down to the branch, the prefix the
+    // sweep's shared path buffer holds while the frame is live.
+    struct SweepFrame {
+        const std::uint8_t* cur;
+        const std::uint8_t* end;
+        std::uint8_t next_slot;
+        std::uint8_t path_len;
+    };
+
     // Single-path walk toward target_hash; true only when it proves the key absent below root.
     // See docs/hashstate.md, "Read-miss confirmation".
     bool confirm_absent(const evmc::bytes32& root, const evmc::bytes32& target_hash) const noexcept;
@@ -387,6 +400,13 @@ class HashState : public BlockState {
     // mutable: reads are logically const over the caches but still record this diagnostic.
     // Reset by build_state_from_trie so it scopes to the reads following one build.
     mutable std::uint32_t unconfirmed_read_count_{0};
+
+    // sweep's frame stack, reserved once (constructor) past the deepest well-formed trie: a
+    // frame is pushed only with a path shorter than 64 nibbles and every frame below it has a
+    // strictly shorter path, so at most 64 are live and no push reallocates. Empty between
+    // sweeps (each drains it) and cleared again at every sweep entry. sweep is not reentrant;
+    // confirm_absent keeps its own stackless walk.
+    std::vector<SweepFrame> sweep_stack_;
 
     // --- Write overlay (S2): copy-on-write over the pristine built caches ---------------
     // Reuses DirectState's container TYPES exactly (direct_state.hpp:82-89) so the later

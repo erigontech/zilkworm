@@ -740,6 +740,361 @@ TEST_CASE("HashState build_state_from_trie skips an absent storage root", "[hash
     CHECK(hs.storage_slot_count() == 0u);
 }
 
+// ---------------------------------------------------------------------------
+// The sweep's frames and path buffer. The sweep keeps one branch frame per level, a cursor
+// into the branch's RLP, and ONE path buffer for the whole trie, resetting it to the frame's
+// prefix at every child visit; a branch's children are read lazily, one item at a time, with
+// the strict child grammar. These fixtures pin the behaviour that layout depends on.
+// See docs/hashstate.md, "Trie sweep tests".
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// RLP list wrapper around an already-encoded payload (for hand-built branch nodes).
+[[nodiscard]] Bytes rlp_list_of(const Bytes& payload) {
+    Bytes out;
+    silkworm::rlp::encode_header(out, {.list = true, .payload_length = payload.size()});
+    out += payload;
+    return out;
+}
+
+}  // namespace
+
+// Sibling subtrees of one branch whose extensions differ in length, the long one first:
+// root[0x3] -> ext(50) -> branch -> leaf(12) x2, then root[0x9] -> ext(2) -> leaf(61), then
+// root[0xD] -> leaf(63). After the first subtree the path buffer holds 52 nibbles of its
+// prefix, so the second subtree's leaves are keyed correctly only if each child visit resets
+// the path to the root's own prefix (a stale suffix would push them past 64 nibbles or key
+// them under the wrong hash). The first subtree pops back from a frame at depth 52.
+TEST_CASE("HashState build_state_from_trie resets the path per child across sibling extensions",
+          "[hash_state]") {
+    HashState hs;
+
+    const Key kA1 = key_with(0x3, 3, 5);
+    Key kA2 = kA1;  // same 51-nibble prefix (root slot + 50 extension nibbles), then diverges
+    kA2.nib[51] = static_cast<uint8_t>((kA1.nib[51] + 1) & 0xF);
+    for (std::size_t i = 52; i < 64; ++i) kA2.nib[i] = static_cast<uint8_t>((i * 11 + 3) & 0xF);
+    const Key kB = key_with(0x9, 5, 2);
+    const Key kC = key_with(0xD, 7, 1);
+
+    TestAccount aA1, aA2, aB, aC;
+    aA1.build(41); aA2.build(42); aB.build(43); aC.build(44);
+
+    // Subtree A: a branch at depth 51 with two 12-nibble leaves, behind a 50-nibble extension.
+    const LeafNode leafA1 = make_leaf(&kA1.nib[52], 12, ByteView{aA1.leaf_value});
+    const evmc::bytes32 hA1 = hs.add_node(ByteView{zilkworm::encode_leaf(leafA1)});
+    const LeafNode leafA2 = make_leaf(&kA2.nib[52], 12, ByteView{aA2.leaf_value});
+    const evmc::bytes32 hA2 = hs.add_node(ByteView{zilkworm::encode_leaf(leafA2)});
+    BranchNode branchA;
+    branchA.set_child(kA1.nib[51], ByteView{hA1.bytes, 32});
+    branchA.set_child(kA2.nib[51], ByteView{hA2.bytes, 32});
+    const evmc::bytes32 hBranchA = hs.add_node(ByteView{zilkworm::encode_branch(branchA)});
+    const ExtensionNode extA = make_ext(&kA1.nib[1], 50, ByteView{hBranchA.bytes, 32});
+    const evmc::bytes32 hExtA = hs.add_node(ByteView{zilkworm::encode_ext(extA)});
+
+    // Subtree B: a 61-nibble leaf behind a 2-nibble extension.
+    const LeafNode leafB = make_leaf(&kB.nib[3], 61, ByteView{aB.leaf_value});
+    const evmc::bytes32 hB = hs.add_node(ByteView{zilkworm::encode_leaf(leafB)});
+    const ExtensionNode extB = make_ext(&kB.nib[1], 2, ByteView{hB.bytes, 32});
+    const evmc::bytes32 hExtB = hs.add_node(ByteView{zilkworm::encode_ext(extB)});
+
+    // Subtree C: a direct 63-nibble leaf.
+    const LeafNode leafC = make_leaf(&kC.nib[1], 63, ByteView{aC.leaf_value});
+    const evmc::bytes32 hC = hs.add_node(ByteView{zilkworm::encode_leaf(leafC)});
+
+    BranchNode root;
+    root.set_child(0x3, ByteView{hExtA.bytes, 32});
+    root.set_child(0x9, ByteView{hExtB.bytes, 32});
+    root.set_child(0xD, ByteView{hC.bytes, 32});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kOk);
+    CHECK(hs.missing_count() == 0u);
+    CHECK(hs.leaf_count() == 4u);
+    CHECK(hs.account_count() == 4u);
+    expect_account(hs.get_account(kA1.hash()), aA1, "A1");
+    expect_account(hs.get_account(kA2.hash()), aA2, "A2");
+    expect_account(hs.get_account(kB.hash()), aB, "B");
+    expect_account(hs.get_account(kC.hash()), aC, "C");
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// The 64-nibble bounds. A branch at depth 63 (root[0x2] -> ext(62) -> branch) is the deepest a
+// well-formed branch can sit: its children are leaves with empty paths (HP byte 0x20) at
+// exactly 64 nibbles, all cached. A 63-nibble extension under root[0x6] ends in a leaf with an
+// empty path: exactly 64 nibbles, cached. Two malformed subtrees stop without emitting and
+// without touching the counters: root[0x5] -> ext(63) -> branch (a branch at depth 64 has no
+// room for a child nibble) and root[0x8] -> ext(60) -> leaf(10) (71 nibbles). The 62- and
+// 63-nibble extension paths are 32-byte strings (0xa0 items), the shape a hash ref also has.
+TEST_CASE("HashState build_state_from_trie sweeps a branch at depth 63 and stops past 64 nibbles",
+          "[hash_state]") {
+    HashState hs;
+
+    // Three keys sharing a 63-nibble prefix (root slot 0x2 + 62 extension nibbles).
+    const Key kD1 = key_with(0x2, 3, 5);
+    Key kD2 = kD1;
+    Key kD3 = kD1;
+    kD2.nib[63] = static_cast<uint8_t>((kD1.nib[63] + 5) & 0xF);
+    kD3.nib[63] = static_cast<uint8_t>((kD1.nib[63] + 9) & 0xF);
+    const Key kE = key_with(0x6, 9, 7);  // root[0x6] -> ext(63) -> leaf(0)
+    const Key kX = key_with(0x5, 5, 2);  // malformed: ext(63) -> branch at depth 64
+    const Key kY = key_with(0x8, 7, 1);  // malformed: ext(60) -> leaf(10)
+
+    TestAccount aD1, aD2, aD3, aE, aX, aY;
+    aD1.build(51); aD2.build(52); aD3.build(53); aE.build(54); aX.build(55); aY.build(56);
+
+    // Depth-63 branch with three empty-path leaves.
+    const LeafNode leafD1 = make_leaf(&kD1.nib[64], 0, ByteView{aD1.leaf_value});
+    const evmc::bytes32 hD1 = hs.add_node(ByteView{zilkworm::encode_leaf(leafD1)});
+    const LeafNode leafD2 = make_leaf(&kD2.nib[64], 0, ByteView{aD2.leaf_value});
+    const evmc::bytes32 hD2 = hs.add_node(ByteView{zilkworm::encode_leaf(leafD2)});
+    const LeafNode leafD3 = make_leaf(&kD3.nib[64], 0, ByteView{aD3.leaf_value});
+    const evmc::bytes32 hD3 = hs.add_node(ByteView{zilkworm::encode_leaf(leafD3)});
+    BranchNode branch63;
+    branch63.set_child(kD1.nib[63], ByteView{hD1.bytes, 32});
+    branch63.set_child(kD2.nib[63], ByteView{hD2.bytes, 32});
+    branch63.set_child(kD3.nib[63], ByteView{hD3.bytes, 32});
+    const evmc::bytes32 hBranch63 = hs.add_node(ByteView{zilkworm::encode_branch(branch63)});
+    const ExtensionNode extD = make_ext(&kD1.nib[1], 62, ByteView{hBranch63.bytes, 32});
+    const evmc::bytes32 hExtD = hs.add_node(ByteView{zilkworm::encode_ext(extD)});
+
+    // 63-nibble extension ending in an empty-path leaf: exactly 64 nibbles.
+    const LeafNode leafE = make_leaf(&kE.nib[64], 0, ByteView{aE.leaf_value});
+    const evmc::bytes32 hE = hs.add_node(ByteView{zilkworm::encode_leaf(leafE)});
+    const ExtensionNode extE = make_ext(&kE.nib[1], 63, ByteView{hE.bytes, 32});
+    const evmc::bytes32 hExtE = hs.add_node(ByteView{zilkworm::encode_ext(extE)});
+
+    // Malformed X: a branch at depth 64 (nothing below it can be keyed).
+    const LeafNode leafX = make_leaf(&kX.nib[64], 0, ByteView{aX.leaf_value});
+    const evmc::bytes32 hX = hs.add_node(ByteView{zilkworm::encode_leaf(leafX)});
+    BranchNode branch64;
+    branch64.set_child(0x0, ByteView{hX.bytes, 32});
+    const evmc::bytes32 hBranch64 = hs.add_node(ByteView{zilkworm::encode_branch(branch64)});
+    const ExtensionNode extX = make_ext(&kX.nib[1], 63, ByteView{hBranch64.bytes, 32});
+    const evmc::bytes32 hExtX = hs.add_node(ByteView{zilkworm::encode_ext(extX)});
+
+    // Malformed Y: 1 + 60 + 10 = 71 nibbles.
+    const LeafNode leafY = make_leaf(&kY.nib[54], 10, ByteView{aY.leaf_value});
+    const evmc::bytes32 hY = hs.add_node(ByteView{zilkworm::encode_leaf(leafY)});
+    const ExtensionNode extY = make_ext(&kY.nib[1], 60, ByteView{hY.bytes, 32});
+    const evmc::bytes32 hExtY = hs.add_node(ByteView{zilkworm::encode_ext(extY)});
+
+    BranchNode root;
+    root.set_child(0x2, ByteView{hExtD.bytes, 32});
+    root.set_child(0x5, ByteView{hExtX.bytes, 32});
+    root.set_child(0x6, ByteView{hExtE.bytes, 32});
+    root.set_child(0x8, ByteView{hExtY.bytes, 32});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kOk);
+    CHECK(hs.missing_count() == 0u);
+    CHECK(hs.leaf_count() == 4u);     // D1, D2, D3, E; X and Y never reach a leaf
+    CHECK(hs.account_count() == 4u);
+    expect_account(hs.get_account(kD1.hash()), aD1, "D1");
+    expect_account(hs.get_account(kD2.hash()), aD2, "D2");
+    expect_account(hs.get_account(kD3.hash()), aD3, "D3");
+    expect_account(hs.get_account(kE.hash()), aE, "E");
+    CHECK(hs.find_built_account(kX.hash()) == nullptr);
+    CHECK(hs.find_built_account(kY.hash()) == nullptr);
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// Lazy child validation. A branch's children are read one item at a time as the sweep passes
+// them, so a malformed item at slot k (here a 1-byte string at slot 2: a branch child is only
+// 0x80, 0xa0 + 32 bytes or an embedded list 0xc0..0xf7) stops the branch at k: the leaves
+// under slots 0 and 1 are cached, nothing under slot 5 is, and no counter moves (a malformed
+// node is unreachable from a keccak-bound root; see hash_state.cpp). The node is built by
+// hand because the encoders cannot emit it.
+TEST_CASE("HashState build_state_from_trie stops a branch at its first malformed child item",
+          "[hash_state]") {
+    HashState hs;
+
+    const Key kA = key_with(0x0, 3, 5);
+    const Key kB = key_with(0x1, 5, 2);
+    const Key kC = key_with(0x5, 7, 1);
+    TestAccount aA, aB, aC;
+    aA.build(61); aB.build(62); aC.build(63);
+    const LeafNode leafA = make_leaf(&kA.nib[1], 63, ByteView{aA.leaf_value});
+    const evmc::bytes32 hA = hs.add_node(ByteView{zilkworm::encode_leaf(leafA)});
+    const LeafNode leafB = make_leaf(&kB.nib[1], 63, ByteView{aB.leaf_value});
+    const evmc::bytes32 hB = hs.add_node(ByteView{zilkworm::encode_leaf(leafB)});
+    const LeafNode leafC = make_leaf(&kC.nib[1], 63, ByteView{aC.leaf_value});
+    const evmc::bytes32 hC = hs.add_node(ByteView{zilkworm::encode_leaf(leafC)});
+
+    Bytes payload;
+    payload.push_back(0xa0); payload.append(hA.bytes, 32);  // slot 0: hash ref -> A
+    payload.push_back(0xa0); payload.append(hB.bytes, 32);  // slot 1: hash ref -> B
+    payload.push_back(0x81); payload.push_back(0xff);       // slot 2: a string, not a child
+    payload.push_back(0x80); payload.push_back(0x80);       // slots 3, 4: empty
+    payload.push_back(0xa0); payload.append(hC.bytes, 32);  // slot 5: hash ref -> C
+    for (int i = 6; i < 16; ++i) payload.push_back(0x80);   // slots 6..15: empty
+    payload.push_back(0x80);                                // value: empty
+    const Bytes node = rlp_list_of(payload);
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{node});
+
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kOk);
+    CHECK(hs.missing_count() == 0u);
+    CHECK(hs.leaf_count() == 2u);
+    CHECK(hs.account_count() == 2u);
+    expect_account(hs.get_account(kA.hash()), aA, "A");
+    expect_account(hs.get_account(kB.hash()), aB, "B");
+    CHECK(hs.find_built_account(kC.hash()) == nullptr);  // past the malformed slot: not swept
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// One-nibble paths. A one-nibble HP path is a single byte below 0x80 (0x30 | nibble for a
+// leaf), which RLP carries with no header: account X sits at root[0x4] -> ext(62) -> leaf(1),
+// and its storage trie holds one slot at root[s] -> ext(61) -> branch -> embedded leaf(1)
+// (a 3-byte inline node decoded in place from the branch's bytes) next to a direct
+// 63-nibble leaf. Every path totals 64 nibbles and every value reads back exactly.
+TEST_CASE("HashState build_state_from_trie decodes one-nibble leaf paths, hashed and embedded",
+          "[hash_state]") {
+    HashState hs;
+
+    // --- X's storage trie ---
+    evmc::bytes32 v1{};
+    v1.bytes[31] = 0x2A;  // single-byte value: the embedded leaf is [0x3n, 0x2a] = 3 bytes
+    evmc::bytes32 v2{};
+    for (std::size_t i = 0; i < 32; ++i) v2.bytes[i] = static_cast<uint8_t>(0xB0u + i);
+    const Key s1 = key_with(0x7, 3, 5);  // root[0x7] -> ext(61) -> branch[nib 62] -> leaf(1)
+    const Key s2 = key_with(0xC, 5, 2);  // root[0xC] -> leaf(63)
+
+    const Bytes ev1 = encode_storage_value(v1);
+    const LeafNode sleaf1 = make_leaf(&s1.nib[63], 1, ByteView{ev1});
+    const Bytes emb1{zilkworm::encode_leaf(sleaf1)};  // own it before the next encode call
+    REQUIRE(emb1.size() == 3u);
+    REQUIRE(emb1[1] < 0x80);  // the one-nibble HP path is a bare byte
+    BranchNode sbranch;
+    sbranch.set_child(s1.nib[62], ByteView{emb1});  // < 32 bytes -> embedded inline child
+    const evmc::bytes32 hSBranch = hs.add_node(ByteView{zilkworm::encode_branch(sbranch)});
+    const ExtensionNode sext = make_ext(&s1.nib[1], 61, ByteView{hSBranch.bytes, 32});
+    const evmc::bytes32 hSExt = hs.add_node(ByteView{zilkworm::encode_ext(sext)});
+    const Bytes ev2 = encode_storage_value(v2);
+    const LeafNode sleaf2 = make_leaf(&s2.nib[1], 63, ByteView{ev2});
+    const evmc::bytes32 hS2 = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf2)});
+    BranchNode sroot;
+    sroot.set_child(0x7, ByteView{hSExt.bytes, 32});
+    sroot.set_child(0xC, ByteView{hS2.bytes, 32});
+    const evmc::bytes32 storage_root = hs.add_node(ByteView{zilkworm::encode_branch(sroot)});
+
+    // --- account trie: root[0x4] -> ext(62) -> leaf(1) ---
+    const Key kX = key_with(0x4, 9, 7);
+    const Bytes accX = account_leaf_value(3, storage_root);
+    const LeafNode leafX = make_leaf(&kX.nib[63], 1, ByteView{accX});
+    const Bytes leafX_rlp{zilkworm::encode_leaf(leafX)};
+    REQUIRE(leafX_rlp.size() > 32u);  // hash-referenced
+    const evmc::bytes32 hX = hs.add_node(ByteView{leafX_rlp});
+    const ExtensionNode extX = make_ext(&kX.nib[1], 62, ByteView{hX.bytes, 32});
+    const evmc::bytes32 hExtX = hs.add_node(ByteView{zilkworm::encode_ext(extX)});
+    BranchNode root;
+    root.set_child(0x4, ByteView{hExtX.bytes, 32});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kOk);
+    CHECK(hs.missing_count() == 0u);
+    CHECK(hs.leaf_count() == 1u);
+    CHECK(hs.account_count() == 1u);
+    CHECK(hs.storage_slot_count() == 2u);
+    CHECK(hs.storage_count() == 2u);
+    const Account* got = hs.get_account(kX.hash());
+    REQUIRE(got != nullptr);
+    CHECK(got->nonce == 3u);
+    CHECK(std::memcmp(got->storage_root, storage_root.bytes, 32) == 0);
+    CHECK(eq32(hs.get_storage(kX.hash(), s1.hash()), v1));
+    CHECK(eq32(hs.get_storage(kX.hash(), s2.hash()), v2));
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// A build whose account root is missing leaves the HashState ready for the next build: the
+// sweep's frame stack is a member, cleared at every entry, and the counters are reset by
+// build_state_from_trie, so a later build from a present root derives accounts and storage
+// cleanly on the same instance.
+TEST_CASE("HashState build_state_from_trie after a missing-root build derives the next root",
+          "[hash_state]") {
+    HashState hs;
+
+    evmc::bytes32 v{};
+    v.bytes[30] = 0x12;
+    v.bytes[31] = 0x34;
+    const Key s = key_with(0x3, 3, 5);
+    const Bytes ev = encode_storage_value(v);
+    const LeafNode sleaf = make_leaf(&s.nib[1], 63, ByteView{ev});
+    const evmc::bytes32 hS = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf)});
+    BranchNode sroot;
+    sroot.set_child(0x3, ByteView{hS.bytes, 32});
+    const evmc::bytes32 storage_root = hs.add_node(ByteView{zilkworm::encode_branch(sroot)});
+
+    const Key kX = key_with(0x1, 5, 2);
+    const Bytes accX = account_leaf_value(8, storage_root);
+    const LeafNode leafX = make_leaf(&kX.nib[1], 63, ByteView{accX});
+    const evmc::bytes32 hX = hs.add_node(ByteView{zilkworm::encode_leaf(leafX)});
+    BranchNode root;
+    root.set_child(0x1, ByteView{hX.bytes, 32});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    evmc::bytes32 never_added{};
+    for (int i = 0; i < 32; ++i) never_added.bytes[i] = static_cast<uint8_t>(0x31 + i);
+    CHECK(hs.build_state_from_trie(never_added) == HashState::BuildStatus::kMissingNode);
+    CHECK(hs.missing_count() == 1u);
+    CHECK(hs.account_count() == 0u);
+    CHECK(hs.storage_count() == 0u);
+
+    CHECK(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
+    CHECK(hs.missing_count() == 0u);
+    CHECK(hs.leaf_count() == 1u);
+    CHECK(hs.account_count() == 1u);
+    CHECK(hs.storage_slot_count() == 1u);
+    CHECK(hs.storage_count() == 1u);
+    const Account* got = hs.get_account(kX.hash());
+    REQUIRE(got != nullptr);
+    CHECK(got->nonce == 8u);
+    CHECK(eq32(hs.get_storage(kX.hash(), s.hash()), v));
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
+// An account leaf is decoded straight into its arena slot, which is given back when the
+// value is not an account. A hash-referenced leaf whose value is a 40-byte string (slot 0x2)
+// precedes two real accounts: it is counted as reached and not cached, and the accounts
+// swept after it land intact, so the returned slot neither leaks nor shifts them.
+TEST_CASE("HashState build_state_from_trie caches nothing for an undecodable hashed leaf",
+          "[hash_state]") {
+    HashState hs;
+
+    const Key kN = key_with(0x2, 3, 5);
+    const Key kP = key_with(0x5, 5, 2);
+    const Key kQ = key_with(0x9, 7, 1);
+    Bytes not_an_account;
+    for (int i = 0; i < 40; ++i) not_an_account.push_back(static_cast<uint8_t>(0xE0 + i));
+    TestAccount aP, aQ;
+    aP.build(71); aQ.build(72);
+
+    const LeafNode leafN = make_leaf(&kN.nib[1], 63, ByteView{not_an_account});
+    const evmc::bytes32 hN = hs.add_node(ByteView{zilkworm::encode_leaf(leafN)});
+    const LeafNode leafP = make_leaf(&kP.nib[1], 63, ByteView{aP.leaf_value});
+    const evmc::bytes32 hP = hs.add_node(ByteView{zilkworm::encode_leaf(leafP)});
+    const LeafNode leafQ = make_leaf(&kQ.nib[1], 63, ByteView{aQ.leaf_value});
+    const evmc::bytes32 hQ = hs.add_node(ByteView{zilkworm::encode_leaf(leafQ)});
+    BranchNode root;
+    root.set_child(0x2, ByteView{hN.bytes, 32});
+    root.set_child(0x5, ByteView{hP.bytes, 32});
+    root.set_child(0x9, ByteView{hQ.bytes, 32});
+    const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    const auto status = hs.build_state_from_trie(root_hash);
+    CHECK(status == HashState::BuildStatus::kOk);
+    CHECK(hs.missing_count() == 0u);
+    CHECK(hs.leaf_count() == 3u);
+    CHECK(hs.account_count() == 2u);
+    CHECK(hs.find_built_account(kN.hash()) == nullptr);
+    expect_account(hs.get_account(kP.hash()), aP, "P");
+    expect_account(hs.get_account(kQ.hash()), aQ, "Q");
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
 // Read misses: confirm_absent either proves the key empty or records an unconfirmed read.
 // See docs/hashstate.md, "Partial-witness reads".
 
