@@ -577,3 +577,39 @@ TEST_CASE("HashIndex 20-byte address keys", "[hash_index]") {
     CHECK(*idx.find(ref20(c1)) == 501u);
     CHECK(*idx.find(ref20(c2)) == 502u);
 }
+
+// clear empties the table in place: every key misses afterwards, the count is zero, the
+// capacity is what it was (no reallocation), and the table takes keys again from empty. A
+// clear of an empty table is a no-op. The value type is the memo's (uint8_t, entries of 1).
+TEST_CASE("HashIndex clear empties the table in place", "[hash_index]") {
+    using Idx = HashIndex<64, &storage_key8, uint8_t>;
+    Idx idx{16};
+    const uint32_t cap = idx.capacity();
+    idx.clear();  // empty: a no-op
+    CHECK(idx.size() == 0u);
+    CHECK(idx.capacity() == cap);
+
+    for (uint32_t i = 0; i < 16; ++i)
+        REQUIRE(idx.insert(ref64(make_key64(0x40000ULL + i, 0x50000ULL + i, 0xAA)), 1u));
+    REQUIRE(idx.size() == 16u);
+    REQUIRE(idx.find(ref64(make_key64(0x40003ULL, 0x50003ULL, 0xAA))).has_value());
+
+    idx.clear();
+    CHECK(idx.size() == 0u);
+    CHECK(idx.capacity() == cap);
+    for (uint32_t i = 0; i < 16; ++i) {
+        CAPTURE(i);
+        CHECK_FALSE(idx.find(ref64(make_key64(0x40000ULL + i, 0x50000ULL + i, 0xAA))).has_value());
+    }
+
+    // Refilled from empty: 15 of the same keys and a new one land (16 entries, the count the
+    // table was sized for), with no growth.
+    for (uint32_t i = 0; i < 15; ++i)
+        REQUIRE(idx.insert(ref64(make_key64(0x40000ULL + i, 0x50000ULL + i, 0xAA)), 1u));
+    REQUIRE(idx.insert(ref64(make_key64(0x40100ULL, 0x50100ULL, 0xBB)), 1u));
+    CHECK(idx.size() == 16u);
+    CHECK(idx.capacity() == cap);
+    CHECK(idx.find(ref64(make_key64(0x4000EULL, 0x5000EULL, 0xAA))).has_value());
+    CHECK_FALSE(idx.find(ref64(make_key64(0x4000FULL, 0x5000FULL, 0xAA))).has_value());
+    CHECK(idx.find(ref64(make_key64(0x40100ULL, 0x50100ULL, 0xBB))).has_value());
+}

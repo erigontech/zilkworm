@@ -322,7 +322,20 @@ a single-path confirmation walk, `confirm_absent`, and bump
   recorded). This also catches a storage root that the build legitimately
   skipped because its node was never added: `find_node_rlp` misses inside
   `confirm_absent`, so the read is recorded rather than passed off as a silent
-  zero.
+  zero. A miss the walk proves absent is memoized for the build under its
+  `addr_hash ‖ slot_hash` key (`absent_slots_`, a
+  `HashIndex<64, &storage_key8, uint8_t>` holding a constant 1 per entry), so a
+  repeated miss of the same slot, which a block often makes, is answered from
+  the memo without another walk. Only a proven miss is entered; an unprovable
+  one is recorded on every read, as before. The memo is sound because a proof
+  reads nothing that changes between builds: the account's `storage_root` in
+  the append-only arena record the build wrote, and keccak-bound nodes that a
+  later add can neither alter nor turn into the key. `build_state_from_trie`
+  clears it (`HashIndex::clear`) with the counter. It is consulted only by
+  `note_storage_miss_`, after the account and empty-root early-outs:
+  `read_storage` returns before `get_storage` for a wiped account, so a wiped
+  account never reaches it, and `find_built_storage` and the accept check's
+  gather never probe it.
 
 Either way the read still returns its blank value (`nullptr` for an account,
 zero for a slot), so a value-returning caller proceeds. The accept gate rejects
@@ -353,18 +366,44 @@ only this diagnostic.
 store, starting at `root`, toward `target_hash`, a 32-byte trie path (an
 `addr_hash` for the account trie, or a `slot_hash` for a storage trie). It
 returns `true` only when it proves `target_hash` absent below `root`, and
-`false` when it cannot. It strips the outer list header with
-`rlp::decode_header`, as the sweep does, and decodes the node with `decode_node`
-from `rlp_sw.hpp` for the branch / extension / leaf split, the same grammar the
-sweep reads item by item, so a read confirmation reads trie bytes the way the
-build did.
+`false` when it cannot. It reads a node the way the sweep does, and only as
+much of it as the one path needs:
+
+- It strips the outer list header with `rlp::decode_header` and classifies the
+  node by the extents of its first two items (exactly two is an extension or
+  leaf, more a branch), the rule `decode_node` applies. No node is decoded
+  whole: there is no `BranchNode`, no unpacked path and no copy of a child.
+- At a branch, the target's next nibble selects the slot. The nibble is read in
+  place from the key byte (`target_nibble`) rather than from a 64-nibble unpack
+  of the key, since a walk looks at only a few of them. The walk reads the
+  child items from the first up to that slot, one at a time with the strict
+  three-case child grammar (`next_branch_child`, shared with the sweep: `0x80`
+  is an empty slot, `0xa0` plus 32 bytes a hash ref, `0xc0..0xf7` an embedded
+  node of at most 31 payload bytes; anything else, or an item past the
+  payload's end, is malformed), and stops there. The siblings past the slot and
+  the value item are never read. A hash child is fetched from the store
+  straight from its bytes in the node; an embedded child is followed in place,
+  since node bytes live in the input blob or `owned_bytes_` and never move
+  (should node storage ever become transient, an embedded child would need a
+  stable copy again).
+- At an extension or leaf, the two items are decoded with `rlp::decode_header`
+  (the canonical-form checks `decode_node` has), and the HP-encoded path is
+  compared nibble by nibble in place against the target's remainder, with a
+  running byte pointer and a high/low toggle, under `hp_decode`'s grammar and
+  its 64-nibble bound. The compare stops at the first mismatch, which usually
+  comes within a few nibbles.
+
+Validation is lazy, as it is in the sweep: a malformed child item at or before
+the target's slot stops the walk unconfirmed, one past it is not seen. Both are
+confined to shapes a keccak-bound root cannot reach (see
+[Building state from the trie](#building-state-from-the-trie)); the slot of a
+genuine branch is read exactly.
 
 It proves absence (returns `true`) in these cases, mirroring the sweep's own
 node handling:
 
 - At a branch, the child slot for the target's next nibble is the empty marker
-  `0x80` (`decode_node` reports it as `child_len == 0`), so nothing hangs below
-  that nibble.
+  `0x80`, so nothing hangs below that nibble.
 - At an extension or leaf, the node's own path nibbles diverge from the target:
   a nibble mismatch, or a path that outlasts the target. The target cannot lie
   below this node.
@@ -373,8 +412,12 @@ node handling:
 It cannot prove absence (returns `false`) when:
 
 - A node the walk needs (the seeding root or a hash-referenced child) is missing
-  from the store, or a node on the path is malformed or undecodable. Emptiness
-  is then unknown and must not be guessed.
+  from the store, or a node on the path is malformed where the walk reads it: an
+  outer item that is not a list, a truncated first or second item, a child item
+  at or before the target's slot that is not in the child grammar, a branch at
+  depth 64 (no nibble is left to index it), a path of more than 64 nibbles, a
+  leaf without a value, or an extension whose child is not a 32-byte hash.
+  Emptiness is then unknown and must not be guessed.
 - A leaf's path matches the target exactly. The key is then actually present,
   not absent.
 
@@ -609,6 +652,9 @@ upholds with its embedded-key `memcmp`.
   first wins), and the sentinel value is rejected (`kFull`, also the cannot-happen
   no-free-bucket case). It grows the table exactly as `insert` does. `insert` keeps its
   overwrite semantics; the node and code stores add through `try_insert`.
+- `clear()` empties a table in place, keeping its capacity: every bucket goes back to the
+  sentinel and the count to zero, with no reallocation. HashState's memo of proven-absent
+  storage slots is cleared this way at every build.
 
 ## Trie fold under HashState
 
@@ -1189,6 +1235,10 @@ place (also after an `insert` overwrote it), a colliding neighbour is claimed by
 than taken for the first key, the sentinel value is rejected, and filling past the hint grows
 the table with every key still findable.
 
+`HashIndex clear empties the table in place` checks `clear` on a memo-shaped table (64-byte
+keys, `uint8_t` values): a no-op when empty, then every key misses, the count is zero and
+the capacity unchanged, and the table takes keys again with no growth.
+
 ### Node and code store
 
 `HashState` is the node and code store for the SSZ input path, parallel to `DirectState`'s
@@ -1280,6 +1330,45 @@ confirmation walk (`confirm_absent`) down the key's path:
   rejects later.
 
 These fixtures are hand-built with the same MPT encoders as the build-sweep fixtures.
+
+The walk's own cases (`HashState confirm_absent ...`) pin its decision table along every kind
+of path a miss can take, with the same fixtures:
+
+- `reads the probe's root-branch slot, first to last`: diverging leaves at root slots 0, 1, 7
+  and 15 (the first two are the items the walk classifies the node by, the last is reached
+  after every sibling was skipped) and the empty slots 2 and 14, all proven.
+- `skips to a pruned storage slot and records the read`: the same through `get_storage`, with
+  a pruned child at slot 15 that leaves every read of it unconfirmed.
+- `follows an embedded child in place`: root -> ext(60) -> branch -> embedded leaf(2). Probes
+  that diverge inside the extension, at an empty slot of the deep branch, or on either nibble
+  of the embedded leaf are proven; the leaf's own key, which the build did not cache (its
+  value is no account), is refuted.
+- `at a branch at depth 63 and past 64 nibbles`: an empty slot of a branch at depth 63 and a
+  divergence inside its 62-nibble extension are proven, so is a leaf path that outlasts the
+  key, while a branch at depth 64 and a 66-nibble HP path cannot confirm.
+- `compares one-nibble and even HP paths`: divergences on a hashed and on an embedded
+  one-nibble leaf, on the last nibble of an even extension and the first of an odd one, and
+  at an empty slot of a deep storage branch.
+- `refutes a leaf at the key the build did not cache`: the exact key is recorded on every
+  read; a key one nibble off is proven by the same leaf.
+- `stops at a malformed sibling before the probe's slot`: the hand-built branch with a 1-byte
+  string at slot 2. The slots before it are proven exactly as the sweep swept them; every
+  slot from it on, the empty marker right after it included, is left unconfirmed.
+- `HP compare matches hp_decode on random paths`: 1,000 random single-node tries (a leaf or
+  an extension with 0..64 path nibbles) probed with keys that share a random-length prefix
+  with the path; the expected answer is computed from `hp_decode` over the node's own HP
+  string and `nibbles64::from_bytes32` over the probe.
+
+The memo of proven-absent slots (`absent_slot_count()` is its size):
+
+- `HashState get_storage memoizes a proven-absent slot until the next build`: a proven miss
+  enters the memo once and a repeat of it adds no entry and no record; an unprovable miss is
+  never entered and is recorded on every read; a miss answered before the memo (an account the
+  cache lacks, an empty storage root) enters nothing; a rebuild clears it and the first read
+  after it walks again.
+- `HashState read_storage of a wiped account never reaches the absent-slot memo`: before the
+  wipe a cold slot is entered and a pruned one recorded; after it the memoized, the pruned and
+  a fresh cold slot read zero with no entry and no record added.
 
 ### GridMPT fold over HashState
 

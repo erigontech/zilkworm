@@ -142,6 +142,16 @@ class HashIndex {
         return find_ptr(key);
     }
 
+    // Empty the table in place, keeping its capacity: every bucket back to the empty
+    // sentinel, the count to zero. For a table that is refilled from scratch per use (the
+    // HashState memo of proven-absent slots, cleared per build), so no reallocation. A no-op
+    // on an empty table.
+    void clear() noexcept {
+        if (size_ == 0u) return;
+        std::fill(buckets_.begin(), buckets_.end(), Bucket{});
+        size_ = 0u;
+    }
+
     uint32_t capacity() const noexcept { return capacity_; }
     uint32_t size() const noexcept { return size_; }
     // Bytes per bucket (key + value, padded to the 8-byte bucket alignment). For tests.

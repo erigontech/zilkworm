@@ -122,7 +122,9 @@ class HashState : public BlockState {
     // See docs/hashstate.md, "Account and storage caches".
     [[gnu::always_inline]] inline evmc::bytes32
     get_storage(const evmc::bytes32& addr_hash, const evmc::bytes32& slot_hash) const noexcept {
-        std::uint8_t key[64];
+        // 8-aligned: note_storage_miss_ reads the slot_hash half through an evmc::bytes32
+        // reference, whose alignment the array must honour.
+        alignas(8) std::uint8_t key[64];
         std::memcpy(key, addr_hash.bytes, 32);
         std::memcpy(key + 32, slot_hash.bytes, 32);
         if (auto off = storage_index_.find(key)) {
@@ -130,7 +132,7 @@ class HashState : public BlockState {
             std::memcpy(v.bytes, storage_arena_.data() + *off, 32);
             return v;
         }
-        note_storage_miss_(addr_hash, slot_hash);
+        note_storage_miss_(key);
         return {};
     }
 
@@ -154,6 +156,9 @@ class HashState : public BlockState {
     // same way as missing_count(): the accept gate accepts only when BOTH are zero, i.e.
     // every read either hit the cache or was confirmed genuinely empty (fail-closed).
     std::uint32_t unconfirmed_read_count() const noexcept { return unconfirmed_read_count_; }
+    // Storage slots a read miss since the last build proved absent and memoized, so a
+    // repeated miss of the same slot is answered without another walk (diagnostic).
+    std::uint32_t absent_slot_count() const noexcept { return absent_slots_.size(); }
 
     // --- silkworm::BlockState interface + BLOCKHASH store ------------------------------
     // See docs/hashstate.md, "Block headers and BLOCKHASH".
@@ -260,7 +265,7 @@ class HashState : public BlockState {
     [[gnu::always_inline]] inline bool
     find_built_storage(const evmc::bytes32& addr_hash,
                        const evmc::bytes32& slot_hash) const noexcept {
-        std::uint8_t key[64];
+        alignas(8) std::uint8_t key[64];
         std::memcpy(key, addr_hash.bytes, 32);
         std::memcpy(key + 32, slot_hash.bytes, 32);
         return storage_index_.find(key).has_value();
@@ -314,10 +319,11 @@ class HashState : public BlockState {
     bool confirm_absent(const evmc::bytes32& root, const evmc::bytes32& target_hash) const noexcept;
 
     // Miss handlers for get_account / get_storage: count a miss that cannot be proven empty.
+    // The storage handler takes the 64-byte addr_hash || slot_hash key get_storage probed
+    // the storage index with, which is also the memo's key.
     // See docs/hashstate.md, "Read-miss confirmation".
     void note_account_miss_(const evmc::bytes32& addr_hash) const noexcept;
-    void note_storage_miss_(const evmc::bytes32& addr_hash,
-                            const evmc::bytes32& slot_hash) const noexcept;
+    void note_storage_miss_(const std::uint8_t (&key)[64]) const noexcept;
 
     // Decode `leaf_value` (an account-leaf RLP) and cache it under `addr_hash`. Bumps
     // leaf_count_ for every leaf reached; on a successful decode also inserts into the
@@ -400,6 +406,20 @@ class HashState : public BlockState {
     // mutable: reads are logically const over the caches but still record this diagnostic.
     // Reset by build_state_from_trie so it scopes to the reads following one build.
     mutable std::uint32_t unconfirmed_read_count_{0};
+
+    // Memo of the storage slots (addr_hash || slot_hash) whose read miss a confirm_absent walk
+    // since the last build proved absent, so a repeated miss of the same slot (a block often
+    // reads a cold slot more than once) is answered without walking again. Only a PROVEN miss
+    // is entered (value 1; HashIndex's empty sentinel is 0): an unprovable one is recorded on
+    // every read, as before. Sound because a proof reads nothing that can change between
+    // builds: the account's storage_root sits in the append-only arena record the build
+    // wrote, and the nodes the walk reads are keccak-bound, so a later add_node can neither
+    // alter them nor turn an empty slot or a diverging path into the key. Cleared by
+    // build_state_from_trie with the other read-miss state. Consulted by note_storage_miss_
+    // only, after its account and empty-root early-outs; read_storage returns before
+    // get_storage for a wiped account, so no wiped account reaches it, and find_built_storage
+    // and the accept check's gather never probe it. mutable as unconfirmed_read_count_ is.
+    mutable HashIndex<64, &storage_key8, std::uint8_t> absent_slots_{1024};
 
     // sweep's frame stack, reserved once (constructor) past the deepest well-formed trie: a
     // frame is pushed only with a path shorter than 64 nibbles and every frame below it has a
