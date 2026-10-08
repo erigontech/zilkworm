@@ -482,7 +482,8 @@ void compare_mstore(size_t capacity, size_t size, const evmone::uint256& offset,
 
     int64_t gas_ref = gas, gas_fast = gas;
     const bool ok_ref = evmone::check_memory(gas_ref, ref, offset, 32);
-    const bool ok_fast = evmone::check_memory_for_mstore(gas_fast, fastm, offset);
+    size_t at = 0;
+    const bool ok_fast = evmone::check_memory_for_mstore(gas_fast, fastm, offset, at);
     if (ok_ref)
         std::memcpy(&ref[static_cast<size_t>(offset)], value, 32);
     if (ok_fast)
@@ -494,6 +495,9 @@ void compare_mstore(size_t capacity, size_t size, const evmone::uint256& offset,
     REQUIRE(ok_fast == ok_ref);
     REQUIRE(gas_fast == gas_ref);
     REQUIRE(fastm.size() == ref.size());
+    REQUIRE(fastm.limit32() == ref.limit32());
+    if (ok_fast)
+        REQUIRE(at == static_cast<size_t>(offset));  // the checked offset the store goes on with
     if (ok_ref) {
         const size_t lo = size > 256 ? size - 256 : 0;
         REQUIRE(std::memcmp(&fastm[lo], &ref[lo], ref.size() - lo) == 0);
@@ -594,6 +598,7 @@ TEST_CASE("Growing the empty memory to 3 words matches grow_memory() with a stor
         std::memcpy(&fastm[0x40], value, 32);
         REQUIRE(fastm.size() == 0x60);
         REQUIRE(ref.size() == 0x60);
+        REQUIRE(fastm.limit32() == ref.limit32());  // the limit the next access compares with
         REQUIRE(std::memcmp(&fastm[0], &ref[0], 0x60) == 0);
     }
 }
