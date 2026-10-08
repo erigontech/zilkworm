@@ -5,6 +5,7 @@
 #include "block.hpp"
 
 #include <bit>
+#include <limits>
 
 #include <zilk_core/core/protocol/param.hpp>
 #include <zilk_core/core/rlp/decode_vector.hpp>
@@ -37,9 +38,20 @@ static intx::uint256 fake_exponential(const intx::uint256& factor,
                                       const intx::uint256& denominator) {
     intx::uint256 output{0};
     intx::uint256 numerator_accum{factor * denominator};
-    for (unsigned i{1}; numerator_accum > 0; ++i) {
-        output += numerator_accum;
-        numerator_accum = (numerator_accum * numerator) / (denominator * i);
+    if (denominator <= std::numeric_limits<uint32_t>::max()) {
+        // The protocol's update fractions are ~2^23: with a 32-bit denominator, denominator * i
+        // fits in 64 bits, which avoids a uint256 multiplication and takes the fast
+        // single-word division path.
+        const auto denom64 = static_cast<uint64_t>(denominator);
+        for (unsigned i{1}; numerator_accum > 0; ++i) {
+            output += numerator_accum;
+            numerator_accum = (numerator_accum * numerator) / (denom64 * uint64_t{i});
+        }
+    } else {
+        for (unsigned i{1}; numerator_accum > 0; ++i) {
+            output += numerator_accum;
+            numerator_accum = (numerator_accum * numerator) / (denominator * i);
+        }
     }
     return output / denominator;
 }

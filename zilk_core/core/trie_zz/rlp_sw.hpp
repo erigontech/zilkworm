@@ -21,10 +21,11 @@
 
 namespace zilkworm {
 
-// rlp helpers live in silkworm::rlp; alias for local readability.
+// rlp/endian helpers live in silkworm; aliases for local readability.
 namespace rlp = ::silkworm::rlp;
+namespace endian = ::silkworm::endian;
 
-#if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG)
+#if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG) && !defined(AIRBENDER)
 inline thread_local Bytes static_buffer = []() {
     Bytes buf;
     buf.reserve(1024);
@@ -163,56 +164,113 @@ inline const Bytes& encode_ext(const ExtensionNode& e) {
     if (e.child_len == 0) {
         return empty;
     }
-    static_buffer.clear();
 
-    // Encode HP path into stack buffer (avoid allocation)
+    // HP-encode path on the stack.
     uint8_t hpbuf[1 + 32];
     uint8_t* hp_end = encode_hp_path(hpbuf, e.path.nib.data(), e.path.len, /*leaf*/ false);
-    ByteView hp_encoded{hpbuf, static_cast<size_t>(hp_end - hpbuf)};
+    const size_t hp_len = static_cast<size_t>(hp_end - hpbuf);
 
-    // Calculate payload length
-    size_t child_rlp_len = e.child_len;
-    if (child_rlp_len == 32) {
-        // Hash reference: needs RLP encoding (0xa0 + 32 bytes = 33 bytes)
-        child_rlp_len = 33;
-    }
+    // HP path RLP length.
+    const size_t hp_rlp_len = hp_len + ((hp_len != 1 || hpbuf[0] >= rlp::kEmptyStringCode) ? 1 : 0);
 
-    rlp::Header h{
-        .list = true,
-        .payload_length = rlp::length(hp_encoded) + child_rlp_len};
-    rlp::encode_header(static_buffer, h);
-    rlp::encode(static_buffer, hp_encoded);
+    // Child RLP length.
+    const size_t child_rlp_len = (e.child_len == 32) ? 33 : e.child_len;
 
-    // Encode child
-    if (e.child_len == 32) {
-        // Hash reference: RLP-encode the 32-byte hash
-        ByteView child_hash{e.child.bytes, 32};
-        rlp::encode(static_buffer, child_hash);
+    const size_t payload = hp_rlp_len + child_rlp_len;
+    const size_t hdr_sz = (payload < 56) ? 1 : 1 + intx::count_significant_bytes(payload);
+    const size_t total = hdr_sz + payload;
+
+    static_buffer.resize(total);
+    uint8_t* out = static_buffer.data();
+
+    // List header.
+    if (payload < 56) {
+        *out++ = static_cast<uint8_t>(rlp::kEmptyListCode + payload);
     } else {
-        // Embedded node: already RLP-encoded, append as-is
-        static_buffer.append(e.child.bytes, e.child_len);
+        auto be = endian::to_big_compact(payload);
+        *out++ = static_cast<uint8_t>(0xF7 + be.size());
+        std::memcpy(out, be.data(), be.size());
+        out += be.size();
     }
 
-    // std::cout << "call to encode_ext " << static_buffer << std::endl;
+    // HP path: RLP string header + bytes.
+    if (hp_len == 1 && hpbuf[0] < rlp::kEmptyStringCode) {
+        *out++ = hpbuf[0];
+    } else {
+        *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + hp_len);
+        std::memcpy(out, hpbuf, hp_len);
+        out += hp_len;
+    }
+
+    // Child.
+    if (e.child_len == 32) {
+        *out++ = 0xa0;
+        std::memcpy(out, e.child.bytes, 32);
+        out += 32;
+    } else {
+        std::memcpy(out, e.child.bytes, e.child_len);
+        out += e.child_len;
+    }
 
     return static_buffer;
 }
 
 inline const Bytes& encode_leaf(const LeafNode& l) {
-    static_buffer.clear();
-
-    // Encode HP path
+    // HP-encode path on the stack.
     uint8_t hpbuf[1 + 32];
     uint8_t* hp_end = encode_hp_path(hpbuf, l.path.nib.data(), l.path.len, /*leaf*/ true);
-    ByteView hp_encoded{hpbuf, static_cast<size_t>(hp_end - hpbuf)};
+    const size_t hp_len = static_cast<size_t>(hp_end - hpbuf);
 
-    rlp::Header h{.list = true, .payload_length = 0};
-    h.payload_length += rlp::length(hp_encoded);
-    h.payload_length += rlp::length(l.value);
+    // HP path RLP length.
+    const size_t hp_rlp_len = hp_len + ((hp_len != 1 || hpbuf[0] >= rlp::kEmptyStringCode) ? 1 : 0);
 
-    rlp::encode_header(static_buffer, h);
-    rlp::encode(static_buffer, hp_encoded);
-    rlp::encode(static_buffer, l.value);
+    // Value RLP length.
+    const size_t val_rlp_len = rlp::length(l.value);
+
+    const size_t payload = hp_rlp_len + val_rlp_len;
+    const size_t hdr_sz = (payload < 56) ? 1 : 1 + intx::count_significant_bytes(payload);
+    const size_t total = hdr_sz + payload;
+
+    static_buffer.resize(total);
+    uint8_t* out = static_buffer.data();
+
+    // List header.
+    if (payload < 56) {
+        *out++ = static_cast<uint8_t>(rlp::kEmptyListCode + payload);
+    } else {
+        auto be = endian::to_big_compact(payload);
+        *out++ = static_cast<uint8_t>(0xF7 + be.size());
+        std::memcpy(out, be.data(), be.size());
+        out += be.size();
+    }
+
+    // HP path.
+    if (hp_len == 1 && hpbuf[0] < rlp::kEmptyStringCode) {
+        *out++ = hpbuf[0];
+    } else {
+        *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + hp_len);
+        std::memcpy(out, hpbuf, hp_len);
+        out += hp_len;
+    }
+
+    // Value.
+    if (l.value.empty()) {
+        *out++ = rlp::kEmptyStringCode;
+    } else if (l.value.size() == 1 && l.value[0] < rlp::kEmptyStringCode) {
+        *out++ = l.value[0];
+    } else {
+        if (l.value.size() < 56) {
+            *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + l.value.size());
+        } else {
+            auto be = endian::to_big_compact(l.value.size());
+            *out++ = static_cast<uint8_t>(0xB7 + be.size());
+            std::memcpy(out, be.data(), be.size());
+            out += be.size();
+        }
+        std::memcpy(out, l.value.data(), l.value.size());
+        out += l.value.size();
+    }
+
     return static_buffer;
 }
 

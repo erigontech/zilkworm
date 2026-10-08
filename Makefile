@@ -15,7 +15,8 @@ export PATH := $(XPACKS_LINUX):$(PATH)
 endif
 
 .PHONY: test-fixtures \
-        z6m_guest z6m_prover eest-prover-test z6m_eest_convert eest-blockchain-tests \
+        z6m_guest z6m_guest_airbender z6m_prover z6m_prover_airbender \
+        eest-prover-test z6m_eest_convert eest-blockchain-tests \
         execute-block selftest tests eest-mfbd-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
@@ -35,8 +36,15 @@ z6m_guest:
 		-DSP1=ON \
 		-DUSE_HASH_KEY=$(USE_HASH_KEY)
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
+
 z6m_prover: z6m_guest
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
+
+z6m_guest_airbender:
+	$(MAKE) -C prover/guest_airbender z6m_guest
+
+z6m_prover_airbender: z6m_guest_airbender
+	cd prover/prover_airbender && cargo build --release
 
 test_hc: z6m_prover
 	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp
