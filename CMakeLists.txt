@@ -124,6 +124,7 @@ if(BUILD_TESTING)
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/receipt_logs_test.cpp
     zilk_core/core/types/max_gas_cost_test.cpp
+    zilk_core/core/rlp/significant_bytes_test.cpp
     zilk_core/core/types/receipt_test.cpp
     zilk_core/core/types/transaction_rlp_view_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
