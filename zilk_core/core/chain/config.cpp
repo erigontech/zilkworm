@@ -346,6 +346,7 @@ constinit const ChainConfig kSepoliaConfig{
     .osaka_time = 1760427360,
     .bpo1_time = 1761017184,
     .bpo2_time = 1761607008,
+    .amsterdam_time = 1791294816,
     .rule_set_config = protocol::EthashConfig{},
 };
 

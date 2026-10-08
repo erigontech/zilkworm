@@ -623,6 +623,29 @@ inline const std::map<std::string, ChainConfig> kNetworkConfig{
          .bpo2_time = 0,
          .amsterdam_time = 0,
      }},
+    // Sepolia fork times (kSepoliaConfig) with the pre-merge forks at genesis: stateless
+    // validation of post-merge blocks has no total difficulty for the TTD rule set.
+    {"sepolia",
+     {
+         .chain_id = 11155111,
+         .homestead_block = 0,
+         .tangerine_whistle_block = 0,
+         .spurious_dragon_block = 0,
+         .byzantium_block = 0,
+         .constantinople_block = 0,
+         .petersburg_block = 0,
+         .istanbul_block = 0,
+         .berlin_block = 0,
+         .london_block = 0,
+         .terminal_total_difficulty = 0,
+         .shanghai_time = 1677557088,
+         .cancun_time = 1706655072,
+         .prague_time = 1741159776,
+         .osaka_time = 1760427360,
+         .bpo1_time = 1761017184,
+         .bpo2_time = 1761607008,
+         .amsterdam_time = 1791294816,
+     }},
 };
 
 std::vector<Transaction> sample_transactions();
