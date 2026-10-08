@@ -21,7 +21,7 @@ reproduces the reference results, and running the proofs.
 | zilkworm branch | `som/zisk-impl` on `erigontech/zilkworm` |
 | evmone branch | `som/zisk-impl` on `erigontech/zvm1` (submodule `third_party/evmone` @ `6f35e0a0`, 9 commits on top of `oss` @ `b10a25a4`) |
 | ZisK pin | v1.3.1-alpha (`306a9c934`): guest linker script, `ziskemu`, `zisk-sdk` crates, proving key |
-| Guest compiler | xPack `riscv-none-elf-gcc` 14.2.0-3.1 (what the Makefile picks, see §3.2) |
+| Guest compiler | xPack `riscv-none-elf-gcc` 15.2.0-1.1, the only version to have installed (§3.2) |
 
 | Commit | Content |
 |---|---|
@@ -61,7 +61,7 @@ reproduces the reference results, and running the proofs.
 Still in software: ripemd160 (no ZisK precompile), identity, modexp with operands > 32 B, the
 MUL/EXP/DIV/MOD opcodes, and blst's 256-bit Fr arithmetic and curve formulas.
 
-### Validated (execute-only, ZisK guest sha256 `4fa5aa2bc92c9ebaad1110976ddfa4b0a05b2945e4197bdf1a8cbf1328d638da`)
+### Validated (execute-only; ZisK guest sha256 `be410c17e0e6f341392e54c117e4e208c7605c299cadb80da0a7eaf3d02ee3ba` for the corpus, `4fa5aa2b…` for the EEST and precompile runs)
 
 - **200-block mainnet corpus**: 200/200 public values byte-identical to native `state_transition`.
   The `ziskemu` CLI, the host's SDK emulator and the host's `--executor ziskemu` all agree, with
@@ -82,11 +82,12 @@ MUL/EXP/DIV/MOD opcodes, and blst's 256-bit Fr arithmetic and curve formulas.
 - **GPU proving** (2026-10-08, one RTX 5090): 200/200 corpus blocks proved with the default
   `compressed` proof type and verified; every proof's step count equals the `ziskemu` run. Numbers in §5.1.
 
-Latest step totals (`ziskemu`, raw; the corpus row is after the intx bump in `e97f0823`):
+Latest step totals (`ziskemu`, raw; the corpus row is the GCC 15.2 ELF after the intx bump in
+`e97f0823`, the EEST row the earlier `4fa5aa2b…` ELF):
 
 | Set | total | min | median | max |
 |---|---|---|---|---|
-| Corpus, 200 blocks | 21688407462 | 4477139 | 105580700 | 234814444 |
+| Corpus, 200 blocks | 21632055276 | 4445579 | 105050439.5 | 234907649 |
 | EEST, 8613 passing fixtures | 51978949913 | 66624 | 366517 | 1711581893 |
 
 ### Not done
@@ -151,16 +152,18 @@ sudo apt-get install -y build-essential cmake ninja-build git git-lfs python3 cu
 # Rust; prover/ and prover/prover_zisk/ pin 1.93.1 in rust-toolchain.toml
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
-# Guest cross-compiler: xPack riscv-none-elf-gcc 14.2.0-3.1
+# Guest cross-compiler: xPack riscv-none-elf-gcc 15.2.0-1.1 (the CI image has the same one)
 sudo npm install --global xpm@latest
-xpm install @xpack-dev-tools/riscv-none-elf-gcc@14.2.0-3.1 --global --verbose
-ls ~/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/   # 14.2.0-3.1
+xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
+ls ~/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/   # 15.2.0-1.1 and nothing else
 ```
 
 The Makefile prepends the **first** directory under `~/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/`
-to `PATH`. With 14.2.0-3.1 installed it wins even next to 15.2.0-1.1, and the reference hashes
-(the ZisK ELF above and the SP1 ELF in §9) were produced with it. Installing 15.2.0-1.1 as well is
-optional; use it for the GCC A/B through `ZISK_GCC_BIN` (§8).
+to `PATH`, so an older version installed next to 15.2 silently becomes the compiler. Keep only
+15.2.x installed (`xpm uninstall @xpack-dev-tools/riscv-none-elf-gcc@<old> --global`), and after
+any toolchain change delete `prover/guest_zisk/build` and `prover/guest_hypercube/build`: CMake
+caches the compiler path on the first configure. All reference hashes and step counts in this
+document are from 15.2.0-1.1.
 
 The ZisK subset strictly needed to build the host is `libgmp-dev nlohmann-json3-dev nasm
 libsodium-dev libomp-dev libopenmpi-dev clang libclang-dev`, as in `.github/docker/zisk-ci.Dockerfile`.
@@ -323,7 +326,7 @@ make eest-mfbd-build        # -> test-fixtures-cache/mfbd-3586193db06d/blockchai
 
 # Guest and native reference
 make z6m_guest_zisk         # postlink prints "ebreak->halt: 16" and the heap range
-sha256sum prover/guest_zisk/build/z6m_guest.elf   # 4fa5aa2bc92c9ebaad1110976ddfa4b0a05b2945e4197bdf1a8cbf1328d638da
+sha256sum prover/guest_zisk/build/z6m_guest.elf   # be410c17e0e6f341392e54c117e4e208c7605c299cadb80da0a7eaf3d02ee3ba
 cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S . && cmake --build build --target state_transition
 ```
 
@@ -339,7 +342,7 @@ python3 tools/scripts/zisk_execute.py --elf prover/guest_zisk/build/z6m_guest.el
 ```
 
 Expect `Total: 3, Passed: 3, … Mismatch: 0, Error: 0`. The steps in
-`temp/runtime/zisk_sanity/results.tsv` should be 4477295, 163598878 and 234804852.
+`temp/runtime/zisk_sanity/results.tsv` should be 4445579, 162811284 and 234907649.
 
 Full runs:
 
@@ -356,7 +359,7 @@ Host prover (CPU or GPU build, execute needs no key):
 ```sh
 P=prover/prover_zisk/target/release/z6m_prover_zisk
 $P --executor ziskemu execute --file-name temp/200_benchmark_blocks_mfbd_v2/24545295/flatWitnessBundle24545295.mfbd
-# "Executed block 0 (gas_used=1056239, cycles=4477295, …)" and a "Public Values: 0x…" line
+# "Executed block 0 (gas_used=1056239, cycles=4445579, …)" and a "Public Values: 0x…" line
 # (with --file-name, execute prints the block number as 0)
 make zisk-eest ZISK_EXECUTOR=ziskemu      # EEST via eest_runner.py; skips fixtures > 20 MB like the SP1 runner
 make zisk-benchmark ZISK_EXECUTOR=ziskemu # 200 blocks via sp1_benchmark.py
@@ -385,7 +388,7 @@ F=test-fixtures-cache/mfbd-3586193db06d/blockchain_tests/for_osaka/ported_static
 /usr/bin/time -v $P prove --file-name $F --proof-path temp/proofs/add11.bin 2>&1 | tee temp/proofs/add11.log
 $P verify --proof-path temp/proofs/add11.bin
 
-# 2. Mainnet blocks, smallest to heaviest: 24545295 (4.5M steps), 24491136 (164M), 24521911 (235M)
+# 2. Mainnet blocks, smallest to heaviest: 24545295 (4.4M steps), 24491136 (163M), 24521911 (235M)
 for N in 24545295 24491136 24521911; do
   /usr/bin/time -v $P prove --file-name temp/200_benchmark_blocks_mfbd_v2/$N/flatWitnessBundle$N.mfbd \
     --proof-path temp/proofs/$N.bin 2>&1 | tee temp/proofs/$N.log
@@ -397,7 +400,9 @@ done
 
 Machine: 1× NVIDIA GeForce RTX 5090 (32607 MiB), driver 595.71.05, CUDA 13.2, AMD Ryzen 9 7945HX
 (32 threads), 103 GB RAM, Ubuntu 25.10, memlock 8192 kB; `cargo-zisk 1.3.1-alpha [gpu]`; guest
-ELF `c2c1490f…` (xPack GCC 14.2.0-3.1, tree `e97f0823` + this commit); host built as in §3.7.
+ELF `c2c1490f…`, built from tree `e97f0823` plus the prove loop with xPack GCC 14.2.0-3.1, before
+15.2 became the only supported toolchain (§3.2); the 15.2 build of the same tree (`be410c17…`)
+executes the corpus in 21,632,055,276 steps, 0.26 % fewer. Host built as in §3.7.
 
 The offline loop proves every bundle under `<data-dir>/blocks/<N>/` in one process:
 
@@ -504,8 +509,8 @@ word (`wait_for_input_ready`).
 | `zisk-benchmark.yml` | `make z6m_prover_zisk`; downloads the raw 200 blocks from `zilkworm-testdata`, regenerates the corpus, and runs `sp1_benchmark.py --prover … --ram-per-instance 16` through the SDK emulator. It fails on any FAILED or SKIPPED block or a short count. |
 
 Both workflows are **execute-only**: they download no proving key, use no GPU and generate no proofs.
-The CI image has only GCC 15.2.0-1.1, so CI's ZisK ELF differs from a local GCC 14 build. Public
-values are identical across the two compilers (§8).
+The CI image has GCC 15.2.0-1.1, the same compiler as the local reference build, so CI's ZisK
+ELF matches a local one built from the same tree.
 
 ## 7. Known Issues and Gotchas
 
@@ -547,12 +552,12 @@ values are identical across the two compilers (§8).
      and record proving time, peak RAM/VRAM and proof size the same way.
    - Expose `max_streams` / `minimal_memory` on the host for cards with less than 32 GB.
    - Then try `--executor assembly`, multi-process `mpirun`, and the `--remote` coordinator.
-2. **Compiler and flag sweep.**
-   - GCC 15.2 vs 14.2 gave identical public values on all 8815 inputs, with −1.69% steps on the
-     corpus and −4.0% on EEST. That was measured before the accelerators, so re-measure.
-   - Build an A/B ELF with
-     `make z6m_guest_zisk ZISK_GCC_BIN=$HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/15.2.0-1.1/.content/bin ZISK_BUILD_DIR=prover/guest_zisk/build-gcc15`.
-   - Also try `-mtune=size`, `-funroll-loops` and the inline parameters.
+2. **Flag sweep.**
+   - The reference compiler is xPack GCC 15.2.x (it gave −1.7% steps on the corpus and −4.0% on
+     EEST against 14.2 before the accelerators, with identical public values on all 8815 inputs).
+   - Build an A/B ELF into its own tree with `make z6m_guest_zisk ZISK_BUILD_DIR=prover/guest_zisk/build-ab`
+     and the flags under test; `ZISK_GCC_BIN` points the build at another xPack bin dir.
+   - Try `-mtune=size`, `-funroll-loops` and the inline parameters.
 3. **Optional accelerators.**
    - MUL/EXP via `arith256` (`0x801`).
    - DIV/MOD via fcall 19; the verified `zisk::udivrem` is already in the shim.
@@ -581,7 +586,7 @@ before building.
 
 ```sh
 make z6m_prover                                         # SP1 guest + host, fresh
-sha256sum prover/guest_hypercube/build/z6m_guest.elf    # leg 0: 68b32dcaebca9c0bd8bf9ca6d911d108271d250c4e919c604878860097b5f676
+sha256sum prover/guest_hypercube/build/z6m_guest.elf    # leg 0: aee426faf6a98197155925767ba99c9dac1bb4ce4e5a975a9402ab384b67dfd6
 make eest-blockchain-tests                              # leg 1: 8654/8654 (8615 EEST fixtures + 39 unit tests)
 tools/scripts/release_state_root_check.sh --dir temp/200_benchmark_blocks_mfbd_v2 -l temp/runtime/leg2
                                                         # leg 2: 200/200, 0 state-root mismatches
@@ -589,15 +594,11 @@ python3 tools/scripts/sp1_benchmark.py --dir temp/200_benchmark_blocks_mfbd_v2
                                                         # leg 3: 200 records, 0 failed blocks
 ```
 
-- **Leg 0** needs xPack GCC 14.2.0-3.1. ZisK code sits behind `ZISK` gates, so the SP1 ELF must not
-  change.
-- **Leg 3 totals at `e97f0823`:** cycles 26,575,390,325; prover gas 50,563,817,864;
-  gas_used 6,036,444,409. The intx bump in `e97f0823` changed the SP1 ELF (it was
-  `e8e7201c…` through `93bcdac28`, with 26,617,248,718 cycles and 50,605,949,665 prover gas).
-- **Stale compiler cache.** `make z6m_guest` reuses `prover/guest_hypercube/build/CMakeCache.txt`,
-  including the compiler path cached on the first configure. With 15.2.0-1.1 installed first and
-  14.2.0-3.1 added later, delete that directory once; otherwise leg 0 silently builds with GCC 15
-  (ELF `aee426fa…`, 26,132,211,190 cycles, which is −1.7%).
+- **Leg 0** needs xPack GCC 15.2.0-1.1 and nothing older installed (§3.2). ZisK code sits behind
+  `ZISK` gates, so the SP1 ELF must not change.
+- **Leg 3 totals at `e97f0823`:** cycles 26,132,211,190; prover gas 50,180,244,468;
+  gas_used 6,036,444,409. Earlier references (`e8e7201c…`, 26,617,248,718 cycles through
+  `93bcdac28`) were GCC 14.2.0-3.1 builds before the intx bump and no longer apply.
 - **Commits that touch the ZisK guest, shims or evmone ZisK code** must also pass `make zisk-emu-check`
   (200/200) and the full EEST `zisk_execute.py` run from §4 (8613 PASS, the 2 known OOMs). Report
   the raw step totals.
