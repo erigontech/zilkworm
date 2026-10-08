@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <evmc/evmc.hpp>
+#include <evmone/baseline.hpp>
 #include <evmone/test/state/state_view.hpp>
 #include <zilk_core/core/common/base.hpp>
 #include <zilk_core/core/common/bytes.hpp>
@@ -36,6 +37,14 @@
 #if USE_HASH_KEY
 #include <array>
 #include <expected>
+#endif
+
+// sanitize() pads the code store's payloads for the EVM where they lie, see code_store_seal.hpp.
+// Not with USE_HASH_KEY: its account recovery looks code up in the code store afterwards.
+#if EVMONE_IN_PLACE_CODE && !USE_HASH_KEY
+#define ZILK_SEAL_CODE_STORE 1
+#else
+#define ZILK_SEAL_CODE_STORE 0
 #endif
 
 namespace evmone::state {
@@ -117,6 +126,12 @@ class DirectState : public BlockState {
     /// which no block ever unfolds.
     mutable std::vector<uint32_t> node_verified_;
     MphfMap code_store_map_;
+#if ZILK_SEAL_CODE_STORE
+    /// Set once sanitize() has zeroed the bytes after each code-store payload, which takes the
+    /// lengths and parts of the keys of the entries: code_store_map_ then serves code_for() only,
+    /// and no lookup by hash. The region it registered with evmone is reset with this object.
+    bool code_store_sealed_{false};
+#endif
 
     std::span<const AddrHashEntry> addr_hashes_;
     std::span<const BlockHashEntry> block_hashes_;
@@ -179,6 +194,9 @@ class DirectState : public BlockState {
     DirectState(const DirectState&) = delete;
     DirectState& operator=(const DirectState&) = delete;
     DirectState(DirectState&& other) noexcept;
+#if ZILK_SEAL_CODE_STORE
+    ~DirectState() override;
+#endif
 
     [[gnu::always_inline]] inline const Account* read_account(const evmc::address& addr) const noexcept;
     [[gnu::always_inline]] inline Account* read_account(const evmc::address& addr) noexcept;
@@ -248,6 +266,9 @@ class DirectState : public BlockState {
                                                   const evmc::bytes32& block_hash) const noexcept override;
     void insert_header(const BlockHeader& header);
 
+    /// Binds the witness: false if it does not hold. Once per blob: on the Airbender guest (and
+    /// the rv32 test build) it then zeroes bytes of the code store's entry headers, which a second
+    /// DirectState over the blob rejects as malformed.
     bool sanitize();
 
     struct AccountInfo {
