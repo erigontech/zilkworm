@@ -94,6 +94,48 @@ distinct files.
 - `SLIB_BENCH_WORK` — output/work dir (default `temp/slib_benchmark`).
 - `FIXTURES_CACHE` — root cache dir (default `./test-fixtures-cache`).
 
+## Mainnet blocks
+
+`make slib-mainnet-benchmark` runs the mainnet blocks the DirectState benchmark
+(`make sp1-benchmark`) uses through the HashState guest, so the two backends can
+be compared block for block.
+
+```bash
+# Convert the raw witness files into HashState fixtures, then run them.
+make slib-mainnet-corpus BENCH_SRC_DIR=<dir of <N>/unifiedBlockAndStateRlp<N>.bin>
+make slib-mainnet-benchmark BENCH_SRC_DIR=<same dir>
+```
+
+- `legacy_to_slib_fixture` turns each `unifiedBlockAndStateRlp<N>.bin` into
+  `$(SLIB_MAINNET_DIR)/<N>/statelessInput<N>.slib` (default
+  `temp/200_benchmark_blocks_slib`), a binary SLIB envelope:
+  `[magic "SLIB"][version][network length][block RLP length][network][block RLP][statelessInputBytes]`.
+  The network is `Mainnet`, and `statelessInputBytes` is built from the file's
+  state nodes, codes and ancestor headers. Given an output path ending in
+  `.json`, the tool writes a one-block blockchain-test JSON instead.
+- The guest reads a SLIB envelope with no JSON parse and no hex decode, the way
+  it reads MFBD. It takes the pre-state root from the parent header, which must
+  be among the witness headers, and otherwise runs the JSON runner's HashState
+  arm's checks and execution. It has no skip outcome (an unknown network fails),
+  and it applies the EIP-7934 block-size cap from Osaka on, as the MFBD runner
+  does, where the JSON arm skips any oversize block before decoding it.
+- The `statelessInputBytes` is a benchmark encoding, not a spec-valid one. It
+  carries the full witness but an empty `new_payload_request` and no public keys,
+  which HashState does not read; the block executes from its RLP. Other EIP-8025
+  tools would reject it.
+- The run uses `sp1_benchmark.py --slib`, which passes `--slib` to
+  `z6m_prover --test-service`, so each block is read from
+  `statelessInput<N>.slib` instead of `flatWitnessBundle<N>.mfbd`. Logs,
+  chunking and the summary are the same as for `make sp1-benchmark`, keyed by
+  block number. `--prover <path>` picks the binary when both builds are kept side
+  by side.
+- A block the guest rejects comes back as the failure sentinel (`u64::MAX`, see
+  "Public output" in [architecture.md](architecture.md)). `--test-service` logs
+  it as `FAILED` with `gas_used=0`, and `sp1_benchmark.py` leaves such blocks
+  out of its summary and prints how many it dropped. On a JSON run the guest
+  reports the gas of every block it accepts, because a gas of 0 also counts as
+  a failed block.
+
 ## CI
 
 `.github/workflows/hypercube-slib-benchmark.yml` runs `make slib-benchmark` and

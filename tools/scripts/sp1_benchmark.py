@@ -186,7 +186,7 @@ RAM_WAIT_INTERVAL = 15
 
 
 def run_prover_chunks(prover: str, data_dir: str,
-                      chunks: List[ChunkInfo]) -> bool:
+                      chunks: List[ChunkInfo], extra_args: List[str]) -> bool:
     """Launch prover processes with memory-aware scheduling.
 
     Each chunk is a single prover invocation with --start-block/--end-block.
@@ -215,7 +215,7 @@ def run_prover_chunks(prover: str, data_dir: str,
                "--start-block", str(chunk.start_block),
                "--end-block", str(chunk.end_block),
                "--data-dir", data_dir,
-               "--execution-log-file", chunk.log_file]
+               "--execution-log-file", chunk.log_file] + extra_args
         print(f"  Launching chunk {chunk.index}: "
               f"blocks {chunk.start_block}..{chunk.end_block} "
               f"({chunk.block_count} blocks)")
@@ -290,8 +290,14 @@ LOG_PATTERN = re.compile(
 )
 
 
+# The guest returns u64::MAX for a block it rejected and u64::MAX - 1 for one it skipped;
+# the prover logs both (and an older guest's 0) as gas_used=0. None of them is a result.
+GUEST_RUN_SKIPPED = 2**64 - 2
+
+
 def parse_execution_log(log_path: str) -> List[BlockRecord]:
     records = []
+    dropped = []
     if not os.path.isfile(log_path):
         print(f"  WARNING: Log file not found: {log_path}")
         return records
@@ -299,12 +305,19 @@ def parse_execution_log(log_path: str) -> List[BlockRecord]:
         for line in f:
             m = LOG_PATTERN.search(line)
             if m:
-                records.append(BlockRecord(
+                rec = BlockRecord(
                     block=int(m.group(2)), gas_used=int(m.group(3)),
                     cycle_count=int(m.group(4)), prover_gas=int(m.group(5)),
                     syscall_count=int(m.group(6)), input_path=m.group(7).strip(),
-                ))
+                )
+                if rec.gas_used == 0 or rec.gas_used >= GUEST_RUN_SKIPPED:
+                    dropped.append(rec.block)
+                else:
+                    records.append(rec)
     records.sort(key=lambda r: r.block)
+    if dropped:
+        print(f"  Dropped {len(dropped)} failed/skipped block(s) from the summary: "
+              + " ".join(str(b) for b in sorted(dropped)))
     return records
 
 
@@ -380,6 +393,15 @@ def main() -> int:
                         help="First block number (default: first available)")
     parser.add_argument("--count", type=int, default=None,
                         help="Number of blocks to run (default: all from --start)")
+    parser.add_argument("--prover", default=None,
+                        help="Prover binary (default: prover/target/release/z6m_prover)")
+    input_kind = parser.add_mutually_exclusive_group()
+    input_kind.add_argument("--is-test", action="store_true",
+                            help="Blocks are <N>/ethTests<N>.json blockchain-test fixtures "
+                                 "instead of MFBD bundles")
+    input_kind.add_argument("--slib", action="store_true",
+                            help="Blocks are <N>/statelessInput<N>.slib envelopes for the "
+                                 "HashState guest instead of MFBD bundles")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -392,7 +414,8 @@ def main() -> int:
         print("ERROR: Not inside a git repository.", file=sys.stderr)
         return 1
 
-    prover = os.path.join(git_root, "prover", "target", "release", "z6m_prover")
+    prover = (os.path.abspath(args.prover) if args.prover else
+              os.path.join(git_root, "prover", "target", "release", "z6m_prover"))
     if not os.path.isfile(prover) or not os.access(prover, os.X_OK):
         print(f"ERROR: Prover not found or not executable: {prover}",
               file=sys.stderr)
@@ -440,7 +463,8 @@ def main() -> int:
 
     # Execution
     print(f"\n[Execution]")
-    ok = run_prover_chunks(prover, prover_data_dir, chunks)
+    extra_args = ["--is-test"] if args.is_test else ["--slib"] if args.slib else []
+    ok = run_prover_chunks(prover, prover_data_dir, chunks, extra_args)
     if not ok:
         print("\nWARNING: Some chunks failed. Proceeding with available data.")
 

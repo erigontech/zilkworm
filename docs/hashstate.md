@@ -1113,7 +1113,7 @@ negatives. The fixture then passes through the normal valid-block path.
 
 ### Raw StatelessInput dispatch
 
-`StateTransition::run` dispatches on the input magic (`EJSN` or `MFBD`). The
+`StateTransition::run` dispatches on the input magic (`EJSN`, `MFBD` or `SLIB`). The
 "default path" input is a raw StatelessInput blob (schema_id `0x1501`, on-wire
 big-endian prefix `15 01`), and it is not wired in yet. The intended design is
 to detect it in the `default` case of that switch
@@ -1125,6 +1125,17 @@ The parser and build front-end already exist and are unit-tested; full block
 execution over `HashState` on this entry path is what remains. Until then the
 path still rejects the input as an unsupported magic, so the `MFBD` and `EJSN`
 guests behave as before.
+
+The mainnet benchmark takes the binary route under its own magic instead. A
+`SLIB` envelope (`kInputMagicSLIB` in `flat_bundle.hpp`) carries the network
+name, the block RLP and the `0x1501` blob, and `StateTransition::run` dispatches
+it to `run_slib_input` the way it dispatches `EJSN` and `MFBD`. That runner
+takes the pre-state root from the parent header, which must be among the
+witness headers, and otherwise runs the JSON runner's HashState arm's checks
+and execution. It has no skip outcome, so an unknown network fails, and it
+applies the EIP-7934 block-size cap from Osaka on, as the `MFBD` runner does,
+where the JSON arm skips any oversize block before decoding it. See
+[slib_benchmark.md](slib_benchmark.md), "Mainnet blocks".
 
 ## Build flag and benchmark targets
 
@@ -1190,6 +1201,12 @@ makes it `HashState` (see "Backend selection").
   on `workflow_dispatch` only; it is not wired to pushes or PRs. Its run step is
   `continue-on-error`, so it never gates CI, and it uploads the log, CSV and
   plot as artifacts.
+- **Mainnet blocks.** `make slib-mainnet-benchmark` runs the mainnet blocks of
+  the DirectState benchmark (`make sp1-benchmark`) through the HashState guest.
+  `legacy_to_slib_fixture` converts each raw witness file into a `SLIB`
+  envelope, and `sp1_benchmark.py --slib` runs them keyed by block number, so
+  the two backends compare block for block. See
+  [slib_benchmark.md](slib_benchmark.md), "Mainnet blocks".
 
 ## Tests
 
