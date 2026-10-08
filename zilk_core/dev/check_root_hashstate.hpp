@@ -9,6 +9,7 @@
 #if defined(Z6M_HASH_STATE) || !defined(__riscv)
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -187,6 +188,23 @@ struct HashStateAccountWrite {
         // destructed again): a read-only claim of absence, which inserts nothing.
         if (acc.deleted) {
             writes.push_back(HashStateAccountWrite{addr_hash, {}, {}, nullptr, /*absent=*/!built});
+            continue;
+        }
+
+        // A built record the block never modified is a verbatim copy of its pre-state leaf:
+        // find_or_create_account copy-on-writes it on the first READ (evmone's build_diff
+        // reports every loaded account, and HashStateView::get_account materializes it), and
+        // every mutator that changes a leaf field (nonce, balance, code_hash), writes a slot,
+        // wipes or revives sets `modified` (hash_state.hpp, the overlay invariant); destruct
+        // sets `deleted`, handled above. Its update would meet the leaf unchanged and add
+        // nothing to the recomputed root, and the value was bound to prev_root by the build
+        // sweep, so no claim is needed either: skip the encode, the sort entry and the unfolds
+        // down to its leaf. The skip requires `built`: a materialized-absent record stays
+        // deleted until a revive, which sets `modified`, so a !built record is never skipped.
+        if (built && !acc.modified) {
+            assert(!hash_state.storage_wiped(addr));
+            assert(hash_state.overflow_slots_for(addr) == nullptr ||
+                   hash_state.overflow_slots_for(addr)->empty());
             continue;
         }
 

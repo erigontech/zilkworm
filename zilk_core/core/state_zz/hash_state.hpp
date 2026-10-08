@@ -371,7 +371,12 @@ class HashState : public BlockState {
     // DirectState->ActiveState retype is a drop-in. Keyed by the 20-byte address (as
     // DirectState is), while the built caches above are keyed by the 32-byte addr_hash;
     // reads consult the overlay first, the built cache second.
-    FlatHashMap<evmc::address, Account> created_accounts_;                                  // every written account
+    // Invariant the accept check's gather relies on (check_root_hashstate.hpp): a built account
+    // enters created_accounts_ on its first READ as a verbatim copy of its leaf with `modified`
+    // false; any change to a leaf field (nonce, balance, code_hash, storage) and any wipe or
+    // revive sets `modified`, and destruct sets `deleted`. A built record with neither flag is
+    // its unchanged pre-state leaf and is not folded. Every future mutator must preserve this.
+    FlatHashMap<evmc::address, Account> created_accounts_;                                  // every loaded account, read or written
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;  // every storage write (zeros RETAINED — divergence a)
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;                                  // in-block created code (fills the old TODO)
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;              // key8-collision spill
