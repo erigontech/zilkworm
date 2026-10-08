@@ -146,6 +146,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/word_layout_test.cpp
     zilk_core/dev/cli/jumpdest_map_test.cpp
     zilk_core/dev/cli/jumpdest_single_bound_test.cpp
+    zilk_core/dev/cli/lean_code_cache_test.cpp
     zilk_core/dev/cli/cmp_jumpi_fusion_test.cpp
     zilk_core/dev/cli/call_message_test.cpp
     zilk_core/dev/cli/mstore_grow_test.cpp
