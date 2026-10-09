@@ -19,7 +19,7 @@ endif
         execute-block selftest tests eest-mfbd-build \
         eest-blockchain-tests-json eest-prover-test-json tests-json \
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
-        ere-workload-checkout ere-fixtures ere-validate ere-compare \
+        ere-workload-checkout ere-fixtures ere-bin-link ere-validate ere-compare \
         release-artifacts
 
 clean: 
@@ -168,8 +168,10 @@ sp1-benchmark: z6m_prover sp1-benchmark-corpus
 
 # Stage release artifacts into ./temp/
 RELEASE_DIR := temp
-RELEASE_BINS := \
+# Recursive: $(ERE_VK) is defined below.
+RELEASE_BINS = \
 	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
+	$(ERE_VK):z6m_guest_hypercube.vk \
 	prover/target/release/z6m_prover:z6m_prover_hypercube \
 	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
 
@@ -184,7 +186,7 @@ release-artifacts:
 	done; \
 	(cd $(RELEASE_DIR) && sha256sum $$names > SHA256SUMS.txt)
 	@echo "release artifacts staged in $(RELEASE_DIR)/:"
-	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
+	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_guest_hypercube.vk $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
 	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
 	@cat $(RELEASE_DIR)/SHA256SUMS.txt
 # ERE benchmark integration: build the SP1 guest ELF + VK as expected by ere-hosts.
@@ -210,8 +212,20 @@ ERE_WORKLOAD_BRANCH ?= master
 ERE_WORKLOAD_DIR    ?= $(CURDIR)/temp/zkevm-benchmark-workload
 ERE_FIXTURE_FILTER  ?= 10M # scopes generation for tractable local runs. default: 10M-gas fixtures, i.e. the 1077-fixture subset
 ERE_TIMEOUT         ?= 60m
+# Registry hosting ere's prebuilt zkVM images; unset => ere builds them from source.
+ERE_IMAGE_REGISTRY  ?= ghcr.io/eth-act/ere
+# Optional local guest ELF dir; empty => download the published guest from the registry.
+ERE_BIN_PATH        ?=
+# Temporary while the workload [patch]es ere-guests: its build.rs cannot derive the guest download
+# source from a path dependency, so the reth leg of ere-compare needs the artifact base URL. Taken
+# from the registry of the ere-guests the workload actually resolves (dirname of the reth sp1 elf_url).
+ERE_RETH_ARTIFACT_URL ?= $(shell python3 $(CURDIR)/tools/ere_workload.py "$(ERE_WORKLOAD_DIR)" reth-artifact-url 2>/dev/null)
+# Fixture folder passed to ere-hosts (--input-folder); default: cached Sepolia batch.
+ERE_INPUT_FOLDER    ?= $(FIXTURES_CACHE)/ere-sepolia/eest_batch
+# Opt-in: set non-empty to (re)generate EEST fixtures via witness-generator-cli first.
+ERE_GEN_FIXTURES    ?=
 ERE_FIXTURE_ENV     := EF_TEST_TRIE=default RUST_MIN_STACK=16388608 RUST_LOG=info
-ERE_RUN_ENV         := RUST_LOG=info
+ERE_RUN_ENV         := ERE_IMAGE_REGISTRY=$(ERE_IMAGE_REGISTRY) RUST_LOG=info
 
 ere-workload-checkout:
 	@if [ ! -d "$(ERE_WORKLOAD_DIR)/.git" ]; then \
@@ -226,18 +240,24 @@ ere-fixtures: ere-workload-checkout
 	    cargo run -p witness-generator-cli --release -- \
 	        tests $(if $(ERE_FIXTURE_FILTER),--include $(ERE_FIXTURE_FILTER))
 
-ere-validate: ere-fixtures
+# ere-hosts loads <bin-path>/$(ERE_GUEST_NAME)-<SP1 SDK version>.{elf,vk}, the version being the one
+# of the ere the workload resolves; link the unversioned ere-bin outputs under that name.
+ere-bin-link:
+	v=$$(python3 tools/ere_workload.py "$(ERE_WORKLOAD_DIR)" sp1-sdk-version) && \
+	for ext in elf vk; do ln -sf $(ERE_GUEST_NAME).$$ext "$(abspath $(ERE_BIN_PATH))/$(ERE_GUEST_NAME)-$$v.$$ext"; done
+
+ere-validate: $(if $(ERE_GEN_FIXTURES),ere-fixtures) $(if $(ERE_BIN_PATH),ere-bin-link)
 	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
-	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
-	        stateless-validator --execution-client zilkworm
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) \
+	        $(if $(ERE_BIN_PATH),--bin-path $(abspath $(ERE_BIN_PATH)),) stateless-validator --execution-client zilkworm --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	python3 $(CURDIR)/tools/ere_compare.py --validate 'zilkworm-*' "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 
-ere-compare: ere-fixtures
+ere-compare: $(if $(ERE_GEN_FIXTURES),ere-fixtures) $(if $(ERE_BIN_PATH),ere-bin-link)
+	cd "$(ERE_WORKLOAD_DIR)" && url="$(ERE_RETH_ARTIFACT_URL)" && $(ERE_RUN_ENV) \
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) --action estimate-cost \
+	        $${url:+--guest-artifact-base-url $$url} stateless-validator --execution-client reth --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
-	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
-	        stateless-validator --execution-client reth
-	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
-	    cargo run -p ere-hosts --release -- --zkvms sp1 --timeout $(ERE_TIMEOUT) \
-	        stateless-validator --execution-client zilkworm
+	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) --action estimate-cost \
+	        $(if $(ERE_BIN_PATH),--bin-path $(abspath $(ERE_BIN_PATH)),) stateless-validator --execution-client zilkworm --input-folder $(abspath $(ERE_INPUT_FOLDER))
 	python3 $(CURDIR)/tools/ere_compare.py "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 

@@ -150,9 +150,6 @@ class DirectState : public BlockState {
     evmc::bytes32 read_storage(const evmc::address& addr,
                                const evmc::bytes32& key) const noexcept;
     ByteView read_code(const evmc::address& addr) const noexcept;
-    ByteView read_code(const evmc::address& addr, const evmc::bytes32& /*code_hash*/) const noexcept {
-        return read_code(addr);
-    }
     evmc::bytes32 get_block_hash(BlockNum n) const noexcept;
     [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr) const noexcept {
         // Materializing, and overlay-aware: a detached account must not report
@@ -361,30 +358,29 @@ DirectState::read_code(const evmc::address& addr) const noexcept {
     // only through its code, and that read must leave a record all the same.
     const Account* pa = observe_account_(addr);
     if (pa->deleted) [[unlikely]]
-        return {};
+        return ByteView{};
 
-    if (pa->code_store_len == 0) {
-        // witness omitted code that is read
-        if (std::memcmp(pa->code_hash, silkworm::kEmptyHash.bytes, 32) != 0) [[unlikely]]
-            fatal("ERROR: read_code: code omitted from witness for non-empty code_hash");
-        return {};
+    if (pa->code_store_len != 0 && pa->code_store_offset != kCreatedCodeOffset) [[likely]]
+        return code_for(*pa);
+
+    if (std::memcmp(pa->code_hash, kEmptyHash.bytes, 32) == 0)
+        return ByteView{};
+
+    // Code is content-addressed: the witness may omit a body that an earlier write in the
+    // block already supplied (EIP-7928 code_writes satisfy the read), so look it up by hash
+    // in the witness code store, then in the in-block created code.
+    const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa->code_hash);
+    if (auto b = code_store_map_.find<32, 0, &hash_key8>(h.bytes))
+        return ByteView{b->data() + FlatKv::kPayloadOffset, b->size() - FlatKv::kPayloadOffset};
+    if (auto it = created_code_.find(hash_key8(h)); it != created_code_.end() &&
+                                                    std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
+        return ByteView{it->second.bytes.data(), it->second.bytes.size()};
     }
+    if (auto cit = created_code_collisions_.find(h); cit != created_code_collisions_.end())
+        return ByteView{cit->second.data(), cit->second.size()};
 
-    if (pa->code_store_offset == kCreatedCodeOffset) [[unlikely]] {
-        const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa->code_hash);
-        const uint64_t k8 = hash_key8(h);
-        if (auto it = created_code_.find(k8); it != created_code_.end() &&
-                                              std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
-            return ByteView{it->second.bytes.data(), it->second.bytes.size()};
-        }
-        if (auto cit = created_code_collisions_.find(h);
-            cit != created_code_collisions_.end()) {
-            return ByteView{cit->second.data(), cit->second.size()};
-        }
-        return {};
-    }
-
-    return code_for(*pa);
+    fatal("ERROR: read_code: code omitted from witness for non-empty code_hash");
+    return ByteView{};
 }
 
 [[gnu::always_inline]] inline const Account*

@@ -30,7 +30,7 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
 endif()
 
 project(zilkworm)
-set(PROJECT_VERSION 0.1.0-alpha.3)
+set(PROJECT_VERSION 0.1.0-alpha.4)
 
 include(CTest)
 
@@ -98,6 +98,7 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/account_read_honest_test.cpp
     zilk_core/dev/cli/delegation_clearing_storage_test.cpp
     zilk_core/dev/cli/code_store_collision_len_test.cpp
+    zilk_core/dev/cli/omitted_code_from_create_test.cpp
   )
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
   # silkworm_core<->types_zz archive cycle globally; --start-group is GNU-ld-only.
