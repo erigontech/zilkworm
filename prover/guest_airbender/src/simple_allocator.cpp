@@ -4,60 +4,57 @@
 #include <new>
 
 extern "C" {
-extern uint32_t _sheap;
-extern uint32_t _eheap;
+extern uint8_t _sheap[];
+extern uint8_t _eheap[];
 }
 
-size_t allocated_bytes = 0;
+// The bump state: the next free byte and the end of the heap. Pointers rather than an offset
+// from _sheap, so operator new forms neither bound nor their difference. Two variables, not a
+// struct: each access then relaxes to one gp-relative lw or sw (link.x's gp window), where a
+// struct's fields share an address formed by an extra addi. heap_end holds _eheap so that it
+// is one load instead of an auipc+addi. Nothing writes it, so LTO would make it read-only and
+// fold it back into the symbol; externally_visible keeps it from assuming that. constinit keeps
+// both out of .init_array: constructors that run before main allocate.
+#if defined(__GNUC__) && !defined(__clang__)
+#define GUEST_EXTERNALLY_VISIBLE __attribute__((externally_visible))
+#else
+#define GUEST_EXTERNALLY_VISIBLE  // clang rejects the attribute (-Wunknown-attributes) and has no such LTO folding
+#endif
+constinit uint8_t* heap_next = _sheap;
+GUEST_EXTERNALLY_VISIBLE constinit uint8_t* heap_end = _eheap;
+
+// _sheap and _eheap are ALIGN(2097152) in link.x, so heap_next rounded up to any alignment up to
+// that stays at or below heap_end: the room left, heap_end minus the rounded pointer, cannot wrap.
+static constexpr size_t kMaxAlign = 2097152;
 
 void* operator new(size_t size) {
-    uint8_t* heap_begin = reinterpret_cast<uint8_t*>(&_sheap);
-    uint8_t* heap_end = reinterpret_cast<uint8_t*>(&_eheap);
-    size_t heap_size = static_cast<size_t>(heap_end - heap_begin);
     // Align to 8 bytes so that any naturally-aligned type can be stored.
-    allocated_bytes = (allocated_bytes + 7u) & ~static_cast<size_t>(7u);
-    if (allocated_bytes + size <= heap_size) {
-        void* ptr = heap_begin + allocated_bytes;
-        allocated_bytes += size;
-        return ptr;
+    uintptr_t p = (reinterpret_cast<uintptr_t>(heap_next) + 7u) & ~uintptr_t{7u};
+    // Compare against the room left: p + size wraps for huge sizes.
+    if (size > reinterpret_cast<uintptr_t>(heap_end) - p) {
+        return nullptr;
     }
-    return nullptr; 
-}
-
-void operator delete(void* ptr) noexcept {
-    // We do not free memory
+    heap_next = reinterpret_cast<uint8_t*>(p + size);
+    return reinterpret_cast<void*>(p);
 }
 
 void* operator new[](size_t size) {
     return operator new(size);
 }
 
-void operator delete[](void* ptr) noexcept {
-    operator delete(ptr);
-}
-
-// _sheap is ALIGN(2097152) in link.x, so an offset aligned within the heap is an aligned address
-// for any alignment up to that.
-static constexpr size_t kMaxAlign = 2097152;
-
 static void* bump_allocate_aligned(size_t size, size_t align) {
-    uint8_t* heap_begin = reinterpret_cast<uint8_t*>(&_sheap);
-    uint8_t* heap_end = reinterpret_cast<uint8_t*>(&_eheap);
-    size_t heap_size = static_cast<size_t>(heap_end - heap_begin);
     if (align < 8) {
         align = 8;
     }
     if (align > kMaxAlign) {
         return nullptr;
     }
-    allocated_bytes = (allocated_bytes + (align - 1)) & ~(align - 1);
-    // Compare against the remaining room: allocated_bytes + size wraps for huge sizes.
-    if (allocated_bytes <= heap_size && size <= heap_size - allocated_bytes) {
-        void* ptr = heap_begin + allocated_bytes;
-        allocated_bytes += size;
-        return ptr;
+    uintptr_t p = (reinterpret_cast<uintptr_t>(heap_next) + (align - 1)) & ~(align - 1);
+    if (size > reinterpret_cast<uintptr_t>(heap_end) - p) {
+        return nullptr;
     }
-    return nullptr;
+    heap_next = reinterpret_cast<uint8_t*>(p + size);
+    return reinterpret_cast<void*>(p);
 }
 
 // Over-aligned types (alignas(32) buffers, ...) must not fall through to the libstdc++
@@ -79,6 +76,19 @@ void* operator new[](size_t size, std::align_val_t al, const std::nothrow_t&) no
     return bump_allocate_aligned(size, static_cast<size_t>(al));
 }
 
+// We do not free memory. Every replaceable delete is defined here, the sized ones included:
+// C++14 sized deallocation sends each std::allocator free to operator delete(void*, size_t),
+// which libstdc++ would otherwise supply as a jump to operator delete(void*). Seeing the empty
+// definitions, LTO drops the calls, and with them the destructor loops that only walk nodes to
+// free them; destructors with other effects still run. Do not mark these noinline: the calls go
+// because the empty bodies are found to have no side effects, not by inlining (the libraries
+// are -fPIC and this file is not, which blocks inlining across them).
+void operator delete(void*) noexcept {}
+void operator delete[](void*) noexcept {}
+void operator delete(void*, size_t) noexcept {}
+void operator delete[](void*, size_t) noexcept {}
+void operator delete(void*, const std::nothrow_t&) noexcept {}
+void operator delete[](void*, const std::nothrow_t&) noexcept {}
 void operator delete(void*, std::align_val_t) noexcept {}
 void operator delete[](void*, std::align_val_t) noexcept {}
 void operator delete(void*, size_t, std::align_val_t) noexcept {}
@@ -110,7 +120,7 @@ void* calloc(size_t nmemb, size_t size) {
         return nullptr;
     }
     // No zeroing: the heap never hands a byte out twice (free and delete are no-ops, realloc
-    // copies into a fresh block), nothing writes past allocated_bytes (the stack sits below
+    // copies into a fresh block), nothing writes past heap_next (the stack sits below
     // .heap, the mem builtins and the input reader write exactly their n bytes, and newlib's
     // memalign, the one writer outside its block, is replaced above), and RAM nobody has
     // written reads 0, as .bss already relies on. _calloc_r inherits this. Reusing memory

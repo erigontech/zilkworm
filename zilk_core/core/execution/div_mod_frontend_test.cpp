@@ -40,6 +40,13 @@ uint256 pow2(unsigned k) { return uint256{1} << k; }
 
 std::vector<uint256> divisors(std::mt19937_64& rng) {
     std::vector<uint256> out{1, 2, 3, 0xffffffffffffffff, uint256{1} << 64, ~uint256{0}};
+    // The moduli MULMOD reduces in closed form on rv32 (see mulmod_sparse_test.cpp), and BN254's.
+    out.push_back(intx::from_string<uint256>(
+        "0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF"));
+    out.push_back(intx::from_string<uint256>(
+        "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001"));
+    out.push_back(intx::from_string<uint256>(
+        "0x800000000000011000000000000000000000000000000000000000000000001"));
     for (unsigned k = 0; k < 256; ++k) {
         out.push_back(pow2(k));
         out.push_back(pow2(k) - 1);

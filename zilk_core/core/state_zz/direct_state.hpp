@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <evmc/evmc.hpp>
+#include <evmone/baseline.hpp>
 #include <evmone/test/state/state_view.hpp>
 #include <zilk_core/core/common/base.hpp>
 #include <zilk_core/core/common/bytes.hpp>
@@ -36,6 +37,14 @@
 #if USE_HASH_KEY
 #include <array>
 #include <expected>
+#endif
+
+// sanitize() pads the code store's payloads for the EVM where they lie, see code_store_seal.hpp.
+// Not with USE_HASH_KEY: its account recovery looks code up in the code store afterwards.
+#if EVMONE_IN_PLACE_CODE && !USE_HASH_KEY
+#define ZILK_SEAL_CODE_STORE 1
+#else
+#define ZILK_SEAL_CODE_STORE 0
 #endif
 
 namespace evmone::state {
@@ -63,6 +72,16 @@ struct nibbles64;  // trie_zz/mpt.hpp
     uint64_t v; std::memcpy(&v, h, 8); return v;
 }
 [[gnu::always_inline]] inline uint64_t hash_key8(const evmc::bytes32& hash) noexcept { return hash_key8(hash.bytes); }
+
+/// Whether the keccak of `payload` is the 32 bytes at `expected` (any alignment). On the Airbender
+/// guest the hash is compared inside the keccak state, so it is never stored out and loaded back.
+[[gnu::always_inline]] inline bool keccak256_equals(ByteView payload, const uint8_t* expected) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+    return ethash_keccak256_eq(expected, payload.data(), payload.size());
+#else
+    return bytes_equal<32>(silkworm::keccak256(payload).bytes, expected);
+#endif
+}
 
 // 7 MSBs + 19th byte (LSB): precompile addrs vary only in byte 19
 [[gnu::always_inline]] inline uint64_t addr_key8(const uint8_t (&a)[20]) noexcept {
@@ -117,6 +136,12 @@ class DirectState : public BlockState {
     /// which no block ever unfolds.
     mutable std::vector<uint32_t> node_verified_;
     MphfMap code_store_map_;
+#if ZILK_SEAL_CODE_STORE
+    /// Set once sanitize() has zeroed the bytes after each code-store payload, which takes the
+    /// lengths and parts of the keys of the entries: code_store_map_ then serves code_for() only,
+    /// and no lookup by hash. The region it registered with evmone is reset with this object.
+    bool code_store_sealed_{false};
+#endif
 
     std::span<const AddrHashEntry> addr_hashes_;
     std::span<const BlockHashEntry> block_hashes_;
@@ -179,6 +204,9 @@ class DirectState : public BlockState {
     DirectState(const DirectState&) = delete;
     DirectState& operator=(const DirectState&) = delete;
     DirectState(DirectState&& other) noexcept;
+#if ZILK_SEAL_CODE_STORE
+    ~DirectState() override;
+#endif
 
     [[gnu::always_inline]] inline const Account* read_account(const evmc::address& addr) const noexcept;
     [[gnu::always_inline]] inline Account* read_account(const evmc::address& addr) noexcept;
@@ -248,6 +276,9 @@ class DirectState : public BlockState {
                                                   const evmc::bytes32& block_hash) const noexcept override;
     void insert_header(const BlockHeader& header);
 
+    /// Binds the witness: false if it does not hold. Once per blob: on the Airbender guest (and
+    /// the rv32 test build) it then zeroes bytes of the code store's entry headers, which a second
+    /// DirectState over the blob rejects as malformed.
     bool sanitize();
 
     struct AccountInfo {
@@ -391,11 +422,15 @@ class DirectState : public BlockState {
     template <class SnapRequestFn>
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash, SnapRequestFn&& request) const noexcept;
+    // The same for a hash that is not a bytes32 object: the caller's copy of it keeps its type as the plain bytes it is.
+    template <class SnapRequestFn>
+    [[gnu::always_inline]] inline std::optional<ByteView>
+    find_node_rlp(const uint8_t (&node_hash)[32], SnapRequestFn&& request) const noexcept;
 
   private:
     template <bool kSnap, class SnapRequestFn>
     [[gnu::always_inline]] inline std::optional<ByteView>
-    find_node_rlp_impl(const evmc::bytes32& node_hash, SnapRequestFn&& request) const noexcept;
+    find_node_rlp_impl(const uint8_t (&node_hash)[32], SnapRequestFn&& request) const noexcept;
 };
 
 [[gnu::always_inline]] inline const Account*
@@ -414,19 +449,25 @@ DirectState::find_pre_account_unchecked(const evmc::address& addr) noexcept {
 
 [[gnu::always_inline]] inline std::optional<ByteView>
 DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
-    return find_node_rlp_impl<false>(node_hash, 0);
+    return find_node_rlp_impl<false>(node_hash.bytes, 0);
 }
 
 template <class SnapRequestFn>
 [[gnu::always_inline]] inline std::optional<ByteView>
 DirectState::find_node_rlp(const evmc::bytes32& node_hash, SnapRequestFn&& request) const noexcept {
+    return find_node_rlp_impl<true>(node_hash.bytes, request);
+}
+
+template <class SnapRequestFn>
+[[gnu::always_inline]] inline std::optional<ByteView>
+DirectState::find_node_rlp(const uint8_t (&node_hash)[32], SnapRequestFn&& request) const noexcept {
     return find_node_rlp_impl<true>(node_hash, request);
 }
 
 template <bool kSnap, class SnapRequestFn>
 [[gnu::always_inline]] inline std::optional<ByteView>
-DirectState::find_node_rlp_impl(const evmc::bytes32& node_hash, [[maybe_unused]] SnapRequestFn&& request) const noexcept {
-    if (auto b = node_store_map_.find<32, 0, &hash_key8>(node_hash.bytes)) {
+DirectState::find_node_rlp_impl(const uint8_t (&node_hash)[32], [[maybe_unused]] SnapRequestFn&& request) const noexcept {
+    if (auto b = node_store_map_.find<32, 0, &hash_key8>(node_hash)) {
         // SOUNDNESS-CRITICAL: a node is used only if its keccak is the hash it was asked for, so
         // every node that reaches the trie is bound to a hash reference in a verified parent (or
         // the pre-state root). Checked on the first lookup; nodes never looked up never matter.
@@ -442,10 +483,10 @@ DirectState::find_node_rlp_impl(const evmc::bytes32& node_hash, [[maybe_unused]]
                 const kprefix::SnapRequest snap = full ? request() : kprefix::SnapRequest{kprefix::kNoSlot, 0};
                 const unsigned blocks = kprefix::first_blocks(snap.slot);
                 verified = blocks != 0
-                               ? kprefix::verify_and_snap(payload.data(), snap.row, blocks, node_hash.bytes)
-                               : bytes_equal<32>(silkworm::keccak256(payload).bytes, node_hash.bytes);
+                               ? kprefix::verify_and_snap(payload.data(), snap.row, blocks, node_hash)
+                               : keccak256_equals(payload, node_hash);
             } else {
-                verified = bytes_equal<32>(silkworm::keccak256(payload).bytes, node_hash.bytes);
+                verified = keccak256_equals(payload, node_hash);
             }
             if (!verified) [[unlikely]]
                 return std::nullopt;  // As a node missing from the witness.

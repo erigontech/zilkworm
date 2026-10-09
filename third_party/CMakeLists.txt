@@ -149,6 +149,10 @@ endif()
 
 if(AIRBENDER)
   target_compile_definitions(evmone PRIVATE AIRBENDER)
+  # The "advanced" option would keep the advanced interpreter and its instruction tables in the
+  # guest image. The guest runs the baseline interpreter only, so compile the option out there;
+  # host and native test builds keep it.
+  target_compile_definitions(evmone PRIVATE EVMONE_ADVANCED=0)
   target_include_directories(evmone PRIVATE
     ${CMAKE_SOURCE_DIR}/prover/guest_airbender/src/include
     ${CMAKE_SOURCE_DIR}/zilk_core

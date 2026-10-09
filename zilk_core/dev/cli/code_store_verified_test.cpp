@@ -7,6 +7,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <span>
 #include <vector>
@@ -144,8 +145,13 @@ TEST_CASE("sanitize skips the entries marked, and takes the marks once", "[state
         m.set(a);
         g_code_store_verified = m.handshake(w);
         w.data[a + 8 + 32 + 100] ^= 1;
+        // sanitize() may zero the bytes after the payloads (the rv32 test build does, see
+        // code_store_seal.hpp), which another DirectState would reject as a malformed layout:
+        // the second one gets the bytes back, at the same address.
+        const std::vector<uint8_t> as_read = w.blob;
         DirectState first{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
         CHECK(first.sanitize());
+        std::copy(as_read.begin(), as_read.end(), w.blob.begin());
         DirectState second{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
         CHECK_FALSE(second.sanitize());
     }

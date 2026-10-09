@@ -228,6 +228,29 @@ template <unsigned Off>
     std::memcpy(dst, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
 }
 
+// Whether b's witness node is a full branch: 16 hash references and an empty value, 3 + 16 * 33 + 1
+// bytes with slot i at 3 + 33 i. Each slot of the node has length class 32, a hash reference (0xa0 and
+// 32 bytes) or an embedded node of 32 bytes, and its list header is 3 bytes (0xf9 and two length
+// bytes): the slots then fill 16 * 33 bytes before the value byte, which only 16 hash references do.
+// fast_decode_header() also takes a 4-byte header with a leading zero, which would leave room for one
+// embedded node of 32 bytes and shift the slots after it.
+[[gnu::always_inline]] inline bool has_full_branch_orig(const BranchNode& b) noexcept {
+    typedef uint32_t __attribute__((may_alias)) w32;
+    const w32* const lens = reinterpret_cast<const w32*>(std::assume_aligned<8>(b.orig_child_len.data()));
+    return b.orig_size == kprefix::kNodeSize && b.orig[0] == 0xf9 &&
+           ((lens[0] ^ 0x20202020u) | (lens[1] ^ 0x20202020u) | (lens[2] ^ 0x20202020u) |
+            (lens[3] ^ 0x20202020u)) == 0;
+}
+
+// Whether encode_branch(b) is the witness node b.orig, a full branch, with the hash bytes of the dirty
+// slots rewritten and nothing else (its full-branch copy-and-patch path), and that node is 8-aligned:
+// what ethash_keccak256_full_branch() hashes from the node itself, with no copy. b.orig, a witness
+// node, is verified against its hash before it is unfolded, and its bytes are never written.
+[[gnu::always_inline]] inline bool hashes_from_witness(const BranchNode& b) noexcept {
+    return b.mask != 0 && b.orig != nullptr && (reinterpret_cast<uintptr_t>(b.orig) & 7) == 0 &&
+           b.same_layout_as_orig() && has_full_branch_orig(b);
+}
+
 // Always inlined (the guest calls it from encode_line() only): grown by the inline hash copies
 // above, it was otherwise compiled out of line and reached by a call.
 [[gnu::always_inline]] inline ByteView encode_branch(const BranchNode& b) {
@@ -245,23 +268,16 @@ template <unsigned Off>
         if (b.dirty == 0) {
             return ByteView{out, b.orig_size};
         }
-        // A full branch (16 hash children, empty value: 3 + 16 * 33 + 1 bytes, most branches on
-        // mainnet) has slot i at 3 + 33 i, so its dirty slots are addressed directly. The general
-        // walk below sums the slot sizes up to the last dirty one.
-        {
-            typedef uint32_t __attribute__((may_alias)) w32;
-            const w32* const lens = reinterpret_cast<const w32*>(std::assume_aligned<8>(b.orig_child_len.data()));
-            if (b.orig_size == 3 + 16 * 33 + 1 &&
-                ((lens[0] ^ 0x20202020u) | (lens[1] ^ 0x20202020u) | (lens[2] ^ 0x20202020u) |
-                 (lens[3] ^ 0x20202020u)) == 0) {
-                for (unsigned dirty = b.dirty; dirty != 0; dirty &= dirty - 1) {
-                    const unsigned i = lowest_set_bit(dirty);
-                    uint8_t* const p = out + 3 + 33 * i;
-                    *p = 0xa0;
-                    put_child_hash(p + 1, b, i);
-                }
-                return ByteView{out, b.orig_size};
+        // A full branch (most branches on mainnet) has slot i at 3 + 33 i, so its dirty slots are
+        // addressed directly. The general walk below sums the slot sizes up to the last dirty one.
+        if (has_full_branch_orig(b)) {
+            for (unsigned dirty = b.dirty; dirty != 0; dirty &= dirty - 1) {
+                const unsigned i = lowest_set_bit(dirty);
+                uint8_t* const p = out + 3 + 33 * i;
+                *p = 0xa0;
+                put_child_hash(p + 1, b, i);
             }
+            return ByteView{out, b.orig_size};
         }
         {
             const uint8_t b0 = b.orig[0];
@@ -322,27 +338,19 @@ template <unsigned Off>
     return ByteView{begin, static_cast<size_t>(p - begin)};
 }
 
-// The number of leading keccak blocks of `encoded`, the encode_branch() of `b`, that the state saved
-// for it in the pool already covers, or 0 when none does. A nonzero result consumes the saved state:
-// the caller must resume from it, now, with the digest of `encoded` as the result.
+// The number of leading keccak blocks of the full branch b's encoding that the state saved for it in
+// the pool already covers, or 0 when none does; b must satisfy hashes_from_witness(). A nonzero result
+// consumes the saved state: the caller must resume from it, now, with ethash_keccak256_full_branch().
 //
 // The saved state is that of the first 136 * blocks bytes of the witness node b.orig (see
-// keccak_prefix.hpp). `encoded` is that node with the hash bytes of the dirty slots rewritten: the
-// copy-and-patch path of encode_branch(), which b.orig != nullptr and an unchanged layout select,
-// and which touches slot i only from byte 4 + 33 i on, a slot's header byte staying 0xa0. So the
-// bytes before the first dirty slot are the node's, and the saved state may be used if none of the
-// slots that begin inside the blocks it covers is dirty (kHeadSlots). That a clean slot is unchanged
-// does not rest on the update that asked for the snapshot: every change to a slot sets its dirty bit,
-// and the pool row is found by b.orig. A node with no dirty slot is the witness node and resumes too.
-[[gnu::always_inline]] inline unsigned take_resumable_blocks(const BranchNode& b, size_t row, ByteView encoded) noexcept {
-    if (b.orig == nullptr || kprefix::tag_orig[row] != b.orig) return 0;
-    // The node as encode_branch() copied it: the whole witness node, laid out as it was. A node of
-    // kNodeSize bytes has no room for a slot that is not a hash reference, so this is the full branch.
-    if (b.orig_size != kprefix::kNodeSize ||
-        !b.same_layout_as_orig() || (reinterpret_cast<uintptr_t>(b.orig) & 7) != 0 ||
-        encoded.size() != kprefix::kNodeSize ||
-        encoded.data() != static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31))
-        return 0;
+// keccak_prefix.hpp). The encoding is that node with the hash bytes of the dirty slots rewritten
+// (hashes_from_witness()), slot i's from byte 4 + 33 i on. So the bytes before the first dirty slot
+// are the node's, and the saved state may be used if none of the slots that begin inside the blocks it
+// covers is dirty (kHeadSlots). That a clean slot is unchanged does not rest on the update that asked
+// for the snapshot: every change to a slot sets its dirty bit, and the pool row is found by b.orig. A
+// node with no dirty slot is the witness node and resumes too.
+[[gnu::always_inline]] inline unsigned take_resumable_blocks(const BranchNode& b, size_t row) noexcept {
+    if (kprefix::tag_orig[row] != b.orig) return 0;
     const unsigned blocks = kprefix::tag_sb[row];
     if ((b.dirty & kprefix::kHeadSlots[blocks]) != 0) return 0;
     kprefix::tag_orig[row] = nullptr;

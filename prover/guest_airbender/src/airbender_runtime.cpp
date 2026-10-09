@@ -8,7 +8,6 @@
 extern "C"
 {
     // Linker-provided section boundaries
-    extern uint32_t _sheap, _eheap;
     extern uint32_t _sstack, _estack;
     extern uint32_t _sidata, _sdata, _edata;
     extern uint32_t _sirodata, _srodata, _erodata;

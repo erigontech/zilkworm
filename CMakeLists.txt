@@ -86,11 +86,49 @@ add_subdirectory(zilk_core)
 # (not in zilk_core/) so projects embedding zilk_core with BUILD_TESTING=ON
 # but without Catch2 (qemu_runner) are unaffected.
 if(BUILD_TESTING)
+  # The Airbender guest's bump allocator defines the global operator new/delete and malloc, so it
+  # cannot be linked into a host test: it would replace the allocator of the whole process. The
+  # test compiles its text with those names mapped to guest_*, so it runs the guest file itself
+  # (a change to it shows up here) without taking over the host's allocation.
+  set(GUEST_ALLOCATOR_SRC ${CMAKE_CURRENT_SOURCE_DIR}/prover/guest_airbender/src/simple_allocator.cpp)
+  set(GUEST_ALLOCATOR_TEST_SOURCES)
+  if(EXISTS ${GUEST_ALLOCATOR_SRC})
+    set(GUEST_ALLOCATOR_TEST_SRC ${CMAKE_CURRENT_BINARY_DIR}/guest_allocator_test/simple_allocator_renamed.cpp)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GUEST_ALLOCATOR_SRC})
+    file(READ ${GUEST_ALLOCATOR_SRC} guest_allocator_text)
+    string(REPLACE "operator new[]" "guest_new_array" guest_allocator_text "${guest_allocator_text}")
+    string(REPLACE "operator delete[]" "guest_delete_array" guest_allocator_text "${guest_allocator_text}")
+    string(REPLACE "operator new" "guest_new" guest_allocator_text "${guest_allocator_text}")
+    string(REPLACE "operator delete" "guest_delete" guest_allocator_text "${guest_allocator_text}")
+    set(guest_allocator_prelude "#include <cerrno>\n#include <cstddef>\n#include <cstdint>\n#include <cstdlib>\n#include <new>\n")
+    foreach(name malloc free calloc realloc memalign aligned_alloc posix_memalign
+                 _malloc_r _free_r _realloc_r _calloc_r _memalign_r)
+      string(APPEND guest_allocator_prelude "#define ${name} guest_${name}\n")
+    endforeach()
+    # configure_file leaves the output alone when the content is unchanged, so no needless rebuilds.
+    file(WRITE ${GUEST_ALLOCATOR_TEST_SRC}.in "${guest_allocator_prelude}${guest_allocator_text}")
+    configure_file(${GUEST_ALLOCATOR_TEST_SRC}.in ${GUEST_ALLOCATOR_TEST_SRC} COPYONLY)
+    set(GUEST_ALLOCATOR_TEST_SOURCES ${GUEST_ALLOCATOR_TEST_SRC} zilk_core/dev/cli/guest_allocator_test.cpp)
+  endif()
+
   add_executable(zilkworm.tests
+    ${GUEST_ALLOCATOR_TEST_SOURCES}
+    zilk_core/core/execution/addmod_words_test.cpp
     zilk_core/core/execution/bn254_mul_test.cpp
+    zilk_core/core/execution/ecc_proj_one_test.cpp
+    zilk_core/core/execution/delegation_probe_test.cpp
+    zilk_core/core/common_zz/data_byte_count_test.cpp
     zilk_core/core/execution/div_mod_frontend_test.cpp
+    zilk_core/core/execution/precompile_lookup_test.cpp
+    zilk_core/core/execution/exp_pow2_base_test.cpp
+    zilk_core/core/execution/kzg_pairing_test.cpp
+    zilk_core/core/execution/mulmod_sparse_test.cpp
+    zilk_core/core/execution/secp256k1_ecrecover_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
+    zilk_core/core/types/receipt_logs_test.cpp
+    zilk_core/core/types/max_gas_cost_test.cpp
+    zilk_core/core/rlp/significant_bytes_test.cpp
     zilk_core/core/types/receipt_test.cpp
     zilk_core/core/types/transaction_rlp_view_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
@@ -98,6 +136,11 @@ if(BUILD_TESTING)
     zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp
     zilk_core/core/trie_zz/encode_branch_patch_test.cpp
     zilk_core/core/trie_zz/grid_mpt_kprefix_test.cpp
+    zilk_core/core/trie_zz/full_branch_hash_test.cpp
+    zilk_core/core/trie_zz/grid_mpt_word_loads_test.cpp
+    zilk_core/core/trie_zz/account_leaf_rlp_test.cpp
+    zilk_core/core/state_zz/node_verify_test.cpp
+    zilk_core/core/trie_zz/unfold_hash_copy_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
     zilk_core/dev/cli/addr_hash_orphan_test.cpp
     zilk_core/dev/cli/account_read_spoof_test.cpp
@@ -106,12 +149,43 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/direct_state_handle_test.cpp
     zilk_core/dev/cli/code_store_collision_len_test.cpp
     zilk_core/dev/cli/storage_host_path_test.cpp
+    zilk_core/dev/cli/call_frame_result_test.cpp
     zilk_core/dev/cli/word_layout_test.cpp
     zilk_core/dev/cli/jumpdest_map_test.cpp
+    zilk_core/dev/cli/jumpdest_single_bound_test.cpp
+    zilk_core/dev/cli/lean_code_cache_test.cpp
     zilk_core/dev/cli/cmp_jumpi_fusion_test.cpp
+    zilk_core/dev/cli/call_message_test.cpp
+    zilk_core/dev/cli/mstore_grow_test.cpp
+    zilk_core/dev/cli/memcheck_bounds_test.cpp
+    zilk_core/dev/cli/underflow_bounds_test.cpp
+    zilk_core/dev/cli/const_mask_and_fusion_test.cpp
+    zilk_core/dev/cli/push1_alu_fusion_test.cpp
+    zilk_core/dev/cli/sar_words_test.cpp
+    zilk_core/dev/cli/shift_stack_words_test.cpp
+    zilk_core/dev/cli/signextend_fusion_test.cpp
     zilk_core/dev/cli/code_store_stream_test.cpp
     zilk_core/dev/cli/code_store_verified_test.cpp
+    zilk_core/dev/cli/env_push_log_test.cpp
+    zilk_core/dev/cli/mem_builtins_test.cpp
+    zilk_core/dev/cli/mem_builtins_host.c
+    zilk_core/dev/cli/code_store_seal_test.cpp
+    zilk_core/dev/cli/in_place_code_test.cpp
+    zilk_core/dev/cli/strict_diag_test.cpp
   )
+  # The guest's memcpy and friends, built for the host with the guest's code-generation flags: the
+  # byte loops must not be turned into the libc calls this file replaces. The guest is built with
+  # -mstrict-align, where a misaligned word access traps but x86 runs it silently, so the alignment
+  # sanitizer stands in for it.
+  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    set(MEM_BUILTINS_HOST_FLAGS -fno-builtin -fno-tree-loop-distribute-patterns -fsanitize=alignment
+                                -fno-sanitize-recover=alignment
+    )
+    set_source_files_properties(
+      zilk_core/dev/cli/mem_builtins_host.c PROPERTIES COMPILE_OPTIONS "${MEM_BUILTINS_HOST_FLAGS}"
+    )
+    target_link_options(zilkworm.tests PRIVATE -fsanitize=alignment)
+  endif()
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
   # silkworm_core<->types_zz archive cycle globally; --start-group is GNU-ld-only.
   if(APPLE)
@@ -119,7 +193,60 @@ if(BUILD_TESTING)
   else()
     set(ZILK_TEST_LIBS -Wl,--start-group silkworm_dev silkworm_core silkworm_types_zz -Wl,--end-group)
   endif()
-  target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} Catch2::Catch2WithMain)
+  # kzg_pairing_test builds proofs and its reference pairing with blst.
+  target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} blst::blst Catch2::Catch2WithMain)
+  # The Airbender guest's blst cyclotomic squaring only exists inside evmone's patch script. The
+  # test extracts the script's text with Python and runs it on a host emulation of the BigInt
+  # delegation, so it needs a host toolchain with Python.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING)
+    set(BLST_CYC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/blst_cyclotomic")
+    set(BLST_CYC_PATCH_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/cmake/patch_blst_airbender.sh")
+    set(BLST_CYC_GEN "${CMAKE_CURRENT_BINARY_DIR}/blst_cyclotomic_gen")
+    add_custom_command(
+      OUTPUT "${BLST_CYC_GEN}/base_block.inc" "${BLST_CYC_GEN}/cand_block.inc"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${BLST_CYC_GEN}"
+      COMMAND ${Python3_EXECUTABLE} -I "${BLST_CYC_DIR}/extract.py" "${BLST_CYC_PATCH_SCRIPT}" "${BLST_CYC_GEN}"
+      DEPENDS "${BLST_CYC_PATCH_SCRIPT}" "${BLST_CYC_DIR}/extract.py"
+      VERBATIM
+    )
+    add_library(blst_cyclotomic_diff STATIC "${BLST_CYC_DIR}/blst_cyclotomic_diff.c"
+                                            "${BLST_CYC_GEN}/base_block.inc" "${BLST_CYC_GEN}/cand_block.inc")
+    target_include_directories(blst_cyclotomic_diff PRIVATE "${BLST_CYC_DIR}" "${BLST_CYC_GEN}")
+    # blst's C, not the repository's: the project's -Werror -pedantic set does not apply to it
+    target_compile_options(blst_cyclotomic_diff PRIVATE -w -O2)
+    target_sources(zilkworm.tests PRIVATE "${BLST_CYC_DIR}/blst_cyclotomic_test.cpp")
+    target_include_directories(zilkworm.tests PRIVATE "${BLST_CYC_DIR}")
+    target_link_libraries(zilkworm.tests PRIVATE blst_cyclotomic_diff)
+  else()
+    message(STATUS "blst cyclotomic differential test skipped (needs Python3 on a host build)")
+  endif()
+  # The Airbender guest's blst mul_mont_384 only exists inside evmone's patch script. The test
+  # extracts the script's text with Python and runs it on a host emulation of the BigInt
+  # delegation, so it needs a host toolchain with Python.
+  if(Python3_Interpreter_FOUND AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING)
+    set(BLST_MONT384_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/blst_mont384")
+    set(BLST_PATCH_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/cmake/patch_blst_airbender.sh")
+    set(BLST_MONT384_GEN "${CMAKE_CURRENT_BINARY_DIR}/blst_mont384_gen")
+    add_custom_command(
+      OUTPUT "${BLST_MONT384_GEN}/cand_block.inc"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${BLST_MONT384_GEN}"
+      COMMAND ${Python3_EXECUTABLE} -I "${BLST_MONT384_DIR}/extract.py" "${BLST_PATCH_SCRIPT}" cand
+              "${BLST_MONT384_GEN}/cand_block.inc"
+      DEPENDS "${BLST_PATCH_SCRIPT}" "${BLST_MONT384_DIR}/extract.py"
+      VERBATIM
+    )
+    add_library(blst_mont384_diff STATIC "${BLST_MONT384_DIR}/blst_mont384_diff.c"
+                                         "${BLST_MONT384_GEN}/cand_block.inc")
+    target_include_directories(blst_mont384_diff PRIVATE "${BLST_MONT384_DIR}" "${BLST_MONT384_GEN}")
+    # blst's C, not the repository's: the project's -Werror -pedantic set does not apply to it
+    target_compile_options(blst_mont384_diff PRIVATE -w -O2)
+    target_sources(zilkworm.tests PRIVATE "${BLST_MONT384_DIR}/blst_mont384_test.cpp")
+    target_include_directories(zilkworm.tests PRIVATE "${BLST_MONT384_DIR}")
+    target_link_libraries(zilkworm.tests PRIVATE blst_mont384_diff)
+  else()
+    message(STATUS "blst mul_mont_384 differential test skipped (needs Python3 on a host build)")
+  endif()
   include(Catch)
   catch_discover_tests(zilkworm.tests)
 endif()

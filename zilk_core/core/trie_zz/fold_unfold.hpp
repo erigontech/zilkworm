@@ -25,6 +25,34 @@
 
 namespace zilkworm {
 
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+// Copies 32 bytes from src (any alignment: witness bytes) to the word-aligned dst. Kept out of line
+// like memcpy: inlined into unfold_slot it makes GCC move the lookup state onto s0-s6, costing seven
+// callee-saved saves and restores per call. Source words are read aligned-down (no misaligned access),
+// so the first word holds src[0] and the last one src[31]; like the guest memcpy it never touches a
+// word that holds none of the 32 bytes. The phase branch is needed: nx << 32 is undefined.
+// EVMONE_RV32_DISPATCH_TEST builds it on the host for testing (little-endian, like the guest).
+[[gnu::noinline]] inline void copy32_to_aligned(unsigned char* dst, const uint8_t* src) noexcept {
+    typedef uint32_t __attribute__((may_alias)) w32;
+    w32* const dw = reinterpret_cast<w32*>(dst);
+    const auto a = reinterpret_cast<uintptr_t>(src);
+    const w32* const sw = reinterpret_cast<const w32*>(a & ~uintptr_t{3});
+    if ((a & 3) == 0) {
+#pragma GCC unroll 8
+        for (int k = 0; k < 8; ++k) dw[k] = sw[k];
+        return;
+    }
+    const unsigned sh = static_cast<unsigned>(a & 3) * 8;
+    uint32_t prev = sw[0];
+#pragma GCC unroll 8
+    for (int k = 0; k < 8; ++k) {
+        const uint32_t nx = sw[k + 1];
+        dw[k] = (prev >> sh) | (nx << (32 - sh));
+        prev = nx;
+    }
+}
+#endif
+
 // rlp helpers live in silkworm::rlp; alias for local readability.
 namespace rlp = ::silkworm::rlp;
 
@@ -32,8 +60,20 @@ namespace rlp = ::silkworm::rlp;
     if (from.size() < 8) [[unlikely]] {
         return {false, from.size()};
     }
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+    // Only bytes 0..3 are read below. Strict alignment turns the 8-byte memcpy into byte copies through the
+    // stack; one word load does for a word-aligned payload, and a misaligned one copies just the four bytes.
+    typedef uint32_t __attribute__((may_alias)) w32;
+    uint32_t word;
+    if ((reinterpret_cast<uintptr_t>(from.data()) & 3) == 0) [[likely]] {
+        word = *reinterpret_cast<const w32*>(from.data());
+    } else {
+        std::memcpy(&word, from.data(), 4);
+    }
+#else
     uint64_t word;
     std::memcpy(&word, from.data(), 8);
+#endif
     uint8_t first = word & 0xFF;
 
     if (first < 0x80) return {false, 1};
@@ -311,34 +351,45 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         return;
     }
 
-    const ByteView encoded = encode_line(grid_line);
-    // A full branch the lookup saved the keccak state of the leading blocks of, which this update left as
-    // they were, is hashed from that state.
-    const size_t row = depth & (kprefix::kRows - 1);
-    const unsigned resume_blocks =
-        grid_line.kind == kBranch ? take_resumable_blocks(grid_line.branch, row, encoded) : 0;
     const unsigned slot = grid_line.parent_slot;
     auto& parent = grid_[grid_line.parent_depth];
     parent.modified = true;
     parent.child_depth[slot] = 0;  // clear
+    // A full branch that differs from its witness node only in hash references is hashed from that
+    // node and its new hashes, with no encoding: before the line goes, as the hash reads it. If the
+    // lookup saved the keccak state of the node's leading blocks and this update left them as they
+    // were, the hash resumes from that state.
+    if (grid_line.kind == kBranch && hashes_from_witness(grid_line.branch)) {
+        const size_t row = depth & (kprefix::kRows - 1);
+        const unsigned blocks = take_resumable_blocks(grid_line.branch, row);
+        switch (parent.kind) {
+            case kBranch:
+                parent.branch.set_child_hash_of(slot, grid_line.branch, kprefix::pool[row], blocks);
+                break;
+            case kExt:
+                parent.ext.set_child_hash_of(grid_line.branch, kprefix::pool[row], blocks);
+                break;
+            default:
+                std::unreachable();
+        }
+        delete_line(depth);
+        return;
+    }
+    const ByteView encoded = encode_line(grid_line);
     // The line goes before its reference is written into the parent (its encoding is in
     // static_buffer, and the parent does not move): the keccak of an encoding of 32 bytes or more,
     // which returns straight into the parent's slot, then ends fold_line() with nothing live across it.
     delete_line(depth);
     switch (parent.kind) {
         case kBranch:
-            if (resume_blocks != 0) {
-                parent.branch.set_child_hash_resumed(slot, encoded, row, resume_blocks);
-            } else if (encoded.size() >= 32) {
+            if (encoded.size() >= 32) {
                 parent.branch.set_child_hash(slot, encoded);
             } else {
                 parent.branch.set_child(slot, encoded);
             }
             break;
         case kExt:
-            if (resume_blocks != 0) {
-                parent.ext.set_child_hash_resumed(encoded, row, resume_blocks);
-            } else if (encoded.size() >= 32) {
+            if (encoded.size() >= 32) {
                 parent.ext.set_child_hash(encoded);
             } else {
                 parent.ext.set_child(encoded);
@@ -356,7 +407,7 @@ inline LeafNode GridMPT<DeletionEnabled>::make_cur_leaf(ByteView value_rlp) {
     l.parent_slot = search_nibbles_[search_nib_cursor_];
     l.path.len = 64 - (search_nib_cursor_ + 1);
     std::memcpy(l.path.nib.data(),
-                &search_nibbles_[search_nib_cursor_ + 1],
+                search_nibbles_.nib.data() + search_nib_cursor_ + 1,
                 l.path.len);
     l.value = value_rlp;
     return l;
@@ -615,9 +666,15 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     ByteView rlp;
     if (child_len == 32) {
         // Hash ref
-        bytes32 ck;
+        // Plain bytes, not a bytes32: handed to the keccak compare out of line, a bytes32 gets its
+        // zero initialization emitted again here.
+        alignas(8) uint8_t ck[32];
         const uint8_t* hs = grid_line.branch.child_ptr[slot] ? grid_line.branch.child_ptr[slot] : child.bytes;
-        std::memcpy(ck.bytes, hs, 32);
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+        copy32_to_aligned(ck, hs);
+#else
+        std::memcpy(ck, hs, 32);
+#endif
         auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
             return kprefix::SnapRequest{snap_writes_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
                                                                                 : kprefix::kNoSlot,

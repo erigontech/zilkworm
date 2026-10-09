@@ -24,6 +24,10 @@
 #include <zilk_core/core/types/transaction.hpp>
 #include <zilk_core/print.hpp>
 
+#if ZILK_SEAL_CODE_STORE
+#include <zilk_core/core/state_zz/code_store_seal.hpp>
+#endif
+
 #if USE_HASH_KEY
 #include <zilk_core/core/rlp/decode.hpp>
 #include <zilk_core/core/trie_zz/mpt.hpp>     // nibbles64, BranchNode
@@ -119,6 +123,32 @@ namespace {
         if (!validate_mphf<32>(blob, meta->code_store_offset, meta->code_store_size,
                                kMphfCodeStoreMagic)) [[unlikely]] {
             return false;
+        }
+
+        // The sections must not overlap. The account map's data is written through (Account
+        // scratch, EVM state), so code-store bytes inside it, hashed and bound by sanitize(),
+        // could change after it, and so could the code the EVM runs in place.
+        {
+            struct Section { uint64_t lo, hi; };
+            const uint64_t n_acc = meta->n_accounts;
+            const Section sections[] = {
+                {0, sizeof(PreStateMeta)},
+                {meta->prestate_offset, n_acc > 0 ? uint64_t{meta->addr_hashes_offset} : 0},
+                {meta->addr_hashes_offset, meta->addr_hashes_offset + n_acc * sizeof(AddrHashEntry)},
+                {meta->block_hashes_offset,
+                 meta->block_hashes_offset + uint64_t{meta->n_block_hashes} * sizeof(BlockHashEntry)},
+                {meta->code_store_offset, uint64_t{meta->code_store_offset} + meta->code_store_size},
+            };
+            for (size_t i = 0; i < std::size(sections); ++i) {
+                for (size_t j = i + 1; j < std::size(sections); ++j) {
+                    const Section& a = sections[i];
+                    const Section& b = sections[j];
+                    if (a.lo < a.hi && b.lo < b.hi && a.lo < b.hi && b.lo < a.hi) [[unlikely]] {
+                        sys_println("DirectState: prestate sections overlap");
+                        return false;
+                    }
+                }
+            }
         }
 
         if (meta->n_accounts > 0) {
@@ -332,6 +362,9 @@ DirectState::DirectState(DirectState&& other) noexcept
     if (pre_state_meta_->code_store_size > 0) {
         code_store_map_.reset(reinterpret_cast<MphfMapHeader*>(prestate_view_.data() + pre_state_meta_->code_store_offset));
     }
+#if ZILK_SEAL_CODE_STORE
+    code_store_sealed_ = std::exchange(other.code_store_sealed_, false);
+#endif
     node_store_map_ = other.node_store_map_;
     node_verified_ = std::move(other.node_verified_);
 
@@ -353,6 +386,14 @@ DirectState::DirectState(DirectState&& other) noexcept
     other.block_hashes_ = {};
     other.code_store_map_ = {};
 }
+
+#if ZILK_SEAL_CODE_STORE
+DirectState::~DirectState() {
+    // The blob may be freed and its memory reused next (not on the guest, whose heap never reuses
+    // a byte), and other bytes there need not stay zero.
+    if (code_store_sealed_) evmone::baseline::set_in_place_code_region(nullptr, nullptr);
+}
+#endif
 
 evmc::bytes32 DirectState::read_storage(const evmc::address& addr,
                                         const evmc::bytes32& key) const noexcept {
@@ -496,7 +537,14 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
 
     // Dedup against the witness code_store; otherwise insert into created_code_
     // keyed by key8(hash). key8 collisions spill into created_code_collisions_.
-    if (auto b = code_store_map_.find<32, 0, &hash_key8>(h.bytes)) {
+    std::optional<std::span<uint8_t>> b;
+#if ZILK_SEAL_CODE_STORE
+    // Once sealed, the keys and lengths of the code store are partly zeroed: no lookup by hash,
+    // created code goes to created_code_ even if the witness carries the same bytes.
+    if (!code_store_sealed_)
+#endif
+        b = code_store_map_.find<32, 0, &hash_key8>(h.bytes);
+    if (b) {
         pa.code_store_offset = static_cast<uint32_t>(b->data() - code_store_map_.data());
     } else {
         pa.code_store_offset = kCreatedCodeOffset;
@@ -868,7 +916,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
         }
     }
     // Snapshot the pre-state leaf RLP before execution mutates the copy (mutators only clear acc_rlp_sroot_off).
-    acc->rlp_into_cache(std::bit_cast<evmc::bytes32>(acc->storage_root));
+    acc->rlp_into_cache();
     sys_println("USE_HASH_KEY: recovered account " +
                 to_hex(ByteView{addr.bytes, sizeof(addr.bytes)}, true) +
                 " from node-store (preimage missing from keys)");
@@ -956,9 +1004,28 @@ bool DirectState::sanitize() {
     const CodeStoreVerified verified = std::exchange(g_code_store_verified, CodeStoreVerified{});
     const bool verified_here = verified.data != nullptr && verified.data == code_store_map_.data() &&
                                verified.data_size == code_store_map_.data_size();
+#if ZILK_SEAL_CODE_STORE
+    // Code the EVM runs in place must lie in this blob, see the end.
+    evmone::baseline::set_in_place_code_region(nullptr, nullptr);
+    if (code_store_sealed_) [[unlikely]] {
+        sys_println("sanitize: called again, after the code store was sealed");
+        return false;
+    }
+    // Walked here, before anything is written, so that the hashing below tests on the way that
+    // every entry the map refers to is an entry of the walk. With no keys validate_mphf has not
+    // checked the data section, and nothing refers to it.
+    const code_store_seal::DenseLayout layout =
+        code_store_map_.n_keys() > 0
+            ? code_store_seal::DenseLayout{code_store_map_.data(), code_store_map_.data_size()}
+            : code_store_seal::DenseLayout{nullptr, 0};
+    bool entries_in_layout = layout.dense();
+#endif
     bool code_keccak_ok = true;
     const uint8_t* const code_data = code_store_map_.data();
     code_store_map_.for_each_offset([&](uint64_t off) {
+#if ZILK_SEAL_CODE_STORE
+        entries_in_layout = entries_in_layout && layout.is_entry(off);
+#endif
         // A misaligned offset is never one the reader walked: it would share the bit of the entry
         // it lies inside.
         if (verified_here && (off & 7) == 0 && (off >> 3) < verified.n_bits &&
@@ -1000,7 +1067,7 @@ bool DirectState::sanitize() {
         }
         pa->deleted = false;
         pa->modified = true;    // To be unset during addr_hashes loop
-        pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
+        pa->rlp_into_cache();
     };
     if (pre_state_meta_->n_accounts > 0) {
         pre_state_map_.for_each<20>(
@@ -1033,6 +1100,18 @@ bool DirectState::sanitize() {
     }
     if (addr_hash_skipped) return false;
 
+#if ZILK_SEAL_CODE_STORE
+    // Every payload is hashed and every account bound to its entry: the lengths and keys are not
+    // read again. Zeroing the bytes after each payload but the last pads it for the EVM in place,
+    // see code_store_seal.hpp. The region ends at the last entry, so the 36 bytes after any code
+    // in it lie in the data section.
+    if (entries_in_layout) {
+        uint8_t* const data = code_store_map_.data();
+        code_store_seal::zero_tails(data, layout.last());
+        evmone::baseline::set_in_place_code_region(data + 8, data + layout.last());
+        code_store_sealed_ = true;
+    }
+#endif
     return true;
 }
 

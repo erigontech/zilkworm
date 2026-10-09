@@ -1,13 +1,15 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -80,8 +82,9 @@ namespace zilkworm {
 }
 #endif
 // Find the least common path of current key from the top, with the last key as reference
+// (search_nibbles_ still holds the expansion of prev's key, or of whatever key came last when prev is null).
 template <bool DeletionEnabled>
-inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbles) {
+inline void GridMPT<DeletionEnabled>::seek_with_last_insert(const TrieNodeFlat& cur, const TrieNodeFlat* prev) {
     //================================================
     // The last leaf must have been inserted to a branch, or deleted from it
     //  --> lcp: lowest common point (between the last inserted and new_nibbles) <--
@@ -125,7 +128,15 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
         return;
     }
     unsigned parent_consumed = parent.consumed;
-    size_t lcp = lcp_nibbles(new_nibbles.nib.data(), search_nibbles_.nib.data(), parent_consumed);
+    size_t lcp;
+    if (prev != nullptr && parent_consumed <= 64) [[likely]] {
+        lcp = std::min<size_t>(key_lcp_nibbles(cur, *prev), parent_consumed);
+    } else {
+        // The first update of a call never gets here (depth_ is 0 after reset() or construction), nor does a
+        // well-formed trie have a branch past nibble 64: compare the expanded keys as before.
+        const nibbles64 new_nibbles = nibbles64::from_bytes32(cur.key);
+        lcp = lcp_nibbles(new_nibbles.nib.data(), search_nibbles_.nib.data(), parent_consumed);
+    }
 
     if (lcp >= parent_consumed) {
         if constexpr (DeletionEnabled) {
@@ -170,25 +181,28 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
 template <bool DeletionEnabled>
 bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
     assert(!failed());
+    // The update search_nibbles_ was last expanded from: the seek compares the keys themselves, and expanding
+    // the new key straight into search_nibbles_ skips a zeroed temporary and its copy.
+    const TrieNodeFlat* prev = nullptr;
     for (auto updates_it = updates_sorted.begin(); updates_it != updates_sorted.end(); ++updates_it) {
         const auto& trie_upd = *updates_it;
 
-        auto new_nibbles = nibbles64::from_bytes32(trie_upd.key);
         search_nib_cursor_ = 0;
         snap_writes_ = false;  // for the folds of the seek below
 
         if (!grid_.empty() && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
             // and it's in a branch, or just a leaf, or nothing (can't be ext -> leaf)
-            seek_with_last_insert(new_nibbles);
+            seek_with_last_insert(trie_upd, prev);
         }
+        search_nibbles_.assign_bytes32(trie_upd.key);
+        prev = &trie_upd;
 
         if (grid_.empty()) {
             // Either the very first update, or the preceding deletes emptied
             // the whole trie (seek pops the last line then). Descending the
             // main loop would read grid_[0] out of bounds; this key simply
             // (re)seeds the trie as a single full-path leaf.
-            search_nibbles_ = new_nibbles;
             last_was_delete_ = false;
             root_unfolded_ = false;
             LeafNode l{search_nibbles_, 0, trie_upd.current_value()};
@@ -196,7 +210,6 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
             continue;
         }
 
-        search_nibbles_ = new_nibbles;
         last_was_delete_ = false;
         snap_writes_ = trie_upd.current_value().size() != 0;
 
@@ -345,7 +358,15 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 }
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
                     // check pre-value matches
-                    if (grid_line.leaf.value != trie_upd.initial_value()) {
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+                    const ByteView initial = trie_upd.initial_value();
+                    const bool pre_value_ok = grid_line.leaf.value.size() == initial.size() &&
+                                              bytes_equal_any(grid_line.leaf.value.data(), initial.data(),
+                                                              initial.size());
+#else
+                    const bool pre_value_ok = grid_line.leaf.value == trie_upd.initial_value();
+#endif
+                    if (!pre_value_ok) {
 #ifndef NDEBUG
                         failed_ = true;
 #endif
@@ -429,6 +450,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
     // An unmodified root is the node verified to hash to prev_root_.
     if (root_unfolded_ && !grid_[0].modified) {
         return prev_root_;
+    }
+    // As fold_line() hashes such a branch, from the start: init_from_root() saves no keccak state.
+    if (grid_[0].kind == kBranch && hashes_from_witness(grid_[0].branch)) {
+        return std::bit_cast<bytes32>(grid_[0].branch.full_branch_hash(nullptr, 0));
     }
     auto encoded = encode_line(grid_[0]);
     return keccak_bytes(encoded);

@@ -8,9 +8,14 @@
 #include "stddef.h"
 #include "stdint.h"
 
+// Word accesses to bytes (any buffer the guest copies) go through this named may_alias type, so
+// they are defined behaviour and -Wstrict-aliasing=1 accepts them.
+typedef uint32_t __attribute__((may_alias)) w32;
+
 // CSR MEMCOPY: copies 32 bytes from [x11] to [x10] in ~4 instructions.
 // Both src and dst must be 4-byte aligned (32-byte alignment not required
 // for correctness, but gives best performance).
+#if defined(__riscv) && __riscv_xlen == 32
 static inline __attribute__((always_inline))
 void csr_memcopy32(void *dst, const void *src) {
     register uintptr_t a0 __asm__("x10") = (uintptr_t)dst;
@@ -19,15 +24,21 @@ void csr_memcopy32(void *dst, const void *src) {
     __asm__ __volatile__("csrrw x0, 0x7CA, x0"
         : "+r"(a2) : "r"(a0), "r"(a1) : "memory");
 }
+#else
+// Host unit tests (mem_builtins_test.cpp) compile this file for the host, with the four
+// functions renamed, and supply the CSR as a function that checks the delegation's operand rules.
+void csr_memcopy32(void *dst, const void *src);
+#endif
 
 // 32 bytes between any two addresses (3.5M calls per 200 mainnet blocks: hashes read out of
 // witness RLP, whose alignment is arbitrary). The source words are read aligned and shifted
 // together, the destination is written with byte stores up to its first word boundary, word
 // stores to the last one and byte stores after. The generic stages below take 74..86 cycles for
 // this shape, this about 45. Reads up to 3 bytes past src + 32, inside the same aligned word.
-static void copy32_any(unsigned char *dst, const unsigned char *src) {
+static inline __attribute__((always_inline))
+void copy32_any(unsigned char *dst, const unsigned char *src) {
     const uintptr_t soff = (uintptr_t)src & 3;
-    const uint32_t *sw = (const uint32_t *)(src - soff);
+    const w32 *sw = (const w32 *)(src - soff);
     const unsigned sh = (unsigned)soff * 8;
     uint32_t carry = sw[0];
     unsigned si = 1;
@@ -45,7 +56,7 @@ static void copy32_any(unsigned char *dst, const unsigned char *src) {
     } while (0)
     const uintptr_t doff = (uintptr_t)dst & 3;
     if (doff == 0) {
-        uint32_t *dw = (uint32_t *)dst;
+        w32 *dw = (w32 *)dst;
         for (int k = 0; k < 8; k++) {
             uint32_t v;
             NEXT_SRC(v);
@@ -60,7 +71,7 @@ static void copy32_any(unsigned char *dst, const unsigned char *src) {
         dst[k] = (unsigned char)v;
         v >>= 8;
     }
-    uint32_t *dw = (uint32_t *)(dst + lead);
+    w32 *dw = (w32 *)(dst + lead);
     const unsigned keep = 32 - lead * 8;  // Bits of v (source bytes not yet stored) at its bottom.
     for (int k = 0; k < 7; k++) {
         uint32_t nx;
@@ -79,49 +90,147 @@ static void copy32_any(unsigned char *dst, const unsigned char *src) {
 // ---------------------------------------------------------------------------
 // memcpy — non-overlapping copy, CSR MEMCOPY + word-aligned fast path
 // ---------------------------------------------------------------------------
+// memcpy() itself only holds the short copies (word-aligned n <= 67 and n == 96 by a jump into a run
+// of word copies, n == 32 at any alignment, n < 8 at unaligned addresses by bytes), with no CSR
+// MEMCOPY in it: that instruction binds x10..x12, and with it in the same function GCC kept dest
+// and src in other registers on every call. Everything else is memcpy_large().
+
+// Copies words [0, words) of s to d, lowest first: memmove() forwards overlapping copies with
+// d < s here, and a store ahead of a pending load would corrupt them. A jump into a run of
+// loads and stores based at the end of the range.
+#define COPY_WORDS_FWD(D, S, WORDS, MAXW)                                                  \
+    do {                                                                                   \
+        w32 *de_ = (w32 *)((uintptr_t)(D) + (WORDS) * 4 - (MAXW) * 4);                     \
+        const w32 *se_ = (const w32 *)((uintptr_t)(S) + (WORDS) * 4 - (MAXW) * 4);         \
+        switch (WORDS) {                                                                   \
+        case 16: de_[(MAXW) - 16] = se_[(MAXW) - 16]; __attribute__((fallthrough));        \
+        case 15: de_[(MAXW) - 15] = se_[(MAXW) - 15]; __attribute__((fallthrough));        \
+        case 14: de_[(MAXW) - 14] = se_[(MAXW) - 14]; __attribute__((fallthrough));        \
+        case 13: de_[(MAXW) - 13] = se_[(MAXW) - 13]; __attribute__((fallthrough));        \
+        case 12: de_[(MAXW) - 12] = se_[(MAXW) - 12]; __attribute__((fallthrough));        \
+        case 11: de_[(MAXW) - 11] = se_[(MAXW) - 11]; __attribute__((fallthrough));        \
+        case 10: de_[(MAXW) - 10] = se_[(MAXW) - 10]; __attribute__((fallthrough));        \
+        case 9: de_[(MAXW) - 9] = se_[(MAXW) - 9]; __attribute__((fallthrough));           \
+        case 8: de_[(MAXW) - 8] = se_[(MAXW) - 8]; __attribute__((fallthrough));           \
+        case 7: de_[(MAXW) - 7] = se_[(MAXW) - 7]; __attribute__((fallthrough));           \
+        case 6: de_[(MAXW) - 6] = se_[(MAXW) - 6]; __attribute__((fallthrough));           \
+        case 5: de_[(MAXW) - 5] = se_[(MAXW) - 5]; __attribute__((fallthrough));           \
+        case 4: de_[(MAXW) - 4] = se_[(MAXW) - 4]; __attribute__((fallthrough));           \
+        case 3: de_[(MAXW) - 3] = se_[(MAXW) - 3]; __attribute__((fallthrough));           \
+        case 2: de_[(MAXW) - 2] = se_[(MAXW) - 2]; __attribute__((fallthrough));           \
+        case 1: de_[(MAXW) - 1] = se_[(MAXW) - 1]; __attribute__((fallthrough));           \
+        case 0: break;                                                                     \
+        default: __builtin_unreachable();                                                  \
+        }                                                                                  \
+    } while (0)
+
+// `chunks` (0..16) CSR MEMCOPY chunks, lowest first, by a jump into a run based at the end.
+static inline __attribute__((always_inline))
+void csr_chunks16(w32 *d, const w32 *s, size_t chunks) {
+    // Integer arithmetic: for chunks < 16 the base lies before d, and the runs below only
+    // reach back into [d, d + chunks * 32).
+    unsigned char *de = (unsigned char *)((uintptr_t)d + chunks * 32 - 512);
+    const unsigned char *se = (const unsigned char *)((uintptr_t)s + chunks * 32 - 512);
+    switch (chunks) {
+    case 16: csr_memcopy32(de + 0, se + 0); __attribute__((fallthrough));
+    case 15: csr_memcopy32(de + 32, se + 32); __attribute__((fallthrough));
+    case 14: csr_memcopy32(de + 64, se + 64); __attribute__((fallthrough));
+    case 13: csr_memcopy32(de + 96, se + 96); __attribute__((fallthrough));
+    case 12: csr_memcopy32(de + 128, se + 128); __attribute__((fallthrough));
+    case 11: csr_memcopy32(de + 160, se + 160); __attribute__((fallthrough));
+    case 10: csr_memcopy32(de + 192, se + 192); __attribute__((fallthrough));
+    case 9: csr_memcopy32(de + 224, se + 224); __attribute__((fallthrough));
+    case 8: csr_memcopy32(de + 256, se + 256); __attribute__((fallthrough));
+    case 7: csr_memcopy32(de + 288, se + 288); __attribute__((fallthrough));
+    case 6: csr_memcopy32(de + 320, se + 320); __attribute__((fallthrough));
+    case 5: csr_memcopy32(de + 352, se + 352); __attribute__((fallthrough));
+    case 4: csr_memcopy32(de + 384, se + 384); __attribute__((fallthrough));
+    case 3: csr_memcopy32(de + 416, se + 416); __attribute__((fallthrough));
+    case 2: csr_memcopy32(de + 448, se + 448); __attribute__((fallthrough));
+    case 1: csr_memcopy32(de + 480, se + 480); __attribute__((fallthrough));
+    case 0: break;
+    default: __builtin_unreachable();
+    }
+}
+
+// Both word-aligned, n > 67.
+static inline __attribute__((always_inline)) void *memcpy_aligned_large(void *dest, const void *src, size_t n) {
+    w32 *dw = (w32 *)dest;
+    const w32 *sw = (const w32 *)src;
+    if ((((uintptr_t)dw ^ (uintptr_t)sw) & 31) == 0) {
+        // Same phase modulo 32: words up to the 32-byte boundary, CSR chunks, words, bytes.
+        const size_t lead = (0u - (uintptr_t)dw) & 31;
+        COPY_WORDS_FWD(dw, sw, lead >> 2, 7);
+        dw = (w32 *)((uintptr_t)dw + lead);
+        sw = (const w32 *)((uintptr_t)sw + lead);
+        n -= lead;
+        while (n >= 16 * 32) {
+            csr_chunks16(dw, sw, 16);
+            dw += 128;
+            sw += 128;
+            n -= 16 * 32;
+        }
+        csr_chunks16(dw, sw, n >> 5);
+        dw = (w32 *)((uintptr_t)dw + (n & ~(size_t)31));
+        sw = (const w32 *)((uintptr_t)sw + (n & ~(size_t)31));
+        n &= 31;
+        COPY_WORDS_FWD(dw, sw, n >> 2, 7);
+        if (n & 3) {
+            unsigned char *d = (unsigned char *)dw + (n & ~(size_t)3);
+            const unsigned char *s = (const unsigned char *)sw + (n & ~(size_t)3);
+            n &= 3;
+            while (n--)
+                *d++ = *s++;
+        }
+        return dest;
+    }
+    // Different phase: words, then bytes.
+    while (n >= 32) {
+        dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
+        dw[4] = sw[4]; dw[5] = sw[5]; dw[6] = sw[6]; dw[7] = sw[7];
+        dw += 8;
+        sw += 8;
+        n -= 32;
+    }
+    COPY_WORDS_FWD(dw, sw, n >> 2, 7);
+    if (n & 3) {
+        unsigned char *d = (unsigned char *)dw + (n & ~(size_t)3);
+        const unsigned char *s = (const unsigned char *)sw + (n & ~(size_t)3);
+        n &= 3;
+        while (n--)
+            *d++ = *s++;
+    }
+    return dest;
+}
+
+// Defined at the end of the file (see the -fno-toplevel-reorder note in CMakeLists.txt): the
+// memcpy() keeps its address (the later functions shift by the size change of memcpy and
+// memcpy_large()), so the callers that reach it with jal still do.
+static void *memcpy_large(void *dest, const void *src, size_t n) __attribute__((noinline));
+
 void *memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
 
-    // Fast-path hub for common aligned sizes.
-    // Ordered by frequency: n==32 (90 sites), n==20 (31), n==64 (9), n==8 (5).
     if ((((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
-        uint32_t *dw = (uint32_t *)d;
-        const uint32_t *sw = (const uint32_t *)s;
-
+        w32 *dw = (w32 *)d;
+        const w32 *sw = (const w32 *)s;
         if (__builtin_expect(n == 32, 1)) {
             dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
             dw[4] = sw[4]; dw[5] = sw[5]; dw[6] = sw[6]; dw[7] = sw[7];
             return dest;
         }
-        if (n == 20) {
-            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
-            dw[4] = sw[4];
-            return dest;
-        }
-        if (n == 64) {
-            dw[0]  = sw[0];  dw[1]  = sw[1];  dw[2]  = sw[2];  dw[3]  = sw[3];
-            dw[4]  = sw[4];  dw[5]  = sw[5];  dw[6]  = sw[6];  dw[7]  = sw[7];
-            dw[8]  = sw[8];  dw[9]  = sw[9];  dw[10] = sw[10]; dw[11] = sw[11];
-            dw[12] = sw[12]; dw[13] = sw[13]; dw[14] = sw[14]; dw[15] = sw[15];
-            return dest;
-        }
-        if (n == 8) {
-            dw[0] = sw[0]; dw[1] = sw[1];
-            return dest;
-        }
-        if (n == 4) {
-            dw[0] = sw[0];
-            return dest;
-        }
-        if (n == 16) {
-            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
-            return dest;
-        }
-        if (n == 48) {
-            dw[0]  = sw[0];  dw[1]  = sw[1];  dw[2]  = sw[2];  dw[3]  = sw[3];
-            dw[4]  = sw[4];  dw[5]  = sw[5];  dw[6]  = sw[6];  dw[7]  = sw[7];
-            dw[8]  = sw[8];  dw[9]  = sw[9];  dw[10] = sw[10]; dw[11] = sw[11];
+        if ((n >> 2) <= 16) {
+            COPY_WORDS_FWD(dw, sw, n >> 2, 16);
+            if (n & 3) {
+                d += n & ~(size_t)3;
+                s += n & ~(size_t)3;
+                switch (n & 3) {
+                case 3: d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; break;
+                case 2: d[0] = s[0]; d[1] = s[1]; break;
+                default: d[0] = s[0];
+                }
+            }
             return dest;
         }
         if (n == 96) {
@@ -133,158 +242,15 @@ void *memcpy(void *dest, const void *src, size_t n) {
             dw[20] = sw[20]; dw[21] = sw[21]; dw[22] = sw[22]; dw[23] = sw[23];
             return dest;
         }
-        // n==17: 4 words + 1 byte (13 sites, e.g. RLP nibble+prefix).
-        if (n == 17) {
-            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
-            d[16] = s[16];
-            return dest;
-        }
-        // n==12: 3 words (common for 96-bit fields).
-        if (n == 12) {
-            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2];
-            return dest;
-        }
-        // n==24: 6 words.
-        if (n == 24) {
-            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2];
-            dw[3] = sw[3]; dw[4] = sw[4]; dw[5] = sw[5];
-            return dest;
-        }
-    }
-
-    // 32 bytes with either address unaligned (a copy onto itself reads each word before it
-    // writes it, so the no-op below is not needed first).
-    if (n == 32) {
+    } else if (n == 32) {
         copy32_any(d, s);
         return dest;
-    }
-
-    // A copy onto itself is a no-op: memmove() forwards one for an EVM MCOPY with equal
-    // offsets, and GCC may emit one for a self-assignment. The CSR MEMCOPY path below must
-    // not see it, as the delegation requires x10 != x11.
-    if (__builtin_expect(d == s, 0))
-        return dest;
-
-    // For tiny copies, just do bytes.
-    if (n < 8) {
+    } else if (n < 8) {
         while (n--)
             *d++ = *s++;
         return dest;
     }
-
-    // Align destination to 4-byte boundary.
-    size_t head = (4 - ((uintptr_t)d & 3)) & 3;
-    n -= head;
-    while (head--)
-        *d++ = *s++;
-
-    // If source is also aligned, use word copies (and CSR MEMCOPY when possible).
-    if (((uintptr_t)s & 3) == 0) {
-        uint32_t *dw = (uint32_t *)d;
-        const uint32_t *sw = (const uint32_t *)s;
-
-        // Advance to 32-byte alignment with word copies, then use CSR MEMCOPY.
-        if (n >= 64) {
-            // Align dst to 32-byte boundary with word stores.
-            size_t to_align = (32 - ((uintptr_t)dw & 31)) & 31;
-            if (to_align && ((uintptr_t)sw & 31) == ((uintptr_t)dw & 31)) {
-                // Both have the same misalignment — aligning one aligns both.
-                size_t words = to_align >> 2;
-                for (size_t i = 0; i < words; i++)
-                    dw[i] = sw[i];
-                dw += words;
-                sw += words;
-                n -= to_align;
-            }
-
-            // Now use CSR MEMCOPY if both are 32-byte aligned.
-            // Unrolled 4x: 128 bytes per iteration to reduce loop overhead.
-            if ((((uintptr_t)dw | (uintptr_t)sw) & 31) == 0) {
-                while (n >= 128) {
-                    csr_memcopy32(dw,      sw);
-                    csr_memcopy32(dw + 8,  sw + 8);
-                    csr_memcopy32(dw + 16, sw + 16);
-                    csr_memcopy32(dw + 24, sw + 24);
-                    dw += 32;
-                    sw += 32;
-                    n -= 128;
-                }
-                while (n >= 32) {
-                    csr_memcopy32(dw, sw);
-                    dw += 8;
-                    sw += 8;
-                    n -= 32;
-                }
-            }
-        } else if (n >= 32 && (((uintptr_t)dw | (uintptr_t)sw) & 31) == 0) {
-            // Already 32-byte aligned — use CSR MEMCOPY directly.
-            // Unrolled 4x for reduced loop overhead.
-            while (n >= 128) {
-                csr_memcopy32(dw,      sw);
-                csr_memcopy32(dw + 8,  sw + 8);
-                csr_memcopy32(dw + 16, sw + 16);
-                csr_memcopy32(dw + 24, sw + 24);
-                dw += 32;
-                sw += 32;
-                n -= 128;
-            }
-            while (n >= 32) {
-                csr_memcopy32(dw, sw);
-                dw += 8;
-                sw += 8;
-                n -= 32;
-            }
-        }
-
-        // Remaining whole words.
-        while (n >= 4) {
-            *dw++ = *sw++;
-            n -= 4;
-        }
-
-        d = (unsigned char *)dw;
-        s = (const unsigned char *)sw;
-    } else {
-        // Source misaligned — use shift-merge technique.
-        // Load aligned words from source and shift to reconstruct.
-        uintptr_t sa = (uintptr_t)s & ~(uintptr_t)3;
-        unsigned shift = ((uintptr_t)s & 3) * 8;  // 8, 16, or 24
-        unsigned rshift = 32 - shift;
-        const uint32_t *sw = (const uint32_t *)sa;
-        uint32_t *dw = (uint32_t *)d;
-        uint32_t prev = *sw++;
-
-        while (n >= 16) {
-            uint32_t a0 = sw[0];
-            uint32_t a1 = sw[1];
-            uint32_t a2 = sw[2];
-            uint32_t a3 = sw[3];
-            dw[0] = (prev >> shift) | (a0 << rshift);
-            dw[1] = (a0 >> shift)   | (a1 << rshift);
-            dw[2] = (a1 >> shift)   | (a2 << rshift);
-            dw[3] = (a2 >> shift)   | (a3 << rshift);
-            prev = a3;
-            dw += 4;
-            sw += 4;
-            n -= 16;
-        }
-
-        while (n >= 4) {
-            uint32_t cur = *sw++;
-            *dw++ = (prev >> shift) | (cur << rshift);
-            prev = cur;
-            n -= 4;
-        }
-
-        d = (unsigned char *)dw;
-        s = (const unsigned char *)sw - (rshift / 8);
-    }
-
-    // Tail bytes.
-    while (n--)
-        *d++ = *s++;
-
-    return dest;
+    return memcpy_large(dest, src, n);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,8 +264,8 @@ void *memmove(void *dest, const void *src, size_t n) {
     // Safe for both overlapping and non-overlapping when using word loads/stores
     // at non-overlapping offsets (which is the case for same-size small copies).
     if ((((uintptr_t)d | (uintptr_t)s) & 3) == 0) {
-        uint32_t *dw = (uint32_t *)d;
-        const uint32_t *sw = (const uint32_t *)s;
+        w32 *dw = (w32 *)d;
+        const w32 *sw = (const w32 *)s;
         if (__builtin_expect(n == 32, 1)) {
             // For 32-byte overlap-safe copy: read all first, then write.
             uint32_t t0=sw[0], t1=sw[1], t2=sw[2], t3=sw[3];
@@ -363,8 +329,8 @@ void *memmove(void *dest, const void *src, size_t n) {
 
     // If source is also aligned, use word copies backward.
     if (((uintptr_t)s & 3) == 0) {
-        uint32_t *dw = (uint32_t *)d;
-        const uint32_t *sw = (const uint32_t *)s;
+        w32 *dw = (w32 *)d;
+        const w32 *sw = (const w32 *)s;
 
         // Unrolled: 4 words = 16 bytes per iteration.
         while (n >= 16) {
@@ -408,7 +374,7 @@ void *memset(void *dest, int c, size_t n) {
 
     // Fast zero-fill paths for common aligned sizes (skip alignment overhead).
     if (byte == 0 && (((uintptr_t)d) & 3) == 0) {
-        uint32_t *dw = (uint32_t *)d;
+        w32 *dw = (w32 *)d;
         if (n == 8) {
             dw[0] = 0; dw[1] = 0;
             return dest;
@@ -543,7 +509,7 @@ void *memset(void *dest, int c, size_t n) {
     // Zero-fill fast path: use CSR MEMCOPY from zero buffer (32 bytes/call).
     // Advance to 32-byte alignment with word stores, then use CSR MEMCOPY.
     if (byte == 0) {
-        uint32_t *dw = (uint32_t *)d;
+        w32 *dw = (w32 *)d;
 
         // Align dst to 32-byte boundary with zero word stores.
         size_t to_align = (32 - ((uintptr_t)dw & 31)) & 31;
@@ -579,7 +545,7 @@ void *memset(void *dest, int c, size_t n) {
     word |= word << 8;
     word |= word << 16;
 
-    uint32_t *dw = (uint32_t *)d;
+    w32 *dw = (w32 *)d;
 
     // Unrolled: 4 words = 16 bytes per iteration.
     while (n >= 16) {
@@ -614,8 +580,8 @@ int memcmp(const void *a, const void *b, size_t n) {
 
     // If both pointers are 4-byte aligned, compare words first.
     if (n >= 4 && (((uintptr_t)pa | (uintptr_t)pb) & 3) == 0) {
-        const uint32_t *wa = (const uint32_t *)pa;
-        const uint32_t *wb = (const uint32_t *)pb;
+        const w32 *wa = (const w32 *)pa;
+        const w32 *wb = (const w32 *)pb;
 
         // Fast path: n==32 (bytes32 comparison) — fully unrolled word compare.
         if (n == 32) {
@@ -673,4 +639,135 @@ int memcmp(const void *a, const void *b, size_t n) {
         pb++;
     }
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// memcpy_large — the rest of memcpy
+// ---------------------------------------------------------------------------
+// Everything memcpy() does not copy inline: n >= 8, and either n > 67 at word alignment or not
+// word-aligned. Out of line: the CSR MEMCOPY binds x10..x12, which in memcpy() itself had GCC keep
+// dest and src in other registers on every call (two moves on entry, one on return).
+static void *memcpy_large(void *dest, const void *src, size_t n) {
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+    // A copy onto itself is a no-op: memmove() forwards one for an EVM MCOPY with equal
+    // offsets, and GCC may emit one for a self-assignment. The CSR MEMCOPY paths below must
+    // not see it, as the delegation requires x10 != x11.
+    if (__builtin_expect(d == s, 0))
+        return dest;
+    if ((((uintptr_t)d | (uintptr_t)s) & 3) == 0)
+        return memcpy_aligned_large(dest, src, n);
+    // Align destination to 4-byte boundary.
+    size_t head = (4 - ((uintptr_t)d & 3)) & 3;
+    n -= head;
+    while (head--)
+        *d++ = *s++;
+
+    // If source is also aligned, use word copies (and CSR MEMCOPY when possible).
+    if (((uintptr_t)s & 3) == 0) {
+        w32 *dw = (w32 *)d;
+        const w32 *sw = (const w32 *)s;
+
+        // Advance to 32-byte alignment with word copies, then use CSR MEMCOPY.
+        if (n >= 64) {
+            // Align dst to 32-byte boundary with word stores.
+            size_t to_align = (32 - ((uintptr_t)dw & 31)) & 31;
+            if (to_align && ((uintptr_t)sw & 31) == ((uintptr_t)dw & 31)) {
+                // Both have the same misalignment — aligning one aligns both.
+                size_t words = to_align >> 2;
+                for (size_t i = 0; i < words; i++)
+                    dw[i] = sw[i];
+                dw += words;
+                sw += words;
+                n -= to_align;
+            }
+
+            // Now use CSR MEMCOPY if both are 32-byte aligned.
+            // Unrolled 4x: 128 bytes per iteration to reduce loop overhead.
+            if ((((uintptr_t)dw | (uintptr_t)sw) & 31) == 0) {
+                while (n >= 128) {
+                    csr_memcopy32(dw,      sw);
+                    csr_memcopy32(dw + 8,  sw + 8);
+                    csr_memcopy32(dw + 16, sw + 16);
+                    csr_memcopy32(dw + 24, sw + 24);
+                    dw += 32;
+                    sw += 32;
+                    n -= 128;
+                }
+                while (n >= 32) {
+                    csr_memcopy32(dw, sw);
+                    dw += 8;
+                    sw += 8;
+                    n -= 32;
+                }
+            }
+        } else if (n >= 32 && (((uintptr_t)dw | (uintptr_t)sw) & 31) == 0) {
+            // Already 32-byte aligned — use CSR MEMCOPY directly.
+            // Unrolled 4x for reduced loop overhead.
+            while (n >= 128) {
+                csr_memcopy32(dw,      sw);
+                csr_memcopy32(dw + 8,  sw + 8);
+                csr_memcopy32(dw + 16, sw + 16);
+                csr_memcopy32(dw + 24, sw + 24);
+                dw += 32;
+                sw += 32;
+                n -= 128;
+            }
+            while (n >= 32) {
+                csr_memcopy32(dw, sw);
+                dw += 8;
+                sw += 8;
+                n -= 32;
+            }
+        }
+
+        // Remaining whole words.
+        while (n >= 4) {
+            *dw++ = *sw++;
+            n -= 4;
+        }
+
+        d = (unsigned char *)dw;
+        s = (const unsigned char *)sw;
+    } else {
+        // Source misaligned — use shift-merge technique.
+        // Load aligned words from source and shift to reconstruct.
+        uintptr_t sa = (uintptr_t)s & ~(uintptr_t)3;
+        unsigned shift = ((uintptr_t)s & 3) * 8;  // 8, 16, or 24
+        unsigned rshift = 32 - shift;
+        const w32 *sw = (const w32 *)sa;
+        w32 *dw = (w32 *)d;
+        uint32_t prev = *sw++;
+
+        while (n >= 16) {
+            uint32_t a0 = sw[0];
+            uint32_t a1 = sw[1];
+            uint32_t a2 = sw[2];
+            uint32_t a3 = sw[3];
+            dw[0] = (prev >> shift) | (a0 << rshift);
+            dw[1] = (a0 >> shift)   | (a1 << rshift);
+            dw[2] = (a1 >> shift)   | (a2 << rshift);
+            dw[3] = (a2 >> shift)   | (a3 << rshift);
+            prev = a3;
+            dw += 4;
+            sw += 4;
+            n -= 16;
+        }
+
+        while (n >= 4) {
+            uint32_t cur = *sw++;
+            *dw++ = (prev >> shift) | (cur << rshift);
+            prev = cur;
+            n -= 4;
+        }
+
+        d = (unsigned char *)dw;
+        s = (const unsigned char *)sw - (rshift / 8);
+    }
+
+    // Tail bytes.
+    while (n--)
+        *d++ = *s++;
+
+    return dest;
 }
