@@ -447,6 +447,12 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
     return {cumulative_gas, true};
 }
 
+#if USE_HASH_KEY
+namespace {
+constexpr uint32_t kNotRecovered = UINT32_MAX;
+}
+#endif
+
 bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                                  evmc_revision rev) {
     const bool clear_empty = rev >= EVMC_SPURIOUS_DRAGON;
@@ -462,14 +468,20 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         auto& e = created_acc_hashes.emplace_back();
         std::memcpy(e.addr_hash, keccak_bytes(addr.bytes).bytes, 32);
         std::memcpy(e.addr, addr.bytes, 20);
+#if USE_HASH_KEY
+        e.entry_offset = kNotRecovered;
+#endif
     }
 #if USE_HASH_KEY
     // Read-only ones: the walk verified them.
-    for (const auto& up : direct_state.recovered_accounts()) {
+    const auto& recovered = direct_state.recovered_accounts();
+    for (std::size_t i = 0; i < recovered.size(); ++i) {
+        const auto& up = recovered[i];
         if (!direct_state.recovered_account_modified(*up)) continue;
         auto& e = created_acc_hashes.emplace_back();
         std::memcpy(e.addr_hash, keccak_bytes(up->addr).bytes, 32);
         std::memcpy(e.addr, up->addr, 20);
+        e.entry_offset = static_cast<uint32_t>(i);
     }
 #endif
     if (created_acc_hashes.size() > 1) [[likely]] {
@@ -519,16 +531,20 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         const auto& cur = has_existing ? *it_existing_hashes : *it_created_hashes;
         const auto& addr = *reinterpret_cast<const evmc::address*>(cur.addr);
 
-        Account* pa = has_existing
-                          ? direct_state.account_at_offset(cur.entry_offset)
-                          : direct_state.find_created_account(addr);
+        Account* pa;
         bool has_pre_leaf = has_existing;
+        if (has_existing) {
+            pa = direct_state.account_at_offset(cur.entry_offset);
+        }
 #if USE_HASH_KEY
-        if (pa == nullptr) {
-            pa = const_cast<Account*>(direct_state.find_recovered_account(addr));
+        else if (cur.entry_offset != kNotRecovered) {
+            pa = direct_state.recovered_accounts()[cur.entry_offset].get();
             has_pre_leaf = true;
         }
 #endif
+        else {
+            pa = direct_state.find_created_account(addr);
+        }
 
         if (pa->deleted) [[unlikely]] {
             if (has_pre_leaf) {

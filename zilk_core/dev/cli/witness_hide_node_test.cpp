@@ -640,6 +640,81 @@ void HiddenAccountModified_RealCheckRoot() {
     expect_true(st.check_root(direct, head, EVMC_CANCUN),
                 "G11: real check_root deletes the destructed recovered account");
 }
+
+// Sorted merge: recovered accounts keep their recovered_accounts() index across
+// the sort, with a created account (never in the trie) interleaved between them.
+void HiddenAccountsInterleavedWithCreated_RealCheckRoot() {
+    std::array<evmc::address, 16> by_nibble{};
+    std::array<bool, 16> have{};
+    for (unsigned b = 0; b < 256; ++b) {
+        const evmc::address a = make_addr(0xCC, static_cast<uint8_t>(b));
+        const unsigned n = keccak_addr32(a).bytes[0] >> 4;
+        if (!have[n]) {
+            have[n] = true;
+            by_nibble[n] = a;
+        }
+    }
+    expect_true(std::count(have.begin(), have.end(), true) == 16,
+                "Y1: one address per first nibble");
+    const evmc::address W = by_nibble[0];
+    const evmc::address A1 = by_nibble[3];  // hidden, credited
+    const evmc::address N = by_nibble[7];   // created, sorts between A1 and A2
+    const evmc::address A2 = by_nibble[12];  // hidden, credited
+    const bytes32 kW = keccak_addr32(W);
+    const bytes32 kA1 = keccak_addr32(A1);
+    const bytes32 kA2 = keccak_addr32(A2);
+    const bytes32 kN = keccak_addr32(N);
+
+    const Bytes wRlp = account_rlp(W, 0, 1000);
+    const Bytes a1Rlp = account_rlp(A1, 0, 5000);
+    const Bytes a2Rlp = account_rlp(A2, 0, 6000);
+    const bytes32 R = hashbuilder_root({{kW, wRlp}, {kA1, a1Rlp}, {kA2, a2Rlp}});
+    const Bytes leafW_rlp = make_leaf_rlp(kW, wRlp);
+    const Bytes leafA1_rlp = make_leaf_rlp(kA1, a1Rlp);
+    const Bytes leafA2_rlp = make_leaf_rlp(kA2, a2Rlp);
+    BranchNode br{};
+    br.set_child(kW.bytes[0] >> 4, ByteView{keccak_bytes(leafW_rlp).bytes, 32});
+    br.set_child(kA1.bytes[0] >> 4, ByteView{keccak_bytes(leafA1_rlp).bytes, 32});
+    br.set_child(kA2.bytes[0] >> 4, ByteView{keccak_bytes(leafA2_rlp).bytes, 32});
+    const Bytes root_rlp{encode_branch(br)};
+    expect_true(keccak_bytes(root_rlp) == R, "Y2: hand-built account root matches R");
+
+    std::vector<uint8_t> prestate = DirectState::build_blob_from_accounts(
+        {make_info(W, 0, 1000)}, /*block_hashes=*/{}, /*code_store=*/{});
+    MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
+    add_node(nb, R, root_rlp);
+    add_node(nb, keccak_bytes(leafW_rlp), leafW_rlp);
+    add_node(nb, keccak_bytes(leafA1_rlp), leafA1_rlp);
+    add_node(nb, keccak_bytes(leafA2_rlp), leafA2_rlp);
+    std::vector<uint8_t> nodestore = std::move(nb).finalize();
+    expect_true(!prestate.empty() && !nodestore.empty(), "Y3: witness blobs built");
+
+    DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
+    expect_true(direct.sanitize(), "Y4: sanitize() ACCEPTS the witness");
+    BlockHeader parent{};
+    parent.number = 1;
+    parent.state_root = R;
+    direct.insert_header(parent);
+
+    // A2 recovered first so recovered_accounts() order differs from hash order.
+    direct.add_to_balance(A2, intx::uint256{2});
+    direct.add_to_balance(A1, intx::uint256{1});
+    direct.add_to_balance(N, intx::uint256{3});
+    expect_true(direct.recovered_accounts().size() == 2, "Y5: both hidden accounts recovered");
+    expect_true(direct.find_created_account(N) != nullptr, "Y6: account N created");
+    expect_true(kA1 < kN && kN < kA2, "Y7: created account sorts between recovered ones");
+
+    BlockHeader head{};
+    head.number = 2;
+    head.parent_hash = parent.hash();
+    head.state_root = hashbuilder_root({{kW, wRlp},
+                                        {kA1, account_rlp(A1, 0, 5001)},
+                                        {kA2, account_rlp(A2, 0, 6002)},
+                                        {kN, account_rlp(N, 0, 3)}});
+    silkworm::cmd::state_transition::StateTransition st{std::span<uint8_t>{}};
+    expect_true(st.check_root(direct, head, EVMC_CANCUN),
+                "G12: real check_root maps sorted entries to the right recovered accounts");
+}
 #endif
 
 // R6 regression: leaf_A absent, not just preimage.
@@ -720,6 +795,7 @@ int main() {
     RecoveredSlotsOnlyAccount_RealCheckRoot();
     HiddenContractAccount_CodeBoundFromCodeStore();
     HiddenAccountModified_RealCheckRoot();
+    HiddenAccountsInterleavedWithCreated_RealCheckRoot();
 #endif
     std::println("\n{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
