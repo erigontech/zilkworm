@@ -715,6 +715,175 @@ void HiddenAccountsInterleavedWithCreated_RealCheckRoot() {
     expect_true(st.check_root(direct, head, EVMC_CANCUN),
                 "G12: real check_root maps sorted entries to the right recovered accounts");
 }
+
+// Recovered contract H (preimage hidden) with a two-slot storage trie, in the
+// node store only; W is the flat anchor account. Storage is H's only moving part.
+struct HiddenStorageWitness {
+    evmc::address W = make_addr(0xDD, 0x00);
+    evmc::address H = make_addr(0xEE, 0x00);
+    bytes32 kW, kH;
+    bytes32 S1 = make_word(0x01), S2 = make_word(0x02), S3 = make_word(0x03);
+    bytes32 kS1, kS2, kS3;
+    bytes32 V1 = make_word(0xAA), V2 = make_word(0xBB);
+    bytes32 SR, R;
+    Bytes wRlp, hRlp;
+    std::vector<uint8_t> prestate, nodestore;
+
+    HiddenStorageWitness() {
+        kW = keccak_addr32(W);
+        kH = keccak_addr32(H);
+        for (uint8_t b = 1; (kW.bytes[0] >> 4) == (kH.bytes[0] >> 4) && b != 0; ++b) {
+            H = make_addr(0xEE, b);
+            kH = keccak_addr32(H);
+        }
+        kS1 = keccak_bytes32(S1);
+        kS2 = keccak_bytes32(S2);
+        for (uint8_t b = 4; (kS1.bytes[0] >> 4) == (kS2.bytes[0] >> 4) && b != 0; ++b) {
+            S2 = make_word(b);
+            kS2 = keccak_bytes32(S2);
+        }
+        // S3: absent from the trie, first nibble free in the storage root branch.
+        kS3 = keccak_bytes32(S3);
+        for (uint8_t b = 0x20; ((kS3.bytes[0] >> 4) == (kS1.bytes[0] >> 4) ||
+                                (kS3.bytes[0] >> 4) == (kS2.bytes[0] >> 4)) && b != 0; ++b) {
+            S3 = make_word(b);
+            kS3 = keccak_bytes32(S3);
+        }
+
+        SR = hashbuilder_root({{kS1, scalar_rlp(V1)}, {kS2, scalar_rlp(V2)}});
+        const Bytes leafS1_rlp = make_leaf_rlp(kS1, scalar_rlp(V1));
+        const Bytes leafS2_rlp = make_leaf_rlp(kS2, scalar_rlp(V2));
+        BranchNode sbr{};
+        sbr.set_child(kS1.bytes[0] >> 4, ByteView{keccak_bytes(leafS1_rlp).bytes, 32});
+        sbr.set_child(kS2.bytes[0] >> 4, ByteView{keccak_bytes(leafS2_rlp).bytes, 32});
+        const Bytes sroot_rlp{encode_branch(sbr)};
+
+        wRlp = account_rlp(W, 0, 1000);
+        hRlp = account_rlp(H, 1, 777, SR);
+        R = hashbuilder_root({{kW, wRlp}, {kH, hRlp}});
+        const Bytes leafW_rlp = make_leaf_rlp(kW, wRlp);
+        const Bytes leafH_rlp = make_leaf_rlp(kH, hRlp);
+        BranchNode abr{};
+        abr.set_child(kW.bytes[0] >> 4, ByteView{keccak_bytes(leafW_rlp).bytes, 32});
+        abr.set_child(kH.bytes[0] >> 4, ByteView{keccak_bytes(leafH_rlp).bytes, 32});
+        const Bytes aroot_rlp{encode_branch(abr)};
+
+        prestate = DirectState::build_blob_from_accounts(
+            {make_info(W, 0, 1000)}, /*block_hashes=*/{}, /*code_store=*/{});
+        MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
+        add_node(nb, R, aroot_rlp);
+        add_node(nb, keccak_bytes(leafW_rlp), leafW_rlp);
+        add_node(nb, keccak_bytes(leafH_rlp), leafH_rlp);
+        add_node(nb, SR, sroot_rlp);
+        add_node(nb, keccak_bytes(leafS1_rlp), leafS1_rlp);
+        add_node(nb, keccak_bytes(leafS2_rlp), leafS2_rlp);
+        nodestore = std::move(nb).finalize();
+    }
+
+    bytes32 root_with_storage(const bytes32& storage_root) const {
+        return hashbuilder_root({{kW, wRlp}, {kH, account_rlp(H, 1, 777, storage_root)}});
+    }
+};
+
+// Recovered account whose only net change is a write to a recovered slot.
+void RecoveredAccountRecoveredSlotWrite_RealCheckRoot() {
+    HiddenStorageWitness w;
+    expect_true(!w.prestate.empty() && !w.nodestore.empty(), "Z1: witness blobs built");
+
+    DirectState direct{std::span<uint8_t>{w.prestate}, std::span<uint8_t>{w.nodestore}};
+    expect_true(direct.sanitize(), "Z2: sanitize() ACCEPTS the witness");
+    BlockHeader parent{};
+    parent.number = 1;
+    parent.state_root = w.R;
+    direct.insert_header(parent);
+
+    expect_true(direct.read_storage(w.H, w.S1) == w.V1, "Z3: hidden slot S1 recovered");
+    Account* paH = direct.read_account(w.H);
+    expect_true(paH != nullptr && direct.find_recovered_account(w.H) == paH &&
+                    direct.recovered_accounts().size() == 1,
+                "Z4: H recovered from the node store, not the flat state");
+    expect_true(paH != nullptr && !direct.recovered_account_modified(*paH),
+                "Z5: reading a slot leaves H unmodified");
+
+    const bytes32 V1n = make_word(0xA1);
+    direct.set_storage_slot(w.H, *paH, w.S1, V1n);
+    expect_true(direct.overflow_slots_for(w.H) == nullptr, "Z6: recovered-slot write skips overflow");
+    expect_true(direct.recovered_account_modified(*paH),
+                "G13: recovered-slot write alone marks the recovered account modified");
+
+    const bytes32 postSR = hashbuilder_root({{w.kS1, scalar_rlp(V1n)}, {w.kS2, scalar_rlp(w.V2)}});
+    expect_true(postSR != w.SR, "Z7: storage root changes");
+    BlockHeader head{};
+    head.number = 2;
+    head.parent_hash = parent.hash();
+    head.state_root = w.root_with_storage(postSR);
+    silkworm::cmd::state_transition::StateTransition st{std::span<uint8_t>{}};
+    expect_true(st.check_root(direct, head, EVMC_CANCUN),
+                "G14: real check_root emits recovered account H for a recovered-slot-only write");
+}
+
+// Recovered account whose only net change is a new slot, proven absent by the
+// walk: it lands in overflow, not recovered_slots_.
+void RecoveredAccountAbsentSlotWrite_RealCheckRoot() {
+    HiddenStorageWitness w;
+    DirectState direct{std::span<uint8_t>{w.prestate}, std::span<uint8_t>{w.nodestore}};
+    expect_true(direct.sanitize(), "Z8: sanitize() ACCEPTS the witness");
+    BlockHeader parent{};
+    parent.number = 1;
+    parent.state_root = w.R;
+    direct.insert_header(parent);
+
+    expect_true(direct.read_storage(w.H, w.S3) == bytes32{}, "Z9: absent slot S3 reads 0");
+    Account* paH = direct.read_account(w.H);
+    expect_true(paH != nullptr && direct.find_recovered_account(w.H) == paH &&
+                    direct.recovered_accounts().size() == 1,
+                "Z10: H recovered from the node store");
+    const bytes32 V3 = make_word(0xC3);
+    direct.set_storage_slot(w.H, *paH, w.S3, V3);
+    const auto* ovf = direct.overflow_slots_for(w.H);
+    expect_true(ovf != nullptr && ovf->size() == 1, "Z11: absent-slot write lands in overflow");
+    expect_true(direct.recovered_account_modified(*paH),
+                "G15: absent-slot write alone marks the recovered account modified");
+
+    const bytes32 postSR = hashbuilder_root({{w.kS1, scalar_rlp(w.V1)},
+                                             {w.kS2, scalar_rlp(w.V2)},
+                                             {w.kS3, scalar_rlp(V3)}});
+    BlockHeader head{};
+    head.number = 2;
+    head.parent_hash = parent.hash();
+    head.state_root = w.root_with_storage(postSR);
+    silkworm::cmd::state_transition::StateTransition st{std::span<uint8_t>{}};
+    expect_true(st.check_root(direct, head, EVMC_CANCUN),
+                "G16: real check_root emits recovered account H for an absent-slot-only write");
+}
+
+// Net-zero slot write on a recovered account: H must not be emitted.
+void RecoveredAccountSlotWriteRestored_RealCheckRoot() {
+    HiddenStorageWitness w;
+    DirectState direct{std::span<uint8_t>{w.prestate}, std::span<uint8_t>{w.nodestore}};
+    expect_true(direct.sanitize(), "Z12: sanitize() ACCEPTS the witness");
+    BlockHeader parent{};
+    parent.number = 1;
+    parent.state_root = w.R;
+    direct.insert_header(parent);
+
+    expect_true(direct.read_storage(w.H, w.S1) == w.V1, "Z13: hidden slot S1 recovered");
+    Account* paH = direct.read_account(w.H);
+    expect_true(paH != nullptr && direct.find_recovered_account(w.H) == paH,
+                "Z14: H recovered from the node store");
+    direct.set_storage_slot(w.H, *paH, w.S1, make_word(0xA1));
+    direct.set_storage_slot(w.H, *paH, w.S1, w.V1);
+    expect_true(paH->modified && !direct.recovered_account_modified(*paH),
+                "G17: restored slot leaves the recovered account net unmodified");
+
+    BlockHeader head{};
+    head.number = 2;
+    head.parent_hash = parent.hash();
+    head.state_root = w.R;
+    silkworm::cmd::state_transition::StateTransition st{std::span<uint8_t>{}};
+    expect_true(st.check_root(direct, head, EVMC_CANCUN),
+                "G18: real check_root keeps the pre-root when the slot write is restored");
+}
 #endif
 
 // R6 regression: leaf_A absent, not just preimage.
@@ -796,6 +965,9 @@ int main() {
     HiddenContractAccount_CodeBoundFromCodeStore();
     HiddenAccountModified_RealCheckRoot();
     HiddenAccountsInterleavedWithCreated_RealCheckRoot();
+    RecoveredAccountRecoveredSlotWrite_RealCheckRoot();
+    RecoveredAccountAbsentSlotWrite_RealCheckRoot();
+    RecoveredAccountSlotWriteRestored_RealCheckRoot();
 #endif
     std::println("\n{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
