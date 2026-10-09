@@ -604,3 +604,148 @@ TEST_CASE("MphfMap collision entries are {u64 key, u64 offset}, 8-aligned, and o
         check_rejected(undersized);
     }
 }
+
+// The two tilings in validate_mphf's comment, one forgery per way of breaking them.
+TEST_CASE("validate_mphf requires sections and entries to tile with no overlap and no gap", "[mphf]") {
+    auto built = build_map(0, 0, 64, 0xA00000ULL);
+    REQUIRE_FALSE(built.blob.empty());
+    const auto validate = [](const std::vector<uint8_t>& b) {
+        return zilkworm::validate_mphf<20>(std::span<const uint8_t>{b}, 0,
+                                           static_cast<uint32_t>(b.size()), kTestMphfMagic);
+    };
+    REQUIRE(validate(built.blob));
+    const auto hdr = [](std::vector<uint8_t>& b) { return reinterpret_cast<MphfMapHeader*>(b.data()); };
+    const auto slots = [&](std::vector<uint8_t>& b) {
+        return reinterpret_cast<uint32_t*>(b.data() + hdr(b)->slot_offsets_offset);
+    };
+    // Two distinct slot-routed entries.
+    uint32_t idx_a = UINT32_MAX, idx_b = UINT32_MAX;
+    for (uint32_t i = 0; i < built.header()->n_keys && idx_b == UINT32_MAX; ++i) {
+        if (slot_offsets_of(built.header())[i] == 0) continue;
+        (idx_a == UINT32_MAX ? idx_a : idx_b) = i;
+    }
+    REQUIRE(idx_b != UINT32_MAX);
+
+    SECTION("an entry nested inside another entry's body is rejected") {
+        auto forged = built.blob;
+        uint8_t* data = forged.data() + hdr(forged)->data_offset;
+        const uint32_t off_a = slots(forged)[idx_a];
+        const uint32_t off_b = slots(forged)[idx_b];
+        // A's body is 60 bytes at off_a+8. Plant B's [len=20][key] at off_a+32, past A's key.
+        const uint64_t len_b = 20;
+        std::array<uint8_t, 20> key_b{};
+        std::memcpy(key_b.data(), data + off_b + 8u, 20);
+        std::memcpy(data + off_a + 32u, &len_b, 8);
+        std::memcpy(data + off_a + 40u, key_b.data(), 20);
+        slots(forged)[idx_b] = off_a + 32u;
+        CHECK_FALSE(validate(forged));
+    }
+
+    SECTION("two slots claiming the same entry are rejected") {
+        auto forged = built.blob;
+        slots(forged)[idx_b] = slots(forged)[idx_a];
+        CHECK_FALSE(validate(forged));
+    }
+
+    SECTION("an entry that no slot or sidecar row owns is rejected") {
+        auto forged = built.blob;
+        slots(forged)[idx_a] = 0;
+        CHECK_FALSE(validate(forged));
+    }
+
+    SECTION("a shrunk entry that leaves a gap before the next one is rejected") {
+        auto forged = built.blob;
+        const uint64_t shorter = 60 - 16;  // still >= the 20-byte key, but align8(8 + len) drops by 16
+        std::memcpy(forged.data() + hdr(forged)->data_offset + 8u, &shorter, 8);
+        CHECK_FALSE(validate(forged));
+    }
+
+    SECTION("spare bytes after data[] are rejected") {
+        auto forged = built.blob;
+        forged.resize(forged.size() + 8u);
+        CHECK_FALSE(validate(forged));
+    }
+
+    SECTION("a gap between the tables and data[] is rejected") {
+        auto forged = built.blob;
+        forged.insert(forged.begin() + hdr(forged)->data_offset, 8, uint8_t{0});
+        hdr(forged)->data_offset += 8u;
+        CHECK_FALSE(validate(forged));
+    }
+
+    SECTION("tables laid over each other are rejected") {
+        auto forged = built.blob;
+        hdr(forged)->slot_offsets_offset = hdr(forged)->displacement_offset;
+        CHECK_FALSE(validate(forged));
+    }
+}
+
+// The blob-level tiling in validate_prestate_layout: a code store placed under an
+// account body would have its checked slot_offsets[] rewritten by an ordinary SSTORE.
+TEST_CASE("validate_direct_state_layout keeps the code store out of the addr map", "[mphf]") {
+    using zilkworm::DirectState;
+    using zilkworm::PreStateMeta;
+    using zilkworm::validate_direct_state_layout;
+
+    std::vector<uint8_t> kv(32 + 5, 0x5B);  // [hash:32][code]; layout checks do not hash
+    kv[0] = 0xC0;
+    MphfBuilder<32> cb{zilkworm::kMphfCodeStoreMagic, kMphfMapVersion};
+    cb.add(zilkworm::hash_key8(reinterpret_cast<const uint8_t(&)[32]>(*kv.data())),
+           ByteView{kv.data(), kv.size()});
+    const std::vector<uint8_t> code_store = std::move(cb).finalize();
+    REQUIRE_FALSE(code_store.empty());
+
+    DirectState::AccountInfo ai{};
+    ai.addr.bytes[0] = 0x11;
+    ai.addr.bytes[19] = 0x22;
+    std::memcpy(ai.account.code_hash, silkworm::kEmptyHash.bytes, 32);
+    std::memcpy(ai.account.storage_root, silkworm::kEmptyRoot.bytes, 32);
+    evmc::bytes32 k1{}, k2{};
+    k1.bytes[31] = 1;
+    k2.bytes[31] = 2;
+    ai.storage = {{k1, k1}, {k2, k2}};  // two inline slots: room to hide a small map in the body
+
+    const auto accepts = [](const std::vector<uint8_t>& b) {
+        return validate_direct_state_layout(std::span<const uint8_t>{b}, {});
+    };
+
+    SECTION("the honest layouts, with and without a code store, are accepted") {
+        CHECK(accepts(DirectState::build_blob_from_accounts({ai}, {}, {})));
+        CHECK(accepts(DirectState::build_blob_from_accounts({ai}, {}, code_store)));
+        CHECK(accepts(DirectState::build_blob_from_accounts({}, {}, {})));
+    }
+
+    SECTION("a code store nested inside an account body is rejected") {
+        auto forged = DirectState::build_blob_from_accounts({ai}, {}, {});
+        auto* meta = reinterpret_cast<PreStateMeta*>(forged.data());
+        const auto* mh = reinterpret_cast<const MphfMapHeader*>(forged.data() + meta->prestate_offset);
+        uint32_t off = 0;
+        for (uint32_t i = 0; i < mh->n_keys && off == 0; ++i) off = slot_offsets_of(mh)[i];
+        REQUIRE(off != 0);
+        // First inline Slot of the account: 8-aligned and inside the addr map's data[].
+        const uint32_t nest = meta->prestate_offset + mh->data_offset + off + 8u +
+                              static_cast<uint32_t>(sizeof(zilkworm::Account));
+        REQUIRE(nest + code_store.size() <= forged.size());
+        std::memcpy(forged.data() + nest, code_store.data(), code_store.size());
+        meta->code_store_offset = nest;
+        meta->code_store_size = static_cast<uint32_t>(code_store.size());
+        CHECK_FALSE(accepts(forged));
+    }
+
+    SECTION("a code store that does not end the blob is rejected") {
+        auto forged = DirectState::build_blob_from_accounts({ai}, {}, code_store);
+        forged.resize(forged.size() + 8u);
+        CHECK_FALSE(accepts(forged));
+    }
+
+    SECTION("an addr map that does not start right after the meta is rejected") {
+        auto forged = DirectState::build_blob_from_accounts({ai}, {}, code_store);
+        forged.insert(forged.begin() + 72, 8, uint8_t{0});
+        auto* meta = reinterpret_cast<PreStateMeta*>(forged.data());
+        meta->prestate_offset += 8u;
+        meta->addr_hashes_offset += 8u;
+        meta->block_hashes_offset += 8u;
+        meta->code_store_offset += 8u;
+        CHECK_FALSE(accepts(forged));
+    }
+}

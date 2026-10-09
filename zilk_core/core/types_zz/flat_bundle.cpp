@@ -183,7 +183,7 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
     }
 
     // The node-store and direct_state sections are bounded and disjoint here; their
-    // MphfMap layout is validated where the maps are built, in the DirectState constructor.
+    // inner layout is checked below, just before the DirectState is built over them.
 
     silkworm::Block genesis;
     {
@@ -276,6 +276,15 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
     bump(hdr->direct_state_off,  hdr->direct_state_size);
     bump(hdr->node_store_off,    hdr->node_store_size);
     bump(hdr->network_off,       hdr->network_size);
+
+    // The DirectState constructor aborts on a malformed layout. Check first so an
+    // untrusted bundle fails the run (nullopt -> kRunFailure) instead of the process.
+    if (!validate_direct_state_layout(
+            std::span<const uint8_t>{blob.data() + direct_off, direct_size},
+            std::span<const uint8_t>{blob.data() + node_off, node_size})) [[unlikely]] {
+        sys_println("load_flat_bundle: direct_state / node_store layout rejected");
+        return std::nullopt;
+    }
 
     FlatBundle fb{
         std::span<uint8_t>{blob.data(), bundle_size},
