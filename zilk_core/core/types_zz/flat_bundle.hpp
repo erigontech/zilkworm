@@ -50,7 +50,7 @@ struct FlatBundle {
 };
 
 inline constexpr uint32_t kFlatBundleMagic   = 0x444E4246u;  // 'FBND'
-inline constexpr uint32_t kFlatBundleVersion = 14u;
+inline constexpr uint32_t kFlatBundleVersion = 15u;
 struct alignas(8) FlatBundleHeader {
     uint32_t magic;
     uint32_t version;
