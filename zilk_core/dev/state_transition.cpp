@@ -447,17 +447,43 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
     return {cumulative_gas, true};
 }
 
+#if USE_HASH_KEY
+namespace {
+constexpr uint32_t kNotRecovered = UINT32_MAX;
+}
+#endif
+
 bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                                  evmc_revision rev) {
     const bool clear_empty = rev >= EVMC_SPURIOUS_DRAGON;
     std::vector<zilkworm::AddrHashEntry> created_acc_hashes_spill;  // to be used with InlineVec additional cache area
     zilkworm::InlineVec<zilkworm::AddrHashEntry, 32> created_acc_hashes(
-        direct_state.created_accounts().size(), created_acc_hashes_spill);
+#if USE_HASH_KEY
+        direct_state.created_accounts().size() + direct_state.recovered_accounts().size(),
+#else
+        direct_state.created_accounts().size(),
+#endif
+        created_acc_hashes_spill);
     for (auto& [addr, _] : direct_state.created_accounts()) {
         auto& e = created_acc_hashes.emplace_back();
         std::memcpy(e.addr_hash, keccak_bytes(addr.bytes).bytes, 32);
         std::memcpy(e.addr, addr.bytes, 20);
+#if USE_HASH_KEY
+        e.entry_offset = kNotRecovered;
+#endif
     }
+#if USE_HASH_KEY
+    // Read-only ones: the walk verified them.
+    const auto& recovered = direct_state.recovered_accounts();
+    for (std::size_t i = 0; i < recovered.size(); ++i) {
+        const auto& up = recovered[i];
+        if (!direct_state.recovered_account_modified(*up)) continue;
+        auto& e = created_acc_hashes.emplace_back();
+        std::memcpy(e.addr_hash, keccak_bytes(up->addr).bytes, 32);
+        std::memcpy(e.addr, up->addr, 20);
+        e.entry_offset = static_cast<uint32_t>(i);
+    }
+#endif
     if (created_acc_hashes.size() > 1) [[likely]] {
         auto* const data = created_acc_hashes.data();
         const std::size_t n = created_acc_hashes.size();
@@ -502,34 +528,41 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             it_created_hashes == end_created_hashes ? true
             : it_existing_hashes == end_it_existing ? false
                                                     : cur_cmp < 0;
-        const auto& addr = *reinterpret_cast<const evmc::address*>(
-            has_existing ? it_existing_hashes->addr : it_created_hashes->addr);
+        const auto& cur = has_existing ? *it_existing_hashes : *it_created_hashes;
+        const auto& addr = *reinterpret_cast<const evmc::address*>(cur.addr);
 
-        {
-            const Account* rec = has_existing
-                                     ? direct_state.account_at_offset(it_existing_hashes->entry_offset)
-                                     : direct_state.find_created_account(addr);
-            if (rec->deleted) [[unlikely]] {
-                if (has_existing) {
-                    // 0x80 current value signals leaf deletion.
-                    auto& node = acc_updates.emplace_back(
-                        std::bit_cast<bytes32>(it_existing_hashes->addr_hash));
-                    node.ext_initial = ByteView{rec->acc_rlp_buf, rec->acc_rlp_len};
-                    node.buf[0] = 0x80;
-                    node.current_off = 0;
-                    node.current_len = 1;
-                    ++it_existing_hashes;
-                } else {
-                    // Created-then-destructed: no pre-trie leaf.
-                    ++it_created_hashes;
-                }
-                continue;
-            }
+        Account* pa;
+        bool has_pre_leaf = has_existing;
+        if (has_existing) {
+            pa = direct_state.account_at_offset(cur.entry_offset);
+        }
+#if USE_HASH_KEY
+        else if (cur.entry_offset != kNotRecovered) {
+            pa = direct_state.recovered_accounts()[cur.entry_offset].get();
+            has_pre_leaf = true;
+        }
+#endif
+        else {
+            pa = direct_state.find_created_account(addr);
         }
 
-        Account* pa = has_existing
-                          ? direct_state.account_at_offset(it_existing_hashes->entry_offset)
-                          : direct_state.find_created_account(addr);
+        if (pa->deleted) [[unlikely]] {
+            if (has_pre_leaf) {
+                // 0x80 current value signals leaf deletion.
+                auto& node = acc_updates.emplace_back(std::bit_cast<bytes32>(cur.addr_hash));
+                node.ext_initial = ByteView{pa->acc_rlp_buf, pa->acc_rlp_len};
+                node.buf[0] = 0x80;
+                node.current_off = 0;
+                node.current_len = 1;
+            }
+            // else created-then-destructed: no pre-trie leaf.
+            if (has_existing) {
+                ++it_existing_hashes;
+            } else {
+                ++it_created_hashes;
+            }
+            continue;
+        }
 
         // Readonly accounts: pa.modified=false guarantees initial==current.
         const bool acc_modified = has_existing ? pa->modified : true;
@@ -541,9 +574,9 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         const auto* created_slots = direct_state.overflow_slots_for(addr);
 #if USE_HASH_KEY
         const auto* rec_slots = direct_state.recovered_slots_for(addr);
-        std::size_t rec_count = 0;  // found entries only; negatives are skipped
+        std::size_t rec_count = 0;  // written only; the walk verified reads
         if (rec_slots != nullptr) {
-            for (const auto& kv : *rec_slots) rec_count += kv.second.found ? 1u : 0u;
+            for (const auto& kv : *rec_slots) rec_count += kv.second.written() ? 1u : 0u;
         }
 #endif
 
@@ -588,15 +621,13 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
 #if USE_HASH_KEY
             if (rec_slots != nullptr) {
                 for (const auto& [k, rs] : *rec_slots) {
-                    if (!rs.found) continue;
+                    if (!rs.written()) continue;
                     auto& node = storage_updates.emplace_back(keccak_bytes32(k));
                     node.self_initial_len = static_cast<uint8_t>(rlp::encode_into_small(
                         node.buf + 0, zeroless_view(ByteView{rs.initial.bytes, 32})));
-                    if (acc_modified && !::zilkworm::eq_hash32(rs.initial.bytes, rs.current.bytes)) [[unlikely]] {
-                        node.current_off = 40;
-                        node.current_len = static_cast<uint8_t>(rlp::encode_into_small(
-                            node.buf + 40, zeroless_view(ByteView{rs.current.bytes, 32})));
-                    }
+                    node.current_off = 40;
+                    node.current_len = static_cast<uint8_t>(rlp::encode_into_small(
+                        node.buf + 40, zeroless_view(ByteView{rs.current.bytes, 32})));
                 }
             }
 #endif
@@ -628,14 +659,14 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         }
 
         bool readonly = false;
-        if (has_existing) {
-            auto& node = acc_updates.emplace_back(
-                std::bit_cast<bytes32>(it_existing_hashes->addr_hash));
-            node.ext_initial = ByteView{pa->acc_rlp_buf, pa->acc_rlp_len};
+        auto& inserted = acc_updates.emplace_back(std::bit_cast<bytes32>(cur.addr_hash));
+        if (has_pre_leaf) {
+            inserted.ext_initial = ByteView{pa->acc_rlp_buf, pa->acc_rlp_len};
             readonly = !acc_modified;
+        }
+        if (has_existing) {
             ++it_existing_hashes;
         } else {
-            acc_updates.emplace_back(std::bit_cast<bytes32>(it_created_hashes->addr_hash));
             ++it_created_hashes;
         }
 
@@ -647,81 +678,10 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
 #endif
                 storage_root = std::bit_cast<bytes32>(pa->storage_root);
             }
-            auto& inserted = acc_updates.back();
             inserted.current_off = 0;
             inserted.current_len = pa->rlp_into(inserted.buf + 0, storage_root);
         }
     }
-
-#if USE_HASH_KEY
-    // Witness-bug fallback: emit recovered accounts (absent from addr_hashes) as updates — pre-state snapshot as initial, post-state as current when modified.
-    if (!direct_state.recovered_accounts().empty()) {
-        for (const auto& up : direct_state.recovered_accounts()) {
-            const Account* pa = up.get();
-            const evmc::address addr = *reinterpret_cast<const evmc::address*>(pa->addr);
-            auto& node = acc_updates.emplace_back(keccak_bytes(addr.bytes));
-            node.ext_initial = ByteView{pa->acc_rlp_buf, pa->acc_rlp_len};
-            // Emptiness from the copy: is_empty_account(addr) could recover more accounts while we iterate.
-            uint8_t bal_or = 0;
-            for (size_t bi = 0; bi < sizeof(pa->balance); ++bi) bal_or |= pa->balance[bi];
-            const bool is_empty = pa->nonce == 0 && bal_or == 0 &&
-                                  ::zilkworm::eq_hash32(pa->code_hash, silkworm::kEmptyHash.bytes);
-            if (pa->deleted || (clear_empty && pa->modified && is_empty)) {
-                // 0x80 current value signals leaf deletion.
-                node.buf[0] = 0x80;
-                node.current_off = 0;
-                node.current_len = 1;
-            } else if (pa->modified) {
-                bytes32 storage_root = std::bit_cast<bytes32>(pa->storage_root);
-                if (mpt::is_zero_quick(storage_root)) {
-                    storage_root = kEmptyRoot;
-                }
-                const auto* created_slots = direct_state.overflow_slots_for(addr);
-                const auto* rec_slots = direct_state.recovered_slots_for(addr);
-                const std::size_t created_count =
-                    created_slots != nullptr ? created_slots->size() : 0;
-                std::size_t rec_count = 0;
-                if (rec_slots != nullptr) {
-                    for (const auto& kv : *rec_slots) rec_count += kv.second.found ? 1u : 0u;
-                }
-                if (created_count + rec_count > 0) {
-                    zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(
-                        created_count + rec_count, storage_spill);
-                    if (created_slots != nullptr) {
-                        for (const auto& [k, v] : *created_slots) {
-                            auto& sn = storage_updates.emplace_back(keccak_bytes32(k));
-                            sn.current_off = 40;
-                            sn.current_len = static_cast<uint8_t>(rlp::encode_into_small(
-                                sn.buf + 40, zeroless_view(ByteView{v.bytes, 32})));
-                        }
-                    }
-                    if (rec_slots != nullptr) {
-                        for (const auto& [k, rs] : *rec_slots) {
-                            if (!rs.found) continue;
-                            auto& sn = storage_updates.emplace_back(keccak_bytes32(k));
-                            sn.self_initial_len = static_cast<uint8_t>(rlp::encode_into_small(
-                                sn.buf + 0, zeroless_view(ByteView{rs.initial.bytes, 32})));
-                            if (!::zilkworm::eq_hash32(rs.initial.bytes, rs.current.bytes)) {
-                                sn.current_off = 40;
-                                sn.current_len = static_cast<uint8_t>(rlp::encode_into_small(
-                                    sn.buf + 40, zeroless_view(ByteView{rs.current.bytes, 32})));
-                            }
-                        }
-                    }
-                    std::sort(storage_updates.data(),
-                              storage_updates.data() + storage_updates.size());
-                    storage_trie.reset(storage_root);
-                    storage_root = storage_trie.calc_root_from_updates(
-                        {storage_updates.data(), storage_updates.size()});
-                }
-                node.current_off = 0;
-                node.current_len = pa->rlp_into(node.buf + 0, storage_root);
-            }
-            // else: unmodified — read-only anchor (initial only).
-        }
-        std::sort(acc_updates.begin(), acc_updates.end());
-    }
-#endif
 
     // acc_updates already sorted: merge of two sorted hash sequences.
     auto prev_root = direct_state.read_header(header.number - 1, header.parent_hash)->state_root;
@@ -905,6 +865,14 @@ uint64_t StateTransition::run_mfbd() {
             failed_ = true;
             return kRunFailure;
         }
+#if USE_HASH_KEY
+        // Node store holds only block 0's pre-state.
+        if (fb->block_rlps.size() > 1) [[unlikely]] {
+            sys_println("ERROR: USE_HASH_KEY does not support multi-block bundles");
+            failed_ = true;
+            return kRunFailure;
+        }
+#endif
         auto [gas, ok] = run_one_bundle(*fb);
         if (!ok) [[unlikely]] {
             failed_ = true;

@@ -875,9 +875,12 @@ account whose preimage was missing from the addr-map. An empty child or a
 diverging path is a valid absence (the caller materializes an absent record); a
 missing or malformed node halts execution.
 `witness_hide_node_test.cpp` documents the gap this guards against.
+The node store holds only the bundle's pre-state trie, so a `USE_HASH_KEY`
+build rejects any bundle with more than one block (§3.1).
 
 `check_root` (block 0 of a bundle) and `check_root_new_block` (subsequent
-blocks) in `state_transition.cpp` drive the recomputes (§3.1). The only
+blocks, never reached under `USE_HASH_KEY`) in `state_transition.cpp` drive the
+recomputes (§3.1). The only
 "updates" to anything node-related are in-memory mutations of each `Account`'s
 `acc_rlp_buf` / `acc_rlp_len` / `acc_rlp_sroot_off` cache after a successful root
 check, so the next block's `HashBuilder`-based path can reuse them. The
@@ -907,6 +910,16 @@ version, RLP-decodes `genesis`, `blocks` (the `<u64 N>` blocks-RLP header plus N
 `DirectState` over the prestate and node-store byte windows (no POD decoding) —
 then passes the already-loaded bundle to `run_one_bundle(*fb)`. After each
 bundle it advances the cursor by `align8(cursor + fb->blob.size())`.
+
+Under `USE_HASH_KEY`, a bundle whose `blocks` list holds more than one block
+fails before `run_one_bundle` with `ERROR: USE_HASH_KEY does not support
+multi-block bundles`, and the run returns failure. The node-store fallback
+(§2.6) walks from the `state_root` of the highest inserted header. After block 0
+commits, that is block 0's post-state root, and the node store holds no nodes
+for it. Such bundles are otherwise valid MFBD. Producers targeting a
+`USE_HASH_KEY` build should emit single-block bundles, putting consecutive
+blocks in separate bundles of the envelope. The default build (flag off) runs
+multi-block bundles as described below.
 
 `run_one_bundle(::zilkworm::FlatBundle& bundle)`:
 
