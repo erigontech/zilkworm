@@ -115,6 +115,7 @@ if(BUILD_TESTING)
     ${GUEST_ALLOCATOR_TEST_SOURCES}
     zilk_core/core/execution/addmod_words_test.cpp
     zilk_core/core/execution/bn254_mul_test.cpp
+    zilk_core/core/execution/ecc_proj_one_test.cpp
     zilk_core/core/execution/delegation_probe_test.cpp
     zilk_core/core/common_zz/data_byte_count_test.cpp
     zilk_core/core/execution/div_mod_frontend_test.cpp
