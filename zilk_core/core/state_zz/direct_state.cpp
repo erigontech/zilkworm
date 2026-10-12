@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <map>
 #include <memory>
 
@@ -23,11 +24,9 @@
 #include <zilk_core/core/types/transaction.hpp>
 #include <zilk_core/print.hpp>
 
-#if USE_HASH_KEY
 #include <zilk_core/core/rlp/decode.hpp>
 #include <zilk_core/core/trie_zz/mpt.hpp>     // nibbles64, BranchNode
 #include <zilk_core/core/trie_zz/rlp_sw.hpp>  // decode_node
-#endif
 namespace zilkworm {
 
 namespace trie = ::silkworm::trie;
@@ -683,7 +682,6 @@ std::optional<BlockHeader> DirectState::read_header(BlockNum,
     return it->second;
 }
 
-#if USE_HASH_KEY
 // Returned view may alias embedded_scratch.
 std::expected<ByteView, DirectState::WalkMiss>
 DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
@@ -758,6 +756,15 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
     return std::unexpected{WalkMiss::kInvalid};
 }
 
+bool DirectState::prove_account_absent(const evmc::bytes32& root, const evmc::address& addr) const {
+    std::array<uint8_t, 32> embedded_scratch{};
+    const auto want = nibbles64::from_bytes32(
+        to_bytes32(keccak256(ByteView{addr.bytes, sizeof(addr.bytes)}).bytes));
+    const auto leaf = walk_nodestore_leaf(root, want, embedded_scratch);
+    return !leaf && leaf.error() == WalkMiss::kAbsent;
+}
+
+#if USE_HASH_KEY
 const Account*
 DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     if (!node_store_map_.valid() || headers_.empty()) return nullptr;
@@ -981,6 +988,9 @@ evmc::bytes32 DirectState::get_block_hash(BlockNum n) const noexcept {
             return std::bit_cast<evmc::bytes32>(it->block_hash);
         }
     }
+    // The EVM asks only within the BLOCKHASH window, so the witness must cover n.
+    sys_println(std::format("ERROR: block hash {} omitted from witness", n));
+    witness_incomplete_ = true;
     return {};
 }
 

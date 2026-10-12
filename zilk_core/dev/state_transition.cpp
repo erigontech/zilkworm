@@ -361,6 +361,55 @@ namespace {
         }
         return Status::kPassed;
     }
+
+    // Stateless validate_headers: witness headers decode exactly and chain contiguously up to the
+    // parent, and every BLOCKHASH table entry is the hash of one of them.
+    bool witness_headers_valid(const ::zilkworm::FlatBundle& bundle) {
+        if (!bundle.ancestors_well_formed) {
+            sys_println("ERROR: malformed witness header");
+            return false;
+        }
+        if (bundle.ancestor_rlps.empty()) return true;  // pre-state table is the only BLOCKHASH source
+        std::vector<evmc::bytes32> hashes;
+        hashes.reserve(bundle.ancestor_rlps.size());
+        for (const auto& h : bundle.ancestor_rlps) hashes.push_back(std::bit_cast<evmc::bytes32>(silkworm::keccak256(h)));
+        for (size_t i = 1; i < hashes.size(); ++i) {
+            if (bundle.ancestors[i].parent_hash != hashes[i - 1]) {
+                sys_println("ERROR: witness headers are not contiguous");
+                return false;
+            }
+        }
+        if (bundle.genesis.header.hash() != hashes.back()) {
+            sys_println("ERROR: parent header is not the last witness header");
+            return false;
+        }
+        const BlockNum first = bundle.ancestors.front().number;
+        for (const auto& e : bundle.direct.block_hashes()) {
+            const BlockNum idx = e.block_number - first;
+            if (e.block_number < first || idx >= hashes.size() || bundle.ancestors[idx].number != e.block_number ||
+                std::memcmp(e.block_hash, hashes[idx].bytes, 32) != 0) {
+                sys_println(std::format("ERROR: block hash {} not proven by witness headers", e.block_number));
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Engine new-payload checks the block RLP cannot express: claimed block hash and versioned hashes.
+    const char* engine_mismatch(const Block& block, const ::zilkworm::BlockEngineRecord& rec) {
+        if (block.header.hash() != rec.block_hash) return "block hash";
+        size_t off = 0;
+        for (const auto& txn : block.transactions) {
+            if (txn.type != TransactionType::kBlob) continue;
+            for (const auto& vh : txn.blob_versioned_hashes) {
+                if (off + 32 > rec.versioned_hashes.size() ||
+                    std::memcmp(vh.bytes, rec.versioned_hashes.data() + off, 32) != 0)
+                    return "versioned hashes";
+                off += 32;
+            }
+        }
+        return off == rec.versioned_hashes.size() ? nullptr : "versioned hashes";
+    }
 }  // namespace
 
 std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle& bundle) {
@@ -382,12 +431,22 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
     chain_id_ = cfg_it->second.chain_id;
     bundle.direct.set_multi_block(bundle.block_rlps.size() > 1);
     Blockchain blockchain{bundle.direct, cfg_it->second, bundle.genesis};
+    const bool headers_valid = witness_headers_valid(bundle);
     uint64_t cumulative_gas = 0;
     bool first_root_check = true;
     for (size_t i = 0; i < bundle.block_rlps.size(); ++i) {
         const bool expect_invalid =
             i < bundle.block_flags.size() &&
             (bundle.block_flags[i] & ::zilkworm::kBlockFlagExpectInvalid);
+        // The witness headers anchor the first block only.
+        if (i == 0 && !headers_valid) {
+            if (expect_invalid) {
+                sys_println("block 0 rejected as expected: witness headers");
+                continue;
+            }
+            failed_ = true;
+            return {0, false};
+        }
         Block block;
         ByteView view{bundle.block_rlps[i]};
         if (!rlp::decode(view, block).has_value()) {
@@ -411,7 +470,31 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             }
         }
 
-        if (ValidationResult err{blockchain.insert_block(block, false)}; err != ValidationResult::kOk) {
+        if (i < bundle.engine_records.size() && bundle.engine_records[i]) {
+            if (const char* why = engine_mismatch(block, *bundle.engine_records[i])) {
+                if (expect_invalid) {
+                    sys_println(std::format("block {} rejected as expected: {}", i, why));
+                    continue;
+                }
+                sys_println(std::format("ERROR: block {} {} mismatch", i, why));
+                failed_ = true;
+                return {0, false};
+            }
+        }
+
+        bundle.direct.reset_witness_incomplete();
+        const ValidationResult err{blockchain.insert_block(block, false)};
+        // Execution that read data the witness omits is invalid whatever its outcome.
+        if (bundle.direct.witness_incomplete()) {
+            if (expect_invalid) {
+                sys_println(std::format("block {} rejected as expected: witness incomplete", i));
+                continue;
+            }
+            sys_println(std::format("ERROR: block {} needs data the witness omits", i));
+            failed_ = true;
+            return {0, false};
+        }
+        if (err != ValidationResult::kOk) {
             if (expect_invalid) {
                 sys_println(std::format("block {} rejected as expected: {}",
                                         i, magic_enum::enum_name(err)));
@@ -422,19 +505,30 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
-        if (expect_invalid) {
-            sys_println(std::format("ERROR: expected-invalid block {} was accepted", i));
-            failed_ = true;
-            return {0, false};
-        }
+        // The post-state root walks the witness trie, so a block is accepted only after it.
         const evmc_revision rev = cfg_it->second.revision(block.header.number, block.header.timestamp);
+        const bool was_anchored = pre_root_set_;
         const bool root_ok = first_root_check
                                  ? check_root(bundle.direct, block.header, rev)
                                  : check_root_new_block(bundle.direct, block.header, rev);
         first_root_check = false;
         if (!root_ok) {
+            if (expect_invalid) {
+                // A rejected block anchors nothing in the public values.
+                if (!was_anchored) {
+                    pre_root_set_ = false;
+                    pre_state_root_ = {};
+                }
+                sys_println(std::format("block {} rejected as expected: state root", i));
+                continue;
+            }
             sys_println(std::format("ERROR: State Root Mismatch at block {}: expected {}",
                                     i, to_hex(block.header.state_root)));
+            failed_ = true;
+            return {0, false};
+        }
+        if (expect_invalid) {
+            sys_println(std::format("ERROR: expected-invalid block {} was accepted", i));
             failed_ = true;
             return {0, false};
         }
@@ -485,6 +579,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     auto end_created_hashes = created_acc_hashes.end();
 
     std::vector<mpt::TrieNodeFlat> storage_spill;
+    std::vector<evmc::address> absent_accounts;
 
     mpt::GridMPT<true> storage_trie{direct_state, kEmptyRoot};
 
@@ -520,7 +615,8 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                     node.current_len = 1;
                     ++it_existing_hashes;
                 } else {
-                    // Created-then-destructed: no pre-trie leaf.
+                    // Absent from the pre-state (observed, or created then destructed): proven below.
+                    absent_accounts.push_back(addr);
                     ++it_created_hashes;
                 }
                 continue;
@@ -734,7 +830,14 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
     assert(!acc_trie.failed());  // debug-only: in release caught by root compare below
     sys_println(std::format("New Root: {}", to_hex(new_root)));
-    const bool ok = (new_root == header.state_root);
+    bool ok = (new_root == header.state_root);
+    // Read-only absences leave the trie untouched, so prove each one against the pre-state root.
+    for (const auto& addr : absent_accounts) {
+        if (!direct_state.prove_account_absent(prev_root, addr)) {
+            sys_println(std::format("ERROR: witness does not prove account {} absent", to_hex(addr.bytes)));
+            ok = false;
+        }
+    }
     for (const auto& addr : direct_state.changed_addresses_journal()) {
         if (direct_state.is_deleted(addr) || (clear_empty && direct_state.is_empty_account(addr))) continue;
         Account* pa = direct_state.read_account(addr);

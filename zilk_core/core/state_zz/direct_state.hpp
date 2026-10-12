@@ -30,10 +30,8 @@
 #define USE_HASH_KEY 0
 #endif
 
-#if USE_HASH_KEY
 #include <array>
 #include <expected>
-#endif
 
 namespace evmone::state {
 struct StateDiff;
@@ -52,9 +50,7 @@ using ::silkworm::FlatHashSet;
 using ::silkworm::kEmptyHash;
 using ::silkworm::kEmptyRoot;
 
-#if USE_HASH_KEY
 struct nibbles64;  // trie_zz/mpt.hpp
-#endif
 
 [[gnu::always_inline]] inline uint64_t hash_key8(const uint8_t (&h)[32]) noexcept {
     uint64_t v; std::memcpy(&v, h, 8); return v;
@@ -129,12 +125,15 @@ class DirectState : public BlockState {
         bool found;             // false = walk proved absence
     };
     mutable FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, RecoveredSlot>> recovered_slots_;
-    enum class WalkMiss : uint8_t { kAbsent, kInvalid };  // kInvalid halts; see fatal()
-    std::expected<ByteView, WalkMiss> walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
-                                                          std::array<uint8_t, 32>& embedded_scratch) const;
     const RecoveredSlot* recover_slot_from_nodestore(const Account& pa, const evmc::address& addr,
                                                      const evmc::bytes32& key) const;
 #endif
+    enum class WalkMiss : uint8_t { kAbsent, kInvalid };  // kInvalid: node missing or malformed
+    std::expected<ByteView, WalkMiss> walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
+                                                          std::array<uint8_t, 32>& embedded_scratch) const;
+
+    // Set when execution needs witness data the bundle lacks; the block is then invalid.
+    mutable bool witness_incomplete_{false};
 
   public:
     explicit DirectState(std::span<uint8_t> prestate_bytes) noexcept;
@@ -150,10 +149,12 @@ class DirectState : public BlockState {
     evmc::bytes32 read_storage(const evmc::address& addr,
                                const evmc::bytes32& key) const noexcept;
     ByteView read_code(const evmc::address& addr) const noexcept;
-    ByteView read_code(const evmc::address& addr, const evmc::bytes32& /*code_hash*/) const noexcept {
-        return read_code(addr);
-    }
     evmc::bytes32 get_block_hash(BlockNum n) const noexcept;
+    // True once execution has read code or a block hash the witness does not supply.
+    bool witness_incomplete() const noexcept { return witness_incomplete_; }
+    void reset_witness_incomplete() noexcept { witness_incomplete_ = false; }
+    // Whether the witness node store proves `addr` absent from the trie rooted at `root`.
+    bool prove_account_absent(const evmc::bytes32& root, const evmc::address& addr) const;
     [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr) const noexcept {
         // Materializing, and overlay-aware: a detached account must not report
         // "no storage" just because it is missing from the blob map.
@@ -361,30 +362,30 @@ DirectState::read_code(const evmc::address& addr) const noexcept {
     // only through its code, and that read must leave a record all the same.
     const Account* pa = observe_account_(addr);
     if (pa->deleted) [[unlikely]]
-        return {};
+        return ByteView{};
 
-    if (pa->code_store_len == 0) {
-        // witness omitted code that is read
-        if (std::memcmp(pa->code_hash, silkworm::kEmptyHash.bytes, 32) != 0) [[unlikely]]
-            fatal("ERROR: read_code: code omitted from witness for non-empty code_hash");
-        return {};
+    if (pa->code_store_len != 0 && pa->code_store_offset != kCreatedCodeOffset) [[likely]]
+        return code_for(*pa);
+
+    if (std::memcmp(pa->code_hash, kEmptyHash.bytes, 32) == 0)
+        return ByteView{};
+
+    // Code is content-addressed: the witness may omit a body that an earlier write in the
+    // block already supplied (EIP-7928 code_writes satisfy the read), so look it up by hash
+    // in the witness code store, then in the in-block created code.
+    const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa->code_hash);
+    if (auto b = code_store_map_.find<32, 0, &hash_key8>(h.bytes))
+        return ByteView{b->data() + FlatKv::kPayloadOffset, b->size() - FlatKv::kPayloadOffset};
+    if (auto it = created_code_.find(hash_key8(h)); it != created_code_.end() &&
+                                                    std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
+        return ByteView{it->second.bytes.data(), it->second.bytes.size()};
     }
+    if (auto cit = created_code_collisions_.find(h); cit != created_code_collisions_.end())
+        return ByteView{cit->second.data(), cit->second.size()};
 
-    if (pa->code_store_offset == kCreatedCodeOffset) [[unlikely]] {
-        const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa->code_hash);
-        const uint64_t k8 = hash_key8(h);
-        if (auto it = created_code_.find(k8); it != created_code_.end() &&
-                                              std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
-            return ByteView{it->second.bytes.data(), it->second.bytes.size()};
-        }
-        if (auto cit = created_code_collisions_.find(h);
-            cit != created_code_collisions_.end()) {
-            return ByteView{cit->second.data(), cit->second.size()};
-        }
-        return {};
-    }
-
-    return code_for(*pa);
+    sys_println("ERROR: read_code: code omitted from witness for non-empty code_hash");
+    witness_incomplete_ = true;
+    return ByteView{};
 }
 
 [[gnu::always_inline]] inline const Account*

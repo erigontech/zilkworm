@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build a release for, e.g. v0.1.0-alpha.3
+        description: Existing tag to build a release for, e.g. v0.1.0-alpha.4
         required: true
 
 concurrency:
@@ -66,8 +66,8 @@ jobs:
             exit 1
           fi
 
-      - name: Build guest ELF and prover
-        run: make z6m_prover
+      - name: Build guest ELF, guest VK and prover
+        run: make z6m_prover ere-bin
 
       - name: Build state_transition CLI
         run: |
@@ -100,6 +100,21 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             temp/z6m_guest_hypercube.elf
+            temp/z6m_guest_hypercube.vk
             temp/z6m_prover_hypercube
             temp/state_transition_linux_x86_64
             temp/SHA256SUMS.txt
+
+  # Called rather than triggered: releases published with GITHUB_TOKEN emit no release event.
+  ere-benchmark:
+    name: ERE benchmark
+    needs: release
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/ere-benchmark.yml
+    with:
+      guest_source: release
+      release_tag: ${{ github.event.inputs.tag || github.ref_name }}
+      compare: true
+    secrets: inherit

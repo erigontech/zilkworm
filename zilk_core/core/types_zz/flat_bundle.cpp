@@ -3,6 +3,7 @@
 
 #include "flat_bundle.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include <zilk_core/core/common/bytes.hpp>
@@ -50,13 +51,19 @@ std::vector<uint8_t> build_flat_bundle(
     const std::vector<uint8_t>& direct_state_blob,
     const std::vector<uint8_t>& node_store_blob,
     std::string_view network,
-    std::span<const uint8_t> block_flags) {
+    std::span<const uint8_t> block_flags,
+    std::span<const std::optional<BlockEngineRecord>> engine_records) {
     size_t blocks_payload = 0;
     for (const auto& br : block_rlps) {
         blocks_payload += align8(br.size());
     }
-    const size_t blocks_section_size =
-        sizeof(uint64_t) + blocks_payload + block_flags.size();
+    // Engine records: [block_hash 32][u64 n][n * 32 versioned hashes], 8-aligned after the flags.
+    size_t engine_size = 0;
+    for (const auto& rec : engine_records) {
+        if (rec) engine_size += 32 + sizeof(uint64_t) + rec->versioned_hashes.size();
+    }
+    const size_t flags_end = sizeof(uint64_t) + blocks_payload + block_flags.size();
+    const size_t blocks_section_size = engine_size > 0 ? align8(flags_end) + engine_size : flags_end;
 
     const size_t hdr_size       = align8(sizeof(FlatBundleHeader));
     const size_t genesis_off    = hdr_size;
@@ -99,6 +106,20 @@ std::vector<uint8_t> build_flat_bundle(
     }
     if (!block_flags.empty()) {
         std::memcpy(out.data() + cursor, block_flags.data(), block_flags.size());
+    }
+    if (engine_size > 0) {
+        cursor = blocks_off + align8(flags_end);
+        for (const auto& rec : engine_records) {
+            if (!rec) continue;
+            std::memcpy(out.data() + cursor, rec->block_hash.bytes, 32);
+            const uint64_t n = rec->versioned_hashes.size() / 32;
+            std::memcpy(out.data() + cursor + 32, &n, sizeof(uint64_t));
+            if (!rec->versioned_hashes.empty()) {
+                std::memcpy(out.data() + cursor + 40, rec->versioned_hashes.data(),
+                            rec->versioned_hashes.size());
+            }
+            cursor += 40 + rec->versioned_hashes.size();
+        }
     }
 
     // Skip zero-length sections: an empty ByteView/vector has a null data()
@@ -196,6 +217,7 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
 
     std::vector<silkworm::ByteView> block_rlps;
     std::span<const uint8_t> block_flags{};
+    std::vector<std::optional<BlockEngineRecord>> engine_records;
     {
         if (hdr->blocks_rlp_size < sizeof(uint64_t)) [[unlikely]] {
             sys_println("load_flat_bundle: blocks section too small");
@@ -233,9 +255,35 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
         if (!block_rlps.empty() && cursor + block_rlps.size() <= section_end) {
             block_flags = {blob.data() + cursor, block_rlps.size()};
         }
+        // Optional engine records, in block order, for blocks flagged kBlockFlagEngineRecord.
+        if (std::ranges::any_of(block_flags, [](uint8_t f) { return (f & kBlockFlagEngineRecord) != 0; })) {
+            engine_records.resize(block_rlps.size());
+            size_t pos = align8(cursor + block_flags.size());
+            for (size_t i = 0; i < block_flags.size(); ++i) {
+                if ((block_flags[i] & kBlockFlagEngineRecord) == 0) continue;
+                if (pos > section_end || section_end - pos < 40) [[unlikely]] {
+                    sys_println("load_flat_bundle: engine record overruns section");
+                    return std::nullopt;
+                }
+                BlockEngineRecord rec{};
+                std::memcpy(rec.block_hash.bytes, blob.data() + pos, 32);
+                uint64_t n = 0;
+                std::memcpy(&n, blob.data() + pos + 32, sizeof(uint64_t));
+                pos += 40;
+                if (n > (section_end - pos) / 32) [[unlikely]] {
+                    sys_println("load_flat_bundle: engine record overruns section");
+                    return std::nullopt;
+                }
+                rec.versioned_hashes = {blob.data() + pos, static_cast<size_t>(n) * 32};
+                pos += static_cast<size_t>(n) * 32;
+                engine_records[i] = rec;
+            }
+        }
     }
 
     std::vector<silkworm::BlockHeader> ancestors;
+    std::vector<silkworm::ByteView> ancestor_rlps;
+    bool ancestors_well_formed = true;
     {
         silkworm::ByteView v{blob.data() + hdr->ancestors_rlp_off, hdr->ancestors_rlp_size};
         if (!v.empty()) {
@@ -243,17 +291,30 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
             if (inner.has_value() && inner->list) {
                 silkworm::ByteView lv = v.substr(0, inner->payload_length);
                 while (!lv.empty()) {
+                    const silkworm::ByteView entry_start = lv;
                     auto eh = silkworm::rlp::decode_header(lv);
-                    if (!eh.has_value()) {
+                    if (!eh.has_value() || eh->payload_length > lv.size()) {
                         sys_println("load_flat_bundle: bad ancestor entry");
                         return std::nullopt;
                     }
-                    silkworm::ByteView ev = lv.substr(0, eh->payload_length);
-                    silkworm::BlockHeader header;
-                    (void)silkworm::rlp::decode(ev, header);
-                    ancestors.push_back(std::move(header));
+                    const size_t entry_len =
+                        static_cast<size_t>(lv.data() - entry_start.data()) + eh->payload_length;
+                    // An entry is a header RLP, or a byte string wrapping one (C++ hosts).
+                    const silkworm::ByteView header_rlp =
+                        eh->list ? entry_start.substr(0, entry_len) : lv.substr(0, eh->payload_length);
                     lv.remove_prefix(eh->payload_length);
+                    silkworm::ByteView hv = header_rlp;
+                    silkworm::BlockHeader header;
+                    // It must decode as exactly one header; anything else is malformed witness.
+                    if (!silkworm::rlp::decode(hv, header, silkworm::rlp::Leftover::kProhibit)) {
+                        ancestors_well_formed = false;
+                        continue;
+                    }
+                    ancestor_rlps.push_back(header_rlp);
+                    ancestors.push_back(std::move(header));
                 }
+            } else {
+                ancestors_well_formed = false;
             }
         }
     }
@@ -286,6 +347,9 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
         node_off, node_size,
         net_off, net_size};
     fb.block_flags = block_flags;
+    fb.engine_records = std::move(engine_records);
+    fb.ancestor_rlps = std::move(ancestor_rlps);
+    fb.ancestors_well_formed = ancestors_well_formed;
     return fb;
 }
 

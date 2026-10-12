@@ -1,0 +1,276 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: ERE Benchmark
+
+# Runs the Zilkworm guest through zkevm-benchmark-workload (ere-hosts, SP1) on the latest batches of
+# a public R2 stateless-input catalog. The host adapter (statelessInputBytes -> MFBD) and the guest
+# come from the same z6m revision: the run's ref, or release_tag for guest_source=release.
+on:
+  push:
+    branches: ['release/*']
+  workflow_dispatch:
+    inputs:
+      guest_source:
+        description: "build: guest built from the selected ref; release: guest published with release_tag"
+        type: choice
+        options: [build, release]
+        default: build
+      release_tag:
+        description: Release whose guest and host adapter to run (guest_source=release)
+        type: string
+      catalog_url:
+        description: Public R2 catalog root, index.html URL, or manifest.json URL
+        type: string
+        default: https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia/index.html
+      batch_count:
+        description: Number of latest batches to run
+        type: string
+        default: "1"
+      compare:
+        description: Also estimate SP1 prover cost against Reth
+        type: boolean
+        default: false
+      workload_ref:
+        description: erigontech/zkevm-benchmark-workload ref
+        type: string
+        default: canepat/zilkworm_mfbd
+      ere_guests_ref:
+        description: erigontech/ere-guests ref
+        type: string
+        default: canepat/zilkworm_mfbd
+  workflow_call:
+    inputs:
+      guest_source:
+        type: string
+      release_tag:
+        type: string
+      catalog_url:
+        type: string
+      batch_count:
+        type: string
+      compare:
+        type: boolean
+      workload_ref:
+        type: string
+      ere_guests_ref:
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ere-benchmark-${{ github.ref }}-${{ inputs.release_tag }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CATALOG_URL: ${{ inputs.catalog_url || 'https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia/index.html' }}
+  BATCH_COUNT: ${{ inputs.batch_count || '1' }}
+  # Temporary: erigontech forks carry the zilkworm client and ere-guests entry until upstreamed.
+  WORKLOAD_REPO: erigontech/zkevm-benchmark-workload
+  WORKLOAD_REF: ${{ inputs.workload_ref || 'canepat/zilkworm_mfbd' }}
+  ERE_GUESTS_REPO: erigontech/ere-guests
+  ERE_GUESTS_REF: ${{ inputs.ere_guests_ref || 'canepat/zilkworm_mfbd' }}
+
+jobs:
+  guest-build:
+    name: Build guest
+    if: inputs.guest_source != 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ci
+    container:
+      image: ghcr.io/erigontech/zilkworm-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          submodules: false
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> prover/target"
+
+      - name: Build guest ELF and VK
+        run: make ere-bin
+
+      - name: Upload guest
+        uses: actions/upload-artifact@v4
+        with:
+          name: zilkworm-guest
+          path: build/ere-bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  guest-release:
+    name: Fetch released guest
+    if: inputs.guest_source == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          [ -n "$RELEASE_TAG" ] || { echo "release_tag is required for guest_source=release" >&2; exit 1; }
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -D release \
+            -p z6m_guest_hypercube.elf -p z6m_guest_hypercube.vk -p SHA256SUMS.txt
+          cd release
+          grep -E ' z6m_guest_hypercube\.(elf|vk)$' SHA256SUMS.txt > guest.sha256
+          [ "$(wc -l < guest.sha256)" -eq 2 ] || { echo "SHA256SUMS.txt lacks the guest ELF or VK" >&2; exit 1; }
+          sha256sum -c --strict guest.sha256
+          mkdir -p ../ere-bin
+          cp z6m_guest_hypercube.elf ../ere-bin/stateless-validator-zilkworm-sp1.elf
+          cp z6m_guest_hypercube.vk ../ere-bin/stateless-validator-zilkworm-sp1.vk
+
+      - name: Upload guest
+        uses: actions/upload-artifact@v4
+        with:
+          name: zilkworm-guest
+          path: ere-bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  ere:
+    name: Validate (zilkworm, sp1)
+    needs: [guest-build, guest-release]
+    # One guest job runs, the other is skipped.
+    if: ${{ !cancelled() && !failure() }}
+    # ere-hosts reaches the ere-server-sp1 container on 127.0.0.1: run on the host, not in a job container.
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      WORKLOAD_DIR: ${{ github.workspace }}/zkevm-benchmark-workload_fork
+      BIN_DIR: ${{ github.workspace }}/ere-bin
+      FIXTURES_DIR: ${{ github.workspace }}/ere-fixtures
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout z6m
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.guest_source == 'release' && inputs.release_tag || github.sha }}
+          path: z6m
+
+      # The workload resolves ../z6m (host adapter path dependency) and ../ere-guests_fork ([patch])
+      # relative to itself, so the checkouts are siblings with these names.
+      - name: Checkout zkevm-benchmark-workload
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.WORKLOAD_REPO }}
+          ref: ${{ env.WORKLOAD_REF }}
+          path: zkevm-benchmark-workload_fork
+
+      - name: Checkout ere-guests
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ERE_GUESTS_REPO }}
+          ref: ${{ env.ERE_GUESTS_REF }}
+          path: ere-guests_fork
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      # Same set as upstream rust-checks.yml: ere-hosts links the ZisK prover libraries (proofman).
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            libbenchmark-dev \
+            libgmp-dev \
+            libomp-dev \
+            libopenmpi-dev \
+            libsodium-dev \
+            libssl-dev \
+            nasm \
+            nlohmann-json3-dev \
+            openmpi-bin \
+            openmpi-common \
+            pkg-config
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: zkevm-benchmark-workload_fork -> target
+
+      - name: Download guest
+        uses: actions/download-artifact@v4
+        with:
+          name: zilkworm-guest
+          path: ere-bin
+
+      - name: Fetch fixtures
+        working-directory: z6m
+        env:
+          ERE_FIXTURES_BASE: ${{ env.CATALOG_URL }}
+          ERE_FIXTURES_CACHE: ${{ env.FIXTURES_DIR }}
+        run: tools/ere-fetch-fixtures.sh latest "$BATCH_COUNT" | tee "$RUNNER_TEMP/fetch.log"
+
+      - name: Validate
+        working-directory: z6m
+        run: make ere-validate ERE_WORKLOAD_DIR="$WORKLOAD_DIR" ERE_BIN_PATH="$BIN_DIR" ERE_INPUT_FOLDER="$FIXTURES_DIR/latest"
+
+      - name: Estimate cost against Reth
+        if: inputs.compare
+        working-directory: z6m
+        run: make ere-compare ERE_WORKLOAD_DIR="$WORKLOAD_DIR" ERE_BIN_PATH="$BIN_DIR" ERE_INPUT_FOLDER="$FIXTURES_DIR/latest"
+
+      - name: Summary
+        if: always()
+        working-directory: z6m
+        env:
+          COMPARE: ${{ inputs.compare }}
+          GUEST_SOURCE: ${{ inputs.guest_source == 'release' && format('release {0}', inputs.release_tag) || 'build' }}
+        run: |
+          metrics="$WORKLOAD_DIR/zkevm-metrics"
+          {
+            echo "### ERE benchmark: zilkworm, sp1"
+            echo
+            echo "| | ref | commit |"
+            echo "|---|---|---|"
+            echo "| z6m | \`$GUEST_SOURCE\` | \`$(git rev-parse --short=12 HEAD)\` |"
+            echo "| zkevm-benchmark-workload | \`$WORKLOAD_REF\` | \`$(git -C "$WORKLOAD_DIR" rev-parse --short=12 HEAD)\` |"
+            echo "| ere-guests | \`$ERE_GUESTS_REF\` | \`$(git -C ../ere-guests_fork rev-parse --short=12 HEAD)\` |"
+            echo
+            echo "Guest ELF sha256: \`$(sha256sum "$BIN_DIR/stateless-validator-zilkworm-sp1.elf" 2>/dev/null | cut -d' ' -f1)\`"
+            echo
+            echo "Fixtures: $CATALOG_URL, $(tail -n1 "$RUNNER_TEMP/fetch.log" 2>/dev/null)"
+            echo
+            if [ -d "$metrics" ]; then
+              echo '```'
+              python3 tools/ere_compare.py --validate 'zilkworm-*' "$metrics" || true
+              [ "$COMPARE" != true ] || python3 tools/ere_compare.py "$metrics" || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ere-metrics
+          path: zkevm-benchmark-workload_fork/zkevm-metrics/
+          if-no-files-found: warn
+          retention-days: 30
