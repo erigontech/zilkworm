@@ -53,7 +53,7 @@ ENV CARGO_HOME=/root/.cargo \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
         sh -s -- -y --default-toolchain 1.91.0 --profile default
 
-RUN git clone --depth 1 --branch erigon/patches-v6.0.2 \
+RUN git clone --depth 1 --branch erigon/patches-v6.6.0 \
         https://github.com/erigontech/sp1.git /tmp/sp1
 
 WORKDIR /tmp/sp1
