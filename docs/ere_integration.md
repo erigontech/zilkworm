@@ -5,23 +5,19 @@ SPDX-License-Identifier: Apache-2.0
 
 # ERE Benchmark Integration
 
-Zilkworm is integrated as a stateless-validation execution client in the [ERE benchmark](https://github.com/eth-act/zkevm-benchmark-workload). The same canonical EEST benchmark fixtures are executed inside SP1 using the Zilkworm guest, validated against their expected public values, and (optionally) compared cycle-for-cycle against other guests (Reth, Ethrex).
-
-> 🚧 **WIP:** needs revision after landing on public Zilkworm repo.
+Zilkworm is integrated as a stateless-validation execution client in the [ERE benchmark](https://github.com/eth-act/zkevm-benchmark-workload). The same canonical EEST benchmark fixtures are executed inside SP1 using the Zilkworm guest, validated against their expected public values, and (optionally) compared with Reth by SP1 estimated prover cost.
 
 The current integration targets **Amsterdam / Sepolia** with the
 **tests-zkevm v21.0.1** stateless schema, on **ere v0.18.1 / ere-guests v0.18.0**. The host adapter decodes the canonical
 EEST `statelessInputBytes` into the Zilkworm MFBD envelope; see
 [`prover/stateless_validator`](../prover/stateless_validator).
 
-> 🚧 The three branches below are pushed to the `erigontech/*` forks but are not yet merged upstream;
-> `[patch]` and path deps still point at local sibling checkouts and must be changed before publishing.
-
 ## Branches and repository layout
 
-The integration spans three repos, which at the moment must sit **as siblings** in the same
-parent directory — the benchmark fork's `[patch]` and path deps use relative
-paths (`../ere-guests_fork`, `../z6m`), so the Zilkworm checkout must be named `z6m/`:
+The ere-guests and benchmark changes live on `erigontech` forks until merged upstream.
+Until then the three repos must sit **as siblings** in the same parent directory: the
+benchmark fork's `[patch]` and path deps use relative paths (`../ere-guests_fork`,
+`../z6m`), so the Zilkworm checkout must be named `z6m/`:
 
 ```
 <workspace>/
@@ -30,9 +26,9 @@ paths (`../ere-guests_fork`, `../z6m`), so the Zilkworm checkout must be named `
 └── zkevm-benchmark-workload_fork/  # clone of erigontech/zkevm-benchmark-workload
 ```
 
-| Repo | Branch (pushed) | Based on | Carries |
+| Repo | Branch | Based on | Carries |
 |---|---|---|---|
-| `erigontech/zilkworm` | `canepat/ere_benchmark_workflow` | `release/0.1.0-alpha.4` (`0066de2`) | Guest (`zilk_core` + ZVM1 submodule `3ddf2bdf`, zvm1 `release/0.1.0-alpha.4`) and the host adapter `prover/stateless_validator` (SIOB→MFBD): tests-zkevm v21.0.1 schema, EIP-8282 builder-requests fix, chain id 1 → Amsterdam, Sepolia network config, ERE make targets/docs/fetch script, `eest_runner` cycle metrics, the `ERE Benchmark` workflow and its release hookup. |
+| `erigontech/zilkworm` | `release/0.1.0-alpha.4` | `v0.1.0-alpha.3` | Guest (`zilk_core` + ZVM1 submodule `34cc5a71`, zvm1 `release/0.1.0-alpha.4`) with the stateless new-payload and witness checks, and the host adapter `prover/stateless_validator` (SIOB→MFBD): tests-zkevm v21.0.1 schema, EIP-8282 builder-requests fix, chain id 1 → Amsterdam, Sepolia network config, ERE make targets/docs/fetch script, `eest_runner` cycle metrics, the `ERE Benchmark` workflow and its release hookup. |
 | `erigontech/ere-guests` | `canepat/zilkworm_mfbd` | `main` (`d31055c`, v0.18.0) | One commit mirroring the Nimbus addition (upstream PR #88): `StatelessValidatorKind::Zilkworm` (catalog ID 4), the `zilkworm` entry in `artifact-registry.json` (sp1, `zkvm_version` v6.6.0), the catalog/downloader/test-crate tests, and the README. `elf_url` is a `local-dev` placeholder until a Zilkworm release is published; the registry and README are updated with that release before upstreaming. |
 | `erigontech/zkevm-benchmark-workload` | `canepat/zilkworm_mfbd` | `master` (`274070c`, ere-guests v0.18.0) | The `zilkworm` execution client (`ExecutionClient::Zilkworm`, host transform via `from_ere_eest`), the `[patch]` redirecting ere-guests deps to `../ere-guests_fork`, the Zilkworm host-adapter path dep (`stateless-validator-zilkworm = ../z6m/prover/stateless_validator`), and the cross-file EEST fixture-name dedup with its regression test. |
 
@@ -91,7 +87,7 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
 ```
 
 - **`ERE_IMAGE_REGISTRY`** is folded into `ERE_RUN_ENV` and prepended to ere's
-  image names so `docker pull` fetches the prebuilt `ere-server-sp1:8961a4e`
+  image names so `docker pull` fetches the prebuilt `ere-server-sp1:20e87aa`
   from ghcr. Without it, ere has no default registry and falls back to building
   the images from source. Overridable.
 - **`ERE_BIN_PATH`** (optional): a relative value is resolved against z6m via
@@ -233,10 +229,13 @@ Full per-fixture metrics live under `$(ERE_WORKLOAD_DIR)/zkevm-metrics/`.
 
 ### Sepolia (current)
 
-Latest batch (blocks 11871300..11871399, 100 blocks), `--action estimate-cost`, SP1 v6.6.0,
-ere v0.18.1. Zilkworm guest built from `canepat/ere_benchmark_workflow` with Sepolia support,
-ELF sha256 `f1b4e19fccf436edd73e01f3d7720a4f4ec99a74729a404c488ccb5498ef229b`; Reth guest
-`0.1.0-rc.4`.
+`ERE Benchmark` CI on `release/0.1.0-alpha.4` (`14e1df3`), latest batch (blocks
+11899400..11899499): Zilkworm 100/100 `output_matched`.
+
+Estimated cost on blocks 11871300..11871399 (100 blocks), `--action estimate-cost`, SP1 v6.6.0,
+ere v0.18.1. Zilkworm guest built during the Sepolia port, before the stateless new-payload and
+witness checks, ELF sha256 `f1b4e19fccf436edd73e01f3d7720a4f4ec99a74729a404c488ccb5498ef229b`;
+Reth guest `0.1.0-rc.4`.
 
 | Client | Completed | output_matched | Mismatches |
 |---|---|---|---|
@@ -254,6 +253,13 @@ ELF sha256 `f1b4e19fccf436edd73e01f3d7720a4f4ec99a74729a404c488ccb5498ef229b`; R
 Components (Reth / Zilkworm): `opcode` 13,623,390,030,884 / 6,328,434,732,279,
 `syscall` 1,732,971,348,982 / 1,455,165,080,240, `system` 826,801,146,472 / 311,302,159,803.
 The two blocks where Reth is cheaper (11871306, 11871361) are among Reth's mismatches.
+
+### tests-zkevm v21.0.1
+
+The ere-guests `stateless-validator-test` crate (`executes_registered_guest`, SP1), with the
+Zilkworm host adapter translating each input, runs 33,637 fixtures: 33,635 succeed. Both
+failures are `test_bal_withdrawals_and_dequeues_net_balance_at_last_index` variants
+(`forward_all`, `forward_half`), which ere-guests also lists as expected failures for Reth.
 
 ### Previous stack (tests-zkevm v0.8.4 layout, ere v0.17.0, SP1 v6.4.0)
 
@@ -325,6 +331,6 @@ test_arithmetic             0.64  ----- Reth cheaper below -----
 
 ## Interpretation
 
-- **Correctness:** Zilkworm produces **100% correct** stateless-validation outputs on the latest Sepolia batch (100/100), where Reth rc.4 mismatches 4 blocks. On the previous stack it matched the full glamsterdam-devnet-8 corpus (72,732/72,732) and the generated tests-zkevm-benchmark v0.8.2 corpus (3464/3464).
+- **Correctness:** Zilkworm produces **100% correct** stateless-validation outputs on the latest Sepolia batch (100/100), where Reth rc.4 mismatches 4 blocks, and matches 33,635 of 33,637 tests-zkevm v21.0.1 fixtures, failing only on 2 that Reth is also expected to fail. On the previous stack it matched the full glamsterdam-devnet-8 corpus (72,732/72,732) and the generated tests-zkevm-benchmark v0.8.2 corpus (3464/3464).
 - **Efficiency:** on Sepolia blocks, estimated prover cost is 0.500× Reth rc.4's (98/100 cheaper). On the previous stack it was 0.495× Reth rc.3's on devnet-8 blocks and 0.257× on the v0.8.2 corpus, excluding the 20 `test_modexp` fixtures where Reth times out.
 - **Reth cheaper:** on Sepolia only on two blocks Reth fails to match; on the v0.8.2 corpus `test_p256verify` (12.94×) dominates, while `test_ripemd160`, `test_block_context` and `test_tx_context` are within 1.15×.
