@@ -1,39 +1,122 @@
 # Changelog
 
-## v0.1.0-alpha.4 - ERE stateless-input path and release benchmark
+## v0.1.0-alpha.4 - ERE stateless input, stateless new-payload checks and Sepolia
 
 ### Highlights
 
-This release lets Zilkworm consume the canonical EEST stateless input used by the ERE zkEVM benchmark, so the same guest validates real Glamsterdam devnet-8 blocks inside `zkevm-benchmark-workload`. Releases now publish the guest verification key and end with an ERE benchmark run against the published guest.
+This release lets Zilkworm consume the canonical EEST stateless input (tests-zkevm v21.0.1) used by the ERE zkEVM benchmark, so the same guest validates Sepolia blocks inside `zkevm-benchmark-workload`. The guest now applies the new-payload and witness checks a stateless validator owes the claimed block, and rejects blocks whose execution needs data the witness omits. Releases publish the guest verification key and end with an ERE benchmark run against the published guest.
 
 #### ERE stateless input (statelessInputBytes -> MFBD)
 
 The host adapter `prover/stateless_validator` decodes EEST `statelessInputBytes` and translates it into the MFBD envelope consumed by the guest:
-- Decoding via ere-guests `stateless-validator-common`, tracking the tests-zkevm v0.8.2 schema
+- Decoding via ere-guests `stateless-validator-common` v0.18.0, tracking the tests-zkevm v21.0.1 schema
 - Witness preimage keys derived from the Block-Level Access Lists (EIP-7928) for post-Amsterdam blocks
 - EIP-8282 builder deposit and exit requests folded into `requests_hash`
-- Network selected by chain id: `glamsterdam-devnet-7`, `glamsterdam-devnet-8`, and chain id 1 for the generated EEST benchmark corpus (Amsterdam from genesis)
-- Expected public values (gas used, pre/post-state root, block hash, chain id) derived on the host for comparison with the guest commitment
+- Network selected by chain id: `sepolia` (11155111, Amsterdam at 1791294816), `glamsterdam-devnet-7`, `glamsterdam-devnet-8`, and chain id 1 for the generated EEST benchmark corpus (Amsterdam from genesis)
+- Claimed block hash and versioned hashes carried per block as an MFBD engine record (`kBlockFlagEngineRecord`)
+- Expected public values (gas used, pre/post-state root, block hash, chain id) derived on the host for comparison with the guest commitment; a block expected to be invalid commits zeros and the chain id
 
 Rust toolchain bumped to 1.95.0.
 
+#### Stateless validation
+
+- Engine checks per execution-specs `execute_new_payload_request`: claimed block hash and blob versioned hashes (EIP-4844) against the block
+- Witness headers must each decode as exactly one header, link by parent hash and end at the parent block; host-provided BLOCKHASH entries are checked against them
+- Code or block hashes missing from the witness mark the block invalid instead of aborting the guest
+- Accounts created and destroyed within the block are proven absent from the parent state trie
+- A block rejected at the state-root check no longer leaks its pre-state root into the public values
+
+Validated under SP1 on tests-zkevm v21.0.1: 33,635 / 33,637 `output_matched`; the 2 failures are BAL fixtures also expected to fail for Reth.
+
 #### ERE benchmark integration
 
-- `make ere-bin` builds the guest ELF and derives its SP1 VK in the layout expected by `ere-hosts`; `ere-bin-link` links it under the SP1 SDK version of the ere the workload resolves
+- `make ere-bin` builds the guest ELF and derives its SP1 VK (32-byte digest) in the layout expected by `ere-hosts`; `ere-bin-link` links it under the SP1 SDK version of the ere the workload resolves
 - `make ere-validate` runs the guest through `ere-hosts --action execute` and gates on `output_matched`
 - `make ere-compare` runs `--action estimate-cost` for Zilkworm and Reth and compares SP1 estimated prover cost (`opcode`, `syscall`, `system` components)
-- `tools/ere-fetch-fixtures.sh` downloads and sha256-verifies devnet-8 R2 batches (`first`, `all`, `latest N`)
-- `tools/ere_compare.py` and `tools/compare_ere_benchmarks.py` read the ere v0.17 metrics schema and report legacy cycles and estimated cost separately
+- `tools/ere-fetch-fixtures.sh` downloads and sha256-verifies R2 catalog batches (`first`, `all`, `latest N`), Sepolia by default
+- `tools/ere_compare.py` and `tools/compare_ere_benchmarks.py` read the ere >= v0.17 metrics schema and report legacy cycles and estimated cost separately
 - `tools/scripts/eest_runner.py` reports SP1 cycle and prover-gas distributions
 - See `docs/ere_integration.md` for the details about environment and workflow
 
-Validated with the release guest on the latest 10 devnet-8 batches (blocks 257420..257519): 101 / 101 `output_matched`. Estimated prover cost on blocks 93300..93309 is 0.593x Reth's.
+Validated on the latest Sepolia batch (blocks 11899400..11899499): 100 / 100 `output_matched`. Estimated prover cost on blocks 11871300..11871399 is 0.500x Reth 0.1.0-rc.4's (Zilkworm cheaper on 98 / 100).
+
+#### Prover
+
+- SP1 v6.6.0, up from v6.0.2; the prover builds on `erigontech/sp1` `erigon/patches-v6.6.0` (v6.6.0 plus `prove_with_cycles`) with the `cuda` feature
+- C++ witness converter embedded via FFI instead of spawning a binary
+- SP1 guest built with wider GCC inlining and loop unrolling (-2.30% cycles); byte swaps expanded inline on rv64im
+
+#### Performance and Fixes
+
+- Keccak calls memoized; `zeroless_view` uses an aligned u64 stride and branchless compare
+- Calldata bytes counted once per transaction; no per-transaction copies of calldata and RLP envelopes
+- GridMPT copies and patches the branch RLP on fold instead of re-encoding
+- `MphfCollisionEntry::offset` widened to u64
+- `USE_HASH_KEY` node-store account recovery restored (default off)
+- evmone built without its built-in tracers
+- MFBD design and specification document (`docs/mfbd_design_specs.md`)
 
 #### CI
 
-- New `ERE Benchmark` workflow: builds the guest at the run's ref or downloads a published release guest (sha256-checked against `SHA256SUMS.txt`), fetches the latest N R2 batches (default 10, matching upstream `eest-r2-stateless-inputs`), and validates; optional cost comparison against Reth
+- New `ERE Benchmark` workflow: builds the guest at the run's ref or downloads a published release guest (sha256-checked against `SHA256SUMS.txt`), fetches the latest N R2 batches (default: Sepolia, 1 batch, matching upstream `eest-r2-stateless-inputs`), and validates; optional cost comparison against Reth
 - Runs on push to `release/*` branches, on `workflow_dispatch`, and from the release workflow
 - Release workflow builds and publishes the guest VK and finishes with an ERE benchmark of the published guest, cost comparison enabled
+- EEST jobs reuse the build directory, extract only `blockchain_tests` and cache fixtures; unit tests run in the `zilkworm-ci` image
+
+#### ZVM1/EVMone changes
+
+ZVM1 (now corresponds to evmone v0.24.0 plus the Amsterdam picks, up from v0.23.0)
+- Code written earlier in the same transaction is served from the transaction's code writes when the witness omits it
+- EIP-7702: the delegate's code is read during call target resolution, before a value-transfer failure, as in execution-specs
+- `Transaction::data` is a non-owning `bytes_view`
+- Keccak calls the zkVM permutation directly and absorbs input with aligned 64-bit loads
+- Faster jumpdest analysis on RISC-V
+- EVMC hash types word-aligned and passed to the C++ host by reference
+- safegcd for 256-bit modular inversion
+- Built-in tracers optional (`EVMONE_TRACING`)
+- Upstream fixes: account nonexistence restored when a cold access is reverted, widened blob fee in the affordability check, state-independent CALL costs charged first
+- Please check the upstream evmone changelog for the full list of changes
+
+### Contributors
+
+| Author | Commits |
+|---|---|
+| Somnath Banerjee @somnergy | 11 |
+| Paweł Bylica @chfast | 3 |
+| @canepat | 2 |
+
+### Commit Log by Category (16 non-merge commits since v0.1.0-alpha.3)
+
+#### Witness Format, State & Pre-Trie Validation
+
+- `7191202` mphf: widen MphfCollisionEntry::offset to u64 (#176) (Somnath Banerjee @somnergy)
+- `e4bdce4` state_zz: re-add USE_HASH_KEY node-store account recovery (default off) (#130) (Somnath Banerjee @somnergy)
+- `66f8500` Add MFBD design and specifications document (#174) (Somnath Banerjee @somnergy)
+
+#### Merkle Patricia Trie
+
+- `e89f3bc` grid_mpt: copy-and-patch the branch RLP on fold instead of re-encoding (#169) (@canepat)
+
+#### Protocol & Core EVM
+
+- `af9274b` protocol: count calldata bytes once per tx (#179) (Somnath Banerjee @somnergy)
+- `26dc926` types/trie: avoid per-tx copies of calldata and RLP envelopes (#178) (Somnath Banerjee @somnergy)
+- `3a88e8c` core: memoize keccak calls (#139) (Somnath Banerjee @somnergy)
+- `da094a9` common: use aligned u64 stride and branchless compare for `zeroless_view` (#121) (Somnath Banerjee @somnergy)
+- `416d457` Build evmone without its built-in tracers (#168) (Paweł Bylica @chfast)
+- `bf1d76b` evmone: point the submodule at the zvm1 oss branch (Somnath Banerjee @somnergy)
+
+#### Prover & Guest
+
+- `14e1df3` Add ERE stateless-input path and release ERE benchmark (#15) (@canepat)
+- `7d73e94` prover: embed C++ witness converter via FFI instead of spawning a binary (#137) (Somnath Banerjee @somnergy)
+- `52dafac` guest: Widen GCC inlining and unroll loops on the SP1 guest (-2.30% cycles) (#164) (Paweł Bylica @chfast)
+- `a4a46de` guest: Expand byte swaps inline on rv64im (#157) (Paweł Bylica @chfast)
+
+#### CI/CD & Workflows
+
+- `0066de2` ci: use zilkworm-ci image in unit tests workflow (#33) (Somnath Banerjee @somnergy)
+- `dcea126` ci: reuse build dir, extract only blockchain_tests, cache fixtures (#135) (Somnath Banerjee @somnergy)
 
 ## v0.1.0-alpha.3 - MFBD witness format, pre-trie validation and Amsterdam
 
