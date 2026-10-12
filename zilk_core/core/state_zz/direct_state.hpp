@@ -202,12 +202,16 @@ class DirectState : public BlockState {
     mutable std::vector<evmc::bytes32> ancestors_;
     mutable BlockNum ancestors_number_{0};
     mutable bool ancestors_end_{false};
+    // Set for stateless new-payload inputs, see require_block_hash_headers().
+    bool require_block_hash_headers_{false};
+    // Set when execution reads code the witness lacks; the block is then invalid.
+    mutable bool witness_incomplete_{false};
     // Keeps sizeof(DirectState) a multiple of 16 on the rv32 guest (528 with USE_HASH_KEY, 464 without): 8 bytes
     // off that moved the buffers placed after it off their phase, and the guest's CSR copies of them took about
     // 1k more BigInt calls and 30-40k more cycles a block on nearly every mainnet block (504 bytes against
     // 512 or 528). A member added here should keep the size a multiple of 16 (the static_assert after the
-    // class checks it), or be measured.
-    [[maybe_unused]] uint8_t ancestors_pad_[8]{};
+    // class checks it), or be measured. The two flags above take 2 of its 8 bytes.
+    [[maybe_unused]] uint8_t ancestors_pad_[6]{};
 
     bool multi_block_{false};
     // Journal only used for multi-block cases
@@ -289,6 +293,16 @@ class DirectState : public BlockState {
     /// `header` back to block n + 1.
     evmc::bytes32 get_block_hash(const BlockHeader& header, BlockNum n) const noexcept;
     bool ancestor_missing() const noexcept { return ancestor_missing_; }
+    /// get_block_hash() also requires the header of block n itself, as stateless validation derives
+    /// BLOCKHASH from the witness headers; a missing one sets ancestor_missing().
+    void require_block_hash_headers(bool on) noexcept { require_block_hash_headers_ = on; }
+    // True once execution has read code the witness does not supply.
+    bool witness_incomplete() const noexcept { return witness_incomplete_; }
+    // Clears witness_incomplete() and ancestor_missing() before a block runs.
+    void reset_witness_incomplete() noexcept {
+        witness_incomplete_ = false;
+        ancestor_missing_ = false;
+    }
     [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr) const noexcept {
         // Materializing, and overlay-aware: a detached account must not report
         // "no storage" just because it is missing from the blob map.
@@ -667,8 +681,8 @@ DirectState::read_code(const Account& pa) const noexcept {
     if (auto cit = created_code_collisions_.find(h); cit != created_code_collisions_.end())
         return ByteView{cit->second.data(), cit->second.size()};
 
-    // witness omitted code that is read
-    fatal("ERROR: read_code: code omitted from witness for non-empty code_hash");
+    sys_println("ERROR: read_code: code omitted from witness for non-empty code_hash");
+    witness_incomplete_ = true;
     return {};
 }
 

@@ -369,6 +369,47 @@ namespace {
         }
         return Status::kPassed;
     }
+
+    // Witness headers decode exactly. A stateless new-payload input (one carrying engine records) also
+    // has them chain contiguously up to the parent, as validate_headers requires; elsewhere they only
+    // feed the BLOCKHASH walk, which ignores a header no child names (get_block_hash).
+    bool witness_headers_valid(const ::zilkworm::FlatBundle& bundle) {
+        if (!bundle.ancestors_well_formed) {
+            sys_println("ERROR: malformed witness header");
+            return false;
+        }
+        if (bundle.engine_records.empty() || bundle.ancestor_rlps.empty()) return true;
+        std::vector<evmc::bytes32> hashes;
+        hashes.reserve(bundle.ancestor_rlps.size());
+        for (const auto& h : bundle.ancestor_rlps) hashes.push_back(std::bit_cast<evmc::bytes32>(silkworm::keccak256(h)));
+        for (size_t i = 1; i < hashes.size(); ++i) {
+            if (bundle.ancestors[i].parent_hash != hashes[i - 1]) {
+                sys_println("ERROR: witness headers are not contiguous");
+                return false;
+            }
+        }
+        if (bundle.genesis.header.hash() != hashes.back()) {
+            sys_println("ERROR: parent header is not the last witness header");
+            return false;
+        }
+        return true;
+    }
+
+    // Engine new-payload checks the block RLP cannot express: claimed block hash and versioned hashes.
+    const char* engine_mismatch(const Block& block, const ::zilkworm::BlockEngineRecord& rec) {
+        if (block.header.hash() != rec.block_hash) return "block hash";
+        size_t off = 0;
+        for (const auto& txn : block.transactions) {
+            if (txn.type != TransactionType::kBlob) continue;
+            for (const auto& vh : txn.blob_versioned_hashes) {
+                if (off + 32 > rec.versioned_hashes.size() ||
+                    std::memcmp(vh.bytes, rec.versioned_hashes.data() + off, 32) != 0)
+                    return "versioned hashes";
+                off += 32;
+            }
+        }
+        return off == rec.versioned_hashes.size() ? nullptr : "versioned hashes";
+    }
 }  // namespace
 
 std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle& bundle) {
@@ -389,13 +430,24 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
     }
     chain_id_ = cfg_it->second.chain_id;
     bundle.direct.set_multi_block(bundle.block_rlps.size() > 1);
+    bundle.direct.require_block_hash_headers(!bundle.engine_records.empty());
     Blockchain blockchain{bundle.direct, cfg_it->second, bundle.genesis};
+    const bool headers_valid = witness_headers_valid(bundle);
     uint64_t cumulative_gas = 0;
     bool first_root_check = true;
     for (size_t i = 0; i < bundle.block_rlps.size(); ++i) {
         const bool expect_invalid =
             i < bundle.block_flags.size() &&
             (bundle.block_flags[i] & ::zilkworm::kBlockFlagExpectInvalid);
+        // The witness headers anchor the first block only.
+        if (i == 0 && !headers_valid) {
+            if (expect_invalid) {
+                sys_println("block 0 rejected as expected: witness headers");
+                continue;
+            }
+            failed_ = true;
+            return {0, false};
+        }
         Block block;
         ByteView view{bundle.block_rlps[i]};
         if (!rlp::decode(view, block).has_value()) {
@@ -419,7 +471,34 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             }
         }
 
-        if (ValidationResult err{blockchain.insert_block(block, false)}; err != ValidationResult::kOk) {
+        if (i < bundle.engine_records.size() && bundle.engine_records[i]) {
+            if (const char* why = engine_mismatch(block, *bundle.engine_records[i])) {
+                if (expect_invalid) {
+                    sys_println(("block " + std::to_string(i) + " rejected as expected: " + why).c_str());
+                    continue;
+                }
+                sys_println(("ERROR: block " + std::to_string(i) + " " + why + " mismatch").c_str());
+                failed_ = true;
+                return {0, false};
+            }
+        }
+
+        bundle.direct.reset_witness_incomplete();
+        const ValidationResult err{blockchain.insert_block(block, false)};
+        // Execution that read data the witness omits (code, or the hash of an ancestor its headers do not
+        // lead to) is invalid whatever its outcome.
+        if (bundle.direct.witness_incomplete() || bundle.direct.ancestor_missing()) {
+            if (expect_invalid) {
+                sys_println(("block " + std::to_string(i) + " rejected as expected: witness incomplete").c_str());
+                continue;
+            }
+            sys_println(("ERROR: block " + std::to_string(i) +
+                         (bundle.direct.ancestor_missing() ? " read the hash of an ancestor the witness does not hold"
+                                                           : " needs data the witness omits")).c_str());
+            failed_ = true;
+            return {0, false};
+        }
+        if (err != ValidationResult::kOk) {
             if (expect_invalid) {
                 sys_println(("block " + std::to_string(i) + " rejected as expected: "
                              + std::string(magic_enum::enum_name(err))).c_str());
@@ -428,18 +507,6 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             sys_println(("ERROR: validation error at block " + std::to_string(i) + ": "
                          + std::string(magic_enum::enum_name(err)) + " ("
                          + std::to_string(magic_enum::enum_integer(err)) + ")").c_str());
-            failed_ = true;
-            return {0, false};
-        }
-        if (expect_invalid) {
-            sys_println(("ERROR: expected-invalid block " + std::to_string(i) + " was accepted").c_str());
-            failed_ = true;
-            return {0, false};
-        }
-        // The block read zero for the hash of an ancestor the witness's headers do not lead to, and no root
-        // tells that apart from the hash.
-        if (bundle.direct.ancestor_missing()) [[unlikely]] {
-            sys_println(("ERROR: block " + std::to_string(i) + " read the hash of an ancestor the witness does not hold").c_str());
             failed_ = true;
             return {0, false};
         }
@@ -452,11 +519,23 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
+        // The post-state root walks the witness trie, so a block is accepted only after it.
         const evmc_revision rev = cfg_it->second.revision(block.header.number, block.header.timestamp);
+        const bool was_anchored = pre_root_set_;
         const bool root_ok = first_root_check
                                  ? check_root(bundle.direct, block.header, rev)
                                  : check_root_new_block(bundle.direct, block.header);
         if (!root_ok) {
+            if (expect_invalid) {
+                // A rejected block anchors nothing in the public values.
+                if (!was_anchored) {
+                    pre_root_set_ = false;
+                    pre_state_root_ = {};
+                }
+                first_root_check = false;
+                sys_println(("block " + std::to_string(i) + " rejected as expected: state root").c_str());
+                continue;
+            }
             sys_println(("ERROR: State Root Mismatch at block " + std::to_string(i)
                          + ": expected " + to_hex(block.header.state_root)).c_str());
             failed_ = true;
@@ -475,6 +554,11 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             return {0, false};
         }
         first_root_check = false;
+        if (expect_invalid) {
+            sys_println(("ERROR: expected-invalid block " + std::to_string(i) + " was accepted").c_str());
+            failed_ = true;
+            return {0, false};
+        }
         // Last validated block in the run is the committed post-state root / block hash.
         post_state_root_ = block.header.state_root;
         block_hash_ = block.header.hash();

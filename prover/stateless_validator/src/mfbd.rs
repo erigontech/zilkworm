@@ -50,6 +50,15 @@ const MPHF_MAX_SEED_RETRIES: u32 = 32;
 
 // Per-block flag bit.
 const BLOCK_FLAG_EXPECT_INVALID: u8 = 0x01;
+const BLOCK_FLAG_ENGINE_RECORD: u8 = 0x02;
+
+/// New-payload request data the block RLP does not carry; the guest checks it before execution.
+pub struct EngineRecord<'a> {
+    /// `execution_payload.block_hash` as claimed by the request.
+    pub block_hash: [u8; 32],
+    /// `versioned_hashes` of the request, in order.
+    pub versioned_hashes: &'a [[u8; 32]],
+}
 
 // Layout sizes — must match C++ static_asserts.
 const ACCOUNT_SIZE: usize = 256;
@@ -908,12 +917,17 @@ fn build_flat_bundle(
     node_store_blob: &[u8],
     network: &str,
     block_flags: &[u8],
+    engine: Option<&EngineRecord<'_>>,
 ) -> Vec<u8> {
     let mut blocks_payload = 0usize;
     for br in block_rlps {
         blocks_payload += align8(br.len());
     }
-    let blocks_section_size = 8 + blocks_payload + block_flags.len();
+    // Engine record: [block_hash 32][u64 n][n * 32 versioned hashes], 8-aligned after the flags.
+    let engine_size = engine.map_or(0, |e| 40 + 32 * e.versioned_hashes.len());
+    let flags_end = 8 + blocks_payload + block_flags.len();
+    let blocks_section_size =
+        if engine_size > 0 { align8(flags_end) + engine_size } else { flags_end };
 
     let hdr_size = align8(FLAT_BUNDLE_HEADER_SIZE);
     let genesis_off = hdr_size;
@@ -955,6 +969,16 @@ fn build_flat_bundle(
     }
     if !block_flags.is_empty() {
         out[cursor..cursor + block_flags.len()].copy_from_slice(block_flags);
+    }
+    if let Some(e) = engine {
+        let mut pos = blocks_off + align8(flags_end);
+        out[pos..pos + 32].copy_from_slice(&e.block_hash);
+        out[pos + 32..pos + 40].copy_from_slice(&(e.versioned_hashes.len() as u64).to_le_bytes());
+        pos += 40;
+        for vh in e.versioned_hashes {
+            out[pos..pos + 32].copy_from_slice(vh);
+            pos += 32;
+        }
     }
     out[anc_off..anc_off + ancestors_rlp.len()].copy_from_slice(ancestors_rlp);
     out[direct_off..direct_off + direct_state_blob.len()].copy_from_slice(direct_state_blob);
@@ -1004,6 +1028,29 @@ pub fn build_mfbd_from_parts(
     witness_headers: &[Bytes],
     fork: &str,
     expect_invalid: bool,
+) -> Result<Vec<u8>> {
+    build_mfbd(
+        current_block_rlp,
+        witness_state,
+        witness_codes,
+        witness_keys,
+        witness_headers,
+        fork,
+        expect_invalid,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_mfbd(
+    current_block_rlp: &[u8],
+    witness_state: &[Bytes],
+    witness_codes: &[Bytes],
+    witness_keys: &[Bytes],
+    witness_headers: &[Bytes],
+    fork: &str,
+    expect_invalid: bool,
+    engine: Option<&EngineRecord<'_>>,
 ) -> Result<Vec<u8>> {
     if witness_headers.is_empty() {
         bail!("witness.headers must contain at least the parent header");
@@ -1181,11 +1228,11 @@ pub fn build_mfbd_from_parts(
     // Match the C++ host: only emit block_flags when expect_invalid is true.
     // (The guest treats an empty block_flags section as "all blocks are expected
     // valid"; emitting [0] would be a no-op semantically but breaks byte parity.)
-    let block_flags_buf: &[u8] = if expect_invalid {
-        const FLAGS: [u8; 1] = [BLOCK_FLAG_EXPECT_INVALID];
-        &FLAGS
-    } else {
-        &[]
+    let invalid_flag = if expect_invalid { BLOCK_FLAG_EXPECT_INVALID } else { 0 };
+    let block_flags_buf: Vec<u8> = match engine {
+        Some(_) => vec![invalid_flag | BLOCK_FLAG_ENGINE_RECORD],
+        None if expect_invalid => vec![invalid_flag],
+        None => Vec::new(),
     };
     let bundle = build_flat_bundle(
         &prev_block_rlp,
@@ -1194,7 +1241,8 @@ pub fn build_mfbd_from_parts(
         &direct_blob,
         &node_store_blob,
         fork,
-        block_flags_buf,
+        &block_flags_buf,
+        engine,
     );
 
     Ok(wrap_mfbd(&bundle))
@@ -1248,6 +1296,10 @@ pub struct AmsterdamBlockParts<'a> {
     pub transactions: &'a [Bytes],
     pub withdrawals: &'a [AmsterdamWithdrawal],
     pub block_access_list: &'a [u8],
+    /// `execution_payload.block_hash` claimed by the request.
+    pub block_hash: [u8; 32],
+    /// `versioned_hashes` of the request, in order.
+    pub versioned_hashes: &'a [[u8; 32]],
 }
 
 /// EEST canonical (SIOB) equivalent of [`build_mfbd_from_parts`].
@@ -1264,7 +1316,9 @@ pub fn build_mfbd_from_amsterdam_parts(
 ) -> Result<Vec<u8>> {
     let current_block_rlp = amsterdam_block_rlp(parts)?;
     let keys = crate::ere_eest::keys_from_bal_bytes(parts.block_access_list)?;
-    build_mfbd_from_parts(
+    let engine =
+        EngineRecord { block_hash: parts.block_hash, versioned_hashes: parts.versioned_hashes };
+    build_mfbd(
         &current_block_rlp,
         witness_state,
         witness_codes,
@@ -1272,6 +1326,7 @@ pub fn build_mfbd_from_amsterdam_parts(
         witness_headers,
         fork,
         expect_invalid,
+        Some(&engine),
     )
 }
 

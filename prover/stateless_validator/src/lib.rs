@@ -110,6 +110,7 @@ impl StatelessValidatorZilkwormInput {
         base_fee_be.reverse();
 
         let execution_requests = collect_execution_requests(&gloas.execution_requests)?;
+        let versioned_hashes: Vec<[u8; 32]> = gloas.versioned_hashes.iter().copied().collect();
 
         let parts = AmsterdamBlockParts {
             parent_hash: payload.parent_hash,
@@ -132,6 +133,8 @@ impl StatelessValidatorZilkwormInput {
             transactions: &transactions,
             withdrawals: &withdrawals,
             block_access_list: &block_access_list,
+            block_hash: payload.block_hash,
+            versioned_hashes: &versioned_hashes,
         };
 
         let flat_bundle = build_mfbd_from_amsterdam_parts(
@@ -143,10 +146,17 @@ impl StatelessValidatorZilkwormInput {
             /* expect_invalid */ !valid_block,
         )?;
 
-        // Expected guest PV (#133 layout). pre_state_root is the parent header's
-        // state root (witness lists headers ascending, so parent is last);
-        // post_state_root / block_hash / gas_used are the payload's claimed
-        // values the guest recomputes and commits.
+        // Expected guest PV (#133 layout). A block rejected as expected leaves every
+        // field but chain_id zero.
+        let mut public_values = Vec::with_capacity(112);
+        if !valid_block {
+            public_values.resize(104, 0);
+            public_values.extend_from_slice(&si.chain_id.to_le_bytes());
+            return Ok(Self { flat_bundle, public_values });
+        }
+        // pre_state_root is the parent header's state root (witness lists headers
+        // ascending, so parent is last); post_state_root / block_hash / gas_used are
+        // the payload's claimed values the guest recomputes and commits.
         let pre_state_root: [u8; 32] = {
             let mut slice = witness_headers
                 .last()
@@ -157,7 +167,6 @@ impl StatelessValidatorZilkwormInput {
                 .state_root
                 .0
         };
-        let mut public_values = Vec::with_capacity(112);
         public_values.extend_from_slice(&payload.gas_used.to_le_bytes());
         public_values.extend_from_slice(&pre_state_root);
         public_values.extend_from_slice(&payload.state_root);
