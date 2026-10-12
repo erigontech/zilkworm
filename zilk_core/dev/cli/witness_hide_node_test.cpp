@@ -203,7 +203,7 @@ bytes32 recompute_storage_root(DirectState& direct, const evmc::address& addr,
     }
 #endif
     std::sort(upds.begin(), upds.end());
-    GridMPT<true> st{direct, anchor};
+    GridMPT<true, DirectState> st{direct, anchor};
     return st.calc_root_from_updates({upds.data(), upds.size()});
 }
 
@@ -298,7 +298,7 @@ void HiddenReadOnlyAccount_AcceptedByValidator() {
     updW.self_initial_len = 0;
     updW.current_off = 0;
     updW.current_len = 0;  // read-only: no SSTORE/no balance change
-    GridMPT<true> acc_trie{direct, R};
+    GridMPT<true, DirectState> acc_trie{direct, R};
     const bytes32 reconstructed = acc_trie.calc_root_from_updates({&updW, 1});
     expect_true(acc_trie.missing_count() == 0,
                 "P1: validator reported NO missing node (witness looks complete)");
@@ -613,7 +613,7 @@ void MissingAccountNode_RejectedByValidator() {
     // A never unfolded: its hash flows through.
     TrieNodeFlat updW{kW};
     updW.ext_initial = ByteView{wRlp.data(), wRlp.size()};
-    GridMPT<true> acc_trie{direct, R};
+    GridMPT<true, DirectState> acc_trie{direct, R};
     const bytes32 reconstructed = acc_trie.calc_root_from_updates({&updW, 1});
     expect_true(reconstructed == R && acc_trie.missing_count() == 0,
                 "M5: validator core ACCEPTS — never unfolds the missing leaf");

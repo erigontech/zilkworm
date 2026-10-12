@@ -577,6 +577,32 @@ inline const std::map<std::string, ChainConfig> kNetworkConfig{
          .bpo2_time = 0,
          .amsterdam_time = 15'000,
      }},
+    // Hardcoded glamsterdam-devnet-7 chain config (devnet-specific: a new devnet needs its own entry)
+    // The MFBD input carries only the network name; the guest maps it here to chain_id + blob schedule
+    // (via bpo/amsterdam fork times) + fork activation. amsterdam_time=0 => revision() returns EVMC_AMSTERDAM.
+    // Blob schedule = {target 14, max 21, base_fee_update_fraction 11684671} = bpo2 schedule
+    // blob_params() selects by latest set bpo time, so cap at bpo2 (leave bpo3/bpo4 unset).
+    {"glamsterdam-devnet-7",
+     {
+         .chain_id = 0x1a62c8cb6,
+         .homestead_block = 0,
+         .tangerine_whistle_block = 0,
+         .spurious_dragon_block = 0,
+         .byzantium_block = 0,
+         .constantinople_block = 0,
+         .petersburg_block = 0,
+         .istanbul_block = 0,
+         .berlin_block = 0,
+         .london_block = 0,
+         .terminal_total_difficulty = 0,
+         .shanghai_time = 0,
+         .cancun_time = 0,
+         .prague_time = 0,
+         .osaka_time = 0,
+         .bpo1_time = 0,
+         .bpo2_time = 0,
+         .amsterdam_time = 0,
+     }},
 };
 
 std::vector<Transaction> sample_transactions();

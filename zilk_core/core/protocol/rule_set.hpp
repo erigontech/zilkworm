@@ -10,11 +10,15 @@
 #include <zilk_core/core/chain/config.hpp>
 #include <zilk_core/core/protocol/validation.hpp>
 #include <zilk_core/core/state/block_state.hpp>
+#include <zilk_core/core/state_zz/active_state.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
+#ifdef Z6M_HASH_STATE
+#include <zilk_core/core/state_zz/hash_state.hpp>
+#endif
 #include <zilk_core/core/types/block.hpp>
 #include <zilk_core/core/types/receipt.hpp>
 
-using ::zilkworm::DirectState;
+using ::zilkworm::ActiveState;
 
 namespace silkworm::protocol {
 
@@ -60,11 +64,11 @@ class RuleSet {
 
     //! \brief Initializes block execution by applying changes stipulated by the protocol
     //! (e.g. DAO transfer, storing parent beacon root)
-    virtual void initialize(const Block& block, DirectState& direct) = 0;
+    virtual void initialize(const Block& block, ActiveState& direct) = 0;
 
     //! \brief Finalizes block execution by applying changes stipulated by the protocol
     //! (e.g. block rewards, withdrawals)
-    virtual ValidationResult finalize(DirectState& direct, const Block& block,
+    virtual ValidationResult finalize(ActiveState& direct, const Block& block,
                                       const std::vector<Log>& logs) = 0;
 
     //! \brief See [YP] Section 11.3 "Reward Application".

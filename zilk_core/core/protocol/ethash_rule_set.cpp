@@ -56,13 +56,13 @@ ValidationResult EthashRuleSet::validate_extra_data(const BlockHeader& header) c
     return RuleSet::validate_extra_data(header);
 }
 
-void EthashRuleSet::initialize(const Block& block, DirectState& direct) {
+void EthashRuleSet::initialize(const Block& block, ActiveState& direct) {
     if (block.header.number == chain_config_.dao_block) {
         transfer_dao_balances(direct);
     }
 }
 
-ValidationResult EthashRuleSet::finalize(DirectState& direct, const Block& block,
+ValidationResult EthashRuleSet::finalize(ActiveState& direct, const Block& block,
                                          const std::vector<Log>&) {
     const BlockReward reward{compute_reward(block)};
     const auto miner = get_beneficiary(block.header);

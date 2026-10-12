@@ -1193,7 +1193,7 @@ rot). This table is the file-level index:
 | `MphfMapHeader` + `MphfMap` class + `index_lookup` / `find` / `resolve_collision` | `zilk_core/core/common_zz/mphf_map.hpp` |
 | `MphfBuilder` (host-side construction), `chd_solve` co-spilling + the sidecar invariant | `zilk_core/core/common_zz/mphf_builder.{hpp,cpp}` |
 | Blob assembly, `entry_offset_for_addr` two-stage probe | `zilk_core/core/state_zz/direct_state_builder.cpp` |
-| `addr_key8` / `hash_key8` | `zilk_core/core/state_zz/direct_state.hpp` |
+| `addr_key8` / `hash_key8` | `zilk_core/core/common_zz/index_key.hpp` |
 | `GridMPT` (storage/account trie recompute) | `GridMPT::unfold_slot` — `zilk_core/core/trie_zz/fold_unfold.hpp`; `GridMPT::init_from_root`, `GridMPT::calc_root_from_updates` — `zilk_core/core/trie_zz/grid_mpt.cpp` |
 | `StateTransition::run` dispatch, `run_one_bundle`, `check_root` / `check_root_new_block` | `zilk_core/dev/state_transition.{hpp,cpp}` |
 | Account-read spoofing / honest-block tests + shared harness | `zilk_core/dev/cli/account_read_spoof_test.cpp`, `zilk_core/dev/cli/account_read_honest_test.cpp`, `zilk_core/core/state_zz/account_read_test_util.hpp` |

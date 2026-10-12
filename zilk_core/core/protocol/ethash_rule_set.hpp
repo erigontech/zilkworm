@@ -15,10 +15,10 @@ class EthashRuleSet : public RuleSet {
   public:
     explicit EthashRuleSet(const ChainConfig& chain_config) : RuleSet(chain_config, /*prohibit_ommers=*/false) {}
 
-    void initialize(const Block& block, DirectState& direct) override;
+    void initialize(const Block& block, ActiveState& direct) override;
 
     //! \brief See [YP] Section 11.3 "Reward Application".
-    ValidationResult finalize(DirectState& direct, const Block& block,
+    ValidationResult finalize(ActiveState& direct, const Block& block,
                               const std::vector<Log>& logs) override;
 
     BlockReward compute_reward(const Block& block) override;
