@@ -25,8 +25,7 @@ class MergeRuleSet : public RuleSet {
 
     void initialize(const Block& block, DirectState& direct) override;
 
-    ValidationResult finalize(DirectState& direct, const Block& block,
-                              const std::vector<Log>& logs) override;
+    ValidationResult finalize(DirectState& direct, const Block& block) override;
 
     evmc::address get_beneficiary(const BlockHeader& header) override;
 

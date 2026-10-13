@@ -64,8 +64,7 @@ class RuleSet {
 
     //! \brief Finalizes block execution by applying changes stipulated by the protocol
     //! (e.g. block rewards, withdrawals)
-    virtual ValidationResult finalize(DirectState& direct, const Block& block,
-                                      const std::vector<Log>& logs) = 0;
+    virtual ValidationResult finalize(DirectState& direct, const Block& block) = 0;
 
     //! \brief See [YP] Section 11.3 "Reward Application".
     virtual evmc::address get_beneficiary(const BlockHeader& header);

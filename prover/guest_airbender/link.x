@@ -99,7 +99,7 @@ SECTIONS
     *(.rodata.*decode_node*12kAllHashLens)
     *(.rodata.memset_zeros)
     *(.sbss._ZZN8silkworm6endian14to_big_compactEyE7full_be)
-    *(.sbss.allocated_bytes)
+    *(.sdata.heap_next .sdata.heap_end)
     *(.rodata._ZN6evmone6crypto3ecc12FieldElementINS0_9secp256k15Curve6FrSpecEE2FpE)
     *(.rodata._ZN4intx8internal5div3214clz_byte_tableE)
     *(.rodata.__clz_tab)
@@ -244,6 +244,10 @@ BUG(riscv-rt): start of .heap is not 4-byte aligned");
    above that shrinks the reach left to gp-relative accesses and silently disables relaxations. */
 ASSERT(ALIGNOF(.rodata) <= 256, "
 ERROR(z6m): .rodata is aligned above 256 bytes, which breaks the gp window");
+/* simple_allocator.cpp rounds its heap pointer up to alignments of up to 2 MiB and relies on the
+   result never passing _eheap. */
+ASSERT(_sheap % 2097152 == 0 && _eheap % 2097152 == 0, "
+BUG: the heap bounds are not 2 MiB aligned");
 
 ASSERT(_stext + SIZEOF(.text) < ORIGIN(REGION_TEXT) + LENGTH(REGION_TEXT), "
 ERROR(riscv-rt): The .text section must be placed inside the REGION_TEXT region.

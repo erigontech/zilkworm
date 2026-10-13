@@ -62,8 +62,7 @@ void EthashRuleSet::initialize(const Block& block, DirectState& direct) {
     }
 }
 
-ValidationResult EthashRuleSet::finalize(DirectState& direct, const Block& block,
-                                         const std::vector<Log>&) {
+ValidationResult EthashRuleSet::finalize(DirectState& direct, const Block& block) {
     const BlockReward reward{compute_reward(block)};
     const auto miner = get_beneficiary(block.header);
     direct.add_to_balance(miner, reward.miner);
