@@ -383,6 +383,12 @@ pub fn gpu_prove(
     prover.prove(batch_id, source)
 }
 
+/// The guest's public output: registers a0..a7 at the end of the proven run.
+#[cfg(feature = "gpu")]
+pub fn output_words(proof: &UnrolledProgramProof) -> [u32; 8] {
+    std::array::from_fn(|i| proof.register_final_values[10 + i].value)
+}
+
 /// Security-tagged envelope magics used by the matter-labs WASM verifier
 /// (proof_verifier_js): proofs and verification keys carry an 8-byte magic,
 /// a format version, and the security level in bits. Legacy un-enveloped
