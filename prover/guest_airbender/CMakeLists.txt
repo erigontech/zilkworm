@@ -119,6 +119,8 @@ set_target_properties(z6m_guest PROPERTIES
     OUTPUT_NAME "z6m_guest"
     SUFFIX ".elf"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    # The linker scripts are not sources: relink when either changes.
+    LINK_DEPENDS "${LINKER_SCRIPT};${MEMORY_SCRIPT}"
 )
 
 if(NOT CMAKE_OBJCOPY)
