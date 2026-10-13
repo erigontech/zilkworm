@@ -457,7 +457,8 @@ struct MirrorRoot {
     /// "Created and existing hashes clash".
     bool clashed{false};
     /// True iff `check_root` rejects whatever the header's state root: a storage or the account
-    /// trie walk failed (`GridMPT::failed()`), and `root` means nothing.
+    /// trie walk failed (`GridMPT::failed()`), or the storage walk of an unmodified account did
+    /// not come back to its storage root; `root` then means nothing.
     bool rejected{false};
 };
 
@@ -475,7 +476,8 @@ struct MirrorRoot {
 ///
 /// `missing_out` accumulates `missing_count()` across accounts, so a storage node absent from
 /// the node store surfaces in `MirrorRoot::missing` instead of hiding behind a matching root;
-/// `rejected_out` is set when the walk fails, which `check_root` rejects.
+/// `rejected_out` is set when `check_root` rejects the walk: it failed, or it did not come back to
+/// the root of an account that was not modified.
 inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, Account& pa,
                                    bool has_existing, bool acc_modified,
                                    GridMPT<true>& storage_trie, unsigned& missing_out,
@@ -517,7 +519,7 @@ inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, A
     storage_trie.reset(storage_root);
     const bytes32 out = storage_trie.calc_root_from_updates({ups.data(), ups.size()});
     missing_out += storage_trie.missing_count();
-    rejected_out = rejected_out || storage_trie.failed();
+    rejected_out = rejected_out || storage_trie.failed() || (!acc_modified && out != storage_root);
     return out;
 }
 

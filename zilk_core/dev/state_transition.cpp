@@ -611,11 +611,19 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                 storage_root = kEmptyRoot;
             }
             storage_trie.reset(storage_root);
-            storage_root = storage_trie.calc_root_from_updates(
+            const bytes32 walked = storage_trie.calc_root_from_updates(
                 {storage_updates.data(), storage_updates.size()});
-            // A failed walk binds none of the slots, and an unmodified account's root is not compared.
+            // A failed walk binds none of the slots.
             if (storage_trie.failed()) [[unlikely]] {
                 sys_println("ERROR: storage trie walk failed");
+                return false;
+            }
+            if (acc_modified) {
+                storage_root = walked;
+            } else if (walked != storage_root) [[unlikely]] {
+                // Nothing writes an unmodified account's storage, so its walk has to come back to the root
+                // its account leaf binds: that leaf goes into the account trie as it was, with no other root.
+                sys_println("ERROR: storage walk of an unmodified account left its root");
                 return false;
             }
         }
