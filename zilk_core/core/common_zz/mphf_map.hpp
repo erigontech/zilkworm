@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -38,6 +39,76 @@ template <size_t N>
 #endif
     return std::memcmp(a, b, N) == 0;
 }
+
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
+/// a[0..n) == b[0..n) at any alignments, for the trie's check of a witness leaf value against the
+/// claimed pre-state value (70-80 byte account leaves). memcmp compares bytewise unless both
+/// operands are word-aligned, which these rarely are. Here a is brought to a word boundary, and b's
+/// bytes are assembled from its aligned words, carried and shifted together; every load stays
+/// inside the two ranges. Short strings, which mostly differ early or are a few bytes long,
+/// compare bytewise. The native test build (EVMONE_RV32_DISPATCH_TEST) compiles it for the tests.
+[[gnu::noinline]] inline bool bytes_equal_any(const uint8_t* a, const uint8_t* b, size_t n) noexcept {
+    static_assert(std::endian::native == std::endian::little, "assembles b's bytes little-endian");
+    typedef uint32_t __attribute__((may_alias)) w32;
+    if (n < 12) {
+#pragma GCC unroll 1
+        for (size_t i = 0; i < n; ++i)
+            if (a[i] != b[i]) return false;
+        return true;
+    }
+    // The head, the partial first word and the tail are switches: GCC's loop unrolling turns a
+    // loop of a few bytes into an 8-way unrolled one behind a dispatch that costs more than the bytes.
+    const unsigned h = static_cast<unsigned>(-reinterpret_cast<uintptr_t>(a)) & 3;
+    switch (h) {
+        case 3: if (a[2] != b[2]) return false; [[fallthrough]];
+        case 2: if (a[1] != b[1]) return false; [[fallthrough]];
+        case 1: if (a[0] != b[0]) return false; [[fallthrough]];
+        default: break;
+    }
+    a += h; b += h; n -= h;
+    const w32* const wa = reinterpret_cast<const w32*>(a);
+    const unsigned s = reinterpret_cast<uintptr_t>(b) & 3;
+    size_t k;
+    if (s == 0) {
+        const w32* const wb = reinterpret_cast<const w32*>(b);
+        k = n / 4;
+#pragma GCC unroll 4
+        for (size_t i = 0; i < k; ++i)
+            if (wa[i] != wb[i]) return false;
+    } else {
+        // cur holds b's bytes below its first word boundary, then those of each aligned word
+        // that the previous a-word did not take.
+        uint32_t cur;
+        switch (s) {
+            case 1: cur = b[0] | uint32_t{b[1]} << 8 | uint32_t{b[2]} << 16; break;
+            case 2: cur = b[0] | uint32_t{b[1]} << 8; break;
+            default: cur = b[0];
+        }
+        const unsigned rs = 8 * s, ls = 32 - rs;
+        const w32* const wb = reinterpret_cast<const w32*>(b + 4 - s);
+        // a-word i takes from wb[i], which ends at b + 4i + 8 - s: inside b while that is <= n.
+        k = (n + s - 4) / 4;
+#pragma GCC unroll 4
+        for (size_t i = 0; i < k; ++i) {
+            const uint32_t hi = wb[i];
+            if (wa[i] != (cur | (hi << ls))) return false;
+            cur = hi >> rs;
+        }
+    }
+    a += 4 * k; b += 4 * k;
+    // n - 4k is at most 3 when b is co-aligned and 4 - s + ((n + s) mod 4), at most 6, otherwise.
+    switch (n - 4 * k) {
+        case 6: if (a[5] != b[5]) return false; [[fallthrough]];
+        case 5: if (a[4] != b[4]) return false; [[fallthrough]];
+        case 4: if (a[3] != b[3]) return false; [[fallthrough]];
+        case 3: if (a[2] != b[2]) return false; [[fallthrough]];
+        case 2: if (a[1] != b[1]) return false; [[fallthrough]];
+        case 1: if (a[0] != b[0]) return false; [[fallthrough]];
+        case 0: return true;
+        default: return std::memcmp(a, b, n - 4 * k) == 0;  // not reached
+    }
+}
+#endif
 
 /// The little-endian u64 at p, for the [len:u64] entry headers. With strict alignment (rv32
 /// Airbender) the memcpy is eight byte loads through a stack temporary; the builder 8-aligns every

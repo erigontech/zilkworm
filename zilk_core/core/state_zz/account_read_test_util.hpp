@@ -732,7 +732,8 @@ inline ShadowRun shadow_execute(const std::vector<uint8_t>& blob_in,
                                 const silkworm::BlockHeader& provisional,
                                 std::span<const silkworm::Transaction> txs,
                                 const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig,
-                                std::span<const silkworm::BlockHeader> headers = {}) {
+                                std::span<const silkworm::BlockHeader> headers = {},
+                                bool keep_in_place_region = true) {
     ShadowRun r{};
     r.blob = blob_in;
     r.nodestore = nodestore_in;
@@ -740,6 +741,12 @@ inline ShadowRun shadow_execute(const std::vector<uint8_t>& blob_in,
     r.sanitize_ok = r.ds->sanitize();
     if (!r.sanitize_ok) return r;
     for (const silkworm::BlockHeader& h : headers) r.ds->insert_header(h);
+#if EVMONE_IN_PLACE_CODE
+    // For a run of the same block with every code copied, to compare with.
+    if (!keep_in_place_region) evmone::baseline::set_in_place_code_region(nullptr, nullptr);
+#else
+    (void)keep_in_place_region;
+#endif
 
     silkworm::Block block{};
     block.header = provisional;

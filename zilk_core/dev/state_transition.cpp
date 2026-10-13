@@ -196,8 +196,11 @@ namespace {
         // Common diagnostic helper. @p rejection_mode identifies which gate fired
         // (real ValidationResult name, or one of the pre-insert short-circuits).
         const auto fail_strict = [&](std::string_view rejection_mode) {
-            sys_println(std::format("STRICT: rejected via {} but expected {}",
-                rejection_mode, expectation).c_str());
+            // Not std::format: this was the only use in the guest, and it alone linked in Ryu, the
+            // unicode tables and the libstdc++ locale and facet machinery, about 0.5 MB of text and
+            // 190 KB of .rodata that the guest copies to RAM at the start of every block.
+            sys_println(("STRICT: rejected via " + std::string(rejection_mode) + " but expected " +
+                         expectation).c_str());
         };
 
         std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
@@ -548,6 +551,8 @@ namespace {
         return !storage_trie.failed() && walked == wiped.storage_root;
     }
 }  // namespace
+// check_root encodes account leaves (at most kAccRlpBufSize bytes) into TrieNodeFlat::buf.
+static_assert(sizeof(mpt::TrieNodeFlat::buf) >= zilkworm::kAccRlpBufSize);
 
 bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                                  evmc_revision rev) {
