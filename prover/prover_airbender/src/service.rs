@@ -660,8 +660,9 @@ impl AirbenderService {
         Ok(run)
     }
 
-    /// Run the GPU proof for a single block, write `proof.bin`, and return
-    /// the serialized proof bytes plus a `ProvingLog` ready for persistence.
+    /// Run the GPU proof for a single block and return the serialized proof
+    /// bytes plus a `ProvingLog`; the worker writes `proof.bin` once the
+    /// preflight verdict is in.
     ///
     /// Does **not** touch ethproofs — the caller is responsible for
     /// spawning any state-transition HTTP calls in the background.
