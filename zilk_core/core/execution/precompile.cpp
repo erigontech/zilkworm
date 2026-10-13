@@ -34,7 +34,7 @@ std::optional<Bytes> ecrec_run(ByteView input) noexcept {
     // Only the first 128 bytes are read, zero-padded. A copy of the whole input would allocate its
     // size on every call, which costs 3000 gas whatever the size, on a guest heap that never frees.
     std::array<uint8_t, 128> d{};
-    std::copy_n(input.data(), std::min(input.size(), d.size()), d.begin());
+    if (!input.empty()) std::copy_n(input.data(), std::min(input.size(), d.size()), d.begin());
 
     const auto v{intx::be::unsafe::load<intx::uint256>(&d[32])};
     const auto r{intx::be::unsafe::load<intx::uint256>(&d[64])};

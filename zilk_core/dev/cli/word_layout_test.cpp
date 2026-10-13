@@ -425,7 +425,7 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
             }
             steps.push_back(s);
         }
-        a.ret(0, 256);
+        a.ret(0, 512);
         // Replay on the model, now that the code is known.
         for (const auto& s : steps) {
             const uint64_t out_size = s.w.bytes[30] % 40;
@@ -474,7 +474,7 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
         }
         const auto out = run(a.code, calldata);
         REQUIRE(out.status == EVMC_SUCCESS);
-        REQUIRE(out.output.size() == 256);
+        REQUIRE(out.output.size() == 512);
         // Memory beyond what the program touched reads as zero, in the model as in the EVM.
         CHECK(std::equal(out.output.begin(), out.output.end(), m.mem.begin()));
         CHECK(out.logs == m.logs);

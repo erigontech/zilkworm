@@ -27,7 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # CMake from Kitware: noble's 3.28 cannot parse the download step of the patched blst (its URL
 # carries a '#airbender-<hash>' tag).
 ARG CMAKE_VERSION=3.31.6
+ARG CMAKE_SHA256=518c76bd18cc4ca5faab891db69b1289dc1bf134f394f0983a19576711b95210
 RUN curl -fsSL -o /tmp/cmake.sh "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.sh" \
+    && echo "${CMAKE_SHA256}  /tmp/cmake.sh" | sha256sum -c - \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local && rm /tmp/cmake.sh
 
 # RISC-V bare-metal GCC for guest cross-compilation
