@@ -35,7 +35,11 @@ inline std::pair<uint8_t*, size_t> read_input_from_csr()
 {
     uint32_t num_bytes = csr_read_word();
     uint8_t* buf = static_cast<uint8_t*>(::operator new(num_bytes));
-    uint32_t* dst = reinterpret_cast<uint32_t*>(buf);
+    // The words go through a named may_alias type (auto would drop the attribute): the guest reads
+    // the witness back through other types (an account's uint64_t nonce and bool flags, an MPHF's
+    // uint64_t seeds), which plain uint32_t stores need not be ordered against.
+    typedef uint32_t __attribute__((may_alias)) w32;
+    w32* const dst = reinterpret_cast<w32*>(buf);
 
     // Blocks of 64 words: the copy is a CSR read and a store per word, so -funroll-loops's 8-word
     // body spent a quarter more on the loop counter and branch (2.25 instructions a word, for the
@@ -148,26 +152,7 @@ inline void blake_trigger_full_rounds(uint32_t* state, const uint32_t* input, ui
     return x12;
 }
 
-// --- Keccak-f[1600] ---
-
-/// 649 delegated CSR writes. State: 31 × u64 at 256-byte-aligned address.
-inline void keccak_f1600_delegate(uint64_t state[25]) {
-    uint64_t __attribute__((aligned(256))) buf[32];
-    for (int i = 0; i < 25; i++) buf[i] = state[i];
-    for (int i = 25; i < 31; i++) buf[i] = 0;
-
-    register uint32_t ctrl asm("x10") = 0;
-    register void*    sptr asm("x11") = static_cast<void*>(buf);
-    asm volatile(
-        "li t0, 649\n"
-        "1:\n"
-        "  csrrw x0, 0x7CB, x0\n"
-        "  addi t0, t0, -1\n"
-        "  bnez t0, 1b\n"
-        : "+r"(ctrl) : "r"(sptr) : "t0", "memory"
-    );
-    for (int i = 0; i < 25; i++) state[i] = buf[i];
-}
+// Keccak-f[1600] (CSR 0x7CB) is delegated from evmone's keccak.c, as 649 contiguous csrrw.
 
 // --- Program termination ---
 

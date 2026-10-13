@@ -37,7 +37,9 @@ jobs:
             nodejs npm \
             curl
           npm i -g xpm
-          xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
+          # Pinned to the guest compiler that prover/Dockerfile ships (release v15.2.0-1): the
+          # guest's code generation, and so its cycle counts, depend on the GCC version.
+          xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
           RISCV_GCC_BIN=$(find $HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc -name 'riscv-none-elf-gcc' -type f 2>/dev/null | head -1 | xargs dirname)
           echo "Found riscv-gcc at: $RISCV_GCC_BIN"
           ls -la "$RISCV_GCC_BIN/" | head -5
@@ -78,8 +80,11 @@ jobs:
       - name: Build guest ELF
         run: make z6m_guest_airbender
 
+      # execute runs on the CPU simulator. The default `gpu` feature needs a CUDA toolkit,
+      # which this container doesn't have (era_cudart_sys's build script fails without one).
       - name: Build prover
-        run: make z6m_prover_airbender
+        working-directory: prover/prover_airbender
+        run: cargo build --release --no-default-features
 
       - name: Run EEST blockchain tests
         id: run_tests
@@ -90,11 +95,15 @@ jobs:
           make -j"$(nproc)" eest 2>&1 | tee output.log
           exit_code=${PIPESTATUS[0]}
 
-          # A test passes only if the guest reported success (or skipped it): a run that stops at
-          # the cycle limit exits cleanly without either line.
+          # A test passes only if the guest reported success and execute exited 0, which it does
+          # only for a run that ended at the guest's exit point. A run that stops at the cycle
+          # limit prints no success line; a skipped run (unknown network, oversized block) ends
+          # at finish_error. The Makefile appends "CRASHED!" to the log of any non-zero exit.
           export LC_ALL=C
           find target/eest-logs -name '*.log' 2>/dev/null | sort > all.txt
-          grep -rlE 'run successful|run skipped' target/eest-logs/ 2>/dev/null | sort > ok.txt
+          grep -rlE 'run successful' target/eest-logs/ 2>/dev/null | sort > reported.txt
+          grep -rlE '^CRASHED! ' target/eest-logs/ 2>/dev/null | sort > crashed.txt
+          comm -23 reported.txt crashed.txt > ok.txt
           comm -23 all.txt ok.txt | sed 's#^target/eest-logs/##; s#\.log$#.json#' > failed.txt
           grep -vE '^[[:space:]]*(#|$)' eest-known-failures.txt | sort > known.txt
           comm -23 failed.txt known.txt > unexpected.txt

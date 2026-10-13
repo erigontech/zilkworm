@@ -15,7 +15,7 @@ TESTFILES := $(shell find $(EEST_DIR)/$(TESTS_SUBDIR) -type f -name '*.json')
 RELTESTS  := $(patsubst $(EEST_DIR)/%,%,$(TESTFILES))
 LOGFILES  := $(addprefix $(LOGDIR)/,$(RELTESTS:.json=.log))
 
-.PHONY: build selftest eest eest-istanbul eest-blake2 clean-logs
+.PHONY: build selftest eest clean-logs
 
 .DELETE_ON_ERROR:
 
@@ -27,7 +27,8 @@ selftest: build
 
 eest: $(LOGFILES)
 
-$(LOGDIR)/%.log: $(EEST_DIR)/%.json
+# A rebuilt prover or guest makes every log stale, so they are prerequisites too (when present).
+$(LOGDIR)/%.log: $(EEST_DIR)/%.json $(wildcard $(PROVER) $(GUEST_BIN))
 	@mkdir -p $(dir $@)
 	$(PROVER) --guest-bin $(GUEST_BIN) execute --is-test --file-name $< 2>&1 | tee $@ || echo "CRASHED! $@" | tee -a $@
 
