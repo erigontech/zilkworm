@@ -53,11 +53,14 @@ std::vector<uint256> divisors(std::mt19937_64& rng) {
         out.push_back(pow2(k) | (pow2(k & ~31u) - 1));
     }
     for (int i = 0; i < 400; ++i) {
+        // Built with shifts: stores through a uint32_t* into the uint64_t words of a uint256
+        // break strict aliasing, and -O3 may drop them.
         uint256 v;
         const unsigned words = 1 + rng() % 8;
         for (unsigned w = 0; w < words; ++w) {
             const auto r = static_cast<uint32_t>(rng());
-            reinterpret_cast<uint32_t*>(&v)[w] = (rng() & 3) ? r : 0;
+            if (rng() & 3)
+                v |= uint256{r} << (32 * w);
         }
         out.push_back(v);
     }

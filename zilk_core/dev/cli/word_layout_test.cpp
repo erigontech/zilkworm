@@ -34,13 +34,15 @@ constexpr address kCaller = 0xaa00000000000000000000000000000000000001_address;
 constexpr address kEcho = 0xbb00000000000000000000000000000000000002_address;
 constexpr address kSender = 0x5e00000000000000000000000000000000000004_address;
 constexpr address kIdentity = 0x0000000000000000000000000000000000000004_address;
+constexpr uint32_t kCallGas = 100000;  // The gas of Asm::call.
 
 enum : uint8_t {
-    STOP = 0x00, ADD = 0x01, SUB = 0x03, KECCAK = 0x20, CALLDATALOAD = 0x35, CALLDATASIZE = 0x36,
+    STOP = 0x00, ADD = 0x01, SUB = 0x03, MOD = 0x06, KECCAK = 0x20, CALLDATALOAD = 0x35,
+    CALLDATASIZE = 0x36,
     CALLDATACOPY = 0x37, CODECOPY = 0x39, EXTCODESIZE = 0x3b, EXTCODECOPY = 0x3c, RETURNDATASIZE = 0x3d,
     RETURNDATACOPY = 0x3e, POP = 0x50, MLOAD = 0x51, MSTORE = 0x52, MSTORE8 = 0x53, MCOPY = 0x5e,
     PUSH1 = 0x60, PUSH2 = 0x61, PUSH4 = 0x63, PUSH20 = 0x73, PUSH32 = 0x7f, DUP1 = 0x80,
-    LOG0 = 0xa0, CREATE = 0xf0, CALL = 0xf1, RETURN = 0xf3, REVERT = 0xfd
+    SWAP1 = 0x90, LOG0 = 0xa0, CREATE = 0xf0, CALL = 0xf1, RETURN = 0xf3, REVERT = 0xfd
 };
 
 struct Asm {
@@ -77,7 +79,7 @@ struct Asm {
     }
     Asm& call(const address& to, uint64_t in, uint64_t in_size, uint64_t out, uint64_t out_size) {
         push(out_size).push(out).push(in_size).push(in).push(0);
-        return push_addr(to).push(100000).op(CALL);
+        return push_addr(to).push4(kCallGas).op(CALL);
     }
 };
 
@@ -85,6 +87,28 @@ bytes32 filled(uint8_t b) {
     bytes32 w;
     std::memset(w.bytes, b, 32);
     return w;
+}
+
+address precompile_address(uint16_t id) {
+    address a{};
+    a.bytes[18] = static_cast<uint8_t>(id >> 8);
+    a.bytes[19] = static_cast<uint8_t>(id);
+    return a;
+}
+
+// The output of a precompile called with Asm::call on the @p size bytes at @p input (byte order),
+// which is also the return data the call leaves.
+bytes precompile_output(uint16_t id, const uint8_t* input, size_t size) {
+    evmc_message msg{};
+    msg.kind = EVMC_CALL;
+    msg.gas = kCallGas;
+    msg.depth = 1;
+    msg.recipient = msg.code_address = precompile_address(id);
+    msg.sender = kCaller;
+    msg.input_data = input;
+    msg.input_size = size;
+    const auto result = evmone::state::call_precompile(EVMC_PRAGUE, msg);
+    return result.output_size != 0 ? bytes(result.output_data, result.output_size) : bytes{};
 }
 
 struct Outcome {
@@ -166,15 +190,25 @@ Outcome run(const bytes& code, const bytes& calldata, const bytes& echo = echo_c
     return o;
 }
 
-// The memory as the program sees it, as bytes.
+// The memory as the program sees it, as bytes, and what the program leaves besides.
 struct Model {
     std::vector<uint8_t> mem = std::vector<uint8_t>(2048, 0);
     bytes return_data;
+    std::vector<bytes> logs;
 
     void store(uint64_t offset, const bytes32& w) { std::memcpy(&mem[offset], w.bytes, 32); }
     void copy_from(uint64_t dst, const bytes& src_bytes, uint64_t src, uint64_t size) {
         for (uint64_t i = 0; i < size; ++i)
             mem[dst + i] = src + i < src_bytes.size() ? src_bytes[src + i] : 0;
+    }
+    bytes slice(uint64_t offset, uint64_t size) const {
+        return {mem.begin() + static_cast<std::ptrdiff_t>(offset),
+                mem.begin() + static_cast<std::ptrdiff_t>(offset + size)};
+    }
+    // A call that returned @p output into the output range at @p dst of @p out_size bytes.
+    void returned(uint64_t dst, uint64_t out_size, const bytes& output) {
+        copy_from(dst, output, 0, std::min<uint64_t>(out_size, output.size()));
+        return_data = output;
     }
 };
 
@@ -307,7 +341,8 @@ TEST_CASE("a CREATE inside init code keeps both init codes", "[word_layout]") {
 
 TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
     Rng rng{0x2545F4914F6CDD1Dull};
-    for (int program = 0; program < 400; ++program) {
+    const bytes echo = echo_code();
+    for (int program = 0; program < 1000; ++program) {
         Asm a;
         Model m;
         const bytes calldata = [&] {
@@ -317,15 +352,26 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
             return c;
         }();
         const auto offset = [&] { return rng.below(4) == 0 ? rng.below(200) : 32 * rng.below(6) + rng.below(4); };
-        const auto size = [&] { return rng.below(3) == 0 ? rng.below(12) : rng.below(70); };
+        const auto size = [&] {
+            switch (rng.below(8)) {
+            case 0: return rng.below(12);
+            case 1: return uint64_t{64};  // The size of the hash's memo.
+            case 2: return rng.below(300);
+            default: return rng.below(70);
+            }
+        };
         // The code is also CODECOPY's source, so the model replays the steps once it is complete.
-        enum Kind { MSTORE_K, MSTORE8_K, MCOPY_K, CALLDATACOPY_K, CODECOPY_K, CALLECHO_K };
+        enum Kind {
+            MSTORE_K, MSTORE8_K, MCOPY_K, CALLDATACOPY_K, CODECOPY_K, CALLECHO_K, MLOAD_K, KECCAK_K,
+            LOG_K, EXTCODECOPY_K, CALLFRAME_K, RETURNDATACOPY_K, MODEXP_K, BLAKE2F_K, KINDS
+        };
         struct Step { Kind kind; uint64_t a, b, c; bytes32 w; };
         std::vector<Step> steps;
         for (unsigned i = 0, n = 6 + static_cast<unsigned>(rng.below(10)); i < n; ++i) {
-            Step s{static_cast<Kind>(rng.below(6)), offset(), offset(), size(), {}};
+            Step s{static_cast<Kind>(rng.below(KINDS)), offset(), offset(), size(), {}};
             for (auto& b : s.w.bytes)
                 b = static_cast<uint8_t>(rng.next());
+            const uint64_t out_size = s.w.bytes[30] % 40;
             switch (s.kind) {
             case MSTORE_K: a.mstore(s.a, s.w); break;
             case MSTORE8_K: a.mstore8(s.a, s.w.bytes[0]); break;
@@ -334,29 +380,96 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
             case CODECOPY_K: a.copy(CODECOPY, s.a, s.b, s.c); break;
             case CALLECHO_K:
                 // Identity precompile: arguments s.b..s.b+s.c, output s.a with a size of its own.
-                a.call(kIdentity, s.b, s.c, s.a, s.w.bytes[1] % 40);
-                a.op(0x50);  // POP the success flag
+                a.call(kIdentity, s.b, s.c, s.a, out_size).op(POP);
                 break;
+            case MLOAD_K: a.push(s.b).op(MLOAD).push(s.a).op(MSTORE); break;
+            case KECCAK_K: a.push(s.c).push(s.b).op(KECCAK).push(s.a).op(MSTORE); break;
+            case LOG_K: {
+                const unsigned topics = s.w.bytes[2] % 3;
+                for (unsigned t = 0; t < topics; ++t)
+                    a.push_word(s.w);
+                a.push(s.c).push(s.b).op(static_cast<uint8_t>(LOG0 + topics));
+                break;
+            }
+            case EXTCODECOPY_K:
+                a.push(s.c).push(s.b % 40).push(s.a).push_addr(kEcho).op(EXTCODECOPY);
+                break;
+            case CALLFRAME_K: a.call(kEcho, s.b, s.c, s.a, out_size).op(POP); break;
+            case RETURNDATACOPY_K:
+                // From s.b modulo (the size + 1) to the end: always inside the return data.
+                a.push(1).op(RETURNDATASIZE).op(ADD).push(s.b).op(MOD);
+                a.op(DUP1).op(RETURNDATASIZE).op(SUB).op(SWAP1).push(s.a).op(RETURNDATACOPY);
+                break;
+            case MODEXP_K: {
+                // Lengths of up to 40 bytes at s.b (the bytes after them are what the memory
+                // holds), and an input that ends near the end of the modulus.
+                const uint64_t lens[] = {s.w.bytes[2] % 41u, s.w.bytes[3] % 41u, s.w.bytes[4] % 41u};
+                for (size_t k = 0; k < 3; ++k) {
+                    bytes32 len{};
+                    len.bytes[31] = static_cast<uint8_t>(lens[k]);
+                    a.mstore(s.b + 32 * k, len);
+                }
+                s.c = 96 + lens[0] + lens[1] + lens[2] + s.w.bytes[5] % 5u - 2;
+                a.call(precompile_address(0x05), s.b, s.c, s.a, out_size).op(POP);
+                break;
+            }
+            case BLAKE2F_K:
+                // Few rounds; a final-block flag of 0, 1 or the invalid 2; sizes 213 and next to it.
+                s.w.bytes[0] = s.w.bytes[1] = s.w.bytes[2] = 0;
+                s.w.bytes[3] = static_cast<uint8_t>(s.w.bytes[3] % 13);
+                a.mstore(s.b, s.w).mstore8(s.b + 212, static_cast<uint8_t>(s.w.bytes[4] % 3));
+                s.c = s.w.bytes[5] % 8 == 0 ? 212 : s.w.bytes[5] % 8 == 1 ? 214 : 213;
+                a.call(precompile_address(0x09), s.b, s.c, s.a, out_size).op(POP);
+                break;
+            case KINDS: break;
             }
             steps.push_back(s);
         }
         a.ret(0, 256);
         // Replay on the model, now that the code is known.
         for (const auto& s : steps) {
+            const uint64_t out_size = s.w.bytes[30] % 40;
             switch (s.kind) {
             case MSTORE_K: m.store(s.a, s.w); break;
             case MSTORE8_K: m.mem[s.a] = s.w.bytes[0]; break;
             case MCOPY_K: std::memmove(&m.mem[s.a], &m.mem[s.b], s.c); break;
             case CALLDATACOPY_K: m.copy_from(s.a, calldata, s.b % 120, s.c); break;
             case CODECOPY_K: m.copy_from(s.a, a.code, s.b, s.c); break;
-            case CALLECHO_K: {
-                const uint64_t out_size = s.w.bytes[1] % 40;
-                const bytes input(m.mem.begin() + static_cast<std::ptrdiff_t>(s.b),
-                    m.mem.begin() + static_cast<std::ptrdiff_t>(s.b + s.c));
-                for (uint64_t i = 0; i < std::min<uint64_t>(out_size, input.size()); ++i)
-                    m.mem[s.a + i] = input[i];
+            case CALLECHO_K: m.returned(s.a, out_size, m.slice(s.b, s.c)); break;
+            case MLOAD_K: {
+                bytes32 w;
+                std::memcpy(w.bytes, &m.mem[s.b], 32);
+                m.store(s.a, w);
                 break;
             }
+            case KECCAK_K: {
+                bytes32 w;
+                std::memcpy(w.bytes, ethash::keccak256(&m.mem[s.b], s.c).bytes, 32);
+                m.store(s.a, w);
+                break;
+            }
+            case LOG_K: m.logs.push_back(m.slice(s.b, s.c)); break;
+            case EXTCODECOPY_K: m.copy_from(s.a, echo, s.b % 40, s.c); break;
+            case CALLFRAME_K: m.returned(s.a, out_size, m.slice(s.b, s.c)); break;
+            case RETURNDATACOPY_K: {
+                const auto src = s.b % (m.return_data.size() + 1);
+                m.copy_from(s.a, m.return_data, src, m.return_data.size() - src);
+                break;
+            }
+            case MODEXP_K:
+                for (size_t k = 0; k < 3; ++k) {
+                    bytes32 len{};
+                    len.bytes[31] = static_cast<uint8_t>(s.w.bytes[2 + k] % 41u);
+                    m.store(s.b + 32 * k, len);
+                }
+                m.returned(s.a, out_size, precompile_output(0x05, &m.mem[s.b], s.c));
+                break;
+            case BLAKE2F_K:
+                m.store(s.b, s.w);
+                m.mem[s.b + 212] = static_cast<uint8_t>(s.w.bytes[4] % 3);
+                m.returned(s.a, out_size, precompile_output(0x09, &m.mem[s.b], s.c));
+                break;
+            case KINDS: break;
             }
         }
         const auto out = run(a.code, calldata);
@@ -364,6 +477,7 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
         REQUIRE(out.output.size() == 256);
         // Memory beyond what the program touched reads as zero, in the model as in the EVM.
         CHECK(std::equal(out.output.begin(), out.output.end(), m.mem.begin()));
+        CHECK(out.logs == m.logs);
     }
 }
 
@@ -398,13 +512,6 @@ struct PrecompileCall {
     uint64_t size;
     uint32_t gas;
 };
-
-address precompile_address(uint16_t id) {
-    address a{};
-    a.bytes[18] = static_cast<uint8_t>(id >> 8);
-    a.bytes[19] = static_cast<uint8_t>(id);
-    return a;
-}
 
 // Pays for 64 KiB of memory, copies the setup bytes from the code to the input and, with @p call,
 // calls the precompile on the input. With @p results it returns the success flag as a word and the
