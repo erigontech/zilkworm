@@ -255,15 +255,19 @@ struct ExecutionLog {
     exec_time_secs: f64,
     freq_cycles_per_sec: u64,
     reached_end: bool,
+    /// The run parked at the guest's exit point (finish_success). Every other way the guest
+    /// stops (finish_error, fatal(), abort, the trap handler) is also a self-loop, which the
+    /// VM reports as reached_end too.
+    succeeded: bool,
+    final_pc: u32,
     input_path: PathBuf,
 }
 
 /// Build the oracle data that the QuasiUARTSource feeds to the guest.
 ///
 /// Protocol:
-///   word 0: dispatch flag (0=unified RLP, 1=EEST JSON test)
-///   word 1: num_bytes (u32, little-endian byte count)
-///   words 2..N: file contents packed into u32 words (LE, zero-padded tail)
+///   word 0: num_bytes (u32, little-endian byte count)
+///   words 1..N: input bytes packed into u32 words (LE, zero-padded tail)
 // Mirrors zilk_core/core/types_zz/flat_bundle.hpp.
 const INPUT_MAGIC_EJSN: u32 = 0x4E534A45; // "EJSN"
 const INPUT_VERSION_EJSN: u32 = 1;
@@ -439,7 +443,8 @@ fn execute_block(
     };
 
     // A successful run parks in the exit sequence's self-loop with its public output in a0..a7;
-    // a failed one parks in finish_error's loop and commits nothing.
+    // a failed one parks in finish_error's loop and commits nothing. The gas used is the input's,
+    // which the guest checks against the header; it is no longer read from the output registers.
     let expected = if finished && state.pc == exit_pc {
         let expected = public_output::expected_for_file(input_path, is_test)?;
         public_output::check(
@@ -459,6 +464,8 @@ fn execute_block(
         exec_time_secs: wall_elapsed.as_secs_f64(),
         freq_cycles_per_sec: freq,
         reached_end: finished,
+        succeeded: finished && state.pc == exit_pc,
+        final_pc: state.pc,
         input_path: input_path.to_path_buf(),
     })
 }
@@ -476,7 +483,7 @@ fn persist_execution_log(log_file: &Path, log: &ExecutionLog) -> Result<()> {
     let timestamp = format_timestamp();
     writeln!(
         &mut file,
-        "{} block={} gas_used={} cycles={} time={:.2}s freq={} reached_end={}  input={}",
+        "{} block={} gas_used={} cycles={} time={:.2}s freq={} reached_end={} ok={}  input={}",
         timestamp,
         log.block_number,
         log.gas_used,
@@ -484,6 +491,7 @@ fn persist_execution_log(log_file: &Path, log: &ExecutionLog) -> Result<()> {
         log.exec_time_secs,
         log.freq_cycles_per_sec,
         log.reached_end,
+        log.succeeded,
         log.input_path.display(),
     )?;
     Ok(())
@@ -541,7 +549,7 @@ fn run_test_service(
         match execute_block(guest_base, &input_path, block_number, max_cycles, false, None) {
             Ok(log) => {
                 println!(
-                    "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={} block_hash={}",
+                    "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={} ok={} block_hash={}",
                     format_timestamp(),
                     log.block_number,
                     log.gas_used,
@@ -549,6 +557,7 @@ fn run_test_service(
                     log.exec_time_secs,
                     log.freq_cycles_per_sec as f64 / 1e9,
                     log.reached_end,
+                    log.succeeded,
                     log.block_hash.map_or("none".to_string(), |h| h.to_string()),
                 );
                 if let Err(e) = persist_execution_log(&log_file, &log) {
@@ -670,6 +679,18 @@ async fn main() -> Result<()> {
                 flamegraph.as_deref(),
             )?;
 
+            let log_file = data_dir.join("executionLogs.log");
+            persist_execution_log(&log_file, &log)?;
+
+            if !log.succeeded {
+                bail!(
+                    "block {} did not finish successfully: final_pc=0x{:08x} reached_end={} cycles={}",
+                    log.block_number,
+                    log.final_pc,
+                    log.reached_end,
+                    log.cycle_count,
+                );
+            }
             println!(
                 "Executed block {} (gas_used={}, cycles={}, time={:.2}s, freq={:.2} GHz, reached_end={})",
                 log.block_number,
@@ -683,9 +704,6 @@ async fn main() -> Result<()> {
                 Some(hash) => println!("Public output: block hash {} (matches the input)", hash),
                 None => println!("Public output: none (the guest did not finish successfully)"),
             }
-
-            let log_file = data_dir.join("executionLogs.log");
-            persist_execution_log(&log_file, &log)?;
         }
 
         Some(Command::Bench {
@@ -787,14 +805,16 @@ async fn main() -> Result<()> {
                     "proof chain hash       = {:08x?}",
                     program_proof.recursion_chain_hash
                 );
-                if regs[8..] == unified.hash_chain {
-                    println!("CHAIN BINDING OK: output[8..16] matches setup hash chain");
-                } else if regs[..8] == unified.hash_chain {
-                    println!("CHAIN BINDING OK: output[0..8] matches setup hash chain");
-                } else {
-                    println!("WARNING: verifier output does not match setup hash chain windows");
+                // output[0..8] are the guest's x10..x17 (its own output), output[8..16] the
+                // recursion chain over the end parameters: the setups, which include the guest
+                // binary, and the final PC. Only the latter binds the proof to this guest.
+                if regs[8..] != unified.hash_chain {
+                    bail!("CHAIN BINDING FAILED: output[8..16] does not match the setup hash chain");
                 }
+                println!("CHAIN BINDING OK: output[8..16] matches setup hash chain");
 
+                // output[0..8] is the guest's public output: the hash of the last block the run
+                // validated. The proof binds its block only through it.
                 let expected = match (file_name, block_hash) {
                     (Some(path), _) => public_output::expected_for_file(&path, false)?.block_hash,
                     (None, Some(hash)) => hash,
@@ -874,6 +894,30 @@ async fn main() -> Result<()> {
             }
 
             let until = until.unwrap_or(ProvingLimit::Base);
+
+            // The prover proves whatever the run did, wherever it stopped: a run that parked in
+            // finish_error (or reported a skip) would yield a proof that verify then rejects.
+            // Run it on the simulator first, as the service's preflight does.
+            if gpu {
+                let preflight =
+                    execute_block(&guest_base, &input_path, block_num, args.cycles, is_test, None)?;
+                if !preflight.succeeded {
+                    bail!(
+                        "preflight: block {} did not finish successfully (final_pc=0x{:08x} reached_end={} cycles={}); not proving",
+                        block_num,
+                        preflight.final_pc,
+                        preflight.reached_end,
+                        preflight.cycle_count,
+                    );
+                }
+                println!(
+                    "[{}] Preflight ok: block {} gas_used={} cycles={}",
+                    format_timestamp(),
+                    block_num,
+                    preflight.gas_used,
+                    preflight.cycle_count,
+                );
+            }
 
             println!(
                 "[{}] Proving block {} (gpu={}, until={:?}, input={})",

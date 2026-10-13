@@ -93,7 +93,7 @@ pub struct AirbenderService {
     guest_exit_pc: u32,
 }
 
-/// Result of running a block through the JIT executor (no proving).
+/// Result of running a block through the VM simulator (no proving).
 struct VmRunOutcome {
     /// The input's gas used once the guest's public output has matched the input; 0 when the
     /// guest did not finish successfully.
@@ -120,7 +120,7 @@ impl AirbenderService {
             bail!("Guest binary not found at {}", bin_path);
         }
 
-        // Load and decode the guest once for JIT execution (preflight and
+        // Load and decode the guest once for simulator runs (preflight and
         // execute-only runs), and locate the canonical exit point so runs
         // that take the finish_error path can be recognized.
         let text_path = format!("{}.text", config.guest_base.display());
@@ -278,6 +278,11 @@ impl AirbenderService {
         };
         info!("Fetcher starting from block {}", next_block);
 
+        // Consecutive failed fetches of next_block. A failed block is retried on the next pass
+        // and skipped only after MAX_FETCH_ATTEMPTS, so a transient RPC error loses nothing.
+        const MAX_FETCH_ATTEMPTS: u32 = 5;
+        let mut fetch_failures: u32 = 0;
+
         'outer: loop {
             let latest = if let Some(end) = self.config.end_block {
                 if next_block > end {
@@ -303,6 +308,7 @@ impl AirbenderService {
                     should_prove || should_execute || self.config.save_all_responses;
 
                 if !should_anything {
+                    next_block = block_number + 1;
                     continue;
                 }
 
@@ -322,9 +328,20 @@ impl AirbenderService {
                 })
                 .await
                 {
-                    Ok(o) => o,
+                    Ok(o) => {
+                        fetch_failures = 0;
+                        o
+                    }
                     Err(err) => {
-                        error!(%block_number, error = %err, "Failed to fetch block");
+                        fetch_failures += 1;
+                        if fetch_failures < MAX_FETCH_ATTEMPTS {
+                            error!(%block_number, attempt = fetch_failures, error = %err, "Failed to fetch block; will retry");
+                            // Retry from this block after the wait below.
+                            break;
+                        }
+                        error!(%block_number, attempts = fetch_failures, error = %err, "Failed to fetch block; skipping it");
+                        fetch_failures = 0;
+                        next_block = block_number + 1;
                         continue;
                     }
                 };
@@ -354,9 +371,11 @@ impl AirbenderService {
                     warn!("Prover worker dropped the queue; fetcher exiting");
                     return Ok(());
                 }
+                next_block = block_number + 1;
             }
 
-            next_block = latest + 1;
+            // next_block only advances past blocks handled above: a lagging RPC that reports a
+            // lower latest leaves it in place instead of re-proving blocks.
             // Tip-following: prefer newHeads push (with a safety timeout in
             // case the subscription stalls); fall back to tight polling —
             // wake-up delay is on the block->proof latency path.
@@ -502,6 +521,14 @@ impl AirbenderService {
 
                 match prove_result {
                     Ok((proof_bytes, log)) => {
+                        // Written only now, once the preflight has passed: proof_bytes is the
+                        // same gzip(EPROOF01 envelope) as serialize_proof_to_file_enveloped.
+                        let block_dir = self.config.output_dir.join(log.block_number.to_string());
+                        if let Err(e) = fs::create_dir_all(&block_dir)
+                            .and_then(|()| fs::write(block_dir.join("proof.bin"), &proof_bytes))
+                        {
+                            error!(block = log.block_number, error = %e, "Failed to write proof.bin");
+                        }
                         println!(
                             "[{}] Proved block {} gas_used={} cycles={} proofs={} time={}ms",
                             Self::format_timestamp(),
@@ -548,7 +575,7 @@ impl AirbenderService {
         Ok(())
     }
 
-    /// Run a block through the JIT executor (no proving) using the cached
+    /// Run a block through the VM simulator (no proving) using the cached
     /// guest tape, and report the final machine state.
     fn run_vm(&self, input_path: &Path) -> Result<VmRunOutcome> {
         let oracle = crate::build_oracle(input_path, false)?;
@@ -679,17 +706,9 @@ impl AirbenderService {
             let proving_millis = start.elapsed().as_millis() as u64;
 
             // A proof that commits another block than the input's is worthless: never keep it.
+            // proof.bin is written by the worker, only once the preflight has passed too.
             let expected = crate::public_output::expected_for_file(input_path, false)?;
             crate::public_output::check(&expected.block_hash, &crate::prove::output_words(&proof))?;
-
-            // Write proof.bin to output_dir/{block}/proof.bin
-            let block_dir = self.config.output_dir.join(block_number.to_string());
-            fs::create_dir_all(&block_dir)?;
-            crate::prove::serialize_proof_to_file_enveloped(
-                &proof,
-                self.config.security,
-                &block_dir.join("proof.bin"),
-            );
 
             let gas_used = expected.gas_used;
             let (family_proofs, init_proofs, delegation_proofs) = proof.get_proof_counts();

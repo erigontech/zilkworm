@@ -120,12 +120,12 @@ The z6m witness format is a compact RLP encoding of the full block context (gene
 
 Ethereum uses Keccak-256 for everything: address derivation, storage slot hashing, MPT node hashing, transaction hashing. Without acceleration, the pure-C `keccakf1600_implementation` in `keccak.c` runs ~300 lines of bit manipulation per permutation.
 
-**Hook**: In `third_party/evmone/lib/evmone_precompiles/keccak.c`, the `AIRBENDER` preprocessor path defines `syscall_keccak_permute()` which delegates to the `airbender::keccak_f1600_delegate()` CSR function. This is selected via the `keccakf1600_best` function pointer.
+**Hook**: In `third_party/evmone/lib/evmone_precompiles/keccak.c`, the `AIRBENDER` preprocessor path defines `syscall_keccak_permute()`, which permutes the state through `keccak_permute_buf()` and its CSR 0x7CB delegation. It is selected as `keccakf1600_best`.
 
 **Protocol**: The keccak CSR (0x7CB) uses a delegation model:
 1. Copy 25 u64 state words to a 256-byte-aligned buffer (+ 6 scratch words)
 2. Set x10=0 (control, auto-bumped by hardware), x11=buffer pointer
-3. Execute 649 sequential `csrrw x0, 0x7CB, x0` instructions (loop)
+3. Execute 649 contiguous `csrrw x0, 0x7CB, x0` instructions (`.rept 649`, not a loop: the transpiler recognizes exactly 649 contiguous CSR writes, runs the whole permutation on the first and moves the PC past the rest)
 4. Copy 25 u64 words back from buffer
 
 Each CSR write performs one micro-step of the Keccak-f permutation. The simulator implements the full 24-round Keccak-f across these 649 calls.
@@ -144,7 +144,7 @@ The bigint CSR provides hardware-accelerated 256-bit arithmetic. Operations are 
 | 0x20 | EQ | x12 = (mut == immut) |
 | 0x80 | MEMCOPY | mut = immut |
 
-Both pointers must be 32-byte aligned and point to RAM (>= 0x200000).
+Both pointers must be 32-byte aligned and point to RAM (>= 0x400000).
 
 ### ecrecover
 
@@ -198,25 +198,29 @@ prover/prover_airbender/target/release/z6m_prover_airbender execute \
 
 Ethereum Execution Specification Tests (EEST) are JSON fixtures that validate EVM correctness across forks.
 
+The guest runs EEST *blockchain* tests. Fetch the pinned fixtures (`test-fixtures.json`) from the repo root first:
+```bash
+tools/test-fixtures.sh test-fixtures.json test-fixtures-cache eest_stable
+```
+
 **Single test:**
 ```bash
 prover/prover_airbender/target/release/z6m_prover_airbender execute \
     --is-test \
-    --file-name third_party/eest-fixtures/state_tests/istanbul/eip152_blake2/test_blake2b.json
+    --file-name test-fixtures-cache/eest_stable/fixtures/blockchain_tests/for_osaka/istanbul/eip152_blake2/blake2_delegatecall/blake2_precompile_delegatecall.json
 ```
 
 **Batch EEST via Makefile:**
 ```bash
 cd prover/prover_airbender
-make eest-blake2          # just blake2 tests
-make eest-istanbul        # all istanbul fork tests
-make eest                 # all state_tests (slow)
-make eest TESTS_SUBDIR=cancun  # specific fork
+make selftest                               # one blake2 test
+make -j"$(nproc)" eest                      # all blockchain tests (slow)
+make -j"$(nproc)" eest TESTS_SUBDIR=for_osaka   # one fixture directory
 ```
 
-**Oracle protocol**: When `--is-test` is used, the Rust prover prepends a u32 dispatch word to the oracle before the byte count. The dispatch value selects the guest code path: `1` = JSON test (`run_json_test()`), `0` = RLP block (`run_unified_rlp()`). The C++ guest reads this first word from CSR 0x7C0 and branches accordingly.
+A test passes only if its log has the guest's `run successful` line and no `CRASHED!` line, which the Makefile appends when `execute` exits non-zero. `execute` exits non-zero unless the run ended at the guest's exit point (`finish_success`): a failure, a skipped test (unknown network, block over the RLP size limit) and a run cut off at the cycle limit all fail. CI fails on any failure outside `eest-known-failures.txt`.
 
-**Available test suites**: Fixtures live under `third_party/eest-fixtures/state_tests/` organized by fork: `frontier`, `istanbul`, `berlin`, `shanghai`, `cancun`, `prague`, and others.
+**Oracle protocol**: The oracle is the input's byte count followed by its bytes, packed into little-endian u32 words. The guest reads them from CSR 0x7C0 and dispatches on the input's leading 4-byte magic: `MFBD` (a flat witness bundle, as converted on disk) or `EJSN` (an EEST JSON test). With `--is-test`, the Rust prover minifies the JSON fixture and wraps it in the `EJSN` envelope.
 
 ### Example Output
 ```

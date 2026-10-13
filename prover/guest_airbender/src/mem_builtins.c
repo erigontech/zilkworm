@@ -24,7 +24,10 @@ void csr_memcopy32(void *dst, const void *src) {
 // witness RLP, whose alignment is arbitrary). The source words are read aligned and shifted
 // together, the destination is written with byte stores up to its first word boundary, word
 // stores to the last one and byte stores after. The generic stages below take 74..86 cycles for
-// this shape, this about 45. Reads up to 3 bytes past src + 32, inside the same aligned word.
+// this shape, this about 45. Reads up to 3 bytes past src + 32, inside the aligned word that holds
+// the last source byte; with a word-aligned src (then dst is unaligned) the C source also loads the
+// whole next word, src + 32..35, which GCC currently drops as dead and which lies in flat RAM in any
+// case (stack, data and heap are all below the end of RAM, and there is no MMU).
 static void copy32_any(unsigned char *dst, const unsigned char *src) {
     const uintptr_t soff = (uintptr_t)src & 3;
     const uint32_t *sw = (const uint32_t *)(src - soff);

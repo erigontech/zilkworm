@@ -20,6 +20,17 @@
 
 namespace silkworm {
 
+// Clear-and-reuse RLP scratches; single-threaded zkVM lacks TLS.
+namespace {
+#if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG) && !defined(AIRBENDER)
+    thread_local Bytes tl_tx_hash_scratch_{};
+    thread_local Bytes tl_tx_sender_scratch_{};
+#else
+    Bytes tl_tx_hash_scratch_{};
+    Bytes tl_tx_sender_scratch_{};
+#endif
+}  // namespace
+
 intx::uint256 Authorization::v() const {
     return y_parity_and_chain_id_to_v(y_parity, chain_id);
 }
@@ -41,9 +52,15 @@ bool Transaction::set_v(const intx::uint256& v) {
 
 evmc::bytes32 Transaction::hash() const {
     hash_computed_.call_once([this]() {
-        Bytes rlp;
-        rlp::encode(rlp, *this, /*wrap_eip2718_into_string=*/false);
-        cached_hash_ = std::bit_cast<evmc_bytes32>(keccak256(rlp));
+        // View is byte-identical to wrap=false encode.
+        if (const ByteView view{rlp_encoded_}; !view.empty()) [[likely]] {
+            cached_hash_ = std::bit_cast<evmc_bytes32>(keccak256(view));
+        } else {
+            Bytes& rlp = tl_tx_hash_scratch_;
+            rlp.clear();
+            rlp::encode(rlp, *this, /*wrap_eip2718_into_string=*/false);
+            cached_hash_ = std::bit_cast<evmc_bytes32>(keccak256(rlp));
+        }
     });
     return cached_hash_;
 }
@@ -509,7 +526,8 @@ void Transaction::signing_payload(Bytes& into) const {
 std::optional<evmc::address> Transaction::sender() const {
     if (!sender_recovered_) {
         sender_recovered_ = true;
-        Bytes rlp{};
+        Bytes& rlp = tl_tx_sender_scratch_;
+        rlp.clear();
         signing_payload(rlp);
         ethash::hash256 hash{keccak256(rlp)};
 

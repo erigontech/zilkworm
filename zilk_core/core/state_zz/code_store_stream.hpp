@@ -50,6 +50,10 @@ static_assert(offsetof(MphfMapHeader, data_size) == 52);
 ///                                                            true if the Keccak-256 of the first
 ///                                                            size bytes of them equals the 8 words
 ///                                                            at key.
+/// Every word is stored through a may_alias type, here and in the guest's io.read() and
+/// io.verify(), which gets dst and key from read_code_store() as pointers to that type: the
+/// guest reads the bytes back through the fields of the witness records (uint64_t, bool and
+/// others), which plain uint32_t stores would not be ordered against under strict aliasing.
 
 /// Reads the data section of the code store, data_size bytes at dst (8-byte aligned), which starts
 /// with an 8-byte sentinel and goes on with entries [len:u64][key:32][payload][zeros to 8 bytes]
@@ -59,13 +63,15 @@ static_assert(offsetof(MphfMapHeader, data_size) == 52);
 /// to read.
 template <class Io>
 uint32_t read_code_store(
-    Io& io, uint32_t* dst, uint32_t data_size, uint32_t* bits, uint32_t n_bits) {
+    Io& io, uint32_t* dst_, uint32_t data_size, uint32_t* bits, uint32_t n_bits) {
+    typedef uint32_t __attribute__((may_alias)) w32;
+    w32* const dst = reinterpret_cast<w32*>(dst_);
     if (data_size < 8) return 0;
     dst[0] = io.word();
     dst[1] = io.word();
     uint32_t off = 8;
     while (data_size - off >= 40) {
-        uint32_t* const e = dst + off / 4;
+        w32* const e = dst + off / 4;
         const uint32_t lo = io.word();
         const uint32_t hi = io.word();
         e[0] = lo;
@@ -80,7 +86,7 @@ uint32_t read_code_store(
         const uint32_t len = lo - 32;
         const uint32_t padded = (len + 7) & ~uint32_t{7};
         if (padded > room) return off + 40;
-        uint32_t* payload = e + 10;
+        w32* payload = e + 10;
         uint32_t words = padded / 4;
         // A payload of 32 bytes or less is left to sanitize(), whose hashing of it is memoized.
         if (len > 32 && (off >> 3) < n_bits) {
@@ -114,7 +120,10 @@ void read_input_words(Io& io, uint32_t* dst, size_t full_words, CodeStoreVerifie
         pos = end;
     };
     auto read_rest = [&] { read_to(limit); };
-    auto word_at = [&](uint64_t byte_off) { return dst[byte_off / 4]; };
+    typedef uint32_t __attribute__((may_alias)) w32;
+    auto word_at = [&](uint64_t byte_off) {
+        return reinterpret_cast<const w32*>(dst)[byte_off / 4];
+    };
 
     // The MFBD envelope and the flat bundle header: one bundle, which starts right after.
     if (limit < kBundleHeaderEnd) return read_rest();

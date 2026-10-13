@@ -50,7 +50,7 @@ A fork of Silkworm's core, compiled both natively (for testing) and cross-compil
 | Library | Path | Role |
 |---------|------|------|
 | **zEVMOne** | `third_party/evmone/` | EVM bytecode interpreter (fork of evmone with ZK-friendly modifications). |
-| **intx** | `third_party/intx/` | Header-only 256-bit integer arithmetic. |
+| **intx** | `third_party/evmone/third_party/intx/` | Header-only 256-bit integer arithmetic (vendored inside the evmone submodule). |
 | **blst** | (fetched at build time) | BLS12-381 cryptographic operations for the BLS precompile. |
 | **nlohmann/json** | (fetched at build time) | JSON parsing for test fixtures and configuration. |
 

@@ -69,7 +69,11 @@ jobs:
         run: rm -rf prover/prover_airbender/target/release/build prover/prover_airbender/target/release/.fingerprint
 
       - name: Build guest ELF and prover
-        run: make z6m_prover_airbender
+        # Execution only: the CPU-only prover, as in airbender-eest.yml (the default gpu feature
+        # needs the CUDA toolkit, which this runner does not have).
+        run: |
+          make z6m_guest_airbender
+          cd prover/prover_airbender && cargo build --release --no-default-features
 
       - name: Download raw benchmark blocks
         run: |

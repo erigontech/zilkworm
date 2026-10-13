@@ -21,10 +21,17 @@ namespace detail {
 /// body spent a quarter more on the loop counter and branch (2.25 instructions a word, for the
 /// multi-megabyte witness); unrolled by 64 it is 2.03. Out of line, as the reader calls it from
 /// several places and the unrolled body is 130 instructions.
-[[gnu::noinline]] inline void read_words(uint32_t* dst, size_t n) {
+///
+/// The stores go through a may_alias type: the guest reads the same bytes through the fields of
+/// the witness records (an account's uint64_t nonce and bool flags, an MPHF's uint64_t seed factor
+/// and displacements), and those reads see the stores whatever is inlined where, without relying
+/// on this function being out of line or on the memory clobber of csr_read_word().
+[[gnu::noinline]] inline void read_words(uint32_t* dst_, size_t n) {
+    typedef uint32_t __attribute__((may_alias)) w32;
+    w32* dst = reinterpret_cast<w32*>(dst_);
     // Pointers, not an index: with both, GCC kept a copy of the index too, 4 instructions of
     // loop control per block instead of 2.
-    uint32_t* const bulk_end = dst + (n & ~size_t{63});
+    w32* const bulk_end = dst + (n & ~size_t{63});
     for (; dst != bulk_end; dst += 64)
     {
 #pragma GCC unroll 64
@@ -39,7 +46,7 @@ namespace detail {
 struct InputWords {
     uint32_t word() { return csr_read_word(); }
     void read(uint32_t* dst, size_t n) { read_words(dst, n); }
-    bool verify(uint32_t* dst, uint32_t size, const uint32_t* key) {
+    bool verify(ethash_w32* dst, uint32_t size, const ethash_w32* key) {
         return ethash_keccak256_read_verify(dst, size, key) != 0;
     }
 };

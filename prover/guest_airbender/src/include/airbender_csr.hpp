@@ -111,26 +111,7 @@ inline void blake_trigger_full_rounds(uint32_t* state, const uint32_t* input, ui
     return x12;
 }
 
-// --- Keccak-f[1600] ---
-
-/// 649 delegated CSR writes. State: 31 × u64 at 256-byte-aligned address.
-inline void keccak_f1600_delegate(uint64_t state[25]) {
-    uint64_t __attribute__((aligned(256))) buf[32];
-    for (int i = 0; i < 25; i++) buf[i] = state[i];
-    for (int i = 25; i < 31; i++) buf[i] = 0;
-
-    register uint32_t ctrl asm("x10") = 0;
-    register void*    sptr asm("x11") = static_cast<void*>(buf);
-    asm volatile(
-        "li t0, 649\n"
-        "1:\n"
-        "  csrrw x0, 0x7CB, x0\n"
-        "  addi t0, t0, -1\n"
-        "  bnez t0, 1b\n"
-        : "+r"(ctrl) : "r"(sptr) : "t0", "memory"
-    );
-    for (int i = 0; i < 25; i++) state[i] = buf[i];
-}
+// Keccak-f[1600] (CSR 0x7CB) is delegated from evmone's keccak.c, as 649 contiguous csrrw.
 
 // --- Program termination ---
 
