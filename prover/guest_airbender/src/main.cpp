@@ -27,7 +27,8 @@ int main()
     }
     // A skipped run (an MFBD with no bundles, an EEST test on an unknown network or with a block
     // over the RLP size limit) validated nothing: end it at finish_error, so that it can neither
-    // be proven nor pass as a success with the sentinel as its gas.
+    // be proven nor pass as a success — its zero block hash would be indistinguishable from a
+    // legitimate run that validates no block.
     if (result == StateTransition::kRunSkipped) {
         sys_println("[state_transition] run skipped");
         airbender::finish_error();
@@ -36,10 +37,11 @@ int main()
     sys_println(msg.c_str());
 
     // The public output is the hash of the last block the run validated, its bytes in order as
-    // little-endian words (zero when no block was validated: EJSN tests, skipped runs). The hash
-    // binds that block's chain: its bundle's pre-state is anchored at the state root of the header
-    // the first block's parent hash names, every later block must extend the one before it, and
-    // each header's state root and gas used are checked against the execution.
+    // little-endian words (zero when no block was validated: an EJSN success, or an MFBD whose
+    // every block is flagged expected-invalid). The hash binds that block's chain: its bundle's
+    // pre-state is anchored at the state root of the header the first block's parent hash names,
+    // every later block must extend the one before it, and each header's state root and gas used
+    // are checked against the execution.
     uint32_t out[8];
     std::memcpy(out, r.block_hash.bytes, sizeof(out));
     airbender::finish_success(out);
