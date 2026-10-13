@@ -56,3 +56,56 @@ jobs:
           name: unit-test-logs
           path: build/Testing/Temporary/LastTest.log
           retention-days: 30
+
+  # The guest's rv32 paths (the word layout of EVM memory, the jump fusions, bn254's NAF
+  # multiplication, the JUMPDEST byte map, the DIV/MOD front end) compile on the host only with
+  # EVMONE_RV32_DISPATCH_TEST; the job above builds the byte-order paths. This one runs the same
+  # tests on the rv32 paths, under AddressSanitizer and UndefinedBehaviorSanitizer. -O2, which the
+  # strict-aliasing guard needs to act, without -DNDEBUG, so that asserts stay on.
+  unit-tests-rv32-paths:
+    name: Run Unit Tests (rv32 paths, ASan+UBSan)
+    runs-on: ubuntu-latest
+    environment: ci
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/erigontech/zilkworm-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      SAN_FLAGS: -DEVMONE_RV32_DISPATCH_TEST -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+      ASAN_OPTIONS: detect_leaks=0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          submodules: false
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+          "-DCMAKE_C_FLAGS=$SAN_FLAGS" "-DCMAKE_CXX_FLAGS=$SAN_FLAGS"
+          "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 -g" "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g"
+          -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined
+
+      - name: Build unit tests
+        run: cmake --build build --target zilkworm.tests
+
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure --parallel
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-rv32-logs
+          path: build/Testing/Temporary/LastTest.log
+          retention-days: 30

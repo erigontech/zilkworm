@@ -21,14 +21,32 @@ bool counting = false;
 
 }  // namespace
 
-// The default operators, counting.
-void* operator new(size_t size) {
+// The default operators, counting. Every form that the library or a sanitizer runtime could
+// otherwise supply is replaced, so that no block is released by an operator of another family
+// (libstdc++'s temporary buffers take nothrow new, which ASan supplies itself).
+namespace {
+void* counted_malloc(size_t size) noexcept {
     if (counting) allocated += size;
-    if (void* p = std::malloc(size != 0 ? size : 1)) return p;
+    return std::malloc(size != 0 ? size : 1);
+}
+}  // namespace
+
+void* operator new(size_t size) {
+    if (void* p = counted_malloc(size)) return p;
     throw std::bad_alloc{};
 }
+void* operator new[](size_t size) {
+    if (void* p = counted_malloc(size)) return p;
+    throw std::bad_alloc{};
+}
+void* operator new(size_t size, const std::nothrow_t&) noexcept { return counted_malloc(size); }
+void* operator new[](size_t size, const std::nothrow_t&) noexcept { return counted_malloc(size); }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, size_t) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete[](void* p, size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
 
 namespace silkworm::precompile {
 
