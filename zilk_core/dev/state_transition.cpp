@@ -452,6 +452,29 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
     return {cumulative_gas, true};
 }
 
+namespace {
+    // The witness slots of an account whose storage the block wiped are in no post-state, but the block can
+    // have read them first: walks them read-only against the root the account's pre-state leaf binds.
+    // Out of line: since Cancun no account a block wipes carries witness slots, and inlined into check_root
+    // the walk cost its merge loop 2.1M cycles over the 200-block corpus.
+    [[gnu::noinline]] bool wiped_storage_bound(const zilkworm::WipedStorage& wiped,
+                                               mpt::GridMPT<true>& storage_trie,
+                                               std::vector<mpt::TrieNodeFlat>& storage_spill) {
+        zilkworm::InlineVec<mpt::TrieNodeFlat, 32> storage_updates(wiped.slots.size(), storage_spill);
+        for (const auto& slot : wiped.slots) {
+            const auto& key = *reinterpret_cast<const bytes32*>(slot.key);
+            auto& node = storage_updates.emplace_back(keccak_bytes32(key));
+            node.self_initial_len = static_cast<uint8_t>(rlp::encode_into_small(
+                node.buf + 0, zeroless_view(ByteView{slot.initial, 32})));
+        }
+        zilkworm::sort_trie_nodes(storage_updates.data(), storage_updates.size());
+        storage_trie.reset(wiped.storage_root);
+        const bytes32 walked = storage_trie.calc_root_from_updates(
+            {storage_updates.data(), storage_updates.size()});
+        return !storage_trie.failed() && walked == wiped.storage_root;
+    }
+}  // namespace
+
 bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                                  evmc_revision rev) {
     const bool clear_empty = rev >= EVMC_SPURIOUS_DRAGON;
@@ -492,6 +515,14 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     std::vector<mpt::TrieNodeFlat> storage_spill;
 
     mpt::GridMPT<true> storage_trie{direct_state, kEmptyRoot};
+
+    // A deleted or recreated account leaves none of its witness slots in the post-state.
+    for (const auto& wiped : direct_state.wiped_storage()) {
+        if (!wiped_storage_bound(wiped, storage_trie, storage_spill)) [[unlikely]] {
+            sys_println("ERROR: storage walk of a wiped account failed");
+            return false;
+        }
+    }
 
     while (it_existing_hashes != end_it_existing || it_created_hashes != end_created_hashes) {
         // Blob and created addr sets should be disjoint.

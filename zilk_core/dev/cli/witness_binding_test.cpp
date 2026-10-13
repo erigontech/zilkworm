@@ -88,8 +88,8 @@ struct Tx {
     evmc::address sender;
 };
 
-Tx tx_to(const evmc::address& to) {
-    Tx t{make_legacy_txn(to, kGas), {}};
+Tx tx_to(const evmc::address& to, const intx::uint256& value = 0) {
+    Tx t{make_legacy_txn(to, kGas, value), {}};
     t.sender = recover_sender(t.tx);
     REQUIRE(t.sender != evmc::address{});
     REQUIRE(t.sender != kCaller);
@@ -160,15 +160,31 @@ bytes32 storage_root_of(const Slots& storage) {
 struct Sealed {
     ChainSetup chain;
     ShadowRun sr;
+    const char* network{"Shanghai"};
 };
 
-Sealed seal(const Tx& t, const bytes32& prev_root, const std::vector<uint8_t>& blob,
-            const std::vector<uint8_t>& nodestore) {
-    Sealed s{make_chain(prev_root, t.tx, /*beneficiary=*/t.sender), {}};
-    s.sr = shadow_execute(blob, nodestore, prev_root, s.chain.base.header, t.tx);
+/// The block of `txs`, under the fork `network` names; the first sender is its beneficiary.
+Sealed seal(std::span<const Tx> txs, const bytes32& prev_root, const std::vector<uint8_t>& blob,
+            const std::vector<uint8_t>& nodestore, const char* network = "Shanghai") {
+    std::vector<silkworm::Transaction> block_txs;
+    for (const Tx& t : txs) block_txs.push_back(t.tx);
+    Sealed s{make_chain(prev_root, block_txs, /*beneficiary=*/txs.front().sender), {}, network};
+    const silkworm::ChainConfig& cfg = silkworm::test::kNetworkConfig.at(network);
+    silkworm::BlockHeader& header = s.chain.base.header;
+    if (cfg.revision(header.number, header.timestamp) >= EVMC_CANCUN) {
+        header.blob_gas_used = 0;
+        header.excess_blob_gas = 0;
+        header.parent_beacon_block_root = evmc::bytes32{};
+    }
+    s.sr = shadow_execute(blob, nodestore, prev_root, header, block_txs, cfg);
     REQUIRE(s.sr.sanitize_ok);
     REQUIRE(s.sr.all_succeeded());
     return s;
+}
+
+Sealed seal(const Tx& t, const bytes32& prev_root, const std::vector<uint8_t>& blob,
+            const std::vector<uint8_t>& nodestore, const char* network = "Shanghai") {
+    return seal(std::span<const Tx>{&t, 1}, prev_root, blob, nodestore, network);
 }
 
 struct Outcome {
@@ -179,7 +195,7 @@ struct Outcome {
 
 /// Runs the guest on `s`'s block with `blob` and `nodestore` as its witness.
 Outcome run_guest(const Sealed& s, const std::vector<uint8_t>& blob, const std::vector<uint8_t>& nodestore) {
-    std::vector<uint8_t> env = make_envelope(s.chain, s.sr, blob, nodestore);
+    std::vector<uint8_t> env = make_envelope(s.chain, s.sr, blob, nodestore, s.network);
     REQUIRE_FALSE(env.empty());
     StateTransition st{std::span<uint8_t>{env}};
     Outcome o{};
@@ -631,4 +647,256 @@ TEST_CASE("the guest executes a slot with the value its storage root binds",
         const ForgedCurrent f = forge_current_copied_by_holder(t);
         expect_accepted(run_guest(f.honest, f.blob, f.ps.nodestore), f.honest);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Storage the block wipes
+// ---------------------------------------------------------------------------
+// Before Cancun SELFDESTRUCT deletes an account, storage and all, and a later transaction can create it
+// again with empty storage. Neither post-state holds the slots the witness carried for it, but the block
+// may have executed with them first. check_root used to skip the storage walk of a deleted account, and
+// that of a recreated one walked only its new slots, so a forged value it read was never checked.
+
+namespace {
+
+/// With calldata, sends its balance to the caller and deletes itself; without, returns storage[key].
+Bytes return_slot_or_selfdestruct(const evmc::bytes32& key) {
+    const Bytes ret = return_slot(key);
+    Bytes k;
+    k.push_back(0x36);  // CALLDATASIZE
+    push1(k, static_cast<uint8_t>(4 + ret.size()));
+    k.push_back(0x57);  // JUMPI
+    k.append(ret);
+    k.push_back(0x5b);  // JUMPDEST
+    k.push_back(0x33);  // CALLER
+    k.push_back(0xff);  // SELFDESTRUCT
+    return k;
+}
+
+/// STATICCALLs `holder` and stores the word it returns in storage[0], CALLs it with calldata, which
+/// has it SELFDESTRUCT, then the sentinel.
+Bytes store_call_result_then_selfdestruct(const evmc::address& holder) {
+    Bytes k;
+    push1(k, 0x20);  // retSize
+    push1(k, 0x00);  // retOffset
+    push1(k, 0x00);  // argsSize
+    push1(k, 0x00);  // argsOffset
+    push20(k, holder);
+    k.push_back(0x5a);  // GAS
+    k.push_back(0xfa);  // STATICCALL
+    k.push_back(0x50);  // POP
+    push1(k, 0x00);
+    k.push_back(0x51);  // MLOAD
+    store_observation(k);
+    push1(k, 0x00);  // retSize
+    push1(k, 0x00);  // retOffset
+    push1(k, 0x01);  // argsSize
+    push1(k, 0x00);  // argsOffset
+    push1(k, 0x00);  // value
+    push20(k, holder);
+    k.push_back(0x5a);  // GAS
+    k.push_back(0xf1);  // CALL
+    k.push_back(0x50);  // POP
+    append_sentinel_and_stop(k);
+    return k;
+}
+
+/// storage[key] = 0x2a, then sends its balance to the caller and deletes itself.
+Bytes write_slot_then_selfdestruct(const evmc::bytes32& key) {
+    Bytes k;
+    push1(k, 0x2a);
+    push32(k, key);
+    k.push_back(0x55);  // SSTORE
+    k.push_back(0x33);  // CALLER
+    k.push_back(0xff);  // SELFDESTRUCT
+    return k;
+}
+
+/// The init code create2_stop() runs: STOP, so the account it creates has no code.
+const Bytes kStopInit{0x00};
+constexpr uint8_t kSalt = 0x01;
+
+/// CREATE2s kStopInit with kSalt and stores the address it returns in storage[0], then the sentinel.
+Bytes create2_stop() {
+    Bytes k;
+    push1(k, kSalt);    // salt
+    push1(k, 0x01);     // size: memory[0] is 0x00, kStopInit
+    push1(k, 0x00);     // offset
+    push1(k, 0x00);     // value
+    k.push_back(0xf5);  // CREATE2
+    store_observation(k);
+    append_sentinel_and_stop(k);
+    return k;
+}
+
+/// The address CREATE2 gives kStopInit with kSalt from `creator`.
+evmc::address create2_stop_address(const evmc::address& creator) {
+    Bytes buf;
+    buf.push_back(0xff);
+    buf.append(creator.bytes, sizeof(creator.bytes));
+    buf.append(word(kSalt).bytes, 32);
+    buf.append(keccak_bytes(ByteView{kStopInit}).bytes, 32);
+    const bytes32 h = keccak_bytes(ByteView{buf});
+    evmc::address out{};
+    std::memcpy(out.bytes, h.bytes + 12, 20);
+    return out;
+}
+
+const evmc::address kFactory = make_addr(0x55, 0x05);  // CREATE2s the destructed account back
+
+/// kCaller reads storage[1] of `holder` through a STATICCALL, then has it SELFDESTRUCT; `holder` holds
+/// `storage`.
+std::vector<AcctSpec> read_then_selfdestruct(const Tx& t, const evmc::address& holder, Slots storage) {
+    return {
+        sender_of(t),
+        AcctSpec{.addr = kCaller, .nonce = 1, .code = store_call_result_then_selfdestruct(holder)},
+        AcctSpec{.addr = holder, .nonce = 1, .code = return_slot_or_selfdestruct(word(1)),
+                 .storage = std::move(storage)},
+    };
+}
+
+/// A witness of `state` whose storage[1] of `holder` claims 0x77 instead of its committed value.
+std::vector<uint8_t> forge_slot(const std::vector<AcctSpec>& state, const evmc::address& holder) {
+    std::vector<AcctSpec> forged = state;
+    spec_of(forged, holder).storage = {{word(1), word(0x77)}};
+    return witness_blob(state, forged);
+}
+
+/// A block whose first transaction has kCaller read storage[1] of `holder` and have it SELFDESTRUCT,
+/// and whose second creates `holder` again.
+struct Recreated {
+    std::vector<Tx> txs;
+    evmc::address holder;
+    std::vector<AcctSpec> state;
+};
+
+Recreated recreated_by_transfer() {
+    Recreated r{{tx_to(kCaller), tx_to(kHolder, /*value=*/1)}, kHolder, {}};
+    r.state = read_then_selfdestruct(r.txs[0], r.holder, {{word(1), word(5)}});
+    r.state.push_back(sender_of(r.txs[1]));
+    return r;
+}
+
+Recreated recreated_by_create2() {
+    Recreated r{{tx_to(kCaller), tx_to(kFactory)}, create2_stop_address(kFactory), {}};
+    REQUIRE(r.txs[0].sender != r.holder);
+    r.state = read_then_selfdestruct(r.txs[0], r.holder, {{word(1), word(5)}});
+    r.state.push_back(sender_of(r.txs[1]));
+    r.state.push_back(AcctSpec{.addr = kFactory, .nonce = 1, .code = create2_stop()});
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE("check_root rejects a forged slot of an account the block destructs",
+          "[witness][binding][wiped]") {
+    SECTION("read before SELFDESTRUCT") {
+        const Tx t = tx_to(kCaller);
+        const std::vector<AcctSpec> state = read_then_selfdestruct(t, kHolder, {{word(1), word(5)}});
+        const Prestate ps = build_prestate(state);
+
+        const std::vector<uint8_t> blob = forge_slot(state, kHolder);
+        const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
+        REQUIRE(s.sr.storage(kCaller, 0) == word(0x77));
+        REQUIRE(s.sr.ds->is_deleted(kHolder));
+        CHECK(s.sr.post.rejected);
+        expect_rejected(run_guest(s, blob, ps.nodestore), "storage walk of a wiped account failed");
+    }
+    SECTION("written before SELFDESTRUCT") {
+        const Tx t = tx_to(kHolder);
+        const std::vector<AcctSpec> state = {
+            sender_of(t),
+            AcctSpec{.addr = kHolder, .nonce = 1, .code = write_slot_then_selfdestruct(word(1)),
+                     .storage = {{word(1), word(5)}}},
+        };
+        const Prestate ps = build_prestate(state);
+
+        // The write costs the same from 0x77 as from 5: the block is the honest one.
+        const std::vector<uint8_t> blob = forge_slot(state, kHolder);
+        const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
+        REQUIRE(s.sr.ds->is_deleted(kHolder));
+        CHECK(s.sr.post.rejected);
+        expect_rejected(run_guest(s, blob, ps.nodestore), "storage walk of a wiped account failed");
+    }
+}
+
+TEST_CASE("check_root rejects a forged slot of an account the block destructs and creates again",
+          "[witness][binding][wiped]") {
+    for (const bool by_create2 : {false, true}) {
+        DYNAMIC_SECTION((by_create2 ? "by CREATE2" : "by a value transfer")) {
+            const Recreated r = by_create2 ? recreated_by_create2() : recreated_by_transfer();
+            const Prestate ps = build_prestate(r.state);
+
+            const std::vector<uint8_t> blob = forge_slot(r.state, r.holder);
+            const Sealed s = seal(r.txs, ps.prev_root, blob, ps.nodestore);
+            REQUIRE(s.sr.storage(kCaller, 0) == word(0x77));
+            REQUIRE_FALSE(s.sr.ds->is_deleted(r.holder));
+            CHECK(s.sr.post.rejected);
+            expect_rejected(run_guest(s, blob, ps.nodestore), "storage walk of a wiped account failed");
+        }
+    }
+}
+
+TEST_CASE("the guest accepts the slots of an account the block wipes, as its storage root binds them",
+          "[witness][binding][wiped][honest]") {
+    SECTION("read before SELFDESTRUCT") {
+        const Tx t = tx_to(kCaller);
+        const Slots storage = {{word(1), word(5)}, {word(2), word(6)}};
+        const Prestate ps = build_prestate(read_then_selfdestruct(t, kHolder, storage));
+        const Sealed s = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+        CHECK(s.sr.storage(kCaller, 0) == word(5));
+        CHECK(s.sr.storage(kCaller, 1) == word(1));
+        CHECK(s.sr.ds->is_deleted(kHolder));
+        CHECK_FALSE(s.sr.post.rejected);
+        expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
+    }
+    SECTION("written before SELFDESTRUCT") {
+        const Tx t = tx_to(kHolder);
+        const Prestate ps = build_prestate({
+            sender_of(t),
+            AcctSpec{.addr = kHolder, .nonce = 1, .code = write_slot_then_selfdestruct(word(1)),
+                     .storage = {{word(1), word(5)}}},
+        });
+        const Sealed s = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+        CHECK(s.sr.ds->is_deleted(kHolder));
+        CHECK_FALSE(s.sr.post.rejected);
+        expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
+    }
+    for (const bool by_create2 : {false, true}) {
+        DYNAMIC_SECTION((by_create2 ? "recreated by CREATE2" : "recreated by a value transfer")) {
+            const Recreated r = by_create2 ? recreated_by_create2() : recreated_by_transfer();
+            const Prestate ps = build_prestate(r.state);
+            const Sealed s = seal(r.txs, ps.prev_root, ps.blob, ps.nodestore);
+            CHECK(s.sr.storage(kCaller, 0) == word(5));
+            CHECK_FALSE(s.sr.ds->is_deleted(r.holder));
+            CHECK(s.sr.ds->read_storage(r.holder, word(1)) == evmc::bytes32{});
+            if (by_create2) {
+                evmc::bytes32 created{};
+                std::memcpy(created.bytes + 12, r.holder.bytes, 20);
+                CHECK(s.sr.storage(kFactory, 0) == created);
+            }
+            CHECK_FALSE(s.sr.post.rejected);
+            expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
+        }
+    }
+}
+
+// Since Cancun (EIP-6780) SELFDESTRUCT deletes only an account the same transaction created, which has no
+// pre-state storage. Any other account keeps its storage, and its walk binds the slots as it always did.
+TEST_CASE("from Cancun on, an account SELFDESTRUCT leaves in place binds its slots as before",
+          "[witness][binding][wiped]") {
+    const Tx t = tx_to(kCaller);
+    const std::vector<AcctSpec> state = read_then_selfdestruct(t, kHolder, {{word(1), word(5)}});
+    const Prestate ps = build_prestate(state);
+
+    const std::vector<uint8_t> blob = forge_slot(state, kHolder);
+    const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore, "Cancun");
+    REQUIRE(s.sr.storage(kCaller, 0) == word(0x77));
+    REQUIRE_FALSE(s.sr.ds->is_deleted(kHolder));
+    expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value mismatch in existing leaf");
+
+    const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore, "Cancun");
+    CHECK(honest.sr.storage(kCaller, 0) == word(5));
+    CHECK_FALSE(honest.sr.ds->is_deleted(kHolder));
+    expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 }

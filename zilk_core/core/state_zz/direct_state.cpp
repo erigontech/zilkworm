@@ -337,6 +337,7 @@ DirectState::DirectState(DirectState&& other) noexcept
 
     created_accounts_ = std::move(other.created_accounts_);
     overflow_slots_ = std::move(other.overflow_slots_);
+    wiped_storage_ = std::move(other.wiped_storage_);
     created_code_ = std::move(other.created_code_);
     created_code_collisions_ = std::move(other.created_code_collisions_);
     headers_ = std::move(other.headers_);
@@ -423,7 +424,7 @@ bool DirectState::revive_if_deleted_slow(const evmc::address& addr, Account& pa)
     pa.deleted = false;
     copy32(pa.code_hash, kEmptyHash);
     copy32(pa.storage_root, kEmptyRoot);
-    pa.slot_count = 0;
+    pa.slot_count = 0;  // destruct() noted them for check_root
     pa.code_store_len = 0;
     pa.nonce = 0;
     store_be_u256(pa.balance, intx::uint256{0});
@@ -482,6 +483,7 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
     // Creation is the only transition that wipes storage, and post-London EIP-3541 keeps
     // deployed code off the 0xef prefix, so it can never look like a designation.
     if (!eip7702::is_code_delegated(code)) {
+        note_wiped_storage_(pa);
         pa.slot_count = 0;
         overflow_slots_.erase(addr);
 #if USE_HASH_KEY
@@ -596,9 +598,20 @@ void DirectState::set_nonce(const evmc::address& addr, uint64_t nonce) {
     touched_.insert(addr);
 }
 
+// Out of line: since Cancun no account a block wipes carries witness slots, and inlined into
+// apply_state_diff() the record cost its loop 0.31M cycles over the 200-block corpus.
+[[gnu::noinline]] void DirectState::note_wiped_storage_(const Account& pa) {
+    if (pa.slot_count == 0) return;
+    wiped_storage_.push_back({slots_for(pa), std::bit_cast<evmc::bytes32>(pa.storage_root)});
+}
+
 void DirectState::destruct(const evmc::address& addr) {
     // Flag every record (blob AND overlay twin); none existing means nothing to mask.
-    if (auto* pa = find_pre_account_unchecked(addr)) pa->deleted = true;
+    if (auto* pa = find_pre_account_unchecked(addr)) {
+        // Once: a deleted record keeps its slots until revive_if_deleted() drops them.
+        if (!pa->deleted) note_wiped_storage_(*pa);
+        pa->deleted = true;
+    }
     if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
         it->second.deleted = true;
     overflow_slots_.erase(addr);
