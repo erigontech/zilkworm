@@ -16,7 +16,8 @@
 //
 // Invariant: while tag_orig[i] is not null, pool[i] holds the Keccak state after the first
 // 136 * tag_sb[i] bytes of the 532-byte witness node at tag_orig[i] (rows 0..24; the delegation's
-// scratch lanes after them are meaningless), those bytes being verified against their hash.
+// scratch lanes after them are meaningless), those bytes being verified against their hash, and
+// tag_sb[i] is 1..3 (take_resumable_blocks() masks it with 3 all the same, see there).
 // Everything that writes a pool row clears its tag first and sets it again only once the node
 // hashed to the hash it was looked up by, and a resume clears the tag as it permutes the row in
 // place. Witness bytes do not change, so a tag never goes stale, and it names the node by its
