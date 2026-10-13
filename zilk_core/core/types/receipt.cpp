@@ -57,7 +57,7 @@ namespace {
     // the bytes before the first and after the last stored word are written one by one.
     uint8_t* copy_words(uint8_t* dst, const uint8_t* src, size_t n) noexcept {
         typedef uint32_t __attribute__((may_alias)) w32;
-        assert(n >= 4);
+        assert(n >= 4 && n % 4 == 0);
         if (std::endian::native != std::endian::little || (reinterpret_cast<uintptr_t>(src) & 3) != 0) {
             return copy(dst, src, n);
         }
