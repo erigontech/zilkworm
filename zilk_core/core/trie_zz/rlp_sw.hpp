@@ -623,7 +623,10 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                 second = ByteView{e1_start_ptr, header_len + h1->payload_length};
             }
         } else {
-            if (h1->payload_length > kMaxLeafValueSize) [[unlikely]] return kInvalid;  // see static_buffer
+            // No trie has a leaf without a value: a key whose value goes loses its leaf. As a grid line it would
+            // be empty, and its fold would delete the ancestors it leaves empty too, where the seek's folds must
+            // delete a line each (see seek_with_last_insert()).
+            if (h1->payload_length == 0 || h1->payload_length > kMaxLeafValueSize) [[unlikely]] return kInvalid;  // see static_buffer
             second = e1_payload;
         }
         return kExtOrLeaf;
