@@ -95,6 +95,8 @@ pub struct AirbenderService {
 
 /// Result of running a block through the VM simulator (no proving).
 struct VmRunOutcome {
+    /// The input's gas used once the guest's public output has matched the input; 0 when the
+    /// guest did not finish successfully.
     gas_used: u64,
     cycle_count: u64,
     reached_end: bool,
@@ -603,13 +605,25 @@ impl AirbenderService {
         let cycles = (state.timestamp - riscv_transpiler::common_constants::INITIAL_TIMESTAMP)
             / riscv_transpiler::common_constants::TIMESTAMP_STEP;
 
-        Ok(VmRunOutcome {
-            gas_used: crate::guest_gas_used(state.registers[10].value, state.registers[11].value),
+        let mut run = VmRunOutcome {
+            gas_used: 0,
             cycle_count: cycles,
             reached_end: finished,
             final_pc: state.pc,
             elapsed_secs: wall_elapsed.as_secs_f64(),
-        })
+        };
+        // A successful run commits the hash of its last block in a0..a7. Any other value means
+        // the run, and a proof of it, covers some other block: fail (preflight then skips or
+        // discards the proof).
+        if run.succeeded(self.guest_exit_pc) {
+            let expected = crate::public_output::expected_for_file(input_path, false)?;
+            crate::public_output::check(
+                &expected.block_hash,
+                &std::array::from_fn(|i| state.registers[10 + i].value),
+            )?;
+            run.gas_used = expected.gas_used;
+        }
+        Ok(run)
     }
 
     fn execute_block(&self, block_number: u64, input_path: &Path) -> Result<()> {
@@ -646,8 +660,9 @@ impl AirbenderService {
         Ok(run)
     }
 
-    /// Run the GPU proof for a single block, write `proof.bin`, and return
-    /// the serialized proof bytes plus a `ProvingLog` ready for persistence.
+    /// Run the GPU proof for a single block and return the serialized proof
+    /// bytes plus a `ProvingLog`; the worker writes `proof.bin` once the
+    /// preflight verdict is in.
     ///
     /// Does **not** touch ethproofs — the caller is responsible for
     /// spawning any state-transition HTTP calls in the background.
@@ -691,10 +706,12 @@ impl AirbenderService {
 
             let proving_millis = start.elapsed().as_millis() as u64;
 
-            let gas_used = crate::guest_gas_used(
-                proof.register_final_values[10].value,
-                proof.register_final_values[11].value,
-            );
+            // A proof that commits another block than the input's is worthless: never keep it.
+            // proof.bin is written by the worker, only once the preflight has passed too.
+            let expected = crate::public_output::expected_for_file(input_path, false)?;
+            crate::public_output::check(&expected.block_hash, &crate::prove::output_words(&proof))?;
+
+            let gas_used = expected.gas_used;
             let (family_proofs, init_proofs, delegation_proofs) = proof.get_proof_counts();
             let total_proofs = family_proofs + init_proofs + delegation_proofs;
 

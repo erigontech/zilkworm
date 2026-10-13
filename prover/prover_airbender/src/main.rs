@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 mod prove;
+mod public_output;
 mod service;
 
 use prove::ProvingLimit;
@@ -29,17 +30,6 @@ const DEFAULT_CYCLES: usize = 5_000_000_000;
 
 /// Default RAM bound in bytes (1 GB).
 const DEFAULT_RAM_BOUND: usize = 1 << 30;
-
-/// The guest's sentinel results (StateTransition::kRunFailure and kRunSkipped in
-/// zilk_core/dev/state_transition.hpp). Neither ends at the exit point, but an older guest
-/// binary ended a skipped run with finish_success and kRunSkipped as its output.
-pub(crate) const GUEST_RUN_FAILURE: u64 = u64::MAX;
-pub(crate) const GUEST_RUN_SKIPPED: u64 = u64::MAX - 1;
-
-/// The gas used that the guest's finish_success leaves in x10 (low word) and x11 (high word).
-pub(crate) fn guest_gas_used(x10: u32, x11: u32) -> u64 {
-    (x11 as u64) << 32 | x10 as u64
-}
 
 /// Map the --security bits value to the airbender SecurityModel.
 fn security_model(bits: u32) -> Result<verifier_common::SecurityModel> {
@@ -241,13 +231,26 @@ enum Command {
         /// Path to setup cache dir (needs `setup --until unified`)
         #[arg(long, default_value = "temp")]
         setup_dir: PathBuf,
+
+        /// Input the proof must cover (MFBD file): the proof's public output must equal the
+        /// hash of its last valid block. A proof binds its block only through that output.
+        #[arg(long, required_unless_present = "block_hash")]
+        file_name: Option<PathBuf>,
+
+        /// Hash of the block the proof must cover, when its input is not at hand
+        #[arg(long, conflicts_with = "file_name")]
+        block_hash: Option<alloy_primitives::B256>,
     },
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct ExecutionLog {
     block_number: u64,
+    /// The input's gas used, once the guest's public output has matched the input; 0 when the
+    /// guest did not finish successfully.
     gas_used: u64,
+    /// The block hash the guest committed (checked against the input), if it finished successfully.
+    block_hash: Option<alloy_primitives::B256>,
     cycle_count: u64,
     exec_time_secs: f64,
     freq_cycles_per_sec: u64,
@@ -439,12 +442,24 @@ fn execute_block(
         0
     };
 
-    // The guest stores gas_used in registers a0 and a1 (x10, x11) via finish_success.
-    let gas_used = guest_gas_used(state.registers[10].value, state.registers[11].value);
+    // A successful run parks in the exit sequence's self-loop with its public output in a0..a7;
+    // a failed one parks in finish_error's loop and commits nothing. The gas used is the input's,
+    // which the guest checks against the header; it is no longer read from the output registers.
+    let expected = if finished && state.pc == exit_pc {
+        let expected = public_output::expected_for_file(input_path, is_test)?;
+        public_output::check(
+            &expected.block_hash,
+            &std::array::from_fn(|i| state.registers[10 + i].value),
+        )?;
+        Some(expected)
+    } else {
+        None
+    };
 
     Ok(ExecutionLog {
         block_number,
-        gas_used,
+        gas_used: expected.map_or(0, |e| e.gas_used),
+        block_hash: expected.map(|e| e.block_hash),
         cycle_count: cycles,
         exec_time_secs: wall_elapsed.as_secs_f64(),
         freq_cycles_per_sec: freq,
@@ -534,7 +549,7 @@ fn run_test_service(
         match execute_block(guest_base, &input_path, block_number, max_cycles, false, None) {
             Ok(log) => {
                 println!(
-                    "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={} ok={}",
+                    "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={} ok={} block_hash={}",
                     format_timestamp(),
                     log.block_number,
                     log.gas_used,
@@ -543,6 +558,7 @@ fn run_test_service(
                     log.freq_cycles_per_sec as f64 / 1e9,
                     log.reached_end,
                     log.succeeded,
+                    log.block_hash.map_or("none".to_string(), |h| h.to_string()),
                 );
                 if let Err(e) = persist_execution_log(&log_file, &log) {
                     eprintln!("warning: failed to write log: {}", e);
@@ -684,6 +700,10 @@ async fn main() -> Result<()> {
                 log.freq_cycles_per_sec as f64 / 1e9,
                 log.reached_end,
             );
+            match log.block_hash {
+                Some(hash) => println!("Public output: block hash {} (matches the input)", hash),
+                None => println!("Public output: none (the guest did not finish successfully)"),
+            }
         }
 
         Some(Command::Bench {
@@ -725,7 +745,12 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Command::Verify { proof, setup_dir }) => {
+        Some(Command::Verify {
+            proof,
+            setup_dir,
+            file_name,
+            block_hash,
+        }) => {
             #[cfg(feature = "gpu")]
             {
                 use execution_utils::unrolled_gpu::UnrolledProverLevel;
@@ -787,15 +812,20 @@ async fn main() -> Result<()> {
                     bail!("CHAIN BINDING FAILED: output[8..16] does not match the setup hash chain");
                 }
                 println!("CHAIN BINDING OK: output[8..16] matches setup hash chain");
-                let gas_used = guest_gas_used(regs[0], regs[1]);
-                if gas_used == GUEST_RUN_FAILURE || gas_used == GUEST_RUN_SKIPPED {
-                    bail!("proof output is the guest's failure/skip sentinel (0x{:016x})", gas_used);
-                }
-                println!("gas_used = {}", gas_used);
+
+                // output[0..8] is the guest's public output: the hash of the last block the run
+                // validated. The proof binds its block only through it.
+                let expected = match (file_name, block_hash) {
+                    (Some(path), _) => public_output::expected_for_file(&path, false)?.block_hash,
+                    (None, Some(hash)) => hash,
+                    (None, None) => unreachable!("clap requires --file-name or --block-hash"),
+                };
+                public_output::check(&expected, &regs[..8].try_into().unwrap())?;
+                println!("PUBLIC OUTPUT OK: output[0..8] commits block hash {}", expected);
             }
             #[cfg(not(feature = "gpu"))]
             {
-                let _ = (proof, setup_dir);
+                let _ = (proof, setup_dir, file_name, block_hash);
                 return Err(eyre!("verify requires the gpu build (SetupCache support)"));
             }
         }
@@ -920,6 +950,9 @@ async fn main() -> Result<()> {
                         prove::create_gpu_prover(&guest_path, &until, security_model(args.security)?)
                     };
                     let (proof, cycles) = prove::gpu_prove(&prover, oracle, block_num);
+                    let expected = public_output::expected_for_file(&input_path, is_test)?;
+                    public_output::check(&expected.block_hash, &prove::output_words(&proof))?;
+                    println!("Proof commits block hash {} (matches the input)", expected.block_hash);
 
                     fs::create_dir_all(&output_dir)?;
                     prove::serialize_proof_to_file_enveloped(

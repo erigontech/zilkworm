@@ -30,7 +30,7 @@ Ethereum block (unified RLP)
 
 ### Key components
 
-- **Guest binary** (`guest_airbender/build/z6m_guest.{bin,text}`): The EVM execution engine compiled to RISC-V (rv32im). Takes a unified RLP encoding of block + state as input, executes all transactions, and returns gas_used. Uses CSR-delegated acceleration for keccak, blake2s, and bigint operations.
+- **Guest binary** (`guest_airbender/build/z6m_guest.{bin,text}`): The EVM execution engine compiled to RISC-V (rv32im). Takes a unified RLP encoding of block + state as input, executes all transactions, and commits the hash of the last block it validated as its 32-byte public output (registers a0..a7). Uses CSR-delegated acceleration for keccak, blake2s, and bigint operations.
 
 - **riscv_transpiler**: JIT-compiles the guest binary to native x86-64 for fast trace generation. Multiple CPU workers re-execute the program in parallel to produce witness data. Supports the full RV32IM ISA including signed mul/div (mulh, mulhsu, div, rem).
 
@@ -83,7 +83,7 @@ This produces `build/z6m_guest.bin` (ROM image) and `build/z6m_guest.text` (inst
 
 ### `execute` — Run a block without proving
 
-Executes the guest binary in the RISC-V VM and reports gas_used, cycle count, and execution time. No GPU required.
+Executes the guest binary in the RISC-V VM and reports gas_used, cycle count, and execution time. No GPU required. The guest's public output must equal the hash of the input's last valid block header; a mismatch fails the command.
 
 ```bash
 z6m_prover_airbender execute \
@@ -135,6 +135,19 @@ Proof targets:
 - `unified`: Full pipeline. Produces 1 family proof + 1 delegation proof (~1.2 MB bincode).
 
 Output: `proofs/proof.bin` (bincode-serialized `UnrolledProgramProof`).
+
+### `verify` — Verify a unified proof
+
+Verifies `proof.bin` against a unified setup cache, then checks the proof's public output against the
+block it must cover: either the input file (`--file-name`) or the block hash (`--block-hash`). A proof
+binds its block only through that output, so one of the two is required and a mismatch fails.
+
+```bash
+z6m_prover_airbender verify \
+  --proof ./proofs/proof.bin \
+  --setup-dir ./temp \
+  --file-name path/to/flatWitnessBundle12345.mfbd
+```
 
 ### `--service` — Continuous proving service
 

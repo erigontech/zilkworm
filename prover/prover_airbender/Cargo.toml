@@ -28,6 +28,9 @@ gpu_prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "d
 # Shared z6m prover infrastructure (block fetching, RLP encoding)
 z6m_common = { path = "../common" }
 
+# keccak256 / B256 for the guest's public output (the committed block hash)
+alloy-primitives = "1.0"
+
 # Async runtime + networking
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
