@@ -162,6 +162,22 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     }
 }
 
+// A key the walk inserts is absent from the pre-state trie, so its claimed pre-value must say so: none for a
+// created account or slot, 0x80 (zero) for a slot read as absent. Anything else is a value the block executed
+// with that no leaf binds; a read-only update would insert an empty leaf, which folds away again.
+// Out of line: insertions are rare (about 51K over the 200-block corpus), and inlined at the four insertion
+// sites the check cost the descent loop 3.4M cycles in register allocation and code layout.
+template <bool DeletionEnabled>
+[[gnu::noinline]] bool GridMPT<DeletionEnabled>::claims_absent(const TrieNodeFlat& u) {
+    const ByteView v = u.initial_value();
+    if (v.empty() || (v.size() == 1 && v[0] == 0x80)) [[likely]] {
+        return true;
+    }
+    failed_ = true;
+    sys_println("Pre value claimed for a key absent from the trie");
+    return false;
+}
+
 template <bool DeletionEnabled>
 bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
     if (failed_) [[unlikely]] {
@@ -185,6 +201,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
             // the whole trie (seek pops the last line then). Descending the
             // main loop would read grid_[0] out of bounds; this key simply
             // (re)seeds the trie as a single full-path leaf.
+            if (!claims_absent(trie_upd)) [[unlikely]] {
+                return {};
+            }
             search_nibbles_ = new_nibbles;
             last_was_delete_ = false;
             root_unfolded_ = false;
@@ -211,6 +230,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 auto unfold_res = unfold_slot(nib);
                 if (unfold_res == UnfoldResult::kEmpty) {
                     // Child is empty - insert here
+                    if (!claims_absent(trie_upd)) [[unlikely]] {
+                        return {};
+                    }
                     auto l = make_cur_leaf(trie_upd.current_value());
                     insert_line(l.parent_slot, depth_, std::move(l));
                     grid_[depth_].modified = true;
@@ -257,6 +279,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     continue;
                 }
 
+                if (!claims_absent(trie_upd)) [[unlikely]] {
+                    return {};
+                }
                 auto old_ext_line{grid_line};  // cache the value;
                 auto new_ext_len = old_ext_line.ext.path.len - m - 1;
                 unsigned d1{}, d2{};
@@ -369,6 +394,9 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     break;  // update complete
                 }
 
+                if (!claims_absent(trie_upd)) [[unlikely]] {
+                    return {};
+                }
                 LeafNode old_leaf{grid_[depth_].leaf};
                 BranchNode bn;
 

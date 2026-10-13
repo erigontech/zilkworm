@@ -312,3 +312,215 @@ TEST_CASE("check_root rejects a witness that omits a pre-state root node",
     const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
     expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 }
+
+// ---------------------------------------------------------------------------
+// Claims for keys absent from the trie
+// ---------------------------------------------------------------------------
+// A key the walk has to insert is absent from the pre-state trie, so its claimed pre-value must be
+// empty: no value for a created account or slot, 0x80 (zero) for a slot read as absent. A read-only
+// claim of anything else used to insert an empty leaf that folded away again, returning the
+// committed root while the block executed with the claimed value.
+
+namespace {
+
+/// Nibble `i` of slot `slot`'s path in the storage trie.
+unsigned path_nibble(const evmc::bytes32& slot, unsigned i) {
+    const bytes32 h = keccak_bytes32(slot);
+    return (i % 2 == 0 ? h.bytes[i / 2] >> 4 : h.bytes[i / 2]) & 0x0f;
+}
+
+/// The first slot from `from` on whose storage-trie path satisfies `pred`.
+template <class Pred>
+evmc::bytes32 find_slot(uint64_t from, Pred pred) {
+    for (uint64_t i = from;; ++i) {
+        if (pred(word(i))) return word(i);
+    }
+}
+
+/// A storage trie and a slot absent from it, inserted at one of the four places
+/// calc_root_from_updates inserts a leaf.
+struct AbsentKey {
+    const char* shape;
+    Slots present;
+    evmc::bytes32 absent;
+};
+
+std::vector<AbsentKey> absent_keys() {
+    const evmc::bytes32 a = word(1);
+    const auto n = [&](unsigned i) { return path_nibble(a, i); };
+    // b shares no nibble with a: the root is a branch.
+    const evmc::bytes32 b = find_slot(2, [&](const evmc::bytes32& s) { return path_nibble(s, 0) != n(0); });
+    // c shares two nibbles with a: the root is an extension.
+    const evmc::bytes32 c = find_slot(2, [&](const evmc::bytes32& s) {
+        return path_nibble(s, 0) == n(0) && path_nibble(s, 1) == n(1);
+    });
+    const auto first_differs = [&](const evmc::bytes32& s) { return path_nibble(s, 0) != n(0); };
+    const auto second_differs = [&](const evmc::bytes32& s) {
+        return path_nibble(s, 0) == n(0) && path_nibble(s, 1) != n(1);
+    };
+    return {
+        {"an empty trie", {}, find_slot(2, first_differs)},
+        {"an empty slot of a branch",
+         {{a, word(5)}, {b, word(6)}},
+         find_slot(2, [&](const evmc::bytes32& s) {
+             return path_nibble(s, 0) != n(0) && path_nibble(s, 0) != path_nibble(b, 0);
+         })},
+        {"an extension, diverging at its first nibble", {{a, word(5)}, {c, word(6)}}, find_slot(2, first_differs)},
+        {"an extension, diverging inside it", {{a, word(5)}, {c, word(6)}}, find_slot(2, second_differs)},
+        {"a leaf, diverging at its first nibble", {{a, word(5)}}, find_slot(2, first_differs)},
+        {"a leaf, diverging after a shared nibble", {{a, word(5)}}, find_slot(2, second_differs)},
+    };
+}
+
+/// storage[to] = storage[from].
+Bytes copy_slot(const evmc::bytes32& from, const evmc::bytes32& to) {
+    Bytes k;
+    push32(k, from);
+    k.push_back(0x54);  // SLOAD
+    push32(k, to);
+    k.push_back(0x55);  // SSTORE
+    k.push_back(0x00);  // STOP
+    return k;
+}
+
+/// storage[key] = 0x2a.
+Bytes write_slot(const evmc::bytes32& key) {
+    Bytes k;
+    push1(k, 0x2a);
+    push32(k, key);
+    k.push_back(0x55);  // SSTORE
+    k.push_back(0x00);  // STOP
+    return k;
+}
+
+/// BALANCE of `a` in storage[0], then the sentinel.
+Bytes store_balance(const evmc::address& a) {
+    Bytes k;
+    push20(k, a);
+    k.push_back(0x31);  // BALANCE
+    store_observation(k);
+    append_sentinel_and_stop(k);
+    return k;
+}
+
+constexpr uint64_t kCopyTarget = 0x99;  // a slot of kHolder that no shape has present
+
+}  // namespace
+
+TEST_CASE("check_root rejects a claimed value for a slot absent from the storage trie",
+          "[witness][binding][absent]") {
+    for (const AbsentKey& k : absent_keys()) {
+        DYNAMIC_SECTION("read through a call, absent key at " << k.shape) {
+            const Tx t = tx_to(kCaller);
+            const std::vector<AcctSpec> state = read_through_call(t, k.absent, k.present);
+            const Prestate ps = build_prestate(state);
+
+            std::vector<AcctSpec> forged = state;
+            spec_of(forged, kHolder).storage.emplace_back(k.absent, word(0x77));
+            const std::vector<uint8_t> blob = witness_blob(state, forged);
+            const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
+            REQUIRE(s.sr.storage(kCaller, 0) == word(0x77));
+            expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value claimed for a key absent from the trie");
+        }
+        DYNAMIC_SECTION("copied by its modified holder, absent key at " << k.shape) {
+            const Tx t = tx_to(kHolder);
+            const std::vector<AcctSpec> state = {
+                sender_of(t),
+                AcctSpec{.addr = kHolder, .nonce = 1, .code = copy_slot(k.absent, word(kCopyTarget)),
+                         .storage = k.present},
+            };
+            const Prestate ps = build_prestate(state);
+
+            std::vector<AcctSpec> forged = state;
+            spec_of(forged, kHolder).storage.emplace_back(k.absent, word(0x77));
+            const std::vector<uint8_t> blob = witness_blob(state, forged);
+            const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
+            REQUIRE(s.sr.storage(kHolder, kCopyTarget) == word(0x77));
+            expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value claimed for a key absent from the trie");
+        }
+    }
+}
+
+// The claims an honest witness makes for absent slots: a zero read (0x80) and a fresh write (no value),
+// in every insertion shape. The zero read of an account the block does not modify also has to fold
+// back to the committed root exactly.
+TEST_CASE("check_root accepts zero and fresh-write claims for absent slots",
+          "[witness][binding][absent][honest]") {
+    for (const AbsentKey& k : absent_keys()) {
+        DYNAMIC_SECTION("zero read through a call, absent key at " << k.shape) {
+            const Tx t = tx_to(kCaller);
+            Slots storage = k.present;
+            storage.emplace_back(k.absent, evmc::bytes32{});
+            const Prestate ps = build_prestate(read_through_call(t, k.absent, std::move(storage)));
+            const Sealed s = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+            CHECK(s.sr.storage(kCaller, 1) == word(1));
+            CHECK(s.sr.storage(kCaller, 0) == evmc::bytes32{});
+            expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
+        }
+        DYNAMIC_SECTION("zero read by its modified holder, absent key at " << k.shape) {
+            const Tx t = tx_to(kHolder);
+            Slots storage = k.present;
+            storage.emplace_back(k.absent, evmc::bytes32{});
+            const Prestate ps = build_prestate({
+                sender_of(t),
+                AcctSpec{.addr = kHolder, .nonce = 1, .code = copy_slot(k.absent, word(kCopyTarget)),
+                         .storage = std::move(storage)},
+            });
+            const Sealed s = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+            expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
+        }
+        DYNAMIC_SECTION("fresh write, absent key at " << k.shape) {
+            const Tx t = tx_to(kHolder);
+            const Prestate ps = build_prestate({
+                sender_of(t),
+                AcctSpec{.addr = kHolder, .nonce = 1, .code = write_slot(k.absent), .storage = k.present},
+            });
+            const Sealed s = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+            CHECK(s.sr.ds->read_storage(kHolder, k.absent) == word(0x2a));
+            expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
+        }
+    }
+}
+
+// An account record whose key is absent from the account trie claims a pre-value for that key.
+TEST_CASE("check_root rejects an account the witness invents", "[witness][binding][absent]") {
+    SECTION("an account the block only reads") {
+        const evmc::address invented = make_addr(0x44, 0x04);
+        const Tx t = tx_to(kCaller);
+        REQUIRE(t.sender != invented);
+        const std::vector<AcctSpec> state = {
+            sender_of(t),
+            AcctSpec{.addr = kCaller, .nonce = 1, .code = store_balance(invented)},
+        };
+        const Prestate ps = build_prestate(state);
+
+        std::vector<AcctSpec> forged = state;
+        forged.push_back(AcctSpec{.addr = invented, .nonce = 0, .balance = 1000});
+        const std::vector<uint8_t> blob = witness_blob(state, forged);
+        const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
+        REQUIRE(s.sr.storage(kCaller, 0) == word(1000));
+        expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value claimed for a key absent from the trie");
+
+        const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+        CHECK(honest.sr.storage(kCaller, 0) == evmc::bytes32{});
+        expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
+    }
+    SECTION("the sender, spending a balance the trie does not give it") {
+        Tx t{make_legacy_txn(kCaller, kGas, /*value=*/600), {}};
+        t.sender = recover_sender(t.tx);
+        REQUIRE(t.sender != evmc::address{});
+        REQUIRE(t.sender != kCaller);
+        const AcctSpec recipient{.addr = kCaller, .nonce = 0, .balance = 1};
+        const AcctSpec sender{.addr = t.sender, .nonce = 0, .balance = 1000};
+
+        const Prestate ps = build_prestate({recipient});
+        const std::vector<uint8_t> blob = witness_blob({recipient}, {recipient, sender});
+        const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
+        REQUIRE(s.sr.ds->get_balance(kCaller) == 601);
+        expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value claimed for a key absent from the trie");
+
+        const Prestate with_sender = build_prestate({recipient, sender});
+        const Sealed honest = seal(t, with_sender.prev_root, with_sender.blob, with_sender.nodestore);
+        expect_accepted(run_guest(honest, with_sender.blob, with_sender.nodestore), honest);
+    }
+}
