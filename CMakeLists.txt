@@ -133,6 +133,11 @@ if(BUILD_TESTING)
   if(TARGET blst_airbender_patch_test)
     add_dependencies(zilkworm.tests blst_airbender_patch_test)
   endif()
+  # So is witness_hide_node_test, a standalone executable (zilk_core/dev/cli): without this, ctest
+  # reports it Not Run and the job fails.
+  if(TARGET witness_hide_node_test)
+    add_dependencies(zilkworm.tests witness_hide_node_test)
+  endif()
 endif()
 
 # All unit tests target

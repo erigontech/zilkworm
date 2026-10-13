@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     golang protobuf-compiler libprotobuf-dev \
     libssl-dev libclang-dev \
     && wget -qO /tmp/cmake.sh "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.sh" \
+    && echo "518c76bd18cc4ca5faab891db69b1289dc1bf134f394f0983a19576711b95210  /tmp/cmake.sh" | sha256sum -c - \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
     && rm /tmp/cmake.sh
 
