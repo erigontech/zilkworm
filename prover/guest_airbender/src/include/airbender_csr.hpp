@@ -35,7 +35,11 @@ inline std::pair<uint8_t*, size_t> read_input_from_csr()
 {
     uint32_t num_bytes = csr_read_word();
     uint8_t* buf = static_cast<uint8_t*>(::operator new(num_bytes));
-    uint32_t* dst = reinterpret_cast<uint32_t*>(buf);
+    // The words go through a named may_alias type (auto would drop the attribute): the guest reads
+    // the witness back through other types (an account's uint64_t nonce and bool flags, an MPHF's
+    // uint64_t seeds), which plain uint32_t stores need not be ordered against.
+    typedef uint32_t __attribute__((may_alias)) w32;
+    w32* const dst = reinterpret_cast<w32*>(buf);
 
     size_t full_words = num_bytes / 4;
     for (size_t i = 0; i < full_words; ++i)
