@@ -4,6 +4,8 @@
 build/
 debug_build/
 prover/guest_hypercube/build/
+prover/guest_airbender/build/
+prover/prover_airbender/target/
 prover/target/
 
 # Large test fixtures (4.7 GB) — not needed for prover build

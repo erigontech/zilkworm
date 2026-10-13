@@ -21,7 +21,7 @@ namespace silkworm {
 
 // Clear-and-reuse RLP scratches; single-threaded zkVM lacks TLS.
 namespace {
-#if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG)
+#if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG) && !defined(AIRBENDER)
     thread_local Bytes tl_tx_hash_scratch_{};
     thread_local Bytes tl_tx_sender_scratch_{};
 #else

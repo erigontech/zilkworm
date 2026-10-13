@@ -1,0 +1,8 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# prover_airbender is a standalone workspace with its own pinned nightly toolchain and
+# Cargo.lock. Keep its build output local instead of in the repo-root prover/target, which
+# the other workspaces share (and which the Makefile, CI, Dockerfile and scripts don't use).
+[build]
+target-dir = "target"

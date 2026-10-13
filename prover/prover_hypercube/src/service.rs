@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ethproofs_client::{EthProofsConfig, EthproofsClient};
+use z6m_common::{EthProofsConfig, EthproofsClient};
 use crate::stdin_builders::{build_stdin_from_eth_tests, build_stdin_from_mfbd};
 use alloy_primitives::B256;
 use alloy_provider::{Provider, ProviderBuilder};
@@ -472,9 +472,11 @@ impl Z6mProverService {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Call proving hook
+        // Call proving hook. Spawned so that ethproofs latency never delays proving.
         if let Some(client) = eth_client {
-            client.proving(opts.block_number).await;
+            let client = client.clone();
+            let block_number = opts.block_number;
+            tokio::spawn(async move { client.proving(block_number).await });
         }
 
         let proof_mode = match opts.proof_type.as_str() {
@@ -531,15 +533,14 @@ impl Z6mProverService {
                     // Read proof bytes back from file
                     let proof_bytes = std::fs::read(&proof_path)?;
 
-                    client
-                        .proved(
-                            &proof_bytes,
-                            opts.block_number,
-                            cycle_count,
-                            proving_millis,
-                            &verifying_key.clone(),
-                        )
-                        .await;
+                    let verifier_id = sp1_sdk::HashableKey::bytes32(&verifying_key);
+                    let client = client.clone();
+                    let block_number = opts.block_number;
+                    tokio::spawn(async move {
+                        client
+                            .proved(&proof_bytes, block_number, cycle_count, proving_millis, &verifier_id)
+                            .await
+                    });
                 }
 
                 let log = ProvingLog {
@@ -744,7 +745,8 @@ impl Z6mProverService {
 
                 // Call queued hook before we even wait for the lock.
                 if let Some(client) = &self.eth_client {
-                    client.queued(block_number).await;
+                    let client = client.clone();
+                    tokio::spawn(async move { client.queued(block_number).await });
                 }
 
                 // Backpressure: wait until client1 is free, then advance.

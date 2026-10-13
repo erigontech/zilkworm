@@ -28,7 +28,9 @@ endif()
 if(SILKWORM_WASM_API)
   add_compile_definitions(EVMC_LOADER_MOCK)
 endif()
-add_subdirectory(evmone/evmc)
+# Its headers are a system directory: evmc::Host::to_context() casts the host to the opaque
+# evmc_host_context, which -Wstrict-aliasing=1 (below) would flag in every file that includes it.
+add_subdirectory(evmone/evmc SYSTEM)
 
 add_library(
   evmone
@@ -108,11 +110,50 @@ else()
   )
 endif()
 
+# The rv32 paths of evmone and intx read and write the 32-bit words of uint256 values (whose words
+# are uint64_t) and of other objects. Through plain uint32_t, GCC's type-based alias analysis takes
+# those accesses not to touch the objects' own, and may drop the stores or move the loads past
+# them: a profile-guided guest dropped the stores of a big-endian uint256 load that way. The words
+# go through named may_alias types instead, and -Wstrict-aliasing=1 rejects any cast of a typed
+# pointer to a word pointer that may not alias it, in the guest's paths and in the ones the native
+# test build compiles with EVMONE_RV32_DISPATCH_TEST. It is active where strict aliasing is (-O2
+# and up). It cannot see a cast from void*, a byte pointer or a struct of bytes (evmc's address and
+# bytes32), nor a may_alias typedef lost to auto (deduction drops the attribute), so those still
+# need care. The SP1 paths pass words to their syscalls through size_t pointers.
+# -Werror=strict-aliasing also turns the warning on, at the default level 3, which misses these
+# casts: the level has to come after it.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1 AND NOT SP1TURBO)
+  target_compile_options(evmone PRIVATE -Werror=strict-aliasing -Wstrict-aliasing=1)
+endif()
+
+# blst.h gives blst's field elements and points uint64_t limbs, while libblst, built for the guest
+# without assembly (__BLST_NO_ASM__), reads and writes the same objects as unsigned int limbs: two
+# views that LTO merges and whose types never alias. bls.cpp and kzg.cpp copy blst objects in C++
+# and pass them to blst functions, some of which only load (the is-infinity and is-one tests); GCC
+# may drop such a copy as dead when one of those is its only reader, as reproducers built with the
+# guest's compiler, flags and libblst show. The guest compiles correctly only because a call that
+# GCC takes to read all memory always comes in between. Without strict aliasing for these two files
+# (which turns the guard above off for them; they have no word casts), that no longer matters.
+if(AIRBENDER)
+  set_source_files_properties(
+    evmone/lib/evmone_precompiles/bls.cpp evmone/lib/evmone_precompiles/kzg.cpp
+    PROPERTIES COMPILE_OPTIONS -fno-strict-aliasing
+  )
+endif()
+
 if(SILKWORM_CORE_USE_ABSEIL)
   # Propagate SILKWORM_CORE_USE_ABSEIL to allow using Silkworm's preferred FlatHashMap.
   find_package(absl REQUIRED)
   target_compile_definitions(evmone PRIVATE SILKWORM_CORE_USE_ABSEIL)
   target_link_libraries(evmone PRIVATE absl::flat_hash_map)
+endif()
+
+if(AIRBENDER)
+  target_compile_definitions(evmone PRIVATE AIRBENDER)
+  target_include_directories(evmone PRIVATE
+    ${CMAKE_SOURCE_DIR}/prover/guest_airbender/src/include
+    ${CMAKE_SOURCE_DIR}/zilk_core
+  )
 endif()
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/evmone/include

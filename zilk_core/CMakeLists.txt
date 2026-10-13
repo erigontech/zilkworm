@@ -23,6 +23,12 @@ endif()
 # Applied PUBLIC on silkworm_types_zz (core/types_zz/CMakeLists.txt).
 option(USE_HASH_KEY "Node-store account recovery for witness preimage gaps" OFF)
 
+if(AIRBENDER)
+    add_compile_definitions(-DAIRBENDER)
+    include_directories(${CMAKE_SOURCE_DIR}/zilk_core)
+    include_directories(${CMAKE_SOURCE_DIR}/prover/guest_airbender/src/include)
+endif()
+
 add_subdirectory(core)
 add_subdirectory(dev)
 

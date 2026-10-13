@@ -27,7 +27,7 @@ namespace {
     // Table index = top log2(slots) bits of the mixed key.
     inline constexpr unsigned kKeccakMemoShift{64 - std::countr_zero(kKeccakMemoSlots)};
 
-#if defined(NO_THREAD_LOCAL) || defined(SP1) || defined(QEMU_DEBUG)
+#if defined(NO_THREAD_LOCAL) || defined(SP1) || defined(QEMU_DEBUG) || defined(AIRBENDER)
     // Single-threaded guest: thread_local would emit an emutls call per access.
     constinit std::array<KeccakSlot, kKeccakMemoSlots> keccak_memo_{};
 #else

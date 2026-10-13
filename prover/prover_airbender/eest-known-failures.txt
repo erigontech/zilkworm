@@ -1,0 +1,37 @@
+# Copyright 2026 The Zilkworm Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# EEST blockchain tests (paths relative to the fixtures' blockchain_tests/) that the Airbender
+# guest is known not to finish. These are resource limits, not wrong results: CI fails only
+# on failures outside this list. Measured against tests@v20.0.1 (test-fixtures.json).
+
+# Exceed the 5B-cycle execution limit: BLS12-381 MSM / pairing, quadratic-complexity and
+# maximum block-RLP-size tests.
+for_cancun/ported_static/stQuadraticComplexityTest/call50000_sha256/call50000_sha256.json
+for_cancuntopragueattime15k/prague/eip2935_historical_block_hashes_from_state/block_hashes/block_hashes_history_at_transition.json
+for_osaka/osaka/eip7934_block_rlp_limit/max_block_rlp_size/block_at_rlp_size_limit_boundary.json
+for_osaka/osaka/eip7934_block_rlp_limit/max_block_rlp_size/block_rlp_size_at_limit_with_all_typed_transactions.json
+for_osaka/prague/eip2537_bls_12_381_precompiles/bls12_g1msm/valid.json
+for_osaka/prague/eip2537_bls_12_381_precompiles/bls12_g2msm/valid.json
+for_osaka/prague/eip2537_bls_12_381_precompiles/bls12_variable_length_input_contracts/valid_gas_g1msm.json
+for_osaka/prague/eip2537_bls_12_381_precompiles/bls12_variable_length_input_contracts/valid_gas_g2msm.json
+for_prague/ported_static/stQuadraticComplexityTest/call50000_sha256/call50000_sha256.json
+for_prague/prague/eip2537_bls_12_381_precompiles/bls12_g1msm/valid.json
+for_prague/prague/eip2537_bls_12_381_precompiles/bls12_g2msm/valid.json
+for_prague/prague/eip2537_bls_12_381_precompiles/bls12_pairing/invalid_multi_inf.json
+for_prague/prague/eip2537_bls_12_381_precompiles/bls12_pairing/valid_multi_inf.json
+for_prague/prague/eip2537_bls_12_381_precompiles/bls12_variable_length_input_contracts/valid_gas_g1msm.json
+for_prague/prague/eip2537_bls_12_381_precompiles/bls12_variable_length_input_contracts/valid_gas_g2msm.json
+for_praguetoosakaattime15k/osaka/eip7934_block_rlp_limit/max_block_rlp_size/fork_transition_block_rlp_limit.json
+
+# Multi-test fixture files: the guest's bump allocator never frees, so the heap runs out
+# part-way through the file.
+for_berlin/frontier/scenarios/scenarios/scenarios.json
+for_cancun/frontier/scenarios/scenarios/scenarios.json
+for_constantinoplefix/frontier/scenarios/scenarios/scenarios.json
+for_istanbul/frontier/scenarios/scenarios/scenarios.json
+for_london/frontier/scenarios/scenarios/scenarios.json
+for_osaka/frontier/scenarios/scenarios/scenarios.json
+for_paris/frontier/scenarios/scenarios/scenarios.json
+for_prague/frontier/scenarios/scenarios/scenarios.json
+for_shanghai/frontier/scenarios/scenarios/scenarios.json
