@@ -40,6 +40,10 @@ namespace rlp = ::silkworm::rlp;
 
     bool is_list = first >= 0xC0;
     uint8_t offset = first & 0x3Fu;
+    // 4..8 length bytes (first byte 0xBB..0xBF or 0xFB..0xFF): a payload of 16 MiB or more. No trie
+    // node is that large (a full branch is 532 bytes, two length bytes), and the shift below would
+    // be by a negative amount. Not a list, so the caller rejects the node.
+    if (offset > 58) [[unlikely]] return {false, 0};
 
     from.remove_prefix(1);
     if (offset <= 55) return {is_list, offset};

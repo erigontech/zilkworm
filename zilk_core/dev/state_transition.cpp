@@ -606,23 +606,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             }
 #endif
             // Raw-key order != keccak(key) order; sort required.
-            if (storage_updates.size() > 1) [[likely]] {
-                auto* const data = storage_updates.data();
-                const std::size_t n = storage_updates.size();
-                if (n <= 16) [[likely]] {
-                    for (std::size_t i = 1; i < n; ++i) {
-                        mpt::TrieNodeFlat key = std::move(data[i]);
-                        std::size_t j = i;
-                        while (j > 0 && key < data[j - 1]) {
-                            data[j] = std::move(data[j - 1]);
-                            --j;
-                        }
-                        data[j] = std::move(key);
-                    }
-                } else {
-                    std::sort(data, data + n);
-                }
-            }
+            zilkworm::sort_trie_nodes(storage_updates.data(), storage_updates.size());
             if (mpt::is_zero_quick(storage_root)) {  // new account
                 storage_root = kEmptyRoot;
             }
@@ -713,8 +697,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                             }
                         }
                     }
-                    std::sort(storage_updates.data(),
-                              storage_updates.data() + storage_updates.size());
+                    zilkworm::sort_trie_nodes(storage_updates.data(), storage_updates.size());
                     storage_trie.reset(storage_root);
                     storage_root = storage_trie.calc_root_from_updates(
                         {storage_updates.data(), storage_updates.size()});
@@ -724,7 +707,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             }
             // else: unmodified — read-only anchor (initial only).
         }
-        std::sort(acc_updates.begin(), acc_updates.end());
+        zilkworm::sort_trie_nodes(acc_updates.data(), acc_updates.size());
     }
 #endif
 

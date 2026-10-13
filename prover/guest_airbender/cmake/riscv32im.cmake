@@ -13,7 +13,11 @@ set(common_flags "-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany
 # guest_hypercube's riscv64im-sp1.cmake does (#164): defaults inline-unit-growth 40,
 # max-inline-insns-auto 30, large-function-growth 100, each roughly doubled. On the 200-block
 # mainnet corpus: -2.03% guest cycles, guest image 2.53 MB -> 3.00 MB (of the 4 MiB ROM).
-set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer \
+# Builtins stay on so GCC expands fixed-size memcpy/memset/memcmp inline: under -fno-builtin every
+# `std::memcpy(&u64, p, 8)` load was a ~35-cycle call, 41M of them per 200 blocks. Loops are still
+# never turned into library calls (-fno-tree-loop-distribute-patterns), and src/mem_builtins.c,
+# which implements those functions, keeps -fno-builtin. 200-block cycles -2.62%.
+set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer \
 --param inline-unit-growth=100 --param max-inline-insns-auto=60 \
 --param large-function-growth=200")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
