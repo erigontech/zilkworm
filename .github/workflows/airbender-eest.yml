@@ -37,7 +37,9 @@ jobs:
             nodejs npm \
             curl
           npm i -g xpm
-          xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
+          # Pinned to the guest compiler that prover/Dockerfile ships (release v15.2.0-1): the
+          # guest's code generation, and so its cycle counts, depend on the GCC version.
+          xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
           RISCV_GCC_BIN=$(find $HOME/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc -name 'riscv-none-elf-gcc' -type f 2>/dev/null | head -1 | xargs dirname)
           echo "Found riscv-gcc at: $RISCV_GCC_BIN"
           ls -la "$RISCV_GCC_BIN/" | head -5
@@ -78,8 +80,11 @@ jobs:
       - name: Build guest ELF
         run: make z6m_guest_airbender
 
+      # execute runs on the CPU simulator. The default `gpu` feature needs a CUDA toolkit,
+      # which this container doesn't have (era_cudart_sys's build script fails without one).
       - name: Build prover
-        run: make z6m_prover_airbender
+        working-directory: prover/prover_airbender
+        run: cargo build --release --no-default-features
 
       - name: Run EEST blockchain tests
         id: run_tests
