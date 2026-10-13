@@ -90,9 +90,7 @@ bool unfolds_as_root(const Bytes& node) {
     DirectState direct{std::span<uint8_t>{prestate}};
     GridMPT<false> trie{direct, silkworm::kEmptyRoot};
     const bool ok = trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0);
-#ifndef NDEBUG
     CHECK(trie.failed() == !ok);
-#endif
     return ok;
 }
 
@@ -109,9 +107,7 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized extension child", "[trie][g
 
     const Bytes node = ext_node(/*child_len=*/60000);
     CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
-#ifndef NDEBUG
-    CHECK(trie.failed());  // rejected decode must mark the trie failed (debug-only sentinel)
-#endif
+    CHECK(trie.failed());  // rejected decode must mark the trie failed
 }
 
 // Re-encoding writes into the fixed static_buffer, so a witness leaf whose value would not fit

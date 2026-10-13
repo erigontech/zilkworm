@@ -3,7 +3,6 @@
 
 #include <array>
 #include <bit>
-#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -117,9 +116,7 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
     }
     auto& parent = grid_[cur_parent_depth];
     if (parent.kind != kBranch) {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"seek: parent not branch\"}");
         depth_ = 0;
         return;
@@ -160,16 +157,16 @@ inline void GridMPT<DeletionEnabled>::seek_with_last_insert(nibbles64& new_nibbl
         search_nib_cursor_ = parent_consumed;
     }
     if (search_nib_cursor_ > 63) {
-#ifndef NDEBUG
         failed_ = true;
-#endif
         sys_println("{\"err\":\"nib_cursor > 63\"}");
     }
 }
 
 template <bool DeletionEnabled>
 bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
-    assert(!failed());
+    if (failed_) [[unlikely]] {
+        return {};  // the root node could not be read: there is no trie to walk
+    }
     for (auto updates_it = updates_sorted.begin(); updates_it != updates_sorted.end(); ++updates_it) {
         const auto& trie_upd = *updates_it;
 
@@ -201,7 +198,13 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
         snap_writes_ = trie_upd.current_value().size() != 0;
 
         // MAIN LOOP
-        while (depth_ < 128) {  // Searching down
+        while (true) {  // Searching down
+            // No 64-nibble key descends this deep; leaving the loop here would drop the update.
+            if (depth_ >= 128) [[unlikely]] {
+                failed_ = true;
+                sys_println("{\"err\":\"descent too deep\"}");
+                return {};
+            }
             auto& grid_line = grid_[depth_];
             if (grid_line.kind == kBranch) {
                 unsigned nib = search_nibbles_[search_nib_cursor_];
@@ -213,9 +216,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                     grid_[depth_].modified = true;
                     break;
                 } else if (unfold_res == UnfoldResult::kMissing || unfold_res == UnfoldResult::kUndefined) {
-#ifndef NDEBUG
                     failed_ = true;
-#endif
                     sys_println("ERROR: missing hash ref in node store (witness incomplete)");
                     return {};
                 }
@@ -240,9 +241,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                             auto rlp_opt = state_->find_node_rlp(grid_line.ext.child);
                             if (!rlp_opt) [[unlikely]] {
                                 ++missing_count_;
-#ifndef NDEBUG
                                 failed_ = true;
-#endif
                                 sys_println("ERROR: missing ext child rlp in node store (witness incomplete)");
                                 return {};
                             }
@@ -250,9 +249,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                         }
                         if (!unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_)) [[unlikely]] {
                             ++missing_count_;
-#ifndef NDEBUG
                             failed_ = true;
-#endif
                             sys_println("ERROR: malformed ext child rlp in node store");
                             return {};
                         }
@@ -346,9 +343,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
                     // check pre-value matches
                     if (grid_line.leaf.value != trie_upd.initial_value()) {
-#ifndef NDEBUG
                         failed_ = true;
-#endif
                         sys_println("Pre value mismatch in existing leaf");
                         return {};
                     }
@@ -417,12 +412,10 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
         fold_line(grid_.size() - 1);
     }
 
-    assert(!failed());  // debug: no swallowed fold_line/seek unfold error above
     if (grid_.size() == 0) {
         return kEmptyRoot;
     }
     fold_line(0);
-    assert(!failed());  // debug: no fold_line(0) unfold error
     if (grid_.empty()) {
         return kEmptyRoot;
     }
@@ -440,19 +433,15 @@ void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
     if (previous_root_hash != kEmptyRoot) {
         auto rlp = state_->find_node_rlp(previous_root_hash);
         if (!rlp) [[unlikely]] {
-#ifndef NDEBUG
             failed_ = true;
-#endif
             sys_println("{\"err\":\"no_rlp\"}");
             return;
         }
         root_unfolded_ = unfold_node_from_rlp(*rlp, 0, 0);
-#ifndef NDEBUG
         if (!root_unfolded_) [[unlikely]] {
             failed_ = true;
             sys_println("{\"err\":\"init_from_root: malformed root rlp\"}");
         }
-#endif
     }
 }
 
