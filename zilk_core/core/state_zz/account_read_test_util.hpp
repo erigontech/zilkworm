@@ -39,8 +39,8 @@
 //   which is NOT interchangeable with `DirectState::account_storage_root` once a
 //   bundle is incomplete — see the comment on `mirror_storage_root`.
 // * The created/existing clash guard lives in `StateTransition::check_root`, which runs
-//   only for the FIRST block of a bundle; `check_root_new_block` (subsequent blocks) has
-//   no such guard. Every bundle these tests build therefore carries a single block.
+//   only for the FIRST block of a bundle (`check_root_new_block` repeats it for the later
+//   ones). Every bundle the account-read tests build carries a single block.
 //
 // Running the suite
 // -----------------
@@ -456,6 +456,11 @@ struct MirrorRoot {
     /// `created_accounts()` — the condition `check_root` rejects with
     /// "Created and existing hashes clash".
     bool clashed{false};
+    /// True iff `check_root` rejects whatever the header's state root: a storage or the account
+    /// trie walk failed (`GridMPT::failed()`), or the storage walk of an unmodified account, or
+    /// of the wiped storage of a deleted or recreated one, did not come back to its storage root;
+    /// `root` then means nothing.
+    bool rejected{false};
 };
 
 /// Reproduces `check_root`'s per-account STORAGE root: a `GridMPT` ANCHORED at the record's
@@ -471,10 +476,13 @@ struct MirrorRoot {
 /// lets a test derive the root the guest will actually compute.
 ///
 /// `missing_out` accumulates `missing_count()` across accounts, so a storage node absent from
-/// the node store surfaces in `MirrorRoot::missing` instead of hiding behind a matching root.
+/// the node store surfaces in `MirrorRoot::missing` instead of hiding behind a matching root;
+/// `rejected_out` is set when `check_root` rejects the walk: it failed, or it did not come back to
+/// the root of an account that was not modified.
 inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, Account& pa,
                                    bool has_existing, bool acc_modified,
-                                   GridMPT<true>& storage_trie, unsigned& missing_out) {
+                                   GridMPT<true>& storage_trie, unsigned& missing_out,
+                                   bool& rejected_out) {
     std::span<const Slot> existing_slots;
     if (has_existing && pa.slot_count > 0) {
         existing_slots = ds.slots_for(pa).first(pa.slot_count);
@@ -512,21 +520,46 @@ inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, A
     storage_trie.reset(storage_root);
     const bytes32 out = storage_trie.calc_root_from_updates({ups.data(), ups.size()});
     missing_out += storage_trie.missing_count();
+    rejected_out = rejected_out || storage_trie.failed() || (!acc_modified && out != storage_root);
     return out;
 }
 
+/// Reproduces `check_root`'s read-only walks of the witness slots of the accounts whose storage the
+/// block wiped (`DirectState::wiped_storage`), each anchored at the storage root it was read under;
+/// `rejected_out` is set when one fails or does not come back to that root.
+inline void mirror_wiped_storage(const DirectState& ds, GridMPT<true>& storage_trie, unsigned& missing_out,
+                                 bool& rejected_out) {
+    for (const WipedStorage& wiped : ds.wiped_storage()) {
+        std::vector<TrieNodeFlat> ups;
+        ups.reserve(wiped.slots.size());
+        for (const auto& slot : wiped.slots) {
+            const auto& key = *reinterpret_cast<const bytes32*>(slot.key);
+            auto& node = ups.emplace_back(keccak_bytes32(key));
+            node.self_initial_len = static_cast<uint8_t>(silkworm::rlp::encode_into_small(
+                node.buf + 0, silkworm::zeroless_view(ByteView{slot.initial, 32})));
+        }
+        std::sort(ups.begin(), ups.end());
+        storage_trie.reset(wiped.storage_root);
+        const bytes32 out = storage_trie.calc_root_from_updates({ups.data(), ups.size()});
+        missing_out += storage_trie.missing_count();
+        rejected_out = rejected_out || storage_trie.failed() || out != wiped.storage_root;
+    }
+}
+
 /// Recomputes the account root exactly the way `StateTransition::check_root` does,
-/// with the single difference that a created/existing hash clash is recorded instead of
-/// aborting. Update-for-update faithful: same merge order over the two sorted sequences,
-/// same `ext_initial` (the record's own `acc_rlp_buf`), same read-only elision
-/// (`current_len == 0` when `!pa->modified`), same `0x80` deletion marker, anchored at
-/// the same `prev_root`. `missing` is `GridMPT::missing_count()` summed over the account trie
-/// and every per-account storage trie, and must be 0 for the derived root to mean anything.
+/// with the single difference that a created/existing hash clash, or a trie walk `check_root`
+/// rejects (`rejected`), is recorded instead of aborting. Update-for-update faithful: same
+/// merge order over the two sorted sequences, same `ext_initial` (the record's own
+/// `acc_rlp_buf`), same read-only elision (`current_len == 0` when `!pa->modified`), same
+/// `0x80` deletion marker, anchored at the same `prev_root`. `missing` is
+/// `GridMPT::missing_count()` summed over the account trie and every per-account storage trie,
+/// and must be 0 for the derived root to mean anything.
 ///
 /// Storage roots come from `mirror_storage_root`, i.e. the anchored per-account storage
 /// `GridMPT` — computed for every non-deleted account with slots even when the account is
 /// read-only, exactly as `check_root` does, so the node lookups counted in `missing` are the
-/// ones the guest performs.
+/// ones the guest performs. The read-only walks of wiped storage (`mirror_wiped_storage`) come
+/// first, as in `check_root`.
 inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
     struct Created {
         bytes32 addr_hash;
@@ -548,6 +581,9 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
 
     // One instance hoisted out of the walk and `reset()` per account, as check_root does.
     GridMPT<true> storage_trie{ds, silkworm::kEmptyRoot};
+
+    // Before the merge, exactly as in check_root.
+    mirror_wiped_storage(ds, storage_trie, out.missing, out.rejected);
 
     auto it_ex = ds.addr_hashes().begin();
     const auto end_ex = ds.addr_hashes().end();
@@ -587,8 +623,8 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
         const bool acc_modified = has_existing ? pa->modified : true;
 
         // Before the account update is emplaced, exactly as in check_root.
-        const bytes32 storage_root = mirror_storage_root(ds, addr, *pa, has_existing,
-                                                        acc_modified, storage_trie, out.missing);
+        const bytes32 storage_root = mirror_storage_root(ds, addr, *pa, has_existing, acc_modified,
+                                                        storage_trie, out.missing, out.rejected);
 
         bool readonly = false;
         if (has_existing) {
@@ -610,6 +646,7 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
     GridMPT<true> acc_trie{ds, prev_root};
     out.root = acc_trie.calc_root_from_updates({ups.data(), ups.size()});
     out.missing += acc_trie.missing_count();
+    out.rejected = out.rejected || acc_trie.failed();
     return out;
 }
 
@@ -656,19 +693,22 @@ struct ShadowRun {
 /// (`mirror_check_root`).
 ///
 /// `provisional` supplies the block context (number, timestamp, base fee, beneficiary,
-/// gas limit); its gas_used/roots are irrelevant here.
+/// gas limit); its gas_used/roots are irrelevant here. `headers` are the headers the block's
+/// BLOCKHASH reads from, as the guest holds them (genesis and ancestors).
 inline ShadowRun shadow_execute(const std::vector<uint8_t>& blob_in,
                                 const std::vector<uint8_t>& nodestore_in,
                                 const bytes32& prev_root,
                                 const silkworm::BlockHeader& provisional,
                                 std::span<const silkworm::Transaction> txs,
-                                const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig) {
+                                const silkworm::ChainConfig& cfg = silkworm::test::kShanghaiConfig,
+                                std::span<const silkworm::BlockHeader> headers = {}) {
     ShadowRun r{};
     r.blob = blob_in;
     r.nodestore = nodestore_in;
     r.ds = std::make_unique<DirectState>(std::span<uint8_t>{r.blob}, std::span<uint8_t>{r.nodestore});
     r.sanitize_ok = r.ds->sanitize();
     if (!r.sanitize_ok) return r;
+    for (const silkworm::BlockHeader& h : headers) r.ds->insert_header(h);
 
     silkworm::Block block{};
     block.header = provisional;

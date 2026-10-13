@@ -270,6 +270,55 @@ namespace {
         return last == 0 ? first : nullptr;
     }
 
+    /// Whether slot key `a` sorts before slot key `b` (memcmp order), the order find_slot() searches in.
+    /// Both are 8-aligned, as every slot is; with strict alignment (rv32 Airbender) they are compared a
+    /// word at a time inline, as find_slot() does, instead of by a call to memcmp.
+    [[gnu::always_inline]] inline bool key_below(const uint8_t* a, const uint8_t* b) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+        typedef uint32_t __attribute__((may_alias)) w32;
+        const w32* const wa = reinterpret_cast<const w32*>(a);
+        const w32* const wb = reinterpret_cast<const w32*>(b);
+        for (int i = 0; i < 8; ++i) {
+            const uint32_t x = wa[i];
+            const uint32_t y = wb[i];
+            if (x == y) continue;
+            // The first differing byte is the lowest nonzero byte of x ^ y, see find_slot().
+            const uint32_t d = x ^ y;
+            const uint32_t m = (d & 0xffu)       ? 0xffu
+                               : (d & 0xffffu)   ? 0xffffu
+                               : (d & 0xffffffu) ? 0xffffffu
+                                                 : ~uint32_t{0};
+            return (x & m) < (y & m);
+        }
+        return false;
+#else
+        return std::memcmp(a, b, 32) < 0;
+#endif
+    }
+
+    // SOUNDNESS-CRITICAL: the entries of an MphfMap must tile its data section exactly as the
+    // MphfBuilder lays them out — contiguous from offset 8 (the reserved sentinel it leaves so
+    // slot_offsets[idx] == 0 means "empty"), each 8-aligned, with no gaps and no overlaps.
+    // find() and for_each() read bodies in place and sanitize() and the EVM write through the
+    // addr-map bodies, so an entry whose body overlapped another's would let a write into one
+    // change the other after it was bound. Checked once, before anything is written; validate_mphf
+    // has already bounded every entry inside the data region, so each [len] read here is in range.
+    [[nodiscard]] bool mphf_entries_tile(const MphfMap& m) {
+        if (!m.valid() || m.n_keys() == 0) return true;
+        std::vector<uint32_t> offsets;
+        offsets.reserve(m.n_keys());
+        m.for_each_offset([&](uint64_t off) { offsets.push_back(static_cast<uint32_t>(off)); });
+        std::sort(offsets.begin(), offsets.end());
+        const uint8_t* const data = m.data_base();
+        uint64_t expect = 8u;  // data[0..8) is the sentinel the builder reserves
+        for (const uint32_t off : offsets) {
+            if (off != expect) return false;  // a gap, an overlap, or a misaligned start
+            const uint64_t body_len = load_u64_le(data + off);
+            expect = off + mphf_align8(static_cast<uint32_t>(8u + body_len));
+        }
+        return expect == m.data_size();
+    }
+
 }  // namespace
 
 namespace detail {
@@ -315,7 +364,6 @@ void DirectState::reserve_block_maps_() noexcept {
     created_code_.reserve(64);
     touched_.reserve(512);
     headers_.reserve(256);
-    created_block_hashes_.reserve(256);
 }
 
 // Rebuilds typed sub-views; blob bytes are caller-owned and pointer-stable.
@@ -337,10 +385,11 @@ DirectState::DirectState(DirectState&& other) noexcept
 
     created_accounts_ = std::move(other.created_accounts_);
     overflow_slots_ = std::move(other.overflow_slots_);
+    wiped_storage_ = std::move(other.wiped_storage_);
     created_code_ = std::move(other.created_code_);
     created_code_collisions_ = std::move(other.created_code_collisions_);
     headers_ = std::move(other.headers_);
-    created_block_hashes_ = std::move(other.created_block_hashes_);
+    ancestor_missing_ = other.ancestor_missing_;
     touched_ = std::move(other.touched_);
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
     changed_storage_journal_ = std::move(other.changed_storage_journal_);
@@ -423,7 +472,7 @@ bool DirectState::revive_if_deleted_slow(const evmc::address& addr, Account& pa)
     pa.deleted = false;
     copy32(pa.code_hash, kEmptyHash);
     copy32(pa.storage_root, kEmptyRoot);
-    pa.slot_count = 0;
+    pa.slot_count = 0;  // destruct() noted them for check_root
     pa.code_store_len = 0;
     pa.nonce = 0;
     store_be_u256(pa.balance, intx::uint256{0});
@@ -482,6 +531,7 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
     // Creation is the only transition that wipes storage, and post-London EIP-3541 keeps
     // deployed code off the 0xef prefix, so it can never look like a designation.
     if (!eip7702::is_code_delegated(code)) {
+        note_wiped_storage_(pa);
         pa.slot_count = 0;
         overflow_slots_.erase(addr);
 #if USE_HASH_KEY
@@ -596,9 +646,20 @@ void DirectState::set_nonce(const evmc::address& addr, uint64_t nonce) {
     touched_.insert(addr);
 }
 
+// Out of line: since Cancun no account a block wipes carries witness slots, and inlined into
+// apply_state_diff() the record cost its loop 0.31M cycles over the 200-block corpus.
+[[gnu::noinline]] void DirectState::note_wiped_storage_(const Account& pa) {
+    if (pa.slot_count == 0) return;
+    wiped_storage_.push_back({slots_for(pa), std::bit_cast<evmc::bytes32>(pa.storage_root)});
+}
+
 void DirectState::destruct(const evmc::address& addr) {
     // Flag every record (blob AND overlay twin); none existing means nothing to mask.
-    if (auto* pa = find_pre_account_unchecked(addr)) pa->deleted = true;
+    if (auto* pa = find_pre_account_unchecked(addr)) {
+        // Once: a deleted record keeps its slots until revive_if_deleted() drops them.
+        if (!pa->deleted) note_wiped_storage_(*pa);
+        pa->deleted = true;
+    }
     if (auto it = created_accounts_.find(addr); it != created_accounts_.end())
         it->second.deleted = true;
     overflow_slots_.erase(addr);
@@ -920,23 +981,6 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
 
 void DirectState::insert_header(const BlockHeader& header) {
     headers_[header.hash()] = header;
-
-    // created_block_hashes_ kept sorted ascending for log-n BLOCKHASH lookup.
-    const uint64_t block_num = header.number;
-    const auto h = header.hash();
-    auto it = std::lower_bound(created_block_hashes_.begin(),
-                               created_block_hashes_.end(), block_num,
-                               [](const BlockHashEntry& e, uint64_t n) {
-                                   return e.block_number < n;
-                               });
-    if (it != created_block_hashes_.end() && it->block_number == block_num) {
-        std::memcpy(it->block_hash, h.bytes, 32);
-    } else {
-        BlockHashEntry e{};
-        e.block_number = block_num;
-        std::memcpy(e.block_hash, h.bytes, 32);
-        created_block_hashes_.insert(it, e);
-    }
 }
 
 bool DirectState::read_body(BlockNum, const evmc::bytes32&, BlockBody&) const noexcept {
@@ -948,6 +992,34 @@ std::optional<intx::uint256> DirectState::total_difficulty(uint64_t, const evmc:
 }
 
 bool DirectState::sanitize() {
+    // SOUNDNESS-CRITICAL: the pre-state blob's sections lie in builder order and do not overlap —
+    // meta | prestate MphfMap | addr_hashes | block_hashes | code store — each ending at or before
+    // the next begins and the last within the blob. validate_prestate_layout bounds every section on
+    // its own; this rules out a producer pointing one into another, e.g. the code store onto a
+    // record's writable slots, which would let the initial->current copy below (or an SSTORE) change
+    // code after it was hashed, or a record's slots over another record's bound initial value.
+    {
+        const PreStateMeta& m = *pre_state_meta_;
+        const uint64_t blob_size = prestate_view_.size();
+        if (sizeof(PreStateMeta) > m.prestate_offset ||
+            m.prestate_offset > m.addr_hashes_offset ||
+            uint64_t{m.addr_hashes_offset} + uint64_t{m.n_accounts} * sizeof(AddrHashEntry) >
+                m.block_hashes_offset ||
+            uint64_t{m.block_hashes_offset} + uint64_t{m.n_block_hashes} * sizeof(BlockHashEntry) >
+                m.code_store_offset ||
+            uint64_t{m.code_store_offset} + m.code_store_size > blob_size) [[unlikely]] {
+            sys_println("sanitize: pre-state sections overlap or out of builder order");
+            return false;
+        }
+        // Within the addr map and the code store, every record/entry starts on an entry boundary and
+        // none overlaps another (the node store is a separate, disjoint bundle section, and its nodes
+        // are bound to their keccak on use, so an overlapping node cannot be mistaken for another).
+        if (!mphf_entries_tile(pre_state_map_) || !mphf_entries_tile(code_store_map_)) [[unlikely]] {
+            sys_println("sanitize: witness MphfMap entries overlap or leave gaps");
+            return false;
+        }
+    }
+
     // SOUNDNESS-CRITICAL: binds each leaf's identity to its trie-key hash.
     //
     // The input reader may have hashed entries as it read them, see CodeStoreVerified. Its bits
@@ -1001,6 +1073,25 @@ bool DirectState::sanitize() {
         pa->deleted = false;
         pa->modified = true;    // To be unset during addr_hashes loop
         pa->rlp_into_cache(std::bit_cast<evmc::bytes32>(pa->storage_root));
+        // Execution reads a slot's current value, but check_root binds only its initial one to the
+        // storage root: the block starts from that, whatever current value the witness carries. Copied
+        // by words (a Slot is 8-aligned): with strict alignment a 32-byte memcpy is a call per slot.
+        //
+        // SOUNDNESS-CRITICAL: find_slot() binary-searches the slots by key, so their keys have to ascend
+        // strictly, which also rules out a key held twice. Out of order, a search can miss a slot the record
+        // holds, and the block would read zero for it, whatever value check_root binds.
+        typedef uint32_t __attribute__((may_alias)) w32;
+        const std::span<Slot> slots = slots_for(*pa);
+        for (size_t s = 0; s < slots.size(); ++s) {
+            if (s > 0 && !key_below(slots[s - 1].key, slots[s].key)) [[unlikely]] {
+                sys_println("sanitize: witness slot keys not in ascending order");
+                acc_walk_ok = false;
+                return;
+            }
+            const w32* const from = reinterpret_cast<const w32*>(slots[s].initial);
+            w32* const to = reinterpret_cast<w32*>(slots[s].current);
+            for (size_t i = 0; i < 8; ++i) to[i] = from[i];
+        }
     };
     if (pre_state_meta_->n_accounts > 0) {
         pre_state_map_.for_each<20>(
@@ -1036,28 +1127,23 @@ bool DirectState::sanitize() {
     return true;
 }
 
-evmc::bytes32 DirectState::get_block_hash(BlockNum n) const noexcept {
-    const auto bh = block_hashes();
-    if (!bh.empty()) {
-        const auto it = std::lower_bound(bh.begin(), bh.end(), n,
-                                         [](const BlockHashEntry& e, BlockNum k) {
-                                             return e.block_number < k;
-                                         });
-        if (it != bh.end() && it->block_number == n) {
-            return std::bit_cast<evmc::bytes32>(it->block_hash);
+// SOUNDNESS-CRITICAL: an ancestor's hash is the parent hash of its child, from `header` back, and each child
+// is the header keyed by the hash the one after it names (insert_header keys a header by its own hash), so
+// every hash returned is bound to `header`. Neither the witness's block-hash section nor the numbers of the
+// headers it carries are, and neither is read.
+evmc::bytes32 DirectState::get_block_hash(const BlockHeader& header, BlockNum n) const noexcept {
+    if (n >= header.number) [[unlikely]]
+        return {};
+    evmc::bytes32 hash = header.parent_hash;
+    for (BlockNum child = header.number - 1; child > n; --child) {
+        const auto it = headers_.find(hash);
+        if (it == headers_.end()) [[unlikely]] {
+            ancestor_missing_ = true;
+            return {};
         }
+        hash = it->second.parent_hash;
     }
-    if (!created_block_hashes_.empty()) {
-        const auto it = std::lower_bound(created_block_hashes_.begin(),
-                                         created_block_hashes_.end(), n,
-                                         [](const BlockHashEntry& e, BlockNum k) {
-                                             return e.block_number < k;
-                                         });
-        if (it != created_block_hashes_.end() && it->block_number == n) {
-            return std::bit_cast<evmc::bytes32>(it->block_hash);
-        }
-    }
-    return {};
+    return hash;
 }
 
 }  // namespace zilkworm

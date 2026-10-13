@@ -105,6 +105,13 @@ struct CreatedCodeEntry {
     std::vector<uint8_t> bytes;
 };
 
+/// The witness slots of a pre-state account whose storage the block wiped, and the storage root of the
+/// account's pre-state leaf they have to be bound to.
+struct WipedStorage {
+    std::span<const Slot> slots;
+    evmc::bytes32 storage_root;
+};
+
 class DirectState : public BlockState {
   private:
     std::span<uint8_t> prestate_view_;
@@ -130,11 +137,16 @@ class DirectState : public BlockState {
     static_assert(std::is_same_v<FlatHashMap<evmc::address, Account>,
                                  std::unordered_map<evmc::address, Account>>);
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;
+    // Deleting an account or deploying code to it wipes its storage, so the post-state holds none of
+    // the slots the witness carried for it, yet the block can have read them first: check_root still
+    // binds them to the pre-state.
+    std::vector<WipedStorage> wiped_storage_;
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
     FlatHashSet<evmc::address> touched_;
     FlatHashMap<evmc::bytes32, BlockHeader> headers_;
-    std::vector<BlockHashEntry> created_block_hashes_;
+    // Set once a block has asked for the hash of an ancestor its headers do not lead to, see get_block_hash().
+    mutable bool ancestor_missing_{false};
 
     bool multi_block_{false};
     // Journal only used for multi-block cases
@@ -152,6 +164,8 @@ class DirectState : public BlockState {
 
     Account* materialize_absent_account_(const evmc::address& addr) const;
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
+    // Called before the storage of `pa` is wiped, while its slots and storage root are the pre-state's.
+    void note_wiped_storage_(const Account& pa);
     void reserve_block_maps_() noexcept;
 
 #if USE_HASH_KEY
@@ -193,7 +207,11 @@ class DirectState : public BlockState {
     ByteView read_code(const evmc::address& addr, const evmc::bytes32& /*code_hash*/) const noexcept {
         return read_code(addr);
     }
-    evmc::bytes32 get_block_hash(BlockNum n) const noexcept;
+    /// The hash of block `n`, an ancestor of the block `header` heads, as BLOCKHASH reads it. Zero, and
+    /// ancestor_missing() set, if the headers held (genesis, ancestors, the blocks run) do not lead from
+    /// `header` back to block n + 1.
+    evmc::bytes32 get_block_hash(const BlockHeader& header, BlockNum n) const noexcept;
+    bool ancestor_missing() const noexcept { return ancestor_missing_; }
     [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr) const noexcept {
         // Materializing, and overlay-aware: a detached account must not report
         // "no storage" just because it is missing from the blob map.
@@ -204,8 +222,19 @@ class DirectState : public BlockState {
     }
     /// has_storage() for the live record `pa` of `addr` that the caller already holds.
     [[gnu::always_inline]] inline bool has_storage(const evmc::address& addr, const Account& pa) const noexcept {
-        // Only blob records carry inline slots; overlay records use overflow_slots_.
-        if (pa.slot_count > 0) return true;
+        // SOUNDNESS-CRITICAL: decides EIP-7610 create collisions, by the storage root and never by the
+        // witness slots: a zero slot is what an absent key holds, and the collision check reads no slot,
+        // so the witness need not carry any. A pre-state record's root is the one its account leaf
+        // commits to, which check_root binds; a created or revived record's is the empty root. Only code
+        // running at the address clears the storage under a non-empty root, and that leaves the account
+        // code or a nonce, a collision either way, until it is destructed. The root of an (8-aligned)
+        // record is compared by words: with strict alignment it would be copied out byte by byte first.
+        if (!eq_hash32(std::assume_aligned<8>(pa.storage_root), kEmptyRoot.bytes)) return true;
+        // Under the empty root, what the block has written: into a witness slot, which check_root binds
+        // to a zero initial value, or into overflow_slots_, which holds no zero.
+        for (const Slot& slot : slots_for(pa)) {
+            if (!evmc::is_zero(std::bit_cast<evmc::bytes32>(slot.current))) return true;
+        }
         if (auto it = overflow_slots_.find(addr); it != overflow_slots_.end() && !it->second.empty()) return true;
         return false;
     }
@@ -320,6 +349,7 @@ class DirectState : public BlockState {
     }
 
     const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept { return created_accounts_; }
+    std::span<const WipedStorage> wiped_storage() const noexcept { return wiped_storage_; }
 #if USE_HASH_KEY
     const std::vector<std::unique_ptr<Account>>& recovered_accounts() const noexcept { return recovered_accounts_; }
 
