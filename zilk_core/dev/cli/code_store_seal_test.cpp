@@ -417,7 +417,10 @@ TEST_CASE("code store seal: forged layouts are not padded", "[state_zz][code_sto
         w.repoint(a, f);
         const auto before = outside_account_map(w);
         DirectState ds{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
-        REQUIRE(ds.sanitize());
+        // The landed stack's tiling check (mphf_entries_tile in sanitize()) rejects an entry that
+        // overlaps another before the sealing walk ever sees it: the forgery is refused outright,
+        // so it is never padded and nothing is written.
+        CHECK_FALSE(ds.sanitize());
         CHECK(outside_account_map(w) == before);
         CHECK_FALSE(analyzed_in_place(ByteView{w.data() + f + 40, inner.size()}));
         for (const auto off : offs) CHECK_FALSE(analyzed_in_place(w.payload(off)));
@@ -436,7 +439,9 @@ TEST_CASE("code store seal: forged layouts are not padded", "[state_zz][code_sto
         w.repoint(a, f);
         const auto before = outside_account_map(w);
         DirectState ds{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
-        REQUIRE(ds.sanitize());
+        // Rejected by the tiling check, as above: the entry across the tail is an overlap, so
+        // sanitize() refuses the bundle before hashing or sealing anything.
+        CHECK_FALSE(ds.sanitize());
         CHECK(outside_account_map(w) == before);
         CHECK(keccak_bytes(ByteView{w.data() + f + 40, plen}) == h);
         for (const auto off : offs) CHECK_FALSE(analyzed_in_place(w.payload(off)));
