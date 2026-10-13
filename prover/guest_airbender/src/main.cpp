@@ -23,12 +23,15 @@ int main()
         sys_println("[state_transition] run FAILED");
         airbender::finish_error();
     }
+    // A skipped run (an MFBD with no bundles, an EEST test on an unknown network or with a block
+    // over the RLP size limit) validated nothing: end it at finish_error, so that it can neither
+    // be proven nor pass as a success with the sentinel as its gas.
     if (result == StateTransition::kRunSkipped) {
         sys_println("[state_transition] run skipped");
-    } else {
-        std::string msg = "[state_transition] run successful, gas used: " + std::to_string(result);
-        sys_println(msg.c_str());
+        airbender::finish_error();
     }
+    std::string msg = "[state_transition] run successful, gas used: " + std::to_string(result);
+    sys_println(msg.c_str());
 
     uint32_t out[8] = {static_cast<uint32_t>(result), static_cast<uint32_t>(result >> 32), 0, 0, 0, 0, 0, 0};
     airbender::finish_success(out);

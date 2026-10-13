@@ -100,7 +100,8 @@ run_block() {
         echo "FAIL $block_num TIMEOUT"
     elif [[ $rc -ne 0 ]]; then
         echo "FAIL $block_num rc=$rc"
-    elif echo "$output" | grep -q "run FAILED\|reached_end=false"; then
+    elif echo "$output" | grep -q "run FAILED" || ! echo "$output" | grep -q "^Executed block "; then
+        # execute prints "Executed block" only for a run that ended at the guest's exit point.
         echo "FAIL $block_num guest-failure"
     fi
 }

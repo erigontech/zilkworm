@@ -204,6 +204,7 @@ class Transaction : public UnsignedTransaction {
     // cached value for hash if already computed
     mutable evmc::bytes32 cached_hash_;
     mutable ResettableOnceFlag hash_computed_;
+
 };
 
 class Transaction2 : public UnsignedTransaction2 {

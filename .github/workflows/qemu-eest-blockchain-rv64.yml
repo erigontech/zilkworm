@@ -3,6 +3,8 @@ name: Qemu EESTs on RV64IM
 on:
   push:
     branches: [master, main, release/*]
+  pull_request:
+    branches: [master, main, release/*]
   schedule:
     - cron: "0 0 */3 * *" # Run every 3 days at midnight UTC
   workflow_dispatch:
