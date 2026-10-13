@@ -93,7 +93,7 @@ RUN curl -fsSL -o /tmp/cuda-keyring.deb \
 # RISC-V bare-metal toolchain (xpack riscv-none-elf-gcc)
 RUN --mount=type=cache,target=/root/.npm \
     npm install --location=global xpm@latest \
-    && xpm install @xpack-dev-tools/riscv-none-elf-gcc@latest --global --verbose
+    && xpm install @xpack-dev-tools/riscv-none-elf-gcc@15.2.0-1.1 --global --verbose
 
 RUN set -e; \
     version_dir="$(ls -1d /root/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/*/ | head -1)"; \
