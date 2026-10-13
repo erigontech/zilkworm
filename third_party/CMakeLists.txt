@@ -125,6 +125,21 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1 AND NOT SP1TURBO)
   target_compile_options(evmone PRIVATE -Werror=strict-aliasing -Wstrict-aliasing=1)
 endif()
 
+# blst.h gives blst's field elements and points uint64_t limbs, while libblst, built for the guest
+# without assembly (__BLST_NO_ASM__), reads and writes the same objects as unsigned int limbs: two
+# views that LTO merges and whose types never alias. bls.cpp and kzg.cpp copy blst objects in C++
+# and pass them to blst functions, some of which only load (the is-infinity and is-one tests); GCC
+# may drop such a copy as dead when one of those is its only reader, as reproducers built with the
+# guest's compiler, flags and libblst show. The guest compiles correctly only because a call that
+# GCC takes to read all memory always comes in between. Without strict aliasing for these two files
+# (which turns the guard above off for them; they have no word casts), that no longer matters.
+if(AIRBENDER)
+  set_source_files_properties(
+    evmone/lib/evmone_precompiles/bls.cpp evmone/lib/evmone_precompiles/kzg.cpp
+    PROPERTIES COMPILE_OPTIONS -fno-strict-aliasing
+  )
+endif()
+
 if(SILKWORM_CORE_USE_ABSEIL)
   # Propagate SILKWORM_CORE_USE_ABSEIL to allow using Silkworm's preferred FlatHashMap.
   find_package(absl REQUIRED)
