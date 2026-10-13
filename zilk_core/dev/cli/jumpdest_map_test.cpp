@@ -34,7 +34,7 @@ std::vector<bool> reference_jumpdests(const std::vector<uint8_t>& code) {
         if (op == kJumpdest)
             valid[i] = true;
         else if (op >= kPush1 && op <= kPush32)
-            i += op - kPush1 + 1;
+            i += static_cast<size_t>(op - kPush1) + 1;
     }
     return valid;
 }
