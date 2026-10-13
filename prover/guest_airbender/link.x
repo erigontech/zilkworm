@@ -79,6 +79,41 @@ SECTIONS
   {
     _sirodata = LOADADDR(.rodata);
     _srodata = .;
+
+    /* The gp window. ld rewrites an auipc+addi/lw/sw pair to a single gp-relative addi/lw/sw
+       when the target lies within the reach of gp's 12-bit offset, less this output section's
+       alignment (here 256, from the keccak buffer) and the object's size. The objects with the
+       most executed address formations are gathered on both sides of __global_pointer$; below
+       it the farthest come first. */
+    *(.rodata._ZN8silkworm10kEmptyHashE)
+    *(.rodata._ZN6evmone6crypto9secp256k112_GLOBAL__N_1L6FP_ONEE)
+    *(.rodata._ZN6evmone6crypto5bn2549Fq6Config3ksiE)
+    *(.rodata._ZZNKSt8__detail20_Prime_rehash_policy11_M_next_bktEjE10__fast_bkt)
+    *(.rodata._ZN6evmone6crypto9secp256k15Curve2X1E .rodata._ZN6evmone6crypto9secp256k15Curve2X2E)
+    *(.rodata._ZN6evmone6crypto9secp256k15Curve2Y2E .rodata._ZN6evmone6crypto9secp256k15Curve8MINUS_Y1E)
+    *(.rodata.*secp256k1*L4wnafILj5EaEEjPT0_PKmE8DEBRUIJN)
+    *(.rodata.*decomposeINS0_9secp256k15Curve*E3DET .rodata.*decomposeINS0_9secp256k15Curve*E12BARRETT_M_LO)
+    *(.rodata._ZZN4evmc4Host13get_interfaceEvE9interface)
+    *(.bss._ZZN8silkworm6endian14to_big_compactERKN4intx4uintILj256EEEE7full_be)
+    *(.rodata._bls_np_hi)
+    *(.rodata.*decode_node*12kAllHashLens)
+    *(.rodata.memset_zeros)
+    *(.sbss._ZZN8silkworm6endian14to_big_compactEyE7full_be)
+    *(.sbss.allocated_bytes)
+    *(.rodata._ZN6evmone6crypto3ecc12FieldElementINS0_9secp256k15Curve6FrSpecEE2FpE)
+    *(.rodata._ZN4intx8internal5div3214clz_byte_tableE)
+    *(.rodata.__clz_tab)
+    . = ALIGN(256);
+    __global_pointer$ = .;
+    *(.bss.buf)
+    *(.rodata._ZN6evmone6crypto3ecc12FieldElementINS0_9secp256k15Curve6FpSpecEE2FpE)
+    *(.rodata.*dispatch_cgoto*11push1_table)
+    *(.rodata._ZN6evmone6crypto3ecc12FieldElementINS0_5bn2545Curve6FpSpecEE2FpE)
+    *(.rodata._bls_p_lo)
+    *(.rodata._bls_np_lo)
+    *(.rodata._bls_p_hi)
+    ASSERT(. <= __global_pointer$ + 2048 - 256, "the gp window overflows above gp");
+
     *(.srodata .srodata.*);
     *(.rodata .rodata.*);
 
@@ -118,8 +153,6 @@ SECTIONS
   {
     _sidata = LOADADDR(.data);
     _sdata = .;
-    /* Must be called __global_pointer$ for linker relaxations to work. */
-    PROVIDE(__global_pointer$ = . + 0x800);
     *(.sdata .sdata.* .sdata2 .sdata2.*);
     *(.data .data.*);
     /* GOT entries – some pre-built libraries are compiled with -fPIC */

@@ -15,6 +15,7 @@ add_executable(z6m_guest
     src/airbender_runtime.cpp
     src/simple_allocator.cpp
     src/mem_builtins.c
+    src/hashtable_policy.cpp
     src/runtime_stubs.c
     src/start.S
 )
@@ -68,6 +69,11 @@ set_source_files_properties(src/mem_builtins.c PROPERTIES
     COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto"
 )
 
+# src/hashtable_policy.cpp defines the __wrap_ target of the --wrap below. Like mem_builtins.c it is
+# compiled without LTO, so the link-time renaming applies to an ordinary object, and its code lands
+# next to mem_builtins.c, within jal range of the LTO code that calls it.
+set_source_files_properties(src/hashtable_policy.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
+
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
 target_compile_options(z6m_guest PRIVATE
     # -ffreestanding
@@ -90,6 +96,9 @@ target_link_options(z6m_guest PRIVATE
     -Wl,-T,${LINKER_SCRIPT}
     -Wl,-e,_start
     -Wl,--gc-sections
+    # libstdc++'s unordered-container growth check computes in double, soft-float on rv32im;
+    # src/hashtable_policy.cpp answers it in integers for the default load factor.
+    -Wl,--wrap=_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEjjj
 )
 
 # Link libraries inside --start-group/--end-group for circular dependency resolution

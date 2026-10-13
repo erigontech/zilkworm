@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "include/airbender_csr.hpp"
+#include "include/airbender_input.hpp"
 
 int main()
 {

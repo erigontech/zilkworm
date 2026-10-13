@@ -27,47 +27,6 @@ inline uint32_t csr_read_word() {
     return out;
 }
 
-// --- Input reading ---
-
-/// Read input blob from CSR non-determinism oracle.
-/// Protocol: first word = byte count, then ceil(n/4) LE words.
-inline std::pair<uint8_t*, size_t> read_input_from_csr()
-{
-    uint32_t num_bytes = csr_read_word();
-    uint8_t* buf = static_cast<uint8_t*>(::operator new(num_bytes));
-    // The words go through a named may_alias type (auto would drop the attribute): the guest reads
-    // the witness back through other types (an account's uint64_t nonce and bool flags, an MPHF's
-    // uint64_t seeds), which plain uint32_t stores need not be ordered against.
-    typedef uint32_t __attribute__((may_alias)) w32;
-    w32* const dst = reinterpret_cast<w32*>(buf);
-
-    // Blocks of 64 words: the copy is a CSR read and a store per word, so -funroll-loops's 8-word
-    // body spent a quarter more on the loop counter and branch (2.25 instructions a word, for the
-    // multi-megabyte witness); unrolled by 64 it is 2.03.
-    size_t full_words = num_bytes / 4;
-    size_t i = 0;
-    for (; i + 64 <= full_words; i += 64)
-    {
-#pragma GCC unroll 64
-        for (size_t k = 0; k < 64; ++k)
-            dst[i + k] = csr_read_word();
-    }
-    for (; i < full_words; ++i)
-        dst[i] = csr_read_word();
-
-    size_t written = full_words * 4;
-    if (written < num_bytes) {
-        uint32_t word = csr_read_word();
-        uint8_t* tail = buf + written;
-        while (written < num_bytes) {
-            *tail++ = static_cast<uint8_t>(word & 0xFFu);
-            word >>= 8;
-            ++written;
-        }
-    }
-    return {buf, num_bytes};
-}
-
 // --- UART output (QuasiUART protocol) ---
 
 namespace detail {
