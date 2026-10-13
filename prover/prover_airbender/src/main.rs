@@ -30,6 +30,11 @@ const DEFAULT_CYCLES: usize = 5_000_000_000;
 /// Default RAM bound in bytes (1 GB).
 const DEFAULT_RAM_BOUND: usize = 1 << 30;
 
+/// The gas used that the guest's finish_success leaves in x10 (low word) and x11 (high word).
+pub(crate) fn guest_gas_used(x10: u32, x11: u32) -> u64 {
+    (x11 as u64) << 32 | x10 as u64
+}
+
 /// Map the --security bits value to the airbender SecurityModel.
 fn security_model(bits: u32) -> Result<verifier_common::SecurityModel> {
     match bits {
@@ -241,6 +246,11 @@ struct ExecutionLog {
     exec_time_secs: f64,
     freq_cycles_per_sec: u64,
     reached_end: bool,
+    /// The run parked at the guest's exit point (finish_success). Every other way the guest
+    /// stops (finish_error, fatal(), abort, the trap handler) is also a self-loop, which the
+    /// VM reports as reached_end too.
+    succeeded: bool,
+    final_pc: u32,
     input_path: PathBuf,
 }
 
@@ -367,8 +377,9 @@ fn execute_block(
     let text_path = format!("{}.text", guest_base.display());
     let elf_path = format!("{}.elf", guest_base.display());
 
-    let (_, binary_u32) = execution_utils::setups::read_binary(Path::new(&bin_path));
+    let (binary_bytes, binary_u32) = execution_utils::setups::read_binary(Path::new(&bin_path));
     let (_, text_u32) = execution_utils::setups::read_binary(Path::new(&text_path));
+    let exit_pc = execution_utils::find_binary_exit_point(&binary_bytes);
 
     let instructions = preprocess_bytecode::<FullMachineDecoderConfig>(&text_u32);
     let tape = SimpleTape::new(&instructions);
@@ -423,8 +434,8 @@ fn execute_block(
         0
     };
 
-    // The guest stores gas_used in register a0 (x10) via finish_success.
-    let gas_used = state.registers[10].value as u64;
+    // The guest stores gas_used in registers a0 and a1 (x10, x11) via finish_success.
+    let gas_used = guest_gas_used(state.registers[10].value, state.registers[11].value);
 
     Ok(ExecutionLog {
         block_number,
@@ -433,6 +444,8 @@ fn execute_block(
         exec_time_secs: wall_elapsed.as_secs_f64(),
         freq_cycles_per_sec: freq,
         reached_end: finished,
+        succeeded: finished && state.pc == exit_pc,
+        final_pc: state.pc,
         input_path: input_path.to_path_buf(),
     })
 }
@@ -450,7 +463,7 @@ fn persist_execution_log(log_file: &Path, log: &ExecutionLog) -> Result<()> {
     let timestamp = format_timestamp();
     writeln!(
         &mut file,
-        "{} block={} gas_used={} cycles={} time={:.2}s freq={} reached_end={}  input={}",
+        "{} block={} gas_used={} cycles={} time={:.2}s freq={} reached_end={} ok={}  input={}",
         timestamp,
         log.block_number,
         log.gas_used,
@@ -458,6 +471,7 @@ fn persist_execution_log(log_file: &Path, log: &ExecutionLog) -> Result<()> {
         log.exec_time_secs,
         log.freq_cycles_per_sec,
         log.reached_end,
+        log.succeeded,
         log.input_path.display(),
     )?;
     Ok(())
@@ -515,7 +529,7 @@ fn run_test_service(
         match execute_block(guest_base, &input_path, block_number, max_cycles, false, None) {
             Ok(log) => {
                 println!(
-                    "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={}",
+                    "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={} ok={}",
                     format_timestamp(),
                     log.block_number,
                     log.gas_used,
@@ -523,6 +537,7 @@ fn run_test_service(
                     log.exec_time_secs,
                     log.freq_cycles_per_sec as f64 / 1e9,
                     log.reached_end,
+                    log.succeeded,
                 );
                 if let Err(e) = persist_execution_log(&log_file, &log) {
                     eprintln!("warning: failed to write log: {}", e);
@@ -643,6 +658,18 @@ async fn main() -> Result<()> {
                 flamegraph.as_deref(),
             )?;
 
+            let log_file = data_dir.join("executionLogs.log");
+            persist_execution_log(&log_file, &log)?;
+
+            if !log.succeeded {
+                bail!(
+                    "block {} did not finish successfully: final_pc=0x{:08x} reached_end={} cycles={}",
+                    log.block_number,
+                    log.final_pc,
+                    log.reached_end,
+                    log.cycle_count,
+                );
+            }
             println!(
                 "Executed block {} (gas_used={}, cycles={}, time={:.2}s, freq={:.2} GHz, reached_end={})",
                 log.block_number,
@@ -652,9 +679,6 @@ async fn main() -> Result<()> {
                 log.freq_cycles_per_sec as f64 / 1e9,
                 log.reached_end,
             );
-
-            let log_file = data_dir.join("executionLogs.log");
-            persist_execution_log(&log_file, &log)?;
         }
 
         Some(Command::Bench {

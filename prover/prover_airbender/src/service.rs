@@ -577,7 +577,7 @@ impl AirbenderService {
             / riscv_transpiler::common_constants::TIMESTAMP_STEP;
 
         Ok(VmRunOutcome {
-            gas_used: state.registers[10].value as u64,
+            gas_used: crate::guest_gas_used(state.registers[10].value, state.registers[11].value),
             cycle_count: cycles,
             reached_end: finished,
             final_pc: state.pc,
@@ -673,7 +673,10 @@ impl AirbenderService {
                 &block_dir.join("proof.bin"),
             );
 
-            let gas_used = proof.register_final_values[10].value as u64;
+            let gas_used = crate::guest_gas_used(
+                proof.register_final_values[10].value,
+                proof.register_final_values[11].value,
+            );
             let (family_proofs, init_proofs, delegation_proofs) = proof.get_proof_counts();
             let total_proofs = family_proofs + init_proofs + delegation_proofs;
 
