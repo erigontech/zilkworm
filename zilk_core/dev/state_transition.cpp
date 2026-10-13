@@ -433,6 +433,13 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
+        // The block read zero for the hash of an ancestor the witness's headers do not lead to, and no root
+        // tells that apart from the hash.
+        if (bundle.direct.ancestor_missing()) [[unlikely]] {
+            sys_println(("ERROR: block " + std::to_string(i) + " read the hash of an ancestor the witness does not hold").c_str());
+            failed_ = true;
+            return {0, false};
+        }
         const evmc_revision rev = cfg_it->second.revision(block.header.number, block.header.timestamp);
         const bool root_ok = first_root_check
                                  ? check_root(bundle.direct, block.header, rev)

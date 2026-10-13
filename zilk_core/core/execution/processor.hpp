@@ -48,7 +48,7 @@ class ExecutionProcessor {
     uint64_t available_gas() const noexcept;
 
   public:
-    //! Look up an ancestor block hash via the witness-side header store.
+    //! The hash of an ancestor of the block, see DirectState::get_block_hash().
     //! Public so the file-local BlockHashes adapter (evmone callback) can forward.
     evmc::bytes32 get_block_hash_for_evm(int64_t block_num) const noexcept;
 
