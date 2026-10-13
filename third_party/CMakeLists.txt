@@ -27,7 +27,9 @@ endif()
 if(SILKWORM_WASM_API)
   add_compile_definitions(EVMC_LOADER_MOCK)
 endif()
-add_subdirectory(evmone/evmc)
+# Its headers are a system directory: evmc::Host::to_context() casts the host to the opaque
+# evmc_host_context, which -Wstrict-aliasing=1 (below) would flag in every file that includes it.
+add_subdirectory(evmone/evmc SYSTEM)
 
 add_library(
   evmone
@@ -105,6 +107,22 @@ else()
             $<$<CXX_COMPILER_ID:GNU>:-Wno-attributes>
             $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>
   )
+endif()
+
+# The rv32 paths of evmone and intx read and write the 32-bit words of uint256 values (whose words
+# are uint64_t) and of other objects. Through plain uint32_t, GCC's type-based alias analysis takes
+# those accesses not to touch the objects' own, and may drop the stores or move the loads past
+# them: a profile-guided guest dropped the stores of a big-endian uint256 load that way. The words
+# go through named may_alias types instead, and -Wstrict-aliasing=1 rejects any cast of a typed
+# pointer to a word pointer that may not alias it, in the guest's paths and in the ones the native
+# test build compiles with EVMONE_RV32_DISPATCH_TEST. It is active where strict aliasing is (-O2
+# and up). It cannot see a cast from void*, a byte pointer or a struct of bytes (evmc's address and
+# bytes32), nor a may_alias typedef lost to auto (deduction drops the attribute), so those still
+# need care. The SP1 paths pass words to their syscalls through size_t pointers.
+# -Werror=strict-aliasing also turns the warning on, at the default level 3, which misses these
+# casts: the level has to come after it.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1 AND NOT SP1TURBO)
+  target_compile_options(evmone PRIVATE -Werror=strict-aliasing -Wstrict-aliasing=1)
 endif()
 
 if(SILKWORM_CORE_USE_ABSEIL)
