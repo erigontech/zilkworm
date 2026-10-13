@@ -88,6 +88,7 @@ add_subdirectory(zilk_core)
 if(BUILD_TESTING)
   add_executable(zilkworm.tests
     zilk_core/core/execution/div_mod_frontend_test.cpp
+    zilk_core/core/execution/precompile_ecrec_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/transaction_rlp_view_test.cpp
