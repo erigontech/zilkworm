@@ -91,6 +91,7 @@ if(BUILD_TESTING)
     zilk_core/core/execution/precompile_ecrec_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
+    zilk_core/core/types/receipt_test.cpp
     zilk_core/core/types/transaction_rlp_view_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
     zilk_core/core/trie_zz/grid_mpt_absent_read_test.cpp
