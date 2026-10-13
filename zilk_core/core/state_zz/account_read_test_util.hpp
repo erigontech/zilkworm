@@ -456,6 +456,9 @@ struct MirrorRoot {
     /// `created_accounts()` — the condition `check_root` rejects with
     /// "Created and existing hashes clash".
     bool clashed{false};
+    /// True iff `check_root` rejects whatever the header's state root: a storage or the account
+    /// trie walk failed (`GridMPT::failed()`), and `root` means nothing.
+    bool rejected{false};
 };
 
 /// Reproduces `check_root`'s per-account STORAGE root: a `GridMPT` ANCHORED at the record's
@@ -471,10 +474,12 @@ struct MirrorRoot {
 /// lets a test derive the root the guest will actually compute.
 ///
 /// `missing_out` accumulates `missing_count()` across accounts, so a storage node absent from
-/// the node store surfaces in `MirrorRoot::missing` instead of hiding behind a matching root.
+/// the node store surfaces in `MirrorRoot::missing` instead of hiding behind a matching root;
+/// `rejected_out` is set when the walk fails, which `check_root` rejects.
 inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, Account& pa,
                                    bool has_existing, bool acc_modified,
-                                   GridMPT<true>& storage_trie, unsigned& missing_out) {
+                                   GridMPT<true>& storage_trie, unsigned& missing_out,
+                                   bool& rejected_out) {
     std::span<const Slot> existing_slots;
     if (has_existing && pa.slot_count > 0) {
         existing_slots = ds.slots_for(pa).first(pa.slot_count);
@@ -512,16 +517,18 @@ inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, A
     storage_trie.reset(storage_root);
     const bytes32 out = storage_trie.calc_root_from_updates({ups.data(), ups.size()});
     missing_out += storage_trie.missing_count();
+    rejected_out = rejected_out || storage_trie.failed();
     return out;
 }
 
 /// Recomputes the account root exactly the way `StateTransition::check_root` does,
-/// with the single difference that a created/existing hash clash is recorded instead of
-/// aborting. Update-for-update faithful: same merge order over the two sorted sequences,
-/// same `ext_initial` (the record's own `acc_rlp_buf`), same read-only elision
-/// (`current_len == 0` when `!pa->modified`), same `0x80` deletion marker, anchored at
-/// the same `prev_root`. `missing` is `GridMPT::missing_count()` summed over the account trie
-/// and every per-account storage trie, and must be 0 for the derived root to mean anything.
+/// with the single difference that a created/existing hash clash, or a trie walk `check_root`
+/// rejects (`rejected`), is recorded instead of aborting. Update-for-update faithful: same
+/// merge order over the two sorted sequences, same `ext_initial` (the record's own
+/// `acc_rlp_buf`), same read-only elision (`current_len == 0` when `!pa->modified`), same
+/// `0x80` deletion marker, anchored at the same `prev_root`. `missing` is
+/// `GridMPT::missing_count()` summed over the account trie and every per-account storage trie,
+/// and must be 0 for the derived root to mean anything.
 ///
 /// Storage roots come from `mirror_storage_root`, i.e. the anchored per-account storage
 /// `GridMPT` — computed for every non-deleted account with slots even when the account is
@@ -587,8 +594,8 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
         const bool acc_modified = has_existing ? pa->modified : true;
 
         // Before the account update is emplaced, exactly as in check_root.
-        const bytes32 storage_root = mirror_storage_root(ds, addr, *pa, has_existing,
-                                                        acc_modified, storage_trie, out.missing);
+        const bytes32 storage_root = mirror_storage_root(ds, addr, *pa, has_existing, acc_modified,
+                                                        storage_trie, out.missing, out.rejected);
 
         bool readonly = false;
         if (has_existing) {
@@ -610,6 +617,7 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
     GridMPT<true> acc_trie{ds, prev_root};
     out.root = acc_trie.calc_root_from_updates({ups.data(), ups.size()});
     out.missing += acc_trie.missing_count();
+    out.rejected = out.rejected || acc_trie.failed();
     return out;
 }
 
