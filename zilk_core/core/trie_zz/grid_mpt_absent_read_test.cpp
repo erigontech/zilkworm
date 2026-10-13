@@ -125,9 +125,9 @@ bytes32 walk(const Bytes32Map& pre, std::vector<Update> updates, bool valid = tr
     const bytes32 got = trie.calc_root_from_updates({flat.data(), flat.size()});
     if (valid) {
         CHECK(trie.missing_count() == 0);
-#ifndef NDEBUG
         CHECK_FALSE(trie.failed());
-#endif
+    } else {
+        CHECK(trie.failed());
     }
     return got;
 }
