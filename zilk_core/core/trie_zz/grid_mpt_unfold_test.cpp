@@ -111,6 +111,21 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized leaf value", "[trie][gridmp
     CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
 }
 
+// A list header with 4 length bytes or more claims a payload no trie node has, and its length would
+// not fit the 3-byte decode.
+TEST_CASE("unfold_node_from_rlp rejects a node with 4 or more length bytes", "[trie][gridmpt][unfold]") {
+    std::vector<uint8_t> prestate =
+        DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
+    DirectState direct{std::span<uint8_t>{prestate}};
+    GridMPT<false> trie{direct, silkworm::kEmptyRoot};
+
+    for (const uint8_t first : {uint8_t{0xFB}, uint8_t{0xFF}}) {
+        Bytes node{first};
+        node.append(40, 0x00);
+        CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
+    }
+}
+
 // The state and storage tries have fixed-length keys, so a branch never carries a value.
 TEST_CASE("unfold_node_from_rlp rejects a branch with a value", "[trie][gridmpt][unfold]") {
     std::vector<uint8_t> prestate =
