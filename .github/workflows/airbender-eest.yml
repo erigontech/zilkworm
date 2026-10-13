@@ -31,7 +31,7 @@ jobs:
         run: |
           apt update
           apt install -y \
-            build-essential cmake ninja-build \
+            build-essential cmake ninja-build pkg-config libssl-dev \
             git git-lfs \
             python3 \
             nodejs npm \
