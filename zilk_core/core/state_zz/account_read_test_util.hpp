@@ -39,8 +39,8 @@
 //   which is NOT interchangeable with `DirectState::account_storage_root` once a
 //   bundle is incomplete — see the comment on `mirror_storage_root`.
 // * The created/existing clash guard lives in `StateTransition::check_root`, which runs
-//   only for the FIRST block of a bundle; `check_root_new_block` (subsequent blocks) has
-//   no such guard. Every bundle these tests build therefore carries a single block.
+//   only for the FIRST block of a bundle (`check_root_new_block` repeats it for the later
+//   ones). Every bundle the account-read tests build carries a single block.
 //
 // Running the suite
 // -----------------

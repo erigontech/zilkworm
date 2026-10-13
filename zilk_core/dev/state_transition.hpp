@@ -52,7 +52,7 @@ class StateTransition {
 
     bool check_root(DirectState& state, BlockHeader& header, evmc_revision rev);
 
-    bool check_root_new_block(DirectState& state, BlockHeader& header, evmc_revision rev);
+    bool check_root_new_block(DirectState& state, BlockHeader& header);
 
   private:
     uint64_t run_ejsn();
