@@ -204,8 +204,8 @@ TEST_CASE("a mark of an entry is not one of an offset inside it", "[state_zz][di
     // A code store whose one slot points 1 or 2 bytes into an entry: such an offset has the bit index
     // of the entry's own. The bytes at +shift are the upper bytes of the entry's length, then the
     // first bytes of its key (cleared here), so a payload of 9000 (or 2.1M) bytes makes them a length
-    // of 35 (or 32) bytes and the layout check lets the offset by. What sits there is no entry: its
-    // hash is no key.
+    // of 35 (or 32) bytes, inside the data section. The layout check rejects the offset as not
+    // 8-aligned, before any mark is read.
     for (const auto& [shift, size] : {std::pair<uint32_t, size_t>{1, 9000}, {2, 2100000}}) {
         DYNAMIC_SECTION("offset 8 + " << shift) {
             auto w = make_witness({code_of(size, 5)});
@@ -221,15 +221,18 @@ TEST_CASE("a mark of an entry is not one of an offset inside it", "[state_zz][di
             g_code_store_verified = m.handshake(w);
             CHECK(sanitize(w));
 
-            // Moved to the offset inside it, which only that is visited, it is hashed and fails.
+            // Moved to the offset inside it, the slot no longer passes the layout check.
+            const auto* meta = reinterpret_cast<const PreStateMeta*>(w.blob.data());
+            REQUIRE(validate_mphf<32>(w.blob, meta->code_store_offset, meta->code_store_size,
+                                      kMphfCodeStoreMagic));
             const uint32_t inside = static_cast<uint32_t>(entry + shift);
             std::memcpy(w.blob.data() + w.slot_field_offsets[0], &inside, 4);
             uint64_t len;
             std::memcpy(&len, w.data + inside, 8);
             REQUIRE(len >= 32);
             REQUIRE(len <= w.data_size - inside - 8);
-            g_code_store_verified = m.handshake(w);
-            CHECK_FALSE(sanitize(w));
+            CHECK_FALSE(validate_mphf<32>(w.blob, meta->code_store_offset, meta->code_store_size,
+                                          kMphfCodeStoreMagic));
         }
     }
 }
