@@ -524,3 +524,111 @@ TEST_CASE("check_root rejects an account the witness invents", "[witness][bindin
         expect_accepted(run_guest(honest, with_sender.blob, with_sender.nodestore), honest);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The value a slot executes with
+// ---------------------------------------------------------------------------
+// A witness slot has an initial and a current value. check_root binds only the initial one to the
+// storage root, so execution has to start from it too: a current value the witness sets apart used
+// to be what the block read, and what a modified account then carried into the post-state.
+
+namespace {
+
+/// Sets the current value of slot `key` of `addr` in `blob`, leaving its initial value as it is.
+void forge_slot_current(std::vector<uint8_t>& blob, const evmc::address& addr, const evmc::bytes32& key,
+                        const evmc::bytes32& value) {
+    DirectState ds{std::span<uint8_t>{blob}};
+    Account* pa = ds.find_pre_account_unchecked(addr);
+    REQUIRE(pa != nullptr);
+    for (Slot& slot : ds.slots_for(*pa)) {
+        if (std::memcmp(slot.key, key.bytes, 32) == 0) {
+            std::memcpy(slot.current, value.bytes, 32);
+            return;
+        }
+    }
+    FAIL("slot not in the witness");
+}
+
+/// A witness whose slot storage[1] of kHolder is 5 by its initial value and 0x77 by its current one,
+/// and the blocks sealed for it: by a producer that executed with 0x77, and by an honest one.
+struct ForgedCurrent {
+    Prestate ps;
+    std::vector<uint8_t> blob;
+    Sealed forged;
+    Sealed honest;
+};
+
+/// `post(v)` is the post-state if the block read v from storage[1] of kHolder.
+template <class Post>
+ForgedCurrent forge_current(const Tx& t, const std::vector<AcctSpec>& state, Post post) {
+    ForgedCurrent f{build_prestate(state), {}, {}, {}};
+    f.blob = f.ps.blob;
+    forge_slot_current(f.blob, kHolder, word(1), word(0x77));
+
+    // What executing with 0x77 yields: the gas and receipts of a run whose witness holds 0x77, and the
+    // root the forged witness used to be checked against, that of the post-state with 0x77 read.
+    std::vector<AcctSpec> with_forged = state;
+    spec_of(with_forged, kHolder).storage = {{word(1), word(0x77)}};
+    f.forged = seal(t, f.ps.prev_root, witness_blob(state, with_forged), f.ps.nodestore);
+    f.forged.sr.post.root = build_prestate(post(word(0x77))).prev_root;
+
+    f.honest = seal(t, f.ps.prev_root, f.ps.blob, f.ps.nodestore);
+    REQUIRE(build_prestate(post(word(5))).prev_root == f.honest.sr.post.root);
+    return f;
+}
+
+ForgedCurrent forge_current_read_through_call(const Tx& t) {
+    return forge_current(t, read_through_call(t, word(1), {{word(1), word(5)}}), [&](const evmc::bytes32& v) {
+        std::vector<AcctSpec> post = read_through_call(t, word(1), {{word(1), word(5)}});
+        spec_of(post, t.sender).nonce = 1;
+        spec_of(post, kCaller).storage = {{word(0), v}, {word(1), word(1)}};
+        return post;
+    });
+}
+
+// The holder copies storage[1] to storage[kCopyTarget]. A current value apart from the initial one
+// used to be written back as storage[1]'s new value too.
+ForgedCurrent forge_current_copied_by_holder(const Tx& t) {
+    const auto holder = [&](Slots storage) {
+        return std::vector<AcctSpec>{
+            sender_of(t),
+            AcctSpec{.addr = kHolder, .nonce = 1, .code = copy_slot(word(1), word(kCopyTarget)),
+                     .storage = std::move(storage)},
+        };
+    };
+    return forge_current(t, holder({{word(1), word(5)}}), [&](const evmc::bytes32& v) {
+        std::vector<AcctSpec> post = holder({{word(1), v}, {word(kCopyTarget), v}});
+        spec_of(post, t.sender).nonce = 1;
+        return post;
+    });
+}
+
+}  // namespace
+
+TEST_CASE("check_root rejects a block executed with a slot value the witness sets apart",
+          "[witness][binding][slot_current]") {
+    SECTION("an unmodified account's slot, read through a call") {
+        const Tx t = tx_to(kCaller);
+        const ForgedCurrent f = forge_current_read_through_call(t);
+        expect_rejected(run_guest(f.forged, f.blob, f.ps.nodestore), "State Root Mismatch");
+    }
+    SECTION("a slot its modified holder copies") {
+        const Tx t = tx_to(kHolder);
+        const ForgedCurrent f = forge_current_copied_by_holder(t);
+        expect_rejected(run_guest(f.forged, f.blob, f.ps.nodestore), "State Root Mismatch");
+    }
+}
+
+TEST_CASE("the guest executes a slot with the value its storage root binds",
+          "[witness][binding][slot_current]") {
+    SECTION("an unmodified account's slot, read through a call") {
+        const Tx t = tx_to(kCaller);
+        const ForgedCurrent f = forge_current_read_through_call(t);
+        expect_accepted(run_guest(f.honest, f.blob, f.ps.nodestore), f.honest);
+    }
+    SECTION("a slot its modified holder copies") {
+        const Tx t = tx_to(kHolder);
+        const ForgedCurrent f = forge_current_copied_by_holder(t);
+        expect_accepted(run_guest(f.honest, f.blob, f.ps.nodestore), f.honest);
+    }
+}
