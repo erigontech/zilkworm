@@ -92,6 +92,7 @@ if(BUILD_TESTING)
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/transaction_rlp_view_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
+    zilk_core/core/trie_zz/grid_mpt_absent_read_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
     zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp
     zilk_core/core/trie_zz/encode_branch_patch_test.cpp
