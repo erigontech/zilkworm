@@ -90,11 +90,15 @@ jobs:
           make -j"$(nproc)" eest 2>&1 | tee output.log
           exit_code=${PIPESTATUS[0]}
 
-          # A test passes only if the guest reported success (or skipped it): a run that stops at
-          # the cycle limit exits cleanly without either line.
+          # A test passes only if the guest reported success and execute exited 0, which it does
+          # only for a run that ended at the guest's exit point. A run that stops at the cycle
+          # limit prints no success line; a skipped run (unknown network, oversized block) ends
+          # at finish_error. The Makefile appends "CRASHED!" to the log of any non-zero exit.
           export LC_ALL=C
           find target/eest-logs -name '*.log' 2>/dev/null | sort > all.txt
-          grep -rlE 'run successful|run skipped' target/eest-logs/ 2>/dev/null | sort > ok.txt
+          grep -rlE 'run successful' target/eest-logs/ 2>/dev/null | sort > reported.txt
+          grep -rlE '^CRASHED! ' target/eest-logs/ 2>/dev/null | sort > crashed.txt
+          comm -23 reported.txt crashed.txt > ok.txt
           comm -23 all.txt ok.txt | sed 's#^target/eest-logs/##; s#\.log$#.json#' > failed.txt
           grep -vE '^[[:space:]]*(#|$)' eest-known-failures.txt | sort > known.txt
           comm -23 failed.txt known.txt > unexpected.txt
