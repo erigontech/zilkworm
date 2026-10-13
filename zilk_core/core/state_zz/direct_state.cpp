@@ -270,6 +270,32 @@ namespace {
         return last == 0 ? first : nullptr;
     }
 
+    /// Whether slot key `a` sorts before slot key `b` (memcmp order), the order find_slot() searches in.
+    /// Both are 8-aligned, as every slot is; with strict alignment (rv32 Airbender) they are compared a
+    /// word at a time inline, as find_slot() does, instead of by a call to memcmp.
+    [[gnu::always_inline]] inline bool key_below(const uint8_t* a, const uint8_t* b) noexcept {
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+        typedef uint32_t __attribute__((may_alias)) w32;
+        const w32* const wa = reinterpret_cast<const w32*>(a);
+        const w32* const wb = reinterpret_cast<const w32*>(b);
+        for (int i = 0; i < 8; ++i) {
+            const uint32_t x = wa[i];
+            const uint32_t y = wb[i];
+            if (x == y) continue;
+            // The first differing byte is the lowest nonzero byte of x ^ y, see find_slot().
+            const uint32_t d = x ^ y;
+            const uint32_t m = (d & 0xffu)       ? 0xffu
+                               : (d & 0xffffu)   ? 0xffffu
+                               : (d & 0xffffffu) ? 0xffffffu
+                                                 : ~uint32_t{0};
+            return (x & m) < (y & m);
+        }
+        return false;
+#else
+        return std::memcmp(a, b, 32) < 0;
+#endif
+    }
+
 }  // namespace
 
 namespace detail {
@@ -1017,10 +1043,20 @@ bool DirectState::sanitize() {
         // Execution reads a slot's current value, but check_root binds only its initial one to the
         // storage root: the block starts from that, whatever current value the witness carries. Copied
         // by words (a Slot is 8-aligned): with strict alignment a 32-byte memcpy is a call per slot.
+        //
+        // SOUNDNESS-CRITICAL: find_slot() binary-searches the slots by key, so their keys have to ascend
+        // strictly, which also rules out a key held twice. Out of order, a search can miss a slot the record
+        // holds, and the block would read zero for it, whatever value check_root binds.
         typedef uint32_t __attribute__((may_alias)) w32;
-        for (Slot& slot : slots_for(*pa)) {
-            const w32* const from = reinterpret_cast<const w32*>(slot.initial);
-            w32* const to = reinterpret_cast<w32*>(slot.current);
+        const std::span<Slot> slots = slots_for(*pa);
+        for (size_t s = 0; s < slots.size(); ++s) {
+            if (s > 0 && !key_below(slots[s - 1].key, slots[s].key)) [[unlikely]] {
+                sys_println("sanitize: witness slot keys not in ascending order");
+                acc_walk_ok = false;
+                return;
+            }
+            const w32* const from = reinterpret_cast<const w32*>(slots[s].initial);
+            w32* const to = reinterpret_cast<w32*>(slots[s].current);
             for (size_t i = 0; i < 8; ++i) to[i] = from[i];
         }
     };
