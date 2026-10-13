@@ -457,8 +457,9 @@ struct MirrorRoot {
     /// "Created and existing hashes clash".
     bool clashed{false};
     /// True iff `check_root` rejects whatever the header's state root: a storage or the account
-    /// trie walk failed (`GridMPT::failed()`), or the storage walk of an unmodified account did
-    /// not come back to its storage root; `root` then means nothing.
+    /// trie walk failed (`GridMPT::failed()`), or the storage walk of an unmodified account, or
+    /// of the wiped storage of a deleted or recreated one, did not come back to its storage root;
+    /// `root` then means nothing.
     bool rejected{false};
 };
 
@@ -523,6 +524,28 @@ inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, A
     return out;
 }
 
+/// Reproduces `check_root`'s read-only walks of the witness slots of the accounts whose storage the
+/// block wiped (`DirectState::wiped_storage`), each anchored at the storage root it was read under;
+/// `rejected_out` is set when one fails or does not come back to that root.
+inline void mirror_wiped_storage(const DirectState& ds, GridMPT<true>& storage_trie, unsigned& missing_out,
+                                 bool& rejected_out) {
+    for (const WipedStorage& wiped : ds.wiped_storage()) {
+        std::vector<TrieNodeFlat> ups;
+        ups.reserve(wiped.slots.size());
+        for (const auto& slot : wiped.slots) {
+            const auto& key = *reinterpret_cast<const bytes32*>(slot.key);
+            auto& node = ups.emplace_back(keccak_bytes32(key));
+            node.self_initial_len = static_cast<uint8_t>(silkworm::rlp::encode_into_small(
+                node.buf + 0, silkworm::zeroless_view(ByteView{slot.initial, 32})));
+        }
+        std::sort(ups.begin(), ups.end());
+        storage_trie.reset(wiped.storage_root);
+        const bytes32 out = storage_trie.calc_root_from_updates({ups.data(), ups.size()});
+        missing_out += storage_trie.missing_count();
+        rejected_out = rejected_out || storage_trie.failed() || out != wiped.storage_root;
+    }
+}
+
 /// Recomputes the account root exactly the way `StateTransition::check_root` does,
 /// with the single difference that a created/existing hash clash, or a trie walk `check_root`
 /// rejects (`rejected`), is recorded instead of aborting. Update-for-update faithful: same
@@ -535,7 +558,8 @@ inline bytes32 mirror_storage_root(DirectState& ds, const evmc::address& addr, A
 /// Storage roots come from `mirror_storage_root`, i.e. the anchored per-account storage
 /// `GridMPT` — computed for every non-deleted account with slots even when the account is
 /// read-only, exactly as `check_root` does, so the node lookups counted in `missing` are the
-/// ones the guest performs.
+/// ones the guest performs. The read-only walks of wiped storage (`mirror_wiped_storage`) come
+/// first, as in `check_root`.
 inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
     struct Created {
         bytes32 addr_hash;
@@ -557,6 +581,9 @@ inline MirrorRoot mirror_check_root(DirectState& ds, const bytes32& prev_root) {
 
     // One instance hoisted out of the walk and `reset()` per account, as check_root does.
     GridMPT<true> storage_trie{ds, silkworm::kEmptyRoot};
+
+    // Before the merge, exactly as in check_root.
+    mirror_wiped_storage(ds, storage_trie, out.missing, out.rejected);
 
     auto it_ex = ds.addr_hashes().begin();
     const auto end_ex = ds.addr_hashes().end();

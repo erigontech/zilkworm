@@ -105,6 +105,13 @@ struct CreatedCodeEntry {
     std::vector<uint8_t> bytes;
 };
 
+/// The witness slots of a pre-state account whose storage the block wiped, and the storage root of the
+/// account's pre-state leaf they have to be bound to.
+struct WipedStorage {
+    std::span<const Slot> slots;
+    evmc::bytes32 storage_root;
+};
+
 class DirectState : public BlockState {
   private:
     std::span<uint8_t> prestate_view_;
@@ -130,6 +137,10 @@ class DirectState : public BlockState {
     static_assert(std::is_same_v<FlatHashMap<evmc::address, Account>,
                                  std::unordered_map<evmc::address, Account>>);
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;
+    // Deleting an account or deploying code to it wipes its storage, so the post-state holds none of
+    // the slots the witness carried for it, yet the block can have read them first: check_root still
+    // binds them to the pre-state.
+    std::vector<WipedStorage> wiped_storage_;
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
     FlatHashSet<evmc::address> touched_;
@@ -152,6 +163,8 @@ class DirectState : public BlockState {
 
     Account* materialize_absent_account_(const evmc::address& addr) const;
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
+    // Called before the storage of `pa` is wiped, while its slots and storage root are the pre-state's.
+    void note_wiped_storage_(const Account& pa);
     void reserve_block_maps_() noexcept;
 
 #if USE_HASH_KEY
@@ -320,6 +333,7 @@ class DirectState : public BlockState {
     }
 
     const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept { return created_accounts_; }
+    std::span<const WipedStorage> wiped_storage() const noexcept { return wiped_storage_; }
 #if USE_HASH_KEY
     const std::vector<std::unique_ptr<Account>>& recovered_accounts() const noexcept { return recovered_accounts_; }
 
