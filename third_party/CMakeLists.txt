@@ -7,8 +7,9 @@
 
 include(evmone/cmake/blst.cmake)
 
+# intx is vendored inside the evmone (zvm1) submodule; no separate submodule.
 set(INTX_INSTALL TRUE)
-add_subdirectory(intx)
+add_subdirectory(evmone/third_party/intx intx)
 
 
 
