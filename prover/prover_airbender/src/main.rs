@@ -30,6 +30,12 @@ const DEFAULT_CYCLES: usize = 5_000_000_000;
 /// Default RAM bound in bytes (1 GB).
 const DEFAULT_RAM_BOUND: usize = 1 << 30;
 
+/// The guest's sentinel results (StateTransition::kRunFailure and kRunSkipped in
+/// zilk_core/dev/state_transition.hpp). Neither ends at the exit point, but an older guest
+/// binary ended a skipped run with finish_success and kRunSkipped as its output.
+pub(crate) const GUEST_RUN_FAILURE: u64 = u64::MAX;
+pub(crate) const GUEST_RUN_SKIPPED: u64 = u64::MAX - 1;
+
 /// The gas used that the guest's finish_success leaves in x10 (low word) and x11 (high word).
 pub(crate) fn guest_gas_used(x10: u32, x11: u32) -> u64 {
     (x11 as u64) << 32 | x10 as u64
@@ -775,13 +781,18 @@ async fn main() -> Result<()> {
                     "proof chain hash       = {:08x?}",
                     program_proof.recursion_chain_hash
                 );
-                if regs[8..] == unified.hash_chain {
-                    println!("CHAIN BINDING OK: output[8..16] matches setup hash chain");
-                } else if regs[..8] == unified.hash_chain {
-                    println!("CHAIN BINDING OK: output[0..8] matches setup hash chain");
-                } else {
-                    println!("WARNING: verifier output does not match setup hash chain windows");
+                // output[0..8] are the guest's x10..x17 (its own output), output[8..16] the
+                // recursion chain over the end parameters: the setups, which include the guest
+                // binary, and the final PC. Only the latter binds the proof to this guest.
+                if regs[8..] != unified.hash_chain {
+                    bail!("CHAIN BINDING FAILED: output[8..16] does not match the setup hash chain");
                 }
+                println!("CHAIN BINDING OK: output[8..16] matches setup hash chain");
+                let gas_used = guest_gas_used(regs[0], regs[1]);
+                if gas_used == GUEST_RUN_FAILURE || gas_used == GUEST_RUN_SKIPPED {
+                    bail!("proof output is the guest's failure/skip sentinel (0x{:016x})", gas_used);
+                }
+                println!("gas_used = {}", gas_used);
             }
             #[cfg(not(feature = "gpu"))]
             {
@@ -854,6 +865,30 @@ async fn main() -> Result<()> {
             }
 
             let until = until.unwrap_or(ProvingLimit::Base);
+
+            // The prover proves whatever the run did, wherever it stopped: a run that parked in
+            // finish_error (or reported a skip) would yield a proof that verify then rejects.
+            // Run it on the simulator first, as the service's preflight does.
+            if gpu {
+                let preflight =
+                    execute_block(&guest_base, &input_path, block_num, args.cycles, is_test, None)?;
+                if !preflight.succeeded {
+                    bail!(
+                        "preflight: block {} did not finish successfully (final_pc=0x{:08x} reached_end={} cycles={}); not proving",
+                        block_num,
+                        preflight.final_pc,
+                        preflight.reached_end,
+                        preflight.cycle_count,
+                    );
+                }
+                println!(
+                    "[{}] Preflight ok: block {} gas_used={} cycles={}",
+                    format_timestamp(),
+                    block_num,
+                    preflight.gas_used,
+                    preflight.cycle_count,
+                );
+            }
 
             println!(
                 "[{}] Proving block {} (gpu={}, until={:?}, input={})",
