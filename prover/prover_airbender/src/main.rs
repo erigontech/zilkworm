@@ -263,9 +263,8 @@ struct ExecutionLog {
 /// Build the oracle data that the QuasiUARTSource feeds to the guest.
 ///
 /// Protocol:
-///   word 0: dispatch flag (0=unified RLP, 1=EEST JSON test)
-///   word 1: num_bytes (u32, little-endian byte count)
-///   words 2..N: file contents packed into u32 words (LE, zero-padded tail)
+///   word 0: num_bytes (u32, little-endian byte count)
+///   words 1..N: input bytes packed into u32 words (LE, zero-padded tail)
 // Mirrors zilk_core/core/types_zz/flat_bundle.hpp.
 const INPUT_MAGIC_EJSN: u32 = 0x4E534A45; // "EJSN"
 const INPUT_VERSION_EJSN: u32 = 1;

@@ -93,7 +93,7 @@ pub struct AirbenderService {
     guest_exit_pc: u32,
 }
 
-/// Result of running a block through the JIT executor (no proving).
+/// Result of running a block through the VM simulator (no proving).
 struct VmRunOutcome {
     gas_used: u64,
     cycle_count: u64,
@@ -118,7 +118,7 @@ impl AirbenderService {
             bail!("Guest binary not found at {}", bin_path);
         }
 
-        // Load and decode the guest once for JIT execution (preflight and
+        // Load and decode the guest once for simulator runs (preflight and
         // execute-only runs), and locate the canonical exit point so runs
         // that take the finish_error path can be recognized.
         let text_path = format!("{}.text", config.guest_base.display());
@@ -573,7 +573,7 @@ impl AirbenderService {
         Ok(())
     }
 
-    /// Run a block through the JIT executor (no proving) using the cached
+    /// Run a block through the VM simulator (no proving) using the cached
     /// guest tape, and report the final machine state.
     fn run_vm(&self, input_path: &Path) -> Result<VmRunOutcome> {
         let oracle = crate::build_oracle(input_path, false)?;
