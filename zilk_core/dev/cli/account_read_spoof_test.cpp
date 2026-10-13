@@ -44,10 +44,9 @@
 // honestly derived header and asserts it is ACCEPTED: that is what proves the header
 // derivation is faithful rather than accidentally wrong.
 //
-// Two things together show the clash rejection alone is doing the work. The genuine-bundle
-// acceptance above makes the header derivation known-faithful; and deleting the clash branch
-// from `check_root` makes all eight reads execute cleanly, leaving only the four per-read
-// rejection assertions of Run 2 to fail — 32 in total.
+// The genuine-bundle acceptance above makes the header derivation known-faithful. The clash is
+// not the only check left: C's record also claims that keccak(C) is absent from the account
+// trie, and `check_root` walks that claim to C's leaf, where it fails.
 //
 // NOTE: some helpers in `account_read_test_util.hpp` intentionally duplicate the private
 // helpers of `addr_hash_orphan_test.cpp` (PR #101, branch canepat/account_routing_check).
@@ -377,10 +376,12 @@ TEST_CASE("StateTransition::run rejects read-only account spoofing across zero-g
             if (!tc.observation_stored) {
                 // Gas-neutral read with a discarded result: the two executions are
                 // observationally identical, so the forged block is byte-identical to
-                // the honest one. Only the witness differs.
+                // the honest one. Only the witness differs, and the walk of the claim
+                // that C is absent, which C's record in created_accounts_ makes, fails
+                // at C's leaf.
                 CHECK(spoof.gas_used == honest.gas_used);
                 CHECK(spoof.receipts_root == honest.receipts_root);
-                CHECK(spoof.post.root == honest.post.root);
+                CHECK(spoof.post.rejected);
             }
 
             // ---- Run 1: honest bundle + honest header must be ACCEPTED ----
@@ -404,8 +405,9 @@ TEST_CASE("StateTransition::run rejects read-only account spoofing across zero-g
             }
 
             // ---- Run 2: forged bundle + the header the spoofed execution justifies ----
-            // Gas, receipts root, logs bloom and state root all match what the guest
-            // recomputes for this witness, so absent the clash check the bundle verifies.
+            // Gas, receipts root and logs bloom match what the guest recomputes for this
+            // witness. Absent the clash check, the walk of the claim that C is absent
+            // would reject it next, at C's leaf.
             {
                 std::vector<uint8_t> env = make_envelope(chain, spoof, forged_blob, nodestore);
                 REQUIRE_FALSE(env.empty());
