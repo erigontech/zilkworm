@@ -332,6 +332,12 @@ template <size_t KeySize, size_t KeyOffset = 0>
     // off is u64 (sidecar) or u32 (slot) but data[] is u32-sized: compare before
     // adding, since off + 8 can wrap and the high half must not be dropped.
     auto entry_within_data = [&](uint64_t off) -> bool {
+        // Every entry starts 8-aligned, as MphfBuilder lays them out, so every body lies at an
+        // 8-aligned offset: DirectState::find_node_rlp keeps one verified bit per body offset / 8.
+        if ((off & 7u) != 0) [[unlikely]] {
+            sys_println("MphfMapHeader: validate_mphf: entry offset not 8-aligned");
+            return false;
+        }
         if (off > data_size || data_size - off < 8u) [[unlikely]] {
             sys_println("MphfMapHeader: validate_mphf: entry header out of data region");
             return false;

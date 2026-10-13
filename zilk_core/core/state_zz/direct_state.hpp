@@ -359,6 +359,8 @@ DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
         // SOUNDNESS-CRITICAL: a node is used only if its keccak is the hash it was asked for, so
         // every node that reaches the trie is bound to a hash reference in a verified parent (or
         // the pre-state root). Checked on the first lookup; nodes never looked up never matter.
+        // The bit is the body offset / 8: validate_mphf rejects any entry not 8-aligned, so no two
+        // bodies share one.
         const auto bit = static_cast<uint32_t>(b->data() - node_store_map_.data_base()) >> 3;
         auto& word = node_verified_[bit >> 5];
         const auto mask = uint32_t{1} << (bit & 31);
