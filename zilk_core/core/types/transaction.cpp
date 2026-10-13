@@ -19,6 +19,17 @@
 
 namespace silkworm {
 
+// Clear-and-reuse RLP scratches; single-threaded zkVM lacks TLS.
+namespace {
+#if defined(__cpp_threadsafe_static_init) && !defined(NO_THREAD_LOCAL) && !defined(SP1) && !defined(QEMU_DEBUG) && !defined(AIRBENDER)
+    thread_local Bytes tl_tx_hash_scratch_{};
+    thread_local Bytes tl_tx_sender_scratch_{};
+#else
+    Bytes tl_tx_hash_scratch_{};
+    Bytes tl_tx_sender_scratch_{};
+#endif
+}  // namespace
+
 intx::uint256 Authorization::v() const {
     return y_parity_and_chain_id_to_v(y_parity, chain_id);
 }
@@ -40,9 +51,15 @@ bool Transaction::set_v(const intx::uint256& v) {
 
 evmc::bytes32 Transaction::hash() const {
     hash_computed_.call_once([this]() {
-        Bytes rlp;
-        rlp::encode(rlp, *this, /*wrap_eip2718_into_string=*/false);
-        cached_hash_ = std::bit_cast<evmc_bytes32>(keccak256(rlp));
+        // View is byte-identical to wrap=false encode.
+        if (const ByteView view{rlp_canonical_view_}; !view.empty()) [[likely]] {
+            cached_hash_ = std::bit_cast<evmc_bytes32>(keccak256(view));
+        } else {
+            Bytes& rlp = tl_tx_hash_scratch_;
+            rlp.clear();
+            rlp::encode(rlp, *this, /*wrap_eip2718_into_string=*/false);
+            cached_hash_ = std::bit_cast<evmc_bytes32>(keccak256(rlp));
+        }
     });
     return cached_hash_;
 }
@@ -332,17 +349,27 @@ namespace rlp {
             return std::unexpected{DecodingError::kInputTooShort};
         }
 
+        const uint8_t* canonical_begin{nullptr};
+
         if (0 < from[0] && from[0] < kEmptyStringCode) {  // Raw serialization of a typed transaction
             if (accepted_typed_txn_wrapping == Eip2718Wrapping::kString) {
                 return std::unexpected{DecodingError::kUnexpectedEip2718Serialization};
             }
 
+            canonical_begin = from.data();
+
             to.type = static_cast<TransactionType>(from[0]);
             from.remove_prefix(1);
 
-            return eip2718_decode(from, to);
+            if (DecodingResult res{eip2718_decode(from, to)}; !res) {
+                return res;
+            }
+            to.set_rlp_canonical_view(
+                ByteView{canonical_begin, static_cast<size_t>(from.data() - canonical_begin)});
+            return {};
         }
 
+        const uint8_t* const legacy_begin = from.data();
         const auto h{decode_header(from)};
         if (!h) {
             return std::unexpected{h.error()};
@@ -364,6 +391,8 @@ namespace rlp {
             if (from.size() != leftover) {
                 return std::unexpected{DecodingError::kUnexpectedListElements};
             }
+            to.set_rlp_canonical_view(
+                ByteView{legacy_begin, static_cast<size_t>(from.data() - legacy_begin)});
             return {};
         }
 
@@ -376,6 +405,9 @@ namespace rlp {
         if (h->payload_length == 0) {
             return std::unexpected{DecodingError::kInputTooShort};
         }
+
+        // Past outer string header: type_byte || inner_list.
+        canonical_begin = from.data();
 
         to.type = static_cast<TransactionType>(from[0]);
         from.remove_prefix(1);
@@ -394,6 +426,7 @@ namespace rlp {
         if (mode != Leftover::kAllow && !from.empty()) {
             return std::unexpected{DecodingError::kInputTooLong};
         }
+        to.set_rlp_canonical_view(ByteView{canonical_begin, h->payload_length});
         return {};
     }
 
@@ -442,7 +475,8 @@ void UnsignedTransaction::encode_for_signing(Bytes& into) const {
 std::optional<evmc::address> Transaction::sender() const {
     if (!sender_recovered_) {
         sender_recovered_ = true;
-        Bytes rlp{};
+        Bytes& rlp = tl_tx_sender_scratch_;
+        rlp.clear();
         encode_for_signing(rlp);
         ethash::hash256 hash{keccak256(rlp)};
 
@@ -467,6 +501,7 @@ void Transaction::reset() {
     sender_recovered_ = false;
     data_non_zero_bytes_ = 0;
     hash_computed_.reset();
+    rlp_canonical_view_ = {};  // drop stale alias on reuse
 }
 
 intx::uint512 UnsignedTransaction::maximum_gas_cost() const {

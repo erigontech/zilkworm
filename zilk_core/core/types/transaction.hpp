@@ -163,6 +163,11 @@ class Transaction : public UnsignedTransaction {
     //! Reset the computed values
     void reset();
 
+    //! Canonical wrap=false RLP; aliases decode source buffer.
+    //! Empty for in-memory-built transactions.
+    ByteView rlp_canonical_view() const noexcept { return rlp_canonical_view_; }
+    void set_rlp_canonical_view(ByteView v) noexcept { rlp_canonical_view_ = v; }
+
   private:
     mutable std::optional<evmc::address> sender_{std::nullopt};
     mutable bool sender_recovered_ = false;
@@ -172,6 +177,8 @@ class Transaction : public UnsignedTransaction {
     // cached value for hash if already computed
     mutable evmc::bytes32 cached_hash_;
     mutable ResettableOnceFlag hash_computed_;
+
+    mutable ByteView rlp_canonical_view_{};
 };
 
 class Transaction2 : public UnsignedTransaction2 {
