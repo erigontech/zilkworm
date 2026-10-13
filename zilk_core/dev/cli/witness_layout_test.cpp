@@ -9,7 +9,13 @@
 //
 // Each case seals a block whose execution the forged witness and an honest twin produce identically
 // (so the block is well-formed) and drives the public entry point, StateTransition::run. The honest
-// twin is accepted; the forgery is rejected, at the line sanitize() prints.
+// twin is accepted; the forgery is rejected. A layout the DirectState constructor validates away
+// aborts the process (the constructor validates before reading any field), so that case runs the
+// forgery in a child and checks for the abort and its message; the rest are rejected in-process,
+// at the line sanitize() prints.
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <array>
 #include <cstdint>
@@ -67,6 +73,39 @@ void expect_rejected(const Outcome& o, std::string_view why) {
     CHECK(o.failed);
     CHECK(o.gas == StateTransition::kRunFailure);
     CHECK(o.log.find(why) != std::string::npos);
+}
+
+// The DirectState constructor validates the pre-state layout before reading any field and aborts
+// on a malformed one, so a forgery it catches ends the process. Run the guest in a child and check
+// for the abort and the message the validation printed before it.
+void expect_rejected_at_construction(const ChainSetup& chain, const ShadowRun& sr,
+                                     const std::vector<uint8_t>& blob,
+                                     const std::vector<uint8_t>& nodestore,
+                                     std::string_view why) {
+    std::vector<uint8_t> env = make_envelope(chain, sr, blob, nodestore);
+    REQUIRE_FALSE(env.empty());
+    int fds[2];
+    REQUIRE(pipe(fds) == 0);
+    const pid_t pid = fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[0]);
+        StateTransition st{std::span<uint8_t>{env}};
+        st.run();
+        _exit(0);
+    }
+    close(fds[1]);
+    std::string out;
+    char buf[256];
+    for (ssize_t n; (n = read(fds[0], buf, sizeof(buf))) > 0;) out.append(buf, static_cast<size_t>(n));
+    close(fds[0]);
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);
+    INFO(out);
+    CHECK(WIFSIGNALED(status));
+    CHECK(WTERMSIG(status) == SIGABRT);
+    CHECK(out.find(why) != std::string::npos);
 }
 
 // 32 code bytes B0 such that B0 and keccak(B0) both begin with 0x00 (STOP): the committed code (B0)
@@ -179,8 +218,8 @@ TEST_CASE("the guest rejects a witness whose code store overlaps a record slot",
 
     // Honest twin accepted; the forged (overlapping) witness rejected.
     expect_accepted(run_guest(chain, sr, ps.blob, ps.nodestore), sr);
-    expect_rejected(run_guest(chain, sr, forged, ps.nodestore),
-                    "sanitize: pre-state sections overlap or out of builder order");
+    expect_rejected_at_construction(chain, sr, forged, ps.nodestore,
+                                    "DirectState: prestate sections overlap");
 }
 
 // A record placed inside another record's slot array (an entry offset pointing into another entry).

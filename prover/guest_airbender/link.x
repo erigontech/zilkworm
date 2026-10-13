@@ -2,7 +2,7 @@ PROVIDE(_stext = ORIGIN(REGION_TEXT));
 PROVIDE(_rom_size = LENGTH(ROM));
 PROVIDE(_max_hart_id = 0);
 PROVIDE(_hart_stack_size = 64M);
-PROVIDE(_heap_size = 768M);
+PROVIDE(_heap_size = 896M);
 
 /*
 PROVIDE(UserSoft = DefaultHandler);

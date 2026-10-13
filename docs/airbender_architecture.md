@@ -19,7 +19,7 @@
 | .rodata | ~`0x4400000` | ~256 KB | Read-only data (VMA, copied from ROM at startup) |
 | .data | ~`0x4440000` | ~48 KB | Initialized data (VMA, copied from ROM at startup) |
 | .bss | ~`0x444C000` | varies | Zero-initialized data |
-| Heap | after .bss | 768 MB | Bump allocator (`operator new`) |
+| Heap | after .bss | 896 MB | Bump allocator (`operator new`) |
 
 ### Two-Phase Build (`prover/guest_airbender/Makefile`)
 
