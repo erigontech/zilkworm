@@ -168,8 +168,21 @@ public:
         alignas(4) uint8_t output[8];
         for (size_t i = 0; i < sizeof(output); ++i)
             output[(msg.flags & kWordFlags) != 0 ? i ^ 3 : i] = static_cast<uint8_t>("returned"[i]);
-        return evmc::Result{EVMC_SUCCESS, 123, 0, output, sizeof(output),
+        evmc::Result result{EVMC_SUCCESS, 123, 0, output, sizeof(output),
                             {.left = child_state_gas_left}};
+#ifdef EVMONE_WORD_LAYOUT
+        if ((msg.flags & evmone::wl::FLAG_WORD_OUTPUT) != 0) {
+            // A frame takes an output it wants in the layout only in storage from
+            // wl::alloc_output() (see ReturnData::take()), where the state Host puts it.
+            auto* const words = evmone::wl::alloc_output(sizeof(output));
+            std::memcpy(words, output, sizeof(output));  // whole words, already in the layout
+            auto raw = result.raw();
+            raw.output_data = words;
+            raw.release = evmone::wl::free_output;
+            return evmc::Result{raw};
+        }
+#endif
+        return result;
     }
 };
 
