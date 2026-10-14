@@ -19,7 +19,7 @@ inputs:
     description: Unused (kept for call-site compatibility).
     required: false
   manifest-key:
-    description: test-fixtures.json key selecting the corpus (eest_stable, eest_devnet, ...).
+    description: test-fixtures.json key selecting the corpus (eest_stable).
     required: false
     default: eest_stable
 

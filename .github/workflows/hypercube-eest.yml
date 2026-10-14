@@ -90,9 +90,6 @@ jobs:
         uses: ./.github/actions/prepare-eest-mfbd
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
-          # This branch targets Glamsterdam, so run the devnet corpus rather
-          # than the stable release the rest of CI uses.
-          manifest-key: eest_devnet
 
       - name: Run EEST tests
         shell: bash
