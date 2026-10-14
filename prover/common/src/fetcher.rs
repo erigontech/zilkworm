@@ -96,7 +96,7 @@ fn extract_bytes_from_value(value: &serde_json::Value) -> Result<Vec<Bytes>> {
             })
             .collect(),
         serde_json::Value::Null => Ok(Vec::new()),
-        _ => bail!("unexpected JSON type for witness field: expected object, array, or null"),
+        _ => Err(eyre!("unexpected JSON type for witness field: expected object, array, or null")),
     }
 }
 
@@ -181,6 +181,9 @@ pub struct FetchOutcome {
     pub block_number: u64,
     pub block_directory: PathBuf,
     pub flat_bundle_path: PathBuf,
+    /// Milliseconds spent converting the execution witness into the flat bundle (witness
+    /// generation, which Ethproofs counts in the proving time); 0 when the bundle was cached.
+    pub witness_millis: u64,
 }
 
 pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchOutcome> {
@@ -226,6 +229,7 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
             block_number,
             block_directory: block_dir,
             flat_bundle_path,
+            witness_millis: 0,
         });
     }
 
@@ -295,6 +299,7 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
         "codes":   execution_witness.codes,
         "keys":    execution_witness.keys,
     });
+    let conversion_started = std::time::Instant::now();
     let witness_input = serde_json::to_vec(&payload)
         .wrap_err("failed to serialize witness JSON")?;
     {
@@ -310,6 +315,7 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
     let bundle_bytes = z6m_witness_ffi::json_witness_to_flat_bundle(&witness_input)
         .wrap_err("witness JSON to flat-bundle conversion failed")?;
     fs::write(&flat_bundle_path, &bundle_bytes)?;
+    let witness_millis = conversion_started.elapsed().as_millis() as u64;
 
     debug!(
         %block_number,
@@ -321,6 +327,7 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
         block_number,
         block_directory: block_dir,
         flat_bundle_path,
+        witness_millis,
     })
 }
 

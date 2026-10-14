@@ -266,7 +266,6 @@ pub struct Z6mProverService {
     /// so executes never wait for the (possibly busy) primary client.
     client2: Arc<Mutex<DynamicProver>>,
     proving_key: DynProvingKey,
-    verifying_key: SP1VerifyingKey,
     config: AppConfig,
     eth_client: Option<EthproofsClient>,
 }
@@ -281,10 +280,6 @@ impl Z6mProverService {
     pub async fn new(config: AppConfig) -> Result<Self> {
         let prover_client = DynamicProver::new().await?;
         let proving_key = prover_client.setup(Z6M_ELF).await;
-        let verifying_key = match &proving_key {
-            DynProvingKey::Env(env_pk) => env_pk.verifying_key().clone(),
-            DynProvingKey::Cuda(cuda_pk) => cuda_pk.verifying_key().clone(),
-        };
         let eth_client = config.ethproofs.clone().map(EthproofsClient::new);
         let client1: Arc<Mutex<DynamicProver>> = Arc::new(Mutex::new(prover_client));
         // Always-CPU sibling client. Used so executes can run on a free client
@@ -296,7 +291,6 @@ impl Z6mProverService {
             client1,
             client2,
             proving_key,
-            verifying_key,
             config,
             eth_client,
         })
@@ -432,7 +426,6 @@ impl Z6mProverService {
         guard: tokio::sync::OwnedMutexGuard<DynamicProver>,
         eth_client: Option<&EthproofsClient>,
         proving_key: DynProvingKey,
-        verifying_key: SP1VerifyingKey,
     ) -> Result<ProvingLog> {
         let input_path = if let Some(file_name) = &opts.file_name {
             file_name.clone()
@@ -533,12 +526,11 @@ impl Z6mProverService {
                     // Read proof bytes back from file
                     let proof_bytes = std::fs::read(&proof_path)?;
 
-                    let verifier_id = sp1_sdk::HashableKey::bytes32(&verifying_key);
                     let client = client.clone();
                     let block_number = opts.block_number;
                     tokio::spawn(async move {
                         client
-                            .proved(&proof_bytes, block_number, cycle_count, proving_millis, &verifier_id)
+                            .proved(&proof_bytes, block_number, cycle_count, proving_millis)
                             .await
                     });
                 }
@@ -761,7 +753,6 @@ impl Z6mProverService {
                     proof_type: service.proof_type.clone(),
                 };
                 let proving_key = self.proving_key.clone();
-                let verifying_key = self.verifying_key.clone();
                 let eth_client = self.eth_client.clone();
 
                 let handle = tokio::spawn(async move {
@@ -770,7 +761,6 @@ impl Z6mProverService {
                         guard,
                         eth_client.as_ref(),
                         proving_key,
-                        verifying_key,
                     )
                     .await
                     {
