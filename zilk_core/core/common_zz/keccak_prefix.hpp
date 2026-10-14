@@ -23,6 +23,12 @@
 // place. Witness bytes do not change, so a tag never goes stale, and it names the node by its
 // bytes' address, not by where the node sits in the grid: whatever row a tag is found in, the
 // state is that of the node it names.
+//
+// The pool holds the states saved while check_root's walks verify nodes, in the row of the grid line a node
+// is unfolded to. The node-store walks of USE_HASH_KEY run during execution, before any grid exists: they save
+// in a table of DirectState's instead (kAddrRow), a row per node address, which lives as long as the node store
+// it names nodes of. Both keep the invariant above: verify_and_snap() writes every row, and a fold that finds
+// a node in neither hashes it in full.
 namespace zilkworm::kprefix {
 
 inline constexpr size_t kRows = 128;
@@ -30,6 +36,29 @@ static_assert((kRows & (kRows - 1)) == 0, "rows are picked by masking a grid dep
 inline constexpr size_t kNodeSize = 3 + 16 * 33 + 1;  // A full branch with an empty value.
 inline constexpr size_t kBlock = 136;
 inline constexpr unsigned kNoSlot = 16;  // For first_blocks(): no snapshot wanted.
+/// SnapRequest::row of a node-store walk: the state goes to DirectState's table, in the row of the node's address.
+inline constexpr size_t kAddrRow = ~size_t{0};
+/// DirectState's table: 4096 rows of 256 bytes. A block's walks verify a few thousand full branches, and the folds
+/// of check_root come after all of them; a much smaller table would lose most states before they are used.
+inline constexpr unsigned kAddrBits = 12;
+inline constexpr size_t kAddrRows = size_t{1} << kAddrBits;
+
+/// A row of DirectState's table, laid out as one of the pool.
+struct alignas(256) StateRow {
+    uint64_t lanes[32];
+};
+static_assert(sizeof(StateRow) == 256);
+
+/// The table row of the node at `node`: a multiplicative hash of its address (bodies are 8-aligned).
+[[gnu::always_inline]] inline size_t addr_row(const uint8_t* node) noexcept {
+    return (static_cast<uint32_t>(reinterpret_cast<uintptr_t>(node) >> 3) * 0x9E3779B1u) >> (32 - kAddrBits);
+}
+
+/// A saved state a fold resumes from: the first `blocks` blocks (0: none) of a node, in `state`.
+struct Resume {
+    uint64_t* state;
+    unsigned blocks;
+};
 
 // The same condition as rlp_sw.hpp's static_buffer: one pool per thread on the host, a plain
 // global on the guests.
@@ -79,19 +108,25 @@ static_assert([] {
     return true;
 }());
 
-/// Whether the keccak of the full branch at `node` (8-byte aligned) is `want`, saving the state
-/// after its first `blocks` blocks in row `row` when it is. Out of line: its tag stores would
-/// otherwise add to the registers unfold_slot() keeps live around the lookup.
-[[gnu::noinline]] inline bool verify_and_snap(const uint8_t* node, size_t row, unsigned blocks,
-                                              const uint8_t* want) noexcept {
+/// Whether the keccak of the `size` bytes at `node` (8-byte aligned, at least 136 * `blocks` of them) is
+/// `want`, saving the state after its first `blocks` blocks in `state`, and the tag `tag` and `sb` of that
+/// row, when it is. Out of line: its tag stores would otherwise add to the registers unfold_slot() keeps
+/// live around the lookup.
+[[gnu::noinline]] inline bool verify_and_snap(const uint8_t* node, size_t size, uint64_t* state, const uint8_t*& tag,
+                                              uint8_t& sb, unsigned blocks, const uint8_t* want) noexcept {
     // The row is about to be overwritten, whatever the compare says: a node that fails it must not
     // leave the tag of the node before it over its bytes' state.
-    tag_orig[row] = nullptr;
-    const auto h = ethash_keccak256_snap(node, kNodeSize, blocks, pool[row]);
+    tag = nullptr;
+    const auto h = ethash_keccak256_snap(node, size, blocks, state);
     if (!bytes_equal<32>(h.bytes, want)) [[unlikely]] return false;
-    tag_orig[row] = node;
-    tag_sb[row] = static_cast<uint8_t>(blocks);
+    tag = node;
+    sb = static_cast<uint8_t>(blocks);
     return true;
+}
+
+/// verify_and_snap() of the full branch at `node` into row `row` of the pool.
+inline bool verify_and_snap(const uint8_t* node, size_t row, unsigned blocks, const uint8_t* want) noexcept {
+    return verify_and_snap(node, kNodeSize, pool[row], tag_orig[row], tag_sb[row], blocks, want);
 }
 
 }  // namespace zilkworm::kprefix

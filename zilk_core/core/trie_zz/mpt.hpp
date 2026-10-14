@@ -446,6 +446,9 @@ class GridMPT {
     // Whether `lines` more lines fit the grid (see kMaxLines); the walk cannot go on if not.
     bool has_room(unsigned lines);
 
+    // The keccak state a fold of the full branch `b` of pool row `row` resumes from (fold_unfold.hpp).
+    kprefix::Resume take_resume_full(const BranchNode& b, size_t row);
+
   public:
     GridMPT(const DirectState& state, bytes32 previous_root_hash)
         : prev_root_{previous_root_hash},

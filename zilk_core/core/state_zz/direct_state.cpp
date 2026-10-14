@@ -367,6 +367,12 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
         }
         node_store_map_.reset(reinterpret_cast<MphfMapHeader*>(nodestore_bytes.data()));
         node_verified_.assign((node_store_map_.data_size() / 8 + 31) / 32, 0u);
+#if USE_HASH_KEY
+        // The states are written before they are read (verify_and_snap()); only the tags need clearing.
+        walk_states_.reset(new kprefix::StateRow[kprefix::kAddrRows]);
+        walk_tags_.reset(new const uint8_t*[kprefix::kAddrRows]());
+        walk_sb_.reset(new uint8_t[kprefix::kAddrRows]());
+#endif
     }
     reserve_block_maps_();
 }
@@ -406,6 +412,9 @@ DirectState::DirectState(DirectState&& other) noexcept
     recovered_accounts_ = std::move(other.recovered_accounts_);
     recovered_slots_ = std::move(other.recovered_slots_);
     recovery_ended_ = other.recovery_ended_;
+    walk_states_ = std::move(other.walk_states_);
+    walk_tags_ = std::move(other.walk_tags_);
+    walk_sb_ = std::move(other.walk_sb_);
 #endif
 
     created_accounts_ = std::move(other.created_accounts_);
@@ -884,6 +893,12 @@ std::optional<BlockHeader> DirectState::read_header(BlockNum,
 }
 
 #if USE_HASH_KEY
+bool DirectState::walk_verify_and_snap(const uint8_t* node, size_t size, unsigned blocks,
+                                       const uint8_t* want) const noexcept {
+    const size_t r = kprefix::addr_row(node);
+    return kprefix::verify_and_snap(node, size, walk_states_[r].lanes, walk_tags_[r], walk_sb_[r], blocks, want);
+}
+
 // Returned view may alias embedded_scratch.
 std::expected<ByteView, DirectState::WalkMiss>
 DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
@@ -897,7 +912,12 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
 
     for (unsigned guard = 0; guard < 70; ++guard) {
         if (!node_is_embedded) {
-            auto rlp = find_node_rlp(node_hash);
+            // A full branch verified here keeps the keccak state of its blocks before the slot the key goes
+            // through, as check_root's walks keep theirs: an SSTORE after the SLOAD of a key changes that slot, and
+            // check_root's fold of the branch then resumes from the state (see take_walk_state()).
+            auto rlp = find_node_rlp(node_hash, [&]() noexcept {
+                return kprefix::SnapRequest{depth < 64 ? want[depth] : kprefix::kNoSlot, kprefix::kAddrRow};
+            });
             if (!rlp) return std::unexpected{WalkMiss::kInvalid};  // witness incomplete
             node_rlp = *rlp;
         }

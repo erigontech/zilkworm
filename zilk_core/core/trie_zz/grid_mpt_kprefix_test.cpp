@@ -562,3 +562,145 @@ TEST_CASE("kprefix: tags do not outlive a GridMPT", "[trie][gridmpt][kprefix]") 
     GridMPT<true> grid{w.state, silkworm::kEmptyRoot};
     for (size_t i = 0; i < kprefix::kRows; ++i) CHECK(kprefix::tag_orig[i] == nullptr);
 }
+
+#if USE_HASH_KEY
+namespace {
+
+// A pre-state of one account whose storage trie is in the node store and none of whose slots the witness carries,
+// so that every read of a slot walks the node store (USE_HASH_KEY).
+std::vector<uint8_t> blob_with_storage(const evmc::address& addr, const bytes32& root) {
+    DirectState::AccountInfo info{};
+    info.addr = addr;
+    std::memcpy(info.account.addr, addr.bytes, 20);
+    info.account.nonce = 1;
+    std::memcpy(info.account.code_hash, silkworm::kEmptyHash.bytes, 32);
+    std::memcpy(info.account.storage_root, root.bytes, 32);
+    return DirectState::build_blob_from_accounts({info}, {}, {});
+}
+
+struct StorageWitness {
+    std::vector<uint8_t> prestate;
+    std::vector<uint8_t> store;
+    DirectState state;
+    StorageWitness(const evmc::address& addr, const bytes32& root, const Map& nodes)
+        : prestate{blob_with_storage(addr, root)},
+          store{build_node_store(nodes)},
+          state{std::span<uint8_t>{prestate}, std::span<uint8_t>{store}} {}
+};
+
+// The RLP of a storage value of 32 bytes, none of them zero.
+Bytes slot_rlp(std::mt19937_64& rng) {
+    Bytes v(33, 0xa0);
+    for (size_t i = 1; i < 33; ++i) v[i] = static_cast<uint8_t>(rng() | 1);
+    return v;
+}
+
+}  // namespace
+
+// The walks of USE_HASH_KEY verify a node before check_root does: a full branch an SLOAD walk verified keeps the
+// state of its blocks before the slot the key goes through, in DirectState's table, and check_root's fold of the
+// branch after an SSTORE of the key resumes from it.
+TEST_CASE("kprefix: a branch an SLOAD walk verified is resumed when check_root writes it", "[trie][gridmpt][kprefix]") {
+    std::mt19937_64 rng(11);
+    evmc::address addr{};
+    addr.bytes[19] = 0x42;
+    Map slots;  // hashed key -> value RLP
+    std::map<bytes32, bytes32, Less> word_of;
+    for (uint32_t i = 0; i < 1500; ++i) {
+        bytes32 w{};
+        std::memcpy(w.bytes + 28, &i, 4);
+        const bytes32 hk = keccak_bytes32(w);
+        slots.emplace(hk, slot_rlp(rng));
+        word_of.emplace(hk, w);
+    }
+    Map nodes;
+    const bytes32 root = hb_root(slots, &nodes);
+    for (const unsigned lo : {4u, 9u, 13u}) {
+        CAPTURE(lo);
+        const auto kp = pair_under_full_branch(slots, lo, lo);
+        REQUIRE(kp.has_value());
+        const bytes32 hk = kp->k1;
+        StorageWitness sw{addr, root, nodes};
+        // The SLOAD: a walk from the root to the key's leaf.
+        const bytes32 read = sw.state.read_storage(addr, word_of.at(hk));
+        CHECK(std::memcmp(read.bytes, slots.at(hk).data() + 1, 32) == 0);
+        const auto root_node = sw.state.find_node_rlp(root);
+        REQUIRE(root_node.has_value());
+        REQUIRE(root_node->size() == kNode);
+        CHECK(sw.state.walk_state_blocks(root_node->data()) == kprefix::first_blocks(hk.bytes[0] >> 4));
+        const ByteView branch = branch_below_root(sw.state, root, hk);
+        CHECK(sw.state.walk_state_blocks(branch.data()) == kprefix::first_blocks(lo));
+        // The table hands a state out only for the node it names, and only if it covers no more blocks than allowed.
+        CHECK(sw.state.take_walk_state(branch.data() + 8, 3).blocks == 0);
+        if (lo >= 4) {
+            CHECK(sw.state.take_walk_state(branch.data(), kprefix::first_blocks(lo) - 1).blocks == 0);
+            CHECK(sw.state.walk_state_blocks(branch.data()) == kprefix::first_blocks(lo));  // not taken
+        }
+        // The SSTORE of the key, folded by check_root's walk of the storage trie.
+        const Bytes nv = slot_rlp(rng);
+        const std::vector<TrieNodeFlat> ups{write_of(hk, slots.at(hk), nv)};
+        Map post = slots;
+        post[hk] = nv;
+        GridMPT<true> grid{sw.state, root};
+        CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
+        CHECK_FALSE(grid.failed());
+        CHECK(sw.state.walk_state_blocks(branch.data()) == 0);  // consumed by the fold
+    }
+}
+
+TEST_CASE("kprefix: a write before the slot a walk saved for hashes the branch in full", "[trie][gridmpt][kprefix]") {
+    // The SLOAD went through slot 13 of a branch, and the state covers its first three blocks; the SSTORE is
+    // of another key, through slot 4 of the same branch: the state must not be used, and the root is
+    // still HashBuilder's.
+    std::mt19937_64 rng(12);
+    evmc::address addr{};
+    addr.bytes[19] = 0x43;
+    Map slots;
+    std::map<bytes32, bytes32, Less> word_of;
+    for (uint32_t i = 0; i < 1500; ++i) {
+        bytes32 w{};
+        std::memcpy(w.bytes + 28, &i, 4);
+        const bytes32 hk = keccak_bytes32(w);
+        slots.emplace(hk, slot_rlp(rng));
+        word_of.emplace(hk, w);
+    }
+    Map nodes;
+    const bytes32 root = hb_root(slots, &nodes);
+    const auto kp = pair_under_full_branch(slots, 4, 13);  // k1 through slot 4, k2 through slot 13 or later
+    REQUIRE(kp.has_value());
+    StorageWitness sw{addr, root, nodes};
+    (void)sw.state.read_storage(addr, word_of.at(kp->k2));  // the walk saves 3 blocks of the branch
+    const ByteView branch = branch_below_root(sw.state, root, kp->k2);
+    REQUIRE(sw.state.walk_state_blocks(branch.data()) == 3);
+    const Bytes nv = slot_rlp(rng);
+    const std::vector<TrieNodeFlat> ups{write_of(kp->k1, slots.at(kp->k1), nv)};
+    Map post = slots;
+    post[kp->k1] = nv;
+    GridMPT<true> grid{sw.state, root};
+    CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
+    CHECK_FALSE(grid.failed());
+    CHECK(sw.state.walk_state_blocks(branch.data()) == 3);  // left where it was
+}
+
+TEST_CASE("kprefix: a walk's corrupt node fails verification with no state saved", "[trie][kprefix]") {
+    std::mt19937_64 rng(13);
+    alignas(256) static uint8_t good[544], corrupt[544];
+    fill_full_branch(good, rng);
+    fill_full_branch(corrupt, rng);
+    const ethash::hash256 gh = ethash_keccak256(good, kNode);
+    bytes32 want;
+    std::memcpy(want.bytes, gh.bytes, 32);
+    Map nodes;
+    nodes.emplace(want, Bytes{ByteView{corrupt, kNode}});
+    Witness w{nodes};
+    CHECK_FALSE(w.state.find_node_rlp(want, [] { return kprefix::SnapRequest{15, kprefix::kAddrRow}; }).has_value());
+    CHECK_FALSE(w.state.find_node_rlp(want).has_value());
+    // The good bytes under their own hash verify, and their state is saved.
+    Map good_nodes;
+    good_nodes.emplace(want, Bytes{ByteView{good, kNode}});
+    Witness g{good_nodes};
+    const auto n = g.state.find_node_rlp(want, [] { return kprefix::SnapRequest{15, kprefix::kAddrRow}; });
+    REQUIRE(n.has_value());
+    CHECK(g.state.walk_state_blocks(n->data()) == 3);
+}
+#endif

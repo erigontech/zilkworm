@@ -359,6 +359,14 @@ template <unsigned Off>
     return blocks;
 }
 
+// The most leading blocks of the full branch b's encoding (b satisfies hashes_from_witness()) that are still the
+// witness node's bytes: those before the hash bytes of its first dirty slot, all three whole blocks if no slot is
+// dirty. A state saved for the node serves the encoding if it covers no more blocks than this, the same test as
+// take_resumable_blocks()'s kHeadSlots one: slot i's hash bytes begin at 4 + 33 i, in block (4 + 33 i) / 136.
+[[gnu::always_inline]] inline unsigned full_branch_clean_blocks(const BranchNode& b) noexcept {
+    return b.dirty == 0 ? 3u : kprefix::first_blocks(lowest_set_bit(b.dirty));
+}
+
 // Writes the list header of a leaf or extension payload at `out`, returns the position after it. A payload
 // below 256 bytes takes the one-byte long form without to_big_compact; a longer one (a leaf value of up to
 // kMaxLeafValueSize) goes through encode_list_header.

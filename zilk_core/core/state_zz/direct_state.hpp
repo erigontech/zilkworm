@@ -202,7 +202,7 @@ class DirectState : public BlockState {
     mutable std::vector<evmc::bytes32> ancestors_;
     mutable BlockNum ancestors_number_{0};
     mutable bool ancestors_end_{false};
-    // Keeps sizeof(DirectState) a multiple of 16 on the rv32 guest (512 with USE_HASH_KEY): 8 bytes off
+    // Keeps sizeof(DirectState) a multiple of 16 on the rv32 guest (528 with USE_HASH_KEY): 8 bytes off
     // that moved the buffers placed after it off their phase, and the guest's CSR copies of them took about
     // 1k more BigInt calls and 30-40k more cycles a block on nearly every mainnet block (504 bytes against
     // 512 or 528). A member added here should keep the size a multiple of 16, or be measured.
@@ -247,6 +247,15 @@ class DirectState : public BlockState {
                                                           std::array<uint8_t, 32>& embedded_scratch) const;
     const RecoveredSlot* recover_slot_from_nodestore(const Account& pa, const evmc::address& addr,
                                                      const evmc::bytes32& key) const;
+    // The keccak states the walks save while they verify a full branch (kprefix::kAddrRow, see
+    // keccak_prefix.hpp), for check_root's folds to resume from: a row per node address (kprefix::addr_row()),
+    // its tag the node's bytes' address and its block count. Allocated with the node store, whose nodes the
+    // tags name, so that no tag outlives the bytes it names; the tags start null.
+    mutable std::unique_ptr<kprefix::StateRow[]> walk_states_;
+    mutable std::unique_ptr<const uint8_t*[]> walk_tags_;
+    mutable std::unique_ptr<uint8_t[]> walk_sb_;
+    [[gnu::noinline]] bool walk_verify_and_snap(const uint8_t* node, size_t size, unsigned blocks,
+                                                const uint8_t* want) const noexcept;
 #endif
 
   public:
@@ -496,6 +505,25 @@ class DirectState : public BlockState {
 
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept;
+#if USE_HASH_KEY
+    /// The state a walk saved for the first blocks of the node at `node` (a full branch), if it covers at most
+    /// `allowed` blocks: taken out of the table, as the resume permutes it in place. {nullptr, 0} if none.
+    kprefix::Resume take_walk_state(const uint8_t* node, unsigned allowed) const noexcept {
+        if (!walk_tags_) return {nullptr, 0};
+        const size_t r = kprefix::addr_row(node);
+        if (walk_tags_[r] != node) return {nullptr, 0};
+        const unsigned blocks = walk_sb_[r];
+        if (blocks == 0 || blocks > allowed) return {nullptr, 0};
+        walk_tags_[r] = nullptr;
+        return {walk_states_[r].lanes, blocks};
+    }
+    /// For tests: the block count of the state the table holds for the node at `node`, 0 if none.
+    unsigned walk_state_blocks(const uint8_t* node) const noexcept {
+        if (!walk_tags_) return 0;
+        const size_t r = kprefix::addr_row(node);
+        return walk_tags_[r] == node ? walk_sb_[r] : 0;
+    }
+#endif
     // find_node_rlp() that, when it has to hash a full branch, also saves the keccak state of its
     // first blocks before a slot in a row of the kprefix pool. `request` is called then, and only then,
     // for the kprefix::SnapRequest: the slot (kNoSlot for no snapshot) and the row.
@@ -564,9 +592,15 @@ DirectState::find_node_rlp_impl(const uint8_t (&node_hash)[32], [[maybe_unused]]
                 const bool full = payload.size() == kprefix::kNodeSize && (reinterpret_cast<uintptr_t>(payload.data()) & 7) == 0;
                 const kprefix::SnapRequest snap = full ? request() : kprefix::SnapRequest{kprefix::kNoSlot, 0};
                 const unsigned blocks = kprefix::first_blocks(snap.slot);
-                verified = blocks != 0
-                               ? kprefix::verify_and_snap(payload.data(), snap.row, blocks, node_hash)
-                               : keccak256_equals(payload, node_hash);
+                if (blocks == 0) {
+                    verified = keccak256_equals(payload, node_hash);
+#if USE_HASH_KEY
+                } else if (snap.row == kprefix::kAddrRow) {
+                    verified = walk_verify_and_snap(payload.data(), payload.size(), blocks, node_hash);
+#endif
+                } else {
+                    verified = kprefix::verify_and_snap(payload.data(), snap.row, blocks, node_hash);
+                }
             } else {
                 verified = keccak256_equals(payload, node_hash);
             }

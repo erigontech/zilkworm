@@ -366,16 +366,16 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
     // A full branch that differs from its witness node only in hash references is hashed from that
     // node and its new hashes, with no encoding: before the line goes, as the hash reads it. If the
     // lookup saved the keccak state of the node's leading blocks and this update left them as they
-    // were, the hash resumes from that state.
+    // were, the hash resumes from that state: saved by check_root's walk in the line's row of the pool,
+    // or by an execution-time walk in DirectState's table (a node is verified once, so by one of them).
     if (grid_line.kind == kBranch && hashes_from_witness(grid_line.branch)) {
-        const size_t row = depth & (kprefix::kRows - 1);
-        const unsigned blocks = take_resumable_blocks(grid_line.branch, row);
+        const kprefix::Resume r = take_resume_full(grid_line.branch, depth & (kprefix::kRows - 1));
         switch (parent.kind) {
             case kBranch:
-                parent.branch.set_child_hash_of(slot, grid_line.branch, kprefix::pool[row], blocks);
+                parent.branch.set_child_hash_of(slot, grid_line.branch, r.state, r.blocks);
                 break;
             case kExt:
-                parent.ext.set_child_hash_of(grid_line.branch, kprefix::pool[row], blocks);
+                parent.ext.set_child_hash_of(grid_line.branch, r.state, r.blocks);
                 break;
             default:
                 std::unreachable();
@@ -406,6 +406,19 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         default:
             std::unreachable();
     }
+}
+
+// The saved state the full branch b (hashes_from_witness()) of the line in pool row `row` resumes from, taken
+// out of the pool or of DirectState's table; {.., 0} if neither holds one for b's node that covers only blocks
+// with no dirty slot.
+template <bool DeletionEnabled>
+[[gnu::always_inline]] inline kprefix::Resume GridMPT<DeletionEnabled>::take_resume_full(const BranchNode& b, size_t row) {
+    if (const unsigned blocks = take_resumable_blocks(b, row); blocks != 0) return {kprefix::pool[row], blocks};
+#if USE_HASH_KEY
+    return state_->take_walk_state(b.orig, full_branch_clean_blocks(b));
+#else
+    return {nullptr, 0};
+#endif
 }
 
 // Make a leaf of path after cursor of current search key
