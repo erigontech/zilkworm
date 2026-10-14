@@ -173,13 +173,20 @@ disk of a few tens of GB. Use `ghcr.io/erigontech/zilkworm-airbender:<commit sha
 - A block is proved only if the simulator runs it to the guest's exit point within the prover's
   cycle limit (1,073,741,822 cycles) and both that run and the proof commit the block's hash; a
   proof is written and posted to Ethproofs only then. A block over the limit, or one the guest
-  rejects, is logged as `SKIPPED` in `provingLogs.log`. The simulator runs concurrently with
-  proving by default (`Z6M_SERIAL_PREFLIGHT=1` runs it first).
+  rejects, is logged as `SKIPPED` in `provingLogs.log`. The simulator runs before proving: the
+  prover would abort the service on a block the guest rejects (its recursion layer panics in
+  code that cannot unwind). `Z6M_CONCURRENT_PREFLIGHT=1` runs it alongside proving instead,
+  saving about 0.5 s a block at the cost of that abort.
 - A prover panic fails that block (`FAILED` in the log); the prover is rebuilt and the service
   carries on with the next block.
-- Ethproofs receives `queued`, `proving` and `proved` (`proving_time` in ms covers witness
-  generation and proving, `proving_cycles` the guest's cycles, `proof` the base64 of
-  `proof.bin`).
+- Ethproofs receives `queued` when a block is picked, `proving` when its proving starts, and
+  `proved` (`proving_time` in ms is the prover's time on the block, from handing it the input
+  to the proof: the pipeline's simulation feeding the GPUs and their proving; fetching,
+  witness conversion and the preflight are not in it; `proving_cycles` the guest's cycles,
+  `proof` the base64 of `proof.bin`).
+- `Z6M_REPLAY_THREADS` sets the prover's CPU threads that replay the guest into circuit traces
+  (Airbender's default is 8). More threads only help where they, and not host memory or PCIe
+  bandwidth, limit the commitment of the base layer's memory.
 
 ## Known limitations
 

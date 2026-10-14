@@ -59,6 +59,11 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_CYCLES)]
     cycles: usize,
 
+    /// CPU threads replaying the guest's execution into circuit traces while proving (the
+    /// GPU backend's default is 8).
+    #[arg(long, global = true, env = "Z6M_REPLAY_THREADS")]
+    replay_threads: Option<usize>,
+
     /// RPC URL for fetching blocks (required for --service)
     #[arg(long)]
     rpc_url: Option<String>,
@@ -549,6 +554,7 @@ async fn run() -> Result<()> {
             output_dir: args.output_dir,
             guest,
             max_cycles: args.cycles,
+            replay_threads: args.replay_threads,
             gpu: args.gpu,
             ethproofs,
         };
@@ -681,7 +687,12 @@ async fn run() -> Result<()> {
             } else {
                 block_number_from_filename(&input_path)
             };
-            let settings = ProverSettings::new(guest.files.clone(), backend, args.cycles)?;
+            let settings = ProverSettings::new(
+                guest.files.clone(),
+                backend,
+                args.cycles,
+                args.replay_threads,
+            )?;
 
             // The prover proves whatever the run did, wherever it stopped: a run that parked in
             // finish_error, or ran into the cycle bound, would yield a proof that commits no
@@ -756,7 +767,7 @@ async fn run() -> Result<()> {
         }) => {
             vk::check_recursion_environment()?;
             let guest = guest_files(args.guest_bin.as_deref())?;
-            let settings = ProverSettings::new(guest, backend, args.cycles)?;
+            let settings = ProverSettings::new(guest, backend, args.cycles, args.replay_threads)?;
             let expected = public_output::expected_for_file(&file_name, false)?;
             let oracle = build_oracle(&file_name, false)?;
             tokio::task::block_in_place(|| -> Result<()> {

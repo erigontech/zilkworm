@@ -155,7 +155,9 @@ z6m_prover_airbender --service --gpu \
 - `--ws-url`: a WebSocket endpoint for newHeads (otherwise the service polls)
 - Proofs are written to `<output-dir>/<block>/proof.bin`; one line per block goes to `<data-dir>/provingLogs.log`
 
-Every proved block is first run on the simulator (the preflight, with the prover's machine and cycle limit). A proof is written and posted only if that run ended at the guest's exit point and both the run and the proof commit the block's hash. The preflight runs concurrently with proving by default; `Z6M_SERIAL_PREFLIGHT=1` runs it first, so that a block that fails it (for example one over the cycle limit) is skipped without being proved.
+Every proved block is first run on the simulator (the preflight, with the prover's machine and cycle limit). A proof is written and posted only if that run ended at the guest's exit point and both the run and the proof commit the block's hash. The preflight runs before proving, so a block that fails it (one the guest rejects, or one over the cycle limit) is skipped without being proved: proving such a block would abort the service, as the prover's recursion layer panics on it in code that cannot unwind. `Z6M_CONCURRENT_PREFLIGHT=1` runs the preflight alongside proving instead, saving its time (about 0.5 s a block) at the cost of that abort on a block that fails it.
+
+`--replay-threads N` (or `Z6M_REPLAY_THREADS`) sets the CPU threads that replay the guest's execution into circuit traces while proving; Airbender's GPU default is 8. On a 24-core desktop host with two 5090s on PCIe 5.0 x8 links, 16 threads made no difference: committing the base layer's memory (about 1.5 s of a 5.3 s proof of 200M cycles) is bound there by host memory and PCIe bandwidth, as each GPU receives the traces at about 30 GB/s.
 
 #### Ethproofs
 
@@ -166,7 +168,7 @@ z6m_prover_airbender --service --gpu --rpc-url ... \
   --ethproofs-cluster-id 42
 ```
 
-The service posts `queued` when a block enters its queue, `proving` when proving starts, and `proved` with `{block_number, cluster_id, proving_time, proving_cycles, proof}`: `proving_time` in ms covers witness generation (the witness-to-MFBD conversion and the guest's input) and proving, not fetching; `proving_cycles` is the guest's cycle count; `proof` is `proof.bin` in standard base64.
+The service posts `queued` when it picks a block, before fetching its witness, `proving` when proving starts, and `proved` with `{block_number, cluster_id, proving_time, proving_cycles, proof}`: `proving_time` in ms is the prover's time on the block, from handing it the input to the proof (the pipeline's simulation and trace generation feeding the GPUs, and the GPUs' proving through the recursion layers), not fetching the block and its witness, converting it, or the preflight; `proving_cycles` is the guest's cycle count; `proof` is `proof.bin` in standard base64.
 
 ### `--test-service` — batch execution from disk
 
