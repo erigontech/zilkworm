@@ -18,6 +18,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
 #include <zilk_core/core/common_zz/keccak_prefix.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
@@ -293,7 +294,7 @@ struct TrieNodeFlat {
     }
 
     bool operator<(const TrieNodeFlat& other) const {
-        return std::memcmp(key.bytes, other.key.bytes, 32) < 0;
+        return lt_bytes32(key.bytes, other.key.bytes);  // TrieNodeFlat is 4-aligned, key first
     }
 };
 
@@ -313,6 +314,28 @@ struct TrieNodeFlat {
     return 2 * j + (((a.key.bytes[j] ^ b.key.bytes[j]) & 0xF0) == 0);
 }
 
+/// Sorts n pointers to nodes by the nodes' keys: a walk that reads the nodes through them leaves
+/// the nodes in place (sort_trie_nodes() moves each out-of-place node once).
+inline void sort_trie_node_ptrs(const TrieNodeFlat** order, size_t n) {
+    if (n < 2) return;
+    const auto less = [](const TrieNodeFlat* a, const TrieNodeFlat* b) noexcept {
+        return lt_bytes32(a->key.bytes, b->key.bytes);
+    };
+    if (n <= 16) {
+        for (size_t i = 1; i < n; ++i) {
+            const TrieNodeFlat* const k = order[i];
+            size_t j = i;
+            while (j > 0 && less(k, order[j - 1])) {
+                order[j] = order[j - 1];
+                --j;
+            }
+            order[j] = k;
+        }
+    } else {
+        std::sort(order, order + n, less);
+    }
+}
+
 /// Sorts n nodes by key. A node is 155 bytes, so a sort that moves nodes (n^2/4 moves for the
 /// insertion sort below 17, n log n for std::sort) spends most of its time copying; this sorts
 /// indices and then applies the permutation, moving each node at most once (cycle following).
@@ -327,7 +350,7 @@ inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
     }
     for (size_t i = 0; i < n; ++i) idx[i] = static_cast<uint32_t>(i);
     const auto less = [data](uint32_t a, uint32_t b) noexcept {
-        return std::memcmp(data[a].key.bytes, data[b].key.bytes, 32) < 0;
+        return lt_bytes32(data[a].key.bytes, data[b].key.bytes);
     };
     if (n <= 16) {
         for (size_t i = 1; i < n; ++i) {
@@ -478,6 +501,10 @@ class GridMPT {
 
     // Main algorithm
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
+    // The same walk over an order of pointers (see sort_trie_node_ptrs()): the nodes stay where they are.
+    bytes32 calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted);
+    template <typename It>
+    bytes32 calc_root_impl(It updates_it, It updates_end);
 
     template <typename NodeType>
     bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node);

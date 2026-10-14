@@ -592,9 +592,10 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
         if (hashes) [[likely]] {
 #pragma GCC unroll 16
             for (size_t i = 0; i < 16; ++i) out_branch.child_ptr[i] = p + 33 * i + 1;
-            static constexpr uint32_t kAllHashLens[4] = {
-                0x20202020u, 0x20202020u, 0x20202020u, 0x20202020u};
-            std::memcpy(out_branch.child_len.data(), kAllHashLens, 16);  // 4 word stores
+            // 4 word stores (child_len is alignas(8)); a memcpy here compiled to a call.
+            typedef uint32_t __attribute__((may_alias)) w32;
+            w32* const cl = reinterpret_cast<w32*>(std::assume_aligned<8>(out_branch.child_len.data()));
+            cl[0] = cl[1] = cl[2] = cl[3] = 0x20202020u;
             out_branch.mask = 0xffff;
             out_branch.value = {};
             return kBranch;
