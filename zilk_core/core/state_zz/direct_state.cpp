@@ -1045,6 +1045,9 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
     }
 
     const auto sroot = std::bit_cast<evmc::bytes32>(pa.storage_root);
+    // A trie with no root has no key: the walk below would say so before reading anything, so the
+    // key's hash (a keccak permutation for each new key) is not taken for it.
+    if (is_zero_quick(sroot) || sroot == kEmptyRoot) return &per_acct[key];  // negative, as the walk's kAbsent
     const nibbles64 want = nibbles64::from_bytes32(keccak_bytes32(key));
     std::array<uint8_t, 32> embedded_scratch;  // embedded RLP outlives walker-local BranchNode
     const auto leaf = walk_nodestore_leaf(sroot, want, embedded_scratch);
