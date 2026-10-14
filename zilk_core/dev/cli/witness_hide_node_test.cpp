@@ -589,8 +589,19 @@ void HiddenContractAccount_CodeBoundFromCodeStore() {
     expect_true(keccak_bytes(root_rlp) == R, "V1: hand-built account root matches R");
 
     // Flat state = {W}; K's preimage is hidden but its code IS in the code store.
+    std::vector<uint8_t> code_store = make_code_store(code_hash, code, /*decoys=*/4);
+    {
+        // The seal keeps the length and key of the first entry in data order: K's code must be another for
+        // its lookup to go through the sealed index (it is the third today).
+        const MphfMap cs{reinterpret_cast<MphfMapHeader*>(code_store.data())};
+        uint64_t first = UINT64_MAX;
+        cs.for_each_offset([&](uint64_t off) noexcept { first = std::min(first, off); });
+        const auto e = cs.find<32, 0, &hash_key8>(code_hash.bytes);
+        expect_true(e.has_value() && static_cast<uint64_t>(e->data() - cs.data()) != first + 8u,
+                    "V1b: K's code is not the code store's first entry, whose key the seal keeps");
+    }
     std::vector<uint8_t> prestate = DirectState::build_blob_from_accounts(
-        {make_info(W, 0, 1000)}, /*block_hashes=*/{}, make_code_store(code_hash, code, /*decoys=*/4));
+        {make_info(W, 0, 1000)}, /*block_hashes=*/{}, std::move(code_store));
     expect_true(!prestate.empty(), "V2: prestate blob built");
 
     MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
