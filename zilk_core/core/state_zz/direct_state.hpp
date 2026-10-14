@@ -202,10 +202,11 @@ class DirectState : public BlockState {
     mutable std::vector<evmc::bytes32> ancestors_;
     mutable BlockNum ancestors_number_{0};
     mutable bool ancestors_end_{false};
-    // Keeps sizeof(DirectState) a multiple of 16 on the rv32 guest (528 with USE_HASH_KEY): 8 bytes off
-    // that moved the buffers placed after it off their phase, and the guest's CSR copies of them took about
+    // Keeps sizeof(DirectState) a multiple of 16 on the rv32 guest (528 with USE_HASH_KEY, 464 without): 8 bytes
+    // off that moved the buffers placed after it off their phase, and the guest's CSR copies of them took about
     // 1k more BigInt calls and 30-40k more cycles a block on nearly every mainnet block (504 bytes against
-    // 512 or 528). A member added here should keep the size a multiple of 16, or be measured.
+    // 512 or 528). A member added here should keep the size a multiple of 16 (the static_assert after the
+    // class checks it), or be measured.
     [[maybe_unused]] uint8_t ancestors_pad_[8]{};
 
     bool multi_block_{false};
@@ -542,6 +543,10 @@ class DirectState : public BlockState {
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp_impl(const uint8_t (&node_hash)[32], SnapRequestFn&& request) const noexcept;
 };
+
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+static_assert(sizeof(DirectState) % 16 == 0, "keep the rv32 guest's DirectState a multiple of 16 bytes, see ancestors_pad_");
+#endif
 
 [[gnu::always_inline]] inline const Account*
 DirectState::find_pre_account_unchecked(const evmc::address& addr) const noexcept {

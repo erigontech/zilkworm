@@ -49,6 +49,11 @@ struct FlatBundle {
                size_t network_off, size_t network_size) noexcept;
 };
 
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+// FlatBundle::direct precedes the buffers whose phase DirectState's size keeps (see DirectState::ancestors_pad_).
+static_assert(sizeof(FlatBundle) % 16 == 0, "keep the rv32 guest's FlatBundle a multiple of 16 bytes, see DirectState::ancestors_pad_");
+#endif
+
 inline constexpr uint32_t kFlatBundleMagic   = 0x444E4246u;  // 'FBND'
 inline constexpr uint32_t kFlatBundleVersion = 14u;
 struct alignas(8) FlatBundleHeader {
