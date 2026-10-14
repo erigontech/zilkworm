@@ -68,7 +68,7 @@ ValidationResult pre_validate_transaction(const Transaction& txn, const evmc_rev
     return ValidationResult::kOk;
 }
 
-ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::DirectState& state,
+ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::ActiveState& state,
                                       uint64_t available_gas) noexcept {
     const std::optional<evmc::address> sender{txn.sender()};
     if (!sender) {

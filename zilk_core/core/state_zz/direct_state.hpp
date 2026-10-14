@@ -21,6 +21,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/hash_maps.hpp>
+#include <zilk_core/core/common_zz/index_key.hpp>
 #include <zilk_core/core/common_zz/keccak_prefix.hpp>
 #include <zilk_core/core/common_zz/mphf_map.hpp>
 #include <zilk_core/core/state/block_state.hpp>
@@ -68,11 +69,6 @@ using ::silkworm::kEmptyRoot;
 struct nibbles64;  // trie_zz/mpt.hpp
 #endif
 
-[[gnu::always_inline]] inline uint64_t hash_key8(const uint8_t (&h)[32]) noexcept {
-    uint64_t v; std::memcpy(&v, h, 8); return v;
-}
-[[gnu::always_inline]] inline uint64_t hash_key8(const evmc::bytes32& hash) noexcept { return hash_key8(hash.bytes); }
-
 /// Whether the keccak of `payload` is the 32 bytes at `expected` (any alignment). On the Airbender
 /// guest the hash is compared inside the keccak state, so it is never stored out and loaded back.
 [[gnu::always_inline]] inline bool keccak256_equals(ByteView payload, const uint8_t* expected) noexcept {
@@ -82,22 +78,6 @@ struct nibbles64;  // trie_zz/mpt.hpp
     return bytes_equal<32>(silkworm::keccak256(payload).bytes, expected);
 #endif
 }
-
-// 7 MSBs + 19th byte (LSB): precompile addrs vary only in byte 19
-[[gnu::always_inline]] inline uint64_t addr_key8(const uint8_t (&a)[20]) noexcept {
-#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-    // The same key from two word loads: with strict alignment the memcpy below is eight byte
-    // loads through a stack temporary, and the callers' addresses are word-aligned.
-    if ((reinterpret_cast<uintptr_t>(a) & 3) == 0) [[likely]] {
-        typedef uint32_t __attribute__((may_alias)) w32;
-        const w32* const w = reinterpret_cast<const w32*>(a);
-        return w[0] | (uint64_t{(w[1] & 0x00FFFFFFu) | (uint32_t{a[19]} << 24)} << 32);
-    }
-#endif
-    uint64_t k; std::memcpy(&k, a, 8);
-    k = (k & 0x00FFFFFFFFFFFFFFull) | (uint64_t(a[19]) << 56); return k;
-}
-[[gnu::always_inline]] inline uint64_t addr_key8(const evmc::address& a) noexcept { return addr_key8(a.bytes); }
 
 inline constexpr uint32_t kMphfAddrMapMagic = 0x4148504Du;    // 'MPHA'
 inline constexpr uint32_t kMphfCodeStoreMagic = 0x4348504Du;  // 'MPHC'

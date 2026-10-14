@@ -138,7 +138,7 @@ void check_delete_all_then_insert(const Bytes32Map& pre, const Bytes32Map& post)
         return std::memcmp(a.key.bytes, b.key.bytes, 32) < 0;
     });
 
-    GridMPT<true> trie{direct, pre_root};
+    GridMPT<true, DirectState> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
     const bytes32 expected = hashbuilder_root(post, nullptr);
 
@@ -183,7 +183,7 @@ void check_partial_delete(const Bytes32Map& pre, const std::vector<bytes32>& del
         }
     }
 
-    GridMPT<true> trie{direct, pre_root};
+    GridMPT<true, DirectState> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
     const bytes32 expected = hashbuilder_root(post, nullptr);
 
