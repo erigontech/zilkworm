@@ -416,6 +416,11 @@ DirectState::DirectState(DirectState&& other) noexcept
 #endif
     node_store_map_ = other.node_store_map_;
     node_verified_ = std::move(other.node_verified_);
+#if USE_HASH_KEY
+    recovered_accounts_ = std::move(other.recovered_accounts_);
+    recovered_slots_ = std::move(other.recovered_slots_);
+    recovery_ended_ = other.recovery_ended_;
+#endif
 
     created_accounts_ = std::move(other.created_accounts_);
     overflow_slots_ = std::move(other.overflow_slots_);
@@ -974,6 +979,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
             return up.get();
         }
     }
+    if (recovery_ended_) return nullptr;  // a later block: the address is absent, see end_recovery()
 
     // Account-trie pre-root = parent block's state_root. get_account has no
     // header context here; the highest-numbered header in headers_ is the
@@ -1026,6 +1032,13 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
                                          const evmc::bytes32& key) const {
     if (!node_store_map_.valid()) return nullptr;
 
+    if (recovery_ended_) [[unlikely]] {
+        // A later block: what was recovered stays, and any other key is absent, see end_recovery().
+        const auto it = recovered_slots_.find(addr);
+        if (it == recovered_slots_.end()) return nullptr;
+        const auto kv = it->second.find(key);
+        return kv != it->second.end() ? &kv->second : nullptr;
+    }
     auto& per_acct = recovered_slots_[addr];
     if (auto it = per_acct.find(key); it != per_acct.end()) {
         return &it->second;

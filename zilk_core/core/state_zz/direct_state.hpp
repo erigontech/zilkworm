@@ -217,6 +217,7 @@ class DirectState : public BlockState {
         bool found;             // false = walk proved absence
     };
     mutable FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, RecoveredSlot>> recovered_slots_;
+    bool recovery_ended_{false};  // see end_recovery()
     enum class WalkMiss : uint8_t { kAbsent, kInvalid };  // kInvalid halts; see fatal()
     std::expected<ByteView, WalkMiss> walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
                                                           std::array<uint8_t, 32>& embedded_scratch) const;
@@ -402,6 +403,12 @@ class DirectState : public BlockState {
     void clear_absent_reads() noexcept { absent_reads_.clear(); }
 #if USE_HASH_KEY
     const std::vector<std::unique_ptr<Account>>& recovered_accounts() const noexcept { return recovered_accounts_; }
+    /// Ends the recovery of accounts and slots from the node store, once check_root has walked the bundle's
+    /// first block. The node store holds the tries of the state before that block, and the next block runs
+    /// on the state it leaves, which the guest has checked the records it holds rebuild to that block's root:
+    /// the witness's, and those the block created or recovered. An account or slot a later block does not
+    /// find among them is absent, as without USE_HASH_KEY. What was recovered stays.
+    void end_recovery() noexcept { recovery_ended_ = true; }
 
     [[gnu::always_inline]] inline const FlatHashMap<evmc::bytes32, RecoveredSlot>*
     recovered_slots_for(const evmc::address& addr) const noexcept {

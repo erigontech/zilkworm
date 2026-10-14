@@ -878,6 +878,10 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         pa->rlp_into_cache(storage_root);
     }
     direct_state.clear_change_journal();
+#if USE_HASH_KEY
+    // The node store holds the tries of the state before this block, not of the one it leaves.
+    direct_state.end_recovery();
+#endif
     return ok;
 }
 

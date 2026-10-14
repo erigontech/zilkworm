@@ -1469,6 +1469,24 @@ TEST_CASE("the guest accepts later blocks that read and pay accounts the first l
     }
 }
 
+// A later block reads an address the state does not have as absent, as the first block does. With
+// USE_HASH_KEY its lookup used to walk the account trie from the root of the block before it, whose nodes
+// no witness holds, and halt the guest.
+TEST_CASE("the guest accepts a later block that pays an account the state does not have",
+          "[witness][binding][later_block][honest]") {
+    const evmc::address fresh = make_addr(0xaa, 0x0a);
+    const TwoBlocks b = two_blocks(tx_to(fresh, /*value=*/1));
+    const Prestate ps = build_prestate(b.state);
+    Sealed s = seal(b.t1, ps.prev_root, ps.blob, ps.nodestore);
+    std::vector<AcctSpec> post = after_block_1(b);
+    spec_of(post, b.t2.sender).nonce = 1;
+    spec_of(post, b.t2.sender).balance -= 1;
+    post.push_back(AcctSpec{.addr = fresh, .nonce = 0, .balance = 1});
+    const silkworm::Block next = seal_next(s, b.t2, build_prestate(post).prev_root);
+    CHECK(s.sr.ds->get_balance(fresh) == 1);
+    expect_accepted(run_guest(s, next, ps.blob, ps.nodestore), s, next);
+}
+
 // ---------------------------------------------------------------------------
 // Block hashes
 // ---------------------------------------------------------------------------
