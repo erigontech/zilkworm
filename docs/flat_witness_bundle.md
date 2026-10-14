@@ -246,9 +246,10 @@ they arise for different reasons.
    fails the memcmp is a definitive miss (§2.4).
 
 2. **CHD bucket overflow inside the MphfMap builder** — orthogonal to (1).
-   Even when every input key has a *unique* fingerprint, CHD may exhaust its
-   displacement budget for a particular bucket and "spill" all of that bucket's
-   keys into the same `MphfCollisionEntry[]` sidecar. A spilled key's read-time
+   Even when every input key has a *unique* fingerprint, CHD may find no
+   displacement within its budget that scatters a bucket's keys onto free slots
+   of their own, and "spills" the keys that collide under its cheapest choice
+   into the same `MphfCollisionEntry[]` sidecar. A spilled key's read-time
    index may already be owned by a key CHD did place, so the builder evicts that
    owner to the sidecar as well, keeping the shared slot empty (§2.5). The
    sidecar serves both populations interchangeably — the lookup path does not
@@ -702,13 +703,13 @@ same two notions of collision from §2.3.1:
    new one is appended too. This is how distinct-identity, same-fingerprint
    collisions wind up in the sidecar.
 
-2. **CHD spill in `chd_solve` (bucket overflow).** `chd_solve` may fail to place
-   every key of a bucket within the displacement budget. It then leaves that
-   bucket's displacement factor at `0` and spills all of the bucket's keys, so
-   their read-time index is whatever `index_lookup` computes with `df = 0` — an
-   index some already-placed key may own. `finalize()` moves each spilled key's
-   body into `collision_keys_` / `collision_bodies_` exactly like an `add`-time
-   duplicate.
+2. **CHD spill in `chd_solve` (bucket overflow).** `chd_solve` may find no
+   displacement within the budget that scatters a bucket's keys onto free slots
+   of their own. The bucket still takes the displacement that forces the fewest
+   keys into the sidecar, and only the keys that collide under it spill —
+   together with any already-placed key they displace. `finalize()` moves each
+   spilled key's body into `collision_keys_` / `collision_bodies_` exactly like
+   an `add`-time duplicate.
 
 After both routes have populated the collision arrays, `finalize()`:
 
@@ -744,22 +745,39 @@ of the map — its entry survives with an emptied body, CHD still places it,
 placement is injective so no other key can claim its index, and `finalize()`
 writes no slot for an empty body. The slot stays `0`.
 
-The CHD-spill route has to work for it, because a spilled key's index is
-computed with `df = 0` and may already be owned. `chd_solve` therefore tracks
-slot ownership explicitly in `slot_owner` — the same occupancy map its
-displacement search probes — and, at the end of each seed attempt, walks the
-spilled list and **co-spills**: for each spilled key it looks up the owner of
-the index that key will probe, and if there is one, clears the slot and appends
-that owner to the spilled list as well. Both keys then resolve through the
-sidecar, and the slot they share stays `0`.
+The CHD-spill route has to work for it, because a spilled key's index is still
+whatever `index_lookup` computes from its bucket's displacement factor, and an
+already-placed key may own it. `chd_solve` therefore tracks slot ownership
+explicitly in `slot_owner` — the same occupancy map its displacement search
+probes, holding `kNoKey` for a free slot and `kBlocked` for one reserved empty —
+and folds the eviction into the placement decision itself.
 
-The pass runs after the whole placement loop, so it sees the final layout and no
-later bucket can re-occupy a slot it cleared. It cannot cascade: an evicted
-owner's own probe index *is* the slot just cleared, so by the time the walk
-reaches that owner the slot is already free and the walk stops there. Each slot
-therefore clears at most once, and the sidecar grows by at most one entry per
-originally spilled key. Co-spilling happens before the attempt is scored against
-the best one so far, so the seed search still minimises the *total* sidecar size.
+Each bucket scores every candidate `d_factor` in the displacement budget by how
+many keys that choice would force into the sidecar. The bucket's keys are mapped
+under the candidate and the distinct positions they land on are walked: a key
+alone on a free slot places and costs nothing; otherwise every bucket key
+sharing that position spills, costing the size of that group — whether the group
+collides with itself or lands on a `kBlocked` index — plus one more when a
+placed key owns the slot, because that owner is evicted with them. The cheapest
+candidate wins, ties going to the lowest displacement, and the scan breaks on
+the first zero-cost candidate, so a bucket that places cleanly still takes the
+first displacement that fits it. `displacement_factors` therefore holds, for
+every bucket a key maps to, a factor the scan validated against `slot_owner`; an
+empty bucket keeps `0`, which no key ever probes.
+
+Placing the winning candidate spills only the keys that actually collide: at a
+contested position, every bucket key landing there and the placed key it
+displaces go to the spilled list together, and the position is set to `kBlocked`
+rather than back to `kNoKey`. That last step is what carries the invariant. The
+eviction happens inside the bucket loop rather than after it, so merely freeing
+the slot would let a later bucket claim the very index those sidecar keys probe
+and make them unreachable again; `kBlocked` fails the occupancy test the search
+uses, so no later placement can reclaim it, and a bucket key that lands on it
+spills without evicting anyone. Spilling is thus per-key, not per-bucket: the
+keys of a spilling bucket that do land alone on free slots keep their singleton
+slots under the same winning `d_factor`. The spilled list is complete when the
+bucket loop ends, and only then is the attempt scored against the best one so
+far, so the seed search still minimises the *total* sidecar size.
 
 Nothing about the wire format changes. `n_keys` still counts distinct keys —
 including those whose bodies live in the sidecar — and still sizes both
@@ -775,22 +793,23 @@ construction.
 
 Suppose four 20-byte addresses with these `addr_key8` fingerprints. Two of them
 (`B`, `C`) share a fingerprint, so the MPHF is actually built over the three
-*distinct* fingerprints `0x11/0x22/0x33`, and we assume CHD additionally fails to
-place `D`'s bucket:
+*distinct* fingerprints `0x11/0x22/0x33`, and we assume CHD additionally cannot
+place `D` cleanly in its bucket:
 
 | Address | `addr_key8` | What happens at build |
 |---|---|---|
 | `A` | `0x11…` | unique fingerprint, gets a singleton slot |
 | `B` | `0x22…` | unique fingerprint, gets a singleton slot |
 | `C` | `0x22…` | **fingerprint collision with B** → evicted to sidecar (both B and C end up there) |
-| `D` | `0x33…` | unique fingerprint, but **CHD can't place it** in its bucket → spilled to sidecar |
+| `D` | `0x33…` | unique fingerprint, but **CHD can't place it** without a collision under any displacement → spilled to sidecar |
 
 After `finalize()`:
 
 - `slot_offsets[idx(A)]` → A's body. `idx(B)` is now zero (B was evicted when C
-  arrived). `idx(D)` is left zero (spilled). Had `idx(D)` landed on A's slot
-  instead, `chd_solve` would have co-spilled A too, clearing that slot so both
-  keys resolve through the sidecar.
+  arrived). `idx(D)` is left zero (spilled), because `chd_solve` marked that
+  index `kBlocked` in `slot_owner` and no later bucket could claim it. Had
+  `idx(D)` landed on A's slot instead, `chd_solve` would have spilled A along
+  with D and blocked the slot, so both keys resolve through the sidecar.
 - The sidecar holds, sorted by `.key`: `(0x22…, B)`, `(0x22…, C)`, `(0x33…, D)`.
   Note B and C form one equal-key cluster; D is a lone-key cluster that only
   exists because of bucket overflow, not a fingerprint clash.
@@ -1191,7 +1210,7 @@ rot). This table is the file-level index:
 | `DirectState`, `sanitize`, `find_node_rlp`, `validate_prestate_layout` | `zilk_core/core/state_zz/direct_state.{hpp,cpp}` |
 | Never-null account reads: `find_or_create_account`, `observe_account_`, `materialize_absent_account_`, `DirectStateView::get_account` | `zilk_core/core/state_zz/direct_state.{hpp,cpp}` |
 | `MphfMapHeader` + `MphfMap` class + `index_lookup` / `find` / `resolve_collision` | `zilk_core/core/common_zz/mphf_map.hpp` |
-| `MphfBuilder` (host-side construction), `chd_solve` co-spilling + the sidecar invariant | `zilk_core/core/common_zz/mphf_builder.{hpp,cpp}` |
+| `MphfBuilder` (host-side construction), `chd_solve` displacement scoring + the sidecar invariant | `zilk_core/core/common_zz/mphf_builder.{hpp,cpp}` |
 | Blob assembly, `entry_offset_for_addr` two-stage probe | `zilk_core/core/state_zz/direct_state_builder.cpp` |
 | `addr_key8` / `hash_key8` | `zilk_core/core/state_zz/direct_state.hpp` |
 | `GridMPT` (storage/account trie recompute) | `GridMPT::unfold_slot` — `zilk_core/core/trie_zz/fold_unfold.hpp`; `GridMPT::init_from_root`, `GridMPT::calc_root_from_updates` — `zilk_core/core/trie_zz/grid_mpt.cpp` |

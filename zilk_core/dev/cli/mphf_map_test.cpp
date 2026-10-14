@@ -11,9 +11,11 @@
 // sidecar ONLY when the slot it lands on is empty — an occupied slot whose embedded key
 // fails the byte comparison is a definitive miss, with no sidecar scan. So the builder owes
 // the lookup one invariant: a key whose body lives in the sidecar must land on an empty
-// slot. `chd_solve` upholds it with an explicit occupancy map, co-spilling any placed key
-// that shares an index with a spilled one (see mphf_builder.cpp). The four spill-invariant
-// cases below were added for that work.
+// slot. `chd_solve` upholds it by scoring each bucket's candidate displacement factors by
+// how many keys the choice would spill: under the cheapest one only the keys that actually
+// collide go to the sidecar, any placed key they displace goes with them, and the index
+// they share is marked `kBlocked` so no later bucket can claim it (see mphf_builder.cpp).
+// The seven spill-invariant cases below were added for that work.
 
 #include <algorithm>
 #include <array>
@@ -89,6 +91,18 @@ AddrBody make_addr_body(uint64_t tag, uint8_t seed_byte) {
 
 [[nodiscard]] inline uint32_t n_collisions_of(const MphfMapHeader* m) noexcept {
     return m->collisions_size / static_cast<uint32_t>(sizeof(zilkworm::MphfCollisionEntry));
+}
+
+[[nodiscard]] inline const uint64_t* displacements_of(const MphfMapHeader* m) noexcept {
+    return reinterpret_cast<const uint64_t*>(
+        reinterpret_cast<const uint8_t*>(m) + m->displacement_offset);
+}
+
+// The bucket index_lookup() derives, i.e. its first stage, before the bucket's
+// displacement factor is folded in.
+[[nodiscard]] inline uint32_t bucket_of(const MphfMapHeader* m, uint64_t k8) noexcept {
+    return zilkworm::fast_mod_u32(
+        static_cast<uint32_t>(zilkworm::mix64_body(k8 + m->seed_factor)), m->n_buckets);
 }
 
 // A map over n sequential tagged addresses. A 0 budget override means "use the
@@ -252,6 +266,103 @@ TEST_CASE("MphfBuilder sidecar keys always probe an empty slot", "[mphf]") {
         sidecar_entries_checked += n_coll;
     }
     CHECK(sidecar_entries_checked > 0u);
+}
+
+// Every bucket holding at least one key must carry a displacement factor the
+// search actually validated against the occupancy map. The old exhaustion path
+// abandoned such a bucket at a literal factor of 0 — a value the search cannot
+// produce, since d_factor == 0 needs d == kMphfGoldenRatio, far above the
+// displacement ceiling — and spilled all of its keys. Per-bucket scoring keeps
+// the cheapest validated candidate instead, so no populated bucket reads 0.
+TEST_CASE("MphfBuilder non-empty buckets keep a validated displacement factor", "[mphf]") {
+    struct Recipe {
+        uint32_t max_retries;
+        uint32_t max_displacement;
+        uint32_t n;
+    };
+    const Recipe recipes[] = {{1, 1, 5}, {1, 1, 12}, {2, 1, 32}, {2, 1, 512}, {0, 0, 1000}};
+
+    uint64_t tag_base = 0x900000ULL;
+    uint32_t populated_buckets_checked = 0;
+    for (const auto& r : recipes) {
+        auto built = build_map(r.max_retries, r.max_displacement, r.n, tag_base);
+        tag_base += 0x100000ULL;
+        REQUIRE_FALSE(built.blob.empty());
+        auto* m = built.header();
+        REQUIRE(m->n_keys == r.n);  // distinct fingerprints, so every entry owns a key
+        REQUIRE(m->n_buckets > 0);
+
+        std::vector<uint32_t> keys_in_bucket(m->n_buckets, 0);
+        for (const auto& e : built.entries) ++keys_in_bucket[bucket_of(m, key8_of(e))];
+
+        const auto* dfacs = displacements_of(m);
+        uint32_t populated = 0;
+        uint32_t unvalidated = 0;
+        for (uint32_t b = 0; b < m->n_buckets; ++b) {
+            if (keys_in_bucket[b] == 0) continue;
+            ++populated;
+            if (dfacs[b] == 0u) ++unvalidated;
+        }
+        CAPTURE(r.max_retries, r.max_displacement, r.n, m->n_buckets, populated, unvalidated);
+        CHECK(populated > 0u);
+        CHECK(unvalidated == 0u);
+        populated_buckets_checked += populated;
+    }
+    CHECK(populated_buckets_checked > 0u);
+}
+
+// Spilling only the individual colliding keys, rather than every key in a bucket
+// that ran out of displacements, must shrink the sidecar. Bounds are the counts
+// measured after the change; the whole-bucket scheme produced 3 / 8 / 23 / 327
+// for these same recipes. A build that exceeds a bound has regressed toward
+// abandoning whole buckets again.
+TEST_CASE("MphfBuilder spills only the keys that actually collide", "[mphf]") {
+    struct Recipe {
+        uint32_t max_retries;
+        uint32_t max_displacement;
+        uint32_t n;
+        uint32_t max_sidecar_entries;
+    };
+    const Recipe recipes[] = {
+        {1, 1, 5, 2},      // was 3
+        {1, 1, 12, 4},     // was 8
+        {2, 1, 32, 14},    // was 23
+        {2, 1, 512, 230},  // was 327
+    };
+
+    uint64_t tag_base = 0x6A0000ULL;  // same keys as the sidecar-invariant case
+    for (const auto& r : recipes) {
+        auto built = build_map(r.max_retries, r.max_displacement, r.n, tag_base);
+        tag_base += 0x100000ULL;
+        REQUIRE_FALSE(built.blob.empty());
+        auto* m = built.header();
+        const uint32_t n_coll = n_collisions_of(m);
+        CAPTURE(r.max_retries, r.max_displacement, r.n, n_coll, r.max_sidecar_entries);
+        REQUIRE(n_coll > 0);  // the recipe must still reach the spill path
+        CHECK(n_coll <= r.max_sidecar_entries);
+    }
+}
+
+// The production budget places every key, so scoring never leaves the zero-cost
+// branch and the blob is exactly what the all-or-nothing search produced. Byte
+// identity across the change was confirmed by hashing these blobs both ways;
+// the absence of a sidecar is the structural reason it holds, and is what would
+// break first if the fast path ever stopped being taken.
+TEST_CASE("MphfBuilder default budget places every key", "[mphf]") {
+    for (uint32_t n : {1u, 8u, 64u, 1000u, 20000u}) {
+        auto built = build_map(0, 0, n, 0xC00000ULL + (static_cast<uint64_t>(n) << 16));
+        REQUIRE_FALSE(built.blob.empty());
+        auto* m = built.header();
+        CAPTURE(n, m->n_keys, m->collisions_size);
+        REQUIRE(m->n_keys == n);
+        CHECK(m->collisions_size == 0u);
+
+        const auto* slots = slot_offsets_of(m);
+        uint32_t empty_slots = 0;
+        for (uint32_t i = 0; i < m->n_keys; ++i)
+            if (slots[i] == 0u) ++empty_slots;
+        CHECK(empty_slots == 0u);  // minimal and perfect: every slot carries a body
+    }
 }
 
 // find() misses two ways: an occupied slot whose embedded key fails memcmp
