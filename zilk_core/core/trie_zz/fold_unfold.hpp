@@ -649,7 +649,9 @@ inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& 
 // one, whether this update reads the key or writes it: the slot is the next nibble of the key (which ends
 // after nibble 63). A branch first reached by a read and changed by a later update resumes as well. Where
 // the cursor is not this update's (the folds of a seek unfold the last child of a branch), the slot is a
-// guess like any other: fold_line() uses a state only if no slot in the blocks it covers changed.
+// guess like any other: fold_line() uses a state only if no slot in the blocks it covers changed. A walk whose
+// updates only read (snap_ clear: check_root's walk of an unmodified account's storage) saves none, as no
+// fold of it hashes anything.
 template <bool DeletionEnabled>
 inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     if (slot > 15) [[unlikely]] {
@@ -700,7 +702,8 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         std::memcpy(ck, hs, 32);
 #endif
         auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
-            return kprefix::SnapRequest{search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1] : kprefix::kNoSlot,
+            return kprefix::SnapRequest{snap_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
+                                                                         : kprefix::kNoSlot,
                                         grid_.size() & (kprefix::kRows - 1)};
         });
         if (!rlp_opt) [[unlikely]] {

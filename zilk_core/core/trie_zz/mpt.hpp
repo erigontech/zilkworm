@@ -413,6 +413,9 @@ class GridMPT {
     // Set by the constructor and reset(): prev_root_ is looked up and unfolded by calc_root_impl(), which knows
     // the first slot of the root its updates change, so that the lookup saves the right keccak state of the root.
     bool root_pending_{false};
+    // Whether the walk's updates write anything, set with root_pending_: a walk that only reads changes no node,
+    // and its lookups save no keccak state (unfold_slot()).
+    bool snap_{false};
 
     // Node-store lookups go through DirectState::find_node_rlp, which owns
     // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload

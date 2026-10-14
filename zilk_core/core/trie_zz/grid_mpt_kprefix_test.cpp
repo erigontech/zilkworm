@@ -505,16 +505,29 @@ TEST_CASE("kprefix: a branch read first is resumed when a later update writes it
         REQUIRE(kp.has_value());
         const Bytes& v1 = pre.at(kp->k1);
         const Bytes& v2 = pre.at(kp->k2);
+        // The last key of the trie, under another branch: written with its own value, it changes nothing.
+        const auto& [kz, vz] = *pre.rbegin();
+        REQUIRE((kz.bytes[0] >> 4) != (kp->k1.bytes[0] >> 4));
         {
-            // A read alone: the branch keeps the state of its blocks before the slot the key went through.
+            // The read, in a walk that writes: the branch keeps the state of its blocks before the slot the key
+            // went through.
             Witness w{nodes};
             GridMPT<true> grid{w.state, pre_root};
-            const std::vector<TrieNodeFlat> ups{read_of(kp->k1, v1)};
+            const std::vector<TrieNodeFlat> ups{read_of(kp->k1, v1), write_of(kz, vz, vz)};
             CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
             CHECK_FALSE(grid.failed());
             const size_t row = row_of(branch_below_root(w.state, pre_root, kp->k1).data());
             REQUIRE(row < kprefix::kRows);
             CHECK(kprefix::tag_sb[row] == kprefix::first_blocks(lo));
+        }
+        {
+            // A walk that only reads changes no node, and saves no state.
+            Witness w{nodes};
+            GridMPT<true> grid{w.state, pre_root};
+            const std::vector<TrieNodeFlat> ups{read_of(kp->k1, v1), read_of(kz, vz)};
+            CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
+            CHECK_FALSE(grid.failed());
+            CHECK(row_of(branch_below_root(w.state, pre_root, kp->k1).data()) == kprefix::kRows);
         }
         {
             // The read, then a write under the same branch: its fold resumes from the read's state.

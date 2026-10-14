@@ -215,6 +215,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_impl(It updates_it, const It updates
                 break;
             }
         }
+        snap_ = first_slot != kprefix::kNoSlot;
         init_from_root(prev_root_, first_slot);
     }
     if (failed_) [[unlikely]] {
