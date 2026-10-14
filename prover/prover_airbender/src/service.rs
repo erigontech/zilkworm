@@ -70,6 +70,9 @@ struct WorkItem {
     witness_millis: u64,
     execute: bool,
     prove: bool,
+    /// The block's Ethproofs `queued` post, which its `proving` post waits for: the posts are
+    /// background tasks, and one that lands late would move the block's status back.
+    queued_post: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub struct AirbenderService {
@@ -298,11 +301,12 @@ impl AirbenderService {
                 // Fire-and-forget "queued" state transition. We fire this at
                 // enqueue time (not at proving start) so it accurately
                 // reflects that the block is now in the prover's queue.
+                let mut queued_post = None;
                 if should_prove {
                     if let Some(c) = &self.eth_client {
                         let c = Arc::clone(c);
                         let bn = block_number;
-                        tokio::spawn(async move { c.queued(bn).await; });
+                        queued_post = Some(tokio::spawn(async move { c.queued(bn).await; }));
                     }
                 }
 
@@ -312,6 +316,7 @@ impl AirbenderService {
                     witness_millis: outcome.witness_millis,
                     execute: should_execute,
                     prove: should_prove,
+                    queued_post,
                 };
 
                 // Backpressure: if the GPU is slower than fetching, the queue
@@ -364,7 +369,7 @@ impl AirbenderService {
         self: Arc<Self>,
         mut rx: mpsc::Receiver<WorkItem>,
     ) -> Result<()> {
-        while let Some(item) = rx.recv().await {
+        while let Some(mut item) = rx.recv().await {
             if item.execute {
                 println!(
                     "[{}] Executing block {}",
@@ -377,7 +382,8 @@ impl AirbenderService {
             }
 
             if item.prove {
-                self.prove_item(&item).await;
+                let queued_post = item.queued_post.take();
+                self.prove_item(&item, queued_post).await;
             }
         }
 
@@ -387,7 +393,13 @@ impl AirbenderService {
 
     /// Proves one block, gated by the preflight: a proof is written and posted only if the
     /// simulator ran the block to the guest's exit point and the proof commits the block's hash.
-    async fn prove_item(self: &Arc<Self>, item: &WorkItem) {
+    /// Its Ethproofs posts go out in order: `proving` after `queued_post`, `proved` after
+    /// `proving`.
+    async fn prove_item(
+        self: &Arc<Self>,
+        item: &WorkItem,
+        queued_post: Option<tokio::task::JoinHandle<()>>,
+    ) {
         let skip = |cycle_count: u64, message: String| {
             error!(block = item.block_number, "{message}");
             let _ = self.persist_proving_log(&ProvingLog {
@@ -430,11 +442,17 @@ impl AirbenderService {
             item.block_number
         );
 
-        // Fire-and-forget "proving" state transition.
+        // "proving" state transition, in the background once "queued" is through.
+        let mut proving_post = None;
         if let Some(c) = &self.eth_client {
             let c = Arc::clone(c);
             let bn = item.block_number;
-            tokio::spawn(async move { c.proving(bn).await; });
+            proving_post = Some(tokio::spawn(async move {
+                if let Some(queued) = queued_post {
+                    let _ = queued.await;
+                }
+                c.proving(bn).await;
+            }));
         }
 
         let prove_result = self.prove_inner(item).await;
@@ -472,14 +490,17 @@ impl AirbenderService {
                     log.proving_millis,
                 );
 
-                // Fire-and-forget "proved" submission. proof_bytes is moved into the task so
-                // the worker can immediately pick up the next item.
+                // "proved" submission, in the background once "proving" is through. proof_bytes
+                // is moved into the task so the worker can immediately pick up the next item.
                 if let Some(c) = &self.eth_client {
                     let c = Arc::clone(c);
                     let bn = log.block_number;
                     let cycles = log.cycle_count;
                     let ms = log.proving_millis;
                     tokio::spawn(async move {
+                        if let Some(proving) = proving_post {
+                            let _ = proving.await;
+                        }
                         c.proved(&proof_bytes, bn, cycles, ms).await;
                     });
                 }
