@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <limits>
 
 #include <evmone/constants.hpp>
 
@@ -141,11 +142,10 @@ ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision 
     intx::uint128 g0;
     if (revision >= EVMC_AMSTERDAM) {
         const auto cost = amsterdam_tx_gas_cost(txn, non_zero_bytes);
-        // EIP-8037 transaction-validation condition 1: the reservoir model needs
-        // regular_gas_budget = TX_MAX_GAS_LIMIT - intrinsic_regular_gas to stay
-        // non-negative, so the regular intrinsic and the calldata floor are each
-        // capped at TX_MAX_GAS_LIMIT even though Amsterdam lifts the cap on
-        // txn.gas_limit itself. Mirrors evmone's validate_transaction.
+        // EIP-8037: the gas limit above TX_MAX_GAS_LIMIT is the state-gas reservoir,
+        // so min(gas_limit, TX_MAX_GAS_LIMIT) must cover the regular intrinsic and
+        // the calldata floor. With the gas limit checks below this is evmone's
+        // validate_transaction condition.
         constexpr int64_t kMaxTxGasLimit = 0x1000000;  // 2**24
         if (std::max(cost.regular, cost.floor) > kMaxTxGasLimit) {
             return ValidationResult::kIntrinsicGas;
@@ -229,6 +229,13 @@ ValidationResult pre_validate_common_forks(const Transaction& txn, evmc_revision
         /// The maximum allowed gas limit for a transaction (EIP-7825).
         constexpr auto MAX_TX_GAS_LIMIT = 0x1000000;  // 2**24
         if (txn.gas_limit > MAX_TX_GAS_LIMIT) {
+            return ValidationResult::kMaxTransactionGasLimitExceeded;
+        }
+    }
+    if (rev >= EVMC_AMSTERDAM) {
+        /// The maximum allowed gas limit of both dimensions: execution + state (EIP-8037).
+        constexpr uint64_t MAX_TX_TOTAL_GAS_LIMIT = std::numeric_limits<uint32_t>::max();
+        if (txn.gas_limit > MAX_TX_TOTAL_GAS_LIMIT) {
             return ValidationResult::kMaxTransactionGasLimitExceeded;
         }
     }

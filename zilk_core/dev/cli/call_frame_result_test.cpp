@@ -241,7 +241,8 @@ Outcome run(const bytes& code, Entry entry, int64_t gas = 10000000,
         acc.code = c;
         std::memcpy(acc.code_hash.bytes, ethash::keccak256(c.data(), c.size()).bytes, 32);
         acc.balance = 1000000;
-        state.insert(a, std::move(acc));
+        acc.loaded = true;  // Seeded: the view is not asked for it.
+        state.access(a) = std::move(acc);
     };
     add(kCaller, code);
     add(kRecursive, recursive_code());
@@ -249,7 +250,8 @@ Outcome run(const bytes& code, Entry entry, int64_t gas = 10000000,
         add(callee(v), callee_code(v));
     evmone::state::Account sender;
     sender.balance = 1000000;
-    state.insert(kSender, std::move(sender));
+    sender.loaded = true;
+    state.access(kSender) = std::move(sender);
 
     auto* const evmone_vm = new evmone::VM{};
     evmc::VM vm{evmone_vm};

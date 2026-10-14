@@ -660,14 +660,16 @@ Outcome run_calls(const bytes& code, const bytes& callee, const bytes& callee2) 
         acc.code = evmc::bytes(c.data(), c.size());
         std::memcpy(acc.code_hash.bytes, ethash::keccak256(c.data(), c.size()).bytes, 32);
         acc.balance = 1000000;
-        state.insert(a, std::move(acc));
+        acc.loaded = true;  // Seeded: the view is not asked for it.
+        state.access(a) = std::move(acc);
     };
     add(kCaller, code);
     add(kCallee, callee);
     add(kCallee2, callee2);
     evmone::state::Account sender;
     sender.balance = 1000000;
-    state.insert(kSender, std::move(sender));
+    sender.loaded = true;
+    state.access(kSender) = std::move(sender);
 
     evmc::VM vm{new evmone::VM{}};
     evmone::state::BlockInfo block;

@@ -115,7 +115,8 @@ Outcome run(const bytes& code, const Env& env, int64_t gas, bool cgoto) {
     evmone::state::Account acc;
     acc.code = code;
     acc.balance = env.balance;
-    state.insert(env.recipient, std::move(acc));
+    acc.loaded = true;  // Seeded: the view is not asked for it.
+    state.access(env.recipient) = std::move(acc);
 
     evmc::VM vm{new evmone::VM{}};
     if (!cgoto)

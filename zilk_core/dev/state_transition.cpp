@@ -137,6 +137,7 @@ namespace {
             {"BlockException.BLOCK_ACCESS_LIST_GAS_LIMIT_EXCEEDED",         {ValidationResult::kBlockAccessListGasExceeded}},
             {"BlockException.INCORRECT_BLOCK_FORMAT",                       {ValidationResult::kFieldBeforeFork, ValidationResult::kMissingField, ValidationResult::kBlockAccessListHashMismatch, kPreInsertReject}},
             {"BlockException.GAS_USED_OVERFLOW",                            {ValidationResult::kWrongBlockGas, ValidationResult::kBlockGasLimitExceeded}},
+            {"BlockException.INVALID_GAS_USED",                             {ValidationResult::kWrongBlockGas}},
             // RLP-shape rejections short-circuit in rlp::decode / size check
             // before insert_block runs. Mark them with a sentinel so the runner
             // can match without consulting a ValidationResult.

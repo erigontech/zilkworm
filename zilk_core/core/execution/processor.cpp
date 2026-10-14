@@ -108,15 +108,17 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     const auto rev = revision();
     const auto non_zero_bytes = txn.data_non_zero_bytes();
 
-    // Amsterdam (EIP-2780/8037): g0 is regular gas only - every state-dependent
-    // charge moved to the top frame (EELS #3126). The EIP-7623 floor follows the
-    // EIP-7976/7981 token rules. evmone splits execution_gas_limit into the regular
-    // budget and the state-gas reservoir itself, from intrinsic_regular_gas.
+    // Amsterdam (EIP-2780/8037): g0 is regular gas only. The EIP-7623 floor follows the
+    // EIP-7976/7981 token rules. The transaction state-gas limit is all above the cap constant
+    // (EIP-8037), as in evmone's validate_transaction().
     evmone::state::TransactionProperties tx_props;
     if (rev >= EVMC_AMSTERDAM) {
         const auto cost = protocol::amsterdam_tx_gas_cost(txn, non_zero_bytes);
-        tx_props = {.execution_gas_limit = static_cast<int64_t>(txn.gas_limit) - cost.regular,
-                    .intrinsic_regular_gas = cost.regular,
+        const auto gas_limit = static_cast<int64_t>(txn.gas_limit);
+        const auto state_gas_limit =
+            std::max(gas_limit - int64_t{evmone::state::MAX_TX_GAS_LIMIT}, int64_t{0});
+        tx_props = {.execution_gas_limit = gas_limit - cost.regular - state_gas_limit,
+                    .state_gas_limit = state_gas_limit,
                     .min_gas_cost = cost.floor};
     } else {
         const auto g0 = protocol::intrinsic_gas(txn, rev, non_zero_bytes);
@@ -128,22 +130,18 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
                     .min_gas_cost = floor_cost};
     }
 
-    // EIP-7928: record cold account/slot accesses in the block access list.
-    const evmone::state::BalStateView bal_view{evm1_state_view, bal_builder_};
-    const auto& exec_view = rev >= EVMC_AMSTERDAM
-                                ? static_cast<const evmone::state::StateView&>(bal_view)
-                                : evm1_state_view;
-    auto evm1_receipt =
-        evmone::state::transition(exec_view, evm1_block_, evm1_block_hashes, evm1_txn, rev, vm_, tx_props);
+    auto evm1_receipt = evmone::state::transition(
+        evm1_state_view, evm1_block_, evm1_block_hashes, evm1_txn, rev, vm_, tx_props);
 
     const auto gas_used = static_cast<uint64_t>(evm1_receipt.gas_used);
     cumulative_gas_used_ += gas_used;
     if (rev >= EVMC_AMSTERDAM) {
-        sum_regular_block_gas_ += evm1_receipt.regular_block_gas;
-        sum_state_block_gas_ += evm1_receipt.state_block_gas;
-        // record_diff needs the pre-state (unwrapped) view, before apply_state_diff below.
-        bal_builder_.record_diff(evmone::state::bal_tx_index::tx(tx_index_),
-                                 evm1_receipt.state_diff, evm1_state_view);
+        // The execution dimension is the block gas less the state one (EIP-8037).
+        sum_regular_block_gas_ += evm1_receipt.block_gas_used - evm1_receipt.state_gas_used;
+        sum_state_block_gas_ += evm1_receipt.state_gas_used;
+        // EIP-7928: the diff lists the reads; recorded against the state before it is applied.
+        bal_builder_.record_diff(static_cast<uint32_t>(tx_index_ + 1), evm1_receipt.state_diff,
+                                 evm1_state_view);
     }
     ++tx_index_;
 
@@ -182,14 +180,10 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
     {
         DirectStateView state_view{direct_};
         BlockHashes block_hashes{*this};
-        const evmone::state::BalStateView bal_view{state_view, bal_builder_};
-        const auto& sys_view = rev >= EVMC_AMSTERDAM
-                                   ? static_cast<const evmone::state::StateView&>(bal_view)
-                                   : state_view;
         auto diff = evmone::state::system_call_block_start(
-            sys_view, evm1_block_, block_hashes, rev, vm_);
+            state_view, evm1_block_, block_hashes, rev, vm_);
         if (rev >= EVMC_AMSTERDAM)
-            bal_builder_.record_diff(evmone::state::bal_tx_index::PRE_BLOCK, diff, state_view);
+            bal_builder_.record_diff(0, diff, state_view);
         apply_state_diff(diff);
     }
 
@@ -234,6 +228,23 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     direct_.clear_touched();
 
+    // EIP-7928: the withdrawals and the block-end system calls share the last index.
+    const auto post_block_index = static_cast<uint32_t>(block_.transactions.size() + 1);
+    if (rev >= EVMC_AMSTERDAM) {
+        // Finalize via evmone so withdrawals and the EIP-161 sweep produce a
+        // StateDiff the BAL can record; rule_set_.finalize mutates DirectState
+        // in place and leaves nothing to record. Amsterdam is always
+        // post-merge, so the block reward is absent. The withdrawals are applied
+        // before the block-end system calls.
+        DirectStateView state_view{direct_};
+        const auto fin_diff =
+            evmone::state::finalize(state_view, rev, block_.header.beneficiary,
+                                    /*block_reward=*/std::nullopt, evm1_block_.ommers,
+                                    evm1_block_.withdrawals);
+        bal_builder_.record_diff(post_block_index, fin_diff, state_view);
+        apply_state_diff(fin_diff);
+    }
+
     // Block-end system calls (EIP-7002 withdrawals, EIP-7251 consolidations) + requests hash validation
     if (rev >= EVMC_PRAGUE && block_.header.requests_hash) {
         // Collect deposit requests from logs (EIP-6110), in block order: receipt by receipt, each
@@ -246,20 +257,13 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
         DirectStateView state_view{direct_};
         BlockHashes block_hashes{*this};
-        const evmone::state::BalStateView bal_view{state_view, bal_builder_};
-        const auto& sys_view = rev >= EVMC_AMSTERDAM
-                                   ? static_cast<const evmone::state::StateView&>(bal_view)
-                                   : state_view;
         auto block_end_result = evmone::state::system_call_block_end(
-            sys_view, evm1_block_, block_hashes, rev, vm_);
+            state_view, evm1_block_, block_hashes, rev, vm_);
         const auto* requests_result = std::get_if<evmone::state::RequestsResult>(&block_end_result);
         if (requests_result == nullptr)
             return ValidationResult::kRequestsProcessingFailure;
-        if (rev >= EVMC_AMSTERDAM) {
-            bal_builder_.record_diff(
-                evmone::state::bal_tx_index::post_block(block_.transactions.size()),
-                requests_result->state_diff, state_view);
-        }
+        if (rev >= EVMC_AMSTERDAM)
+            bal_builder_.record_diff(post_block_index, requests_result->state_diff, state_view);
         apply_state_diff(requests_result->state_diff);
 
         using evmone::state::Requests;
@@ -277,22 +281,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
             return ValidationResult::kRequestsRootMismatch;
     }
 
-    if (rev >= EVMC_AMSTERDAM) {
-        // Finalize via evmone so withdrawals and the EIP-161 sweep produce a
-        // StateDiff the BAL can record; rule_set_.finalize mutates DirectState
-        // in place and leaves nothing to record. Amsterdam is always
-        // post-merge, so the block reward is absent.
-        DirectStateView state_view{direct_};
-        const evmone::state::BalStateView bal_view{state_view, bal_builder_};
-        const auto fin_diff =
-            evmone::state::finalize(bal_view, rev, block_.header.beneficiary,
-                                    /*block_reward=*/std::nullopt, evm1_block_.ommers,
-                                    evm1_block_.withdrawals);
-        bal_builder_.record_diff(
-            evmone::state::bal_tx_index::post_block(block_.transactions.size()), fin_diff,
-            state_view);
-        apply_state_diff(fin_diff);
-    } else {
+    if (rev < EVMC_AMSTERDAM) {
         const auto finalization_result = rule_set_.finalize(direct_, block_);
         if (finalization_result != ValidationResult::kOk) {
             if (rev >= EVMC_SPURIOUS_DRAGON) {

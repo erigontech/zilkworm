@@ -504,8 +504,8 @@ struct HostFixture {
         view.add(kDelegate, 0, returns_byte(0xdd));
         view.add(kNoCode, 0, {});
         view.add(kVanity, 0, returns_byte(0xee));
-        // Warmed by an access list: in the State as a placeholder, not yet loaded.
-        state.get_or_insert_for_access(kPlaceholder);
+        // Warmed by an access list: in the State, not yet loaded.
+        state.access(kPlaceholder);
     }
 
     evmc::Result call(evmc_call_kind kind, const address& recipient, const address& code_address,
@@ -551,14 +551,14 @@ TEST_CASE("a call runs its recipient's code from the recipient's account", "[cal
         CHECK(r.status_code == EVMC_SUCCESS);
         CHECK(r.output_size == 0);
         CHECK(r.gas_left == 100'000);
-        REQUIRE(f.state.find(kAbsent) != nullptr);
-        CHECK(f.state.find(kAbsent)->erase_if_empty);
+        REQUIRE_FALSE(f.state.get(kAbsent).nonexistent);
+        CHECK(f.state.get(kAbsent).erase_if_empty);
         const auto other = 0xabababababababababababababababababab0002_address;
         r = f.call(EVMC_CALL, other, other, 9);
         CHECK(r.status_code == EVMC_SUCCESS);
         CHECK(r.output_size == 0);
-        REQUIRE(f.state.find(other) != nullptr);
-        CHECK(f.state.find(other)->balance == 9);
+        REQUIRE_FALSE(f.state.get(other).nonexistent);
+        CHECK(f.state.get(other).balance == 9);
     }
     SECTION("a recipient that was only a placeholder is loaded, and its code runs") {
         auto r = f.call(EVMC_CALL, kPlaceholder, kPlaceholder);
