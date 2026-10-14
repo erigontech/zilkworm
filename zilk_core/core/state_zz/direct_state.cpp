@@ -840,6 +840,15 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
     for (const auto& [addr, pa] : created_accounts_) {
         emit(addr, pa);
     }
+#if USE_HASH_KEY
+    // The accounts recovered from the node store are in the state as well, though the witness carries no
+    // record of them. No hash of theirs is a key above, see check_root_new_block().
+    for (const auto& up : recovered_accounts_) {
+        evmc::address addr;
+        std::memcpy(addr.bytes, up->addr, sizeof(addr.bytes));
+        emit(addr, *up);
+    }
+#endif
 
     if (account_rlp.empty()) return kEmptyRoot;
 

@@ -1350,6 +1350,66 @@ TEST_CASE("a later block's state root keeps an empty account no block touches",
     }
 }
 
+// With USE_HASH_KEY the first block recovers an account the witness carries no record of from the node store.
+// It is in the state the later blocks run on, and so in the roots the guest rebuilds for them from the records
+// it holds: the check that the witness holds the whole state after the first block, and each later block's
+// root. Both used to leave recovered accounts out, so a later block's root that dropped one the first block
+// deleted and the second paid was accepted, and the bundle of one the first block left in place was rejected.
+// Without USE_HASH_KEY the guest rejects the first block, which reads the account as absent.
+TEST_CASE("a later block's state root keeps the accounts the first block recovered",
+          "[witness][binding][later_block]") {
+    SECTION("one the first block deletes and the second pays") {
+        const Tx t1 = tx_to(kEmpty);
+        const Tx t2 = tx_to(kEmpty, /*value=*/1);
+        REQUIRE(t1.sender != t2.sender);
+        const std::vector<AcctSpec> state = {sender_of(t1), sender_of(t2), AcctSpec{.addr = kEmpty}};
+        const Prestate ps = build_prestate(state);
+        const std::vector<uint8_t> blob = witness_blob(state, without(state, kEmpty));
+        // Block 1 touches kEmpty, which EIP-161 then deletes.
+        std::vector<AcctSpec> post = without(state, kEmpty);
+        spec_of(post, t1.sender).nonce = 1;
+        Sealed s = seal(t1, ps.prev_root, blob, ps.nodestore);
+        s.sr.post.root = build_prestate(post).prev_root;
+        // Block 2 pays it 1 wei, which creates it again.
+        spec_of(post, t2.sender).nonce = 1;
+        spec_of(post, t2.sender).balance -= 1;
+        const bytes32 without_it = build_prestate(post).prev_root;
+        post.push_back(AcctSpec{.addr = kEmpty, .balance = 1});
+        const silkworm::Block next = seal_next(s, t2, build_prestate(post).prev_root);
+        silkworm::Block dropped = next;
+        dropped.header.state_root = without_it;
+#if USE_HASH_KEY
+        expect_rejected(run_guest(s, dropped, blob, ps.nodestore), "State Root Mismatch at block 1");
+        expect_accepted(run_guest(s, next, blob, ps.nodestore), s, next);
+#else
+        expect_rejected(run_guest(s, next, blob, ps.nodestore), "Pre value mismatch in existing leaf");
+#endif
+    }
+    SECTION("one the first block pays") {
+        const Tx t1 = tx_to(kRich, /*value=*/1);
+        const Tx t2 = tx_to(kRich, /*value=*/2);
+        REQUIRE(t1.sender != t2.sender);
+        const std::vector<AcctSpec> state = {sender_of(t1), sender_of(t2), AcctSpec{.addr = kRich, .balance = 1000}};
+        const Prestate ps = build_prestate(state);
+        const std::vector<uint8_t> blob = witness_blob(state, without(state, kRich));
+        std::vector<AcctSpec> post = state;
+        spec_of(post, t1.sender).nonce = 1;
+        spec_of(post, t1.sender).balance -= 1;
+        spec_of(post, kRich).balance += 1;
+        Sealed s = seal(t1, ps.prev_root, blob, ps.nodestore);
+        s.sr.post.root = build_prestate(post).prev_root;
+        spec_of(post, t2.sender).nonce = 1;
+        spec_of(post, t2.sender).balance -= 2;
+        spec_of(post, kRich).balance += 2;
+        const silkworm::Block next = seal_next(s, t2, build_prestate(post).prev_root);
+#if USE_HASH_KEY
+        expect_accepted(run_guest(s, next, blob, ps.nodestore), s, next);
+#else
+        expect_rejected(run_guest(s, next, blob, ps.nodestore), "Pre value mismatch in existing leaf");
+#endif
+    }
+}
+
 // A value the witness forges for an account or slot only a later block reads is bound all the same: the
 // first block's walk checks every record and slot the witness carries, whichever block reads it.
 TEST_CASE("the guest rejects a value the witness forges for a later block",
