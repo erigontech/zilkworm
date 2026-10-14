@@ -991,6 +991,17 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     if (!parent) return nullptr;
 
     const auto hashed = to_bytes32(keccak256(ByteView{addr.bytes, sizeof(addr.bytes)}).bytes);
+    // Never an address the witness carries a record of (sanitize() bound addr_hashes_, ascending, to the
+    // records): its lookup missed that record, which only a forged address map does. The absent record the
+    // caller materializes for it then clashes with the witness's in check_root, as without USE_HASH_KEY;
+    // a recovered one would put a second update for its key into the walk of the account trie.
+    if (const auto it = std::lower_bound(addr_hashes_.begin(), addr_hashes_.end(), hashed,
+                                         [](const AddrHashEntry& e, const evmc::bytes32& h) {
+                                             return std::memcmp(e.addr_hash, h.bytes, 32) < 0;
+                                         });
+        it != addr_hashes_.end() && std::memcmp(it->addr_hash, hashed.bytes, 32) == 0) [[unlikely]] {
+        return nullptr;
+    }
     const nibbles64 want = nibbles64::from_bytes32(hashed);
 
     std::array<uint8_t, 32> embedded_scratch;  // embedded RLP outlives walker-local BranchNode
