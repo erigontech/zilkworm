@@ -416,6 +416,9 @@ DirectState::DirectState(DirectState&& other) noexcept
     created_code_collisions_ = std::move(other.created_code_collisions_);
     headers_ = std::move(other.headers_);
     ancestor_missing_ = other.ancestor_missing_;
+    ancestors_ = std::move(other.ancestors_);
+    ancestors_number_ = other.ancestors_number_;
+    ancestors_end_ = other.ancestors_end_;
     touched_ = std::move(other.touched_);
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
     changed_storage_journal_ = std::move(other.changed_storage_journal_);
@@ -1070,6 +1073,7 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
 
 void DirectState::insert_header(const BlockHeader& header) {
     headers_[header.hash()] = header;
+    ancestors_.clear();  // The header may lead get_block_hash() further now.
 }
 
 bool DirectState::read_body(BlockNum, const evmc::bytes32&, BlockBody&) const noexcept {
@@ -1288,16 +1292,26 @@ DirectState::code_entry_by_hash_(const uint8_t (&hash)[32]) const noexcept {
 evmc::bytes32 DirectState::get_block_hash(const BlockHeader& header, BlockNum n) const noexcept {
     if (n >= header.number) [[unlikely]]
         return {};
-    evmc::bytes32 hash = header.parent_hash;
-    for (BlockNum child = header.number - 1; child > n; --child) {
-        const auto it = headers_.find(hash);
+    // The walk is kept for the header, which BLOCKHASH asks again and again (up to 256 lookups each):
+    // ancestors_ holds the hashes it found, the parent's first, so a hash is looked up once a block.
+    if (ancestors_.empty() || ancestors_number_ != header.number || ancestors_[0] != header.parent_hash) {
+        ancestors_.clear();
+        ancestors_.reserve(257);  // The parent and the 256 blocks BLOCKHASH reaches.
+        ancestors_.push_back(header.parent_hash);
+        ancestors_number_ = header.number;
+        ancestors_end_ = false;
+    }
+    const BlockNum depth = header.number - 1 - n;
+    while (ancestors_.size() <= depth) {
+        const auto it = ancestors_end_ ? headers_.end() : headers_.find(ancestors_.back());
         if (it == headers_.end()) [[unlikely]] {
+            ancestors_end_ = true;
             ancestor_missing_ = true;
             return {};
         }
-        hash = it->second.parent_hash;
+        ancestors_.push_back(it->second.parent_hash);
     }
-    return hash;
+    return ancestors_[static_cast<size_t>(depth)];
 }
 
 }  // namespace zilkworm

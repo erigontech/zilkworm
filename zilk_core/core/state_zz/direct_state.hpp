@@ -196,6 +196,17 @@ class DirectState : public BlockState {
     FlatHashMap<evmc::bytes32, BlockHeader> headers_;
     // Set once a block has asked for the hash of an ancestor its headers do not lead to, see get_block_hash().
     mutable bool ancestor_missing_{false};
+    // get_block_hash()'s walk so far, for the header of number ancestors_number_ and parent hash
+    // ancestors_[0]: ancestors_[d] is the hash of block number - 1 - d. ancestors_end_ is set once the
+    // headers held do not lead past the last. insert_header() drops it.
+    mutable std::vector<evmc::bytes32> ancestors_;
+    mutable BlockNum ancestors_number_{0};
+    mutable bool ancestors_end_{false};
+    // Keeps sizeof(DirectState) a multiple of 16 on the rv32 guest (512 with USE_HASH_KEY): 8 bytes off
+    // that moved the buffers placed after it off their phase, and the guest's CSR copies of them took about
+    // 1k more BigInt calls and 30-40k more cycles a block on nearly every mainnet block (504 bytes against
+    // 512 or 528). A member added here should keep the size a multiple of 16, or be measured.
+    [[maybe_unused]] uint8_t ancestors_pad_[8]{};
 
     bool multi_block_{false};
     // Journal only used for multi-block cases
