@@ -108,21 +108,23 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn, size_t non_zero_bytes) n
         if (has_value) recipient_regular += kTxValueCost;
     }
 
-    const auto num_addresses = static_cast<int64_t>(txn.access_list.size());
-    int64_t num_storage_keys = 0;
+    // The counts and their products are unsigned: Airbender's v3 machine has no signed multiply,
+    // which a signed widening product of these small values compiles to on rv32.
+    const auto num_addresses = static_cast<uint64_t>(txn.access_list.size());
+    uint64_t num_storage_keys = 0;
     for (const AccessListEntry& e : txn.access_list) {
-        num_storage_keys += static_cast<int64_t>(e.storage_keys.size());
+        num_storage_keys += e.storage_keys.size();
     }
-    const int64_t access_list_regular =
-        num_addresses * kAccessListAddressCost + num_storage_keys * kAccessListStorageKeyCost;
-    const int64_t access_list_tokens = num_addresses * kAccessListAddressFloorTokens +
-                                       num_storage_keys * kAccessListStorageKeyFloorTokens;
+    const auto access_list_regular = static_cast<int64_t>(
+        num_addresses * kAccessListAddressCost + num_storage_keys * kAccessListStorageKeyCost);
+    const auto access_list_tokens = static_cast<int64_t>(
+        num_addresses * kAccessListAddressFloorTokens + num_storage_keys * kAccessListStorageKeyFloorTokens);
     const int64_t access_list_cost = access_list_regular + access_list_tokens * kDataTokenFloor;
 
     // Only the state-independent per-authorization base cost is charged here; the ACCOUNT_WRITE
     // regular gas and the NEW_ACCOUNT/AUTH_BASE state gas are charged at the top frame.
-    const auto num_auth = static_cast<int64_t>(txn.authorizations.size());
-    const int64_t auth_regular = num_auth * kExecutionPerAuthBaseCost;
+    const auto num_auth = static_cast<uint64_t>(txn.authorizations.size());
+    const auto auth_regular = static_cast<int64_t>(num_auth * kExecutionPerAuthBaseCost);  // unsigned: see above
 
     // Decomposed regular-gas intrinsic base (EIP-2780), which also anchors the calldata floor so
     // the floor never undercuts the transaction's own intrinsic base (EELS #3120).
