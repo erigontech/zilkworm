@@ -213,7 +213,6 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_impl(It updates_it, const It updates
         const TrieNodeFlat& trie_upd = deref_update(*updates_it);
 
         search_nib_cursor_ = 0;
-        snap_writes_ = false;  // for the folds of the seek below
 
         if (!grid_.empty() && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
@@ -242,7 +241,6 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_impl(It updates_it, const It updates
         }
 
         last_was_delete_ = false;
-        snap_writes_ = trie_upd.current_value().size() != 0;
 
         // MAIN LOOP
         // Every step goes down at least one nibble of the key, and only a leaf is reached with all 64 of them
@@ -503,7 +501,6 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_impl(It updates_it, const It updates
         }
     }
 
-    snap_writes_ = false;
     while (grid_.size() > 1) {
         fold_line(grid_.size() - 1);
     }

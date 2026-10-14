@@ -630,10 +630,13 @@ inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& 
 // Returns kEmpty when the slot is empty - 0x80 (caller should insert here),
 // kMissing when a 32-byte hash ref has no entry in the node store
 // (witness incomplete — caller should hard-fail), kSuccess otherwise.
-// During the descent for an update that writes (snap_writes_), search_nibbles_ at search_nib_cursor_ is the
-// slot being unfolded, and a full branch verified here keeps the keccak state of its blocks before the first
-// slot the update changes in it, for fold_line() to resume from. Updates come in key order, so that slot
-// is the next nibble of the key (which ends after nibble 63).
+// During the descent for an update, search_nibbles_ at search_nib_cursor_ is the slot being unfolded, and a
+// full branch verified here keeps the keccak state of its blocks before the slot the key goes through in it,
+// for fold_line() to resume from. Updates come in key order, so no later update changes a slot before that
+// one, whether this update reads the key or writes it: the slot is the next nibble of the key (which ends
+// after nibble 63). A branch first reached by a read and changed by a later update resumes as well. Where
+// the cursor is not this update's (the folds of a seek unfold the last child of a branch), the slot is a
+// guess like any other: fold_line() uses a state only if no slot in the blocks it covers changed.
 template <bool DeletionEnabled>
 inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     if (slot > 15) [[unlikely]] {
@@ -684,8 +687,7 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         std::memcpy(ck, hs, 32);
 #endif
         auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
-            return kprefix::SnapRequest{snap_writes_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
-                                                                                : kprefix::kNoSlot,
+            return kprefix::SnapRequest{search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1] : kprefix::kNoSlot,
                                         grid_.size() & (kprefix::kRows - 1)};
         });
         if (!rlp_opt) [[unlikely]] {

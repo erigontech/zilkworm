@@ -408,10 +408,6 @@ class GridMPT {
     nibbles64 search_nibbles_;  // The current key being searched for/inserted
 
     bool last_was_delete_{false};
-    // Set while the descent for an update that sets a value (a deletion of 0x80 counts as one) runs:
-    // only such an update rewrites the hash bytes of the branches it passes through, see unfold_slot().
-    // Clear everywhere else, where the search cursor is not the one unfold_slot() would read.
-    bool snap_writes_{false};
     // grid_[0] is the node find_node_rlp() verified to hash to prev_root_ (unchanged while unmodified).
     bool root_unfolded_{false};
 
@@ -476,7 +472,6 @@ class GridMPT {
         search_nib_cursor_ = 0;
         last_was_delete_ = false;
         missing_count_ = 0;
-        snap_writes_ = false;
         failed_ = false;
         prev_root_ = new_prev_root;
         grid_.clear();                  

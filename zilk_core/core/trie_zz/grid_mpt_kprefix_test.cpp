@@ -12,6 +12,7 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <optional>
 #include <random>
 #include <span>
 #include <vector>
@@ -425,6 +426,109 @@ TEST_CASE("kprefix: the same node folded in two storage tries", "[trie][gridmpt]
         grid.reset(pre_root);
         CHECK(grid.calc_root_from_updates({u.updates.data(), u.updates.size()}) == hb_root(u.expected, nullptr));
         CHECK_FALSE(grid.failed());
+    }
+}
+
+namespace {
+
+TrieNodeFlat read_of(const bytes32& k, const Bytes& v) {
+    TrieNodeFlat n{k};
+    n.self_initial_len = static_cast<uint8_t>(v.size());
+    std::memcpy(n.buf, v.data(), v.size());
+    return n;
+}
+
+TrieNodeFlat write_of(const bytes32& k, const Bytes& v, const Bytes& w) {
+    TrieNodeFlat n = read_of(k, v);
+    n.current_off = 40;
+    n.current_len = static_cast<uint8_t>(w.size());
+    std::memcpy(n.buf + 40, w.data(), w.size());
+    return n;
+}
+
+// The node slot `slot` of the full branch `branch` refers to, where the node store holds it. Looked up once the
+// walk verified it: a first lookup here would verify it with no state saved.
+ByteView child_node(const DirectState& state, ByteView branch, unsigned slot) {
+    REQUIRE(branch.size() == kNode);
+    bytes32 h;
+    std::memcpy(h.bytes, branch.data() + 4 + 33 * slot, 32);
+    const auto rlp = state.find_node_rlp(h);
+    REQUIRE(rlp.has_value());
+    return *rlp;
+}
+
+// The pool row whose tag names `node`, or kRows.
+size_t row_of(const uint8_t* node) {
+    for (size_t i = 0; i < kprefix::kRows; ++i)
+        if (kprefix::tag_orig[i] == node) return i;
+    return kprefix::kRows;
+}
+
+// Two keys of `pre` under the same branch below the root, a full one (all 16 second nibbles present), the
+// first going through slot `lo` of it and the second through slot `hi` or a later one.
+struct KeyPair {
+    bytes32 k1, k2;
+};
+std::optional<KeyPair> pair_under_full_branch(const Map& pre, unsigned lo, unsigned hi) {
+    std::array<uint16_t, 16> present{};
+    for (const auto& [k, v] : pre) present[k.bytes[0] >> 4] |= static_cast<uint16_t>(1u << (k.bytes[0] & 0x0f));
+    for (auto it = pre.begin(); it != pre.end(); ++it) {
+        const unsigned top = it->first.bytes[0] >> 4;
+        if (present[top] != 0xffff || (it->first.bytes[0] & 0x0f) != lo) continue;
+        for (auto jt = std::next(it); jt != pre.end() && (jt->first.bytes[0] >> 4) == top; ++jt)
+            if ((jt->first.bytes[0] & 0x0f) >= hi) return KeyPair{it->first, jt->first};
+    }
+    return std::nullopt;
+}
+
+// The full branch below the root that `key` goes through, once a walk verified it.
+ByteView branch_below_root(const DirectState& state, const bytes32& root, const bytes32& key) {
+    const auto r = state.find_node_rlp(root);
+    REQUIRE(r.has_value());
+    const ByteView b = child_node(state, *r, key.bytes[0] >> 4);
+    REQUIRE(b.size() == kNode);
+    return b;
+}
+
+}  // namespace
+
+// Snapshots on read descents: the first key through a branch is often read only, and a later update in key order
+// changes a slot at or after the one it went through, so the state saved for the read serves the write.
+TEST_CASE("kprefix: a branch read first is resumed when a later update writes it", "[trie][gridmpt][kprefix]") {
+    std::mt19937_64 rng(10);
+    Map nodes;
+    const Map pre = random_trie(rng, 1500);  // full branches below the root: ~94 keys under each
+    const bytes32 pre_root = hb_root(pre, &nodes);
+    for (const unsigned lo : {4u, 9u, 13u}) {
+        CAPTURE(lo);
+        const auto kp = pair_under_full_branch(pre, lo, lo);
+        REQUIRE(kp.has_value());
+        const Bytes& v1 = pre.at(kp->k1);
+        const Bytes& v2 = pre.at(kp->k2);
+        {
+            // A read alone: the branch keeps the state of its blocks before the slot the key went through.
+            Witness w{nodes};
+            GridMPT<true> grid{w.state, pre_root};
+            const std::vector<TrieNodeFlat> ups{read_of(kp->k1, v1)};
+            CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
+            CHECK_FALSE(grid.failed());
+            const size_t row = row_of(branch_below_root(w.state, pre_root, kp->k1).data());
+            REQUIRE(row < kprefix::kRows);
+            CHECK(kprefix::tag_sb[row] == kprefix::first_blocks(lo));
+        }
+        {
+            // The read, then a write under the same branch: its fold resumes from the read's state.
+            Witness w{nodes};
+            GridMPT<true> grid{w.state, pre_root};
+            const Bytes nv = value_of(rng, 33);
+            const std::vector<TrieNodeFlat> ups{read_of(kp->k1, v1), write_of(kp->k2, v2, nv)};
+            Map post = pre;
+            post[kp->k2] = nv;
+            CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
+            CHECK_FALSE(grid.failed());
+            // Consumed by the fold of the branch: no row names it any more.
+            CHECK(row_of(branch_below_root(w.state, pre_root, kp->k1).data()) == kprefix::kRows);
+        }
     }
 }
 
