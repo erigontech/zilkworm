@@ -695,7 +695,9 @@ async fn run() -> Result<()> {
                 is_test,
                 None,
             )?;
-            if !preflight.succeeded {
+            // The simulator bounds its steps, the prover the timestamp, which a delegation call
+            // advances by more than one cycle: check the cycle count as well.
+            if !preflight.succeeded || preflight.cycle_count >= settings.cycles_bound as u64 {
                 bail!(
                     "preflight: block {} did not finish successfully within {} cycles (final_pc=0x{:08x} reached_end={} cycles={}); not proving",
                     block_num,

@@ -503,13 +503,16 @@ impl AirbenderService {
 
     /// Why a preflight run rules its block out, if it does.
     fn preflight_failure(&self, run: &VmRunOutcome) -> Option<String> {
-        if run.succeeded(self.guest.exit_pc) {
-            None
-        } else if !run.reached_end && run.cycle_count >= MAX_PROVABLE_CYCLES as u64 {
+        // The simulator bounds its steps, the prover the timestamp, which a delegation call
+        // advances by more than one cycle: a run can reach the exit point past the prover's
+        // bound, which the prover would cut short.
+        if run.cycle_count >= MAX_PROVABLE_CYCLES as u64 {
             Some(format!(
-                "the block takes more than {} cycles, the most the prover takes",
-                MAX_PROVABLE_CYCLES
+                "the block takes {} cycles or more, more than the prover takes ({} cycles)",
+                run.cycle_count, MAX_PROVABLE_CYCLES
             ))
+        } else if run.succeeded(self.guest.exit_pc) {
+            None
         } else {
             Some(format!(
                 "guest validation failure (final_pc=0x{:08x} reached_end={} cycles={})",
