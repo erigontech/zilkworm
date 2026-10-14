@@ -73,6 +73,10 @@ struct WorkItem {
     /// `proving` post waits for: the posts are background tasks, and one that lands late would
     /// move the block's status back.
     queued_post: Option<tokio::task::JoinHandle<()>>,
+    /// The block's preflight run, which the fetcher makes as soon as the bundle exists, before
+    /// enqueueing the block; None with Z6M_CONCURRENT_PREFLIGHT, where the worker runs it
+    /// alongside proving.
+    preflight: Option<Result<VmRunOutcome>>,
 }
 
 pub struct AirbenderService {
@@ -83,9 +87,13 @@ pub struct AirbenderService {
     prover: Option<Arc<Mutex<BlockProver>>>,
     /// The guest, decoded once for simulator runs (preflight and execute-only).
     guest: Arc<Guest>,
+    /// A block's preflight completes before its proving starts, unless
+    /// Z6M_CONCURRENT_PREFLIGHT is set (see `prove_item`).
+    serial_preflight: bool,
 }
 
 /// Result of running a block through the VM simulator (no proving).
+#[derive(Debug)]
 struct VmRunOutcome {
     /// The input's gas used once the guest's public output has matched the input; 0 when the
     /// guest did not finish successfully.
@@ -142,6 +150,7 @@ impl AirbenderService {
             eth_client,
             prover,
             guest,
+            serial_preflight: std::env::var("Z6M_CONCURRENT_PREFLIGHT").is_err(),
         })
     }
 
@@ -155,9 +164,10 @@ impl AirbenderService {
     ///
     /// Topology:
     /// - A **fetcher** task walks block numbers, pulls each one off the RPC,
-    ///   writes the MFBD flat bundle to disk, and pushes a `WorkItem` into a
-    ///   bounded channel. It fires `ethproofs.queued(block)` as a
-    ///   background `tokio::spawn` so the fetcher never waits on HTTP.
+    ///   writes the MFBD flat bundle to disk, runs the block's preflight, and
+    ///   pushes a `WorkItem` into a bounded channel. It fires
+    ///   `ethproofs.queued(block)` as a background `tokio::spawn` so the
+    ///   fetcher never waits on HTTP.
     /// - A **prover worker** task drains the channel, running execute
     ///   and/or prove for each item. `ethproofs.proving(block)` and
     ///   `.proved(..)` are both spawned background tasks so the worker
@@ -165,8 +175,8 @@ impl AirbenderService {
     ///
     /// Fetching is therefore independent of the GPU: while a proof is
     /// running, the fetcher can pre-queue up to `PROVER_QUEUE_CAPACITY`
-    /// blocks. If the fetcher gets ahead, `tx.send().await` backpressures
-    /// naturally.
+    /// blocks, preflights done. If the fetcher gets ahead, `tx.send().await`
+    /// backpressures naturally.
     pub async fn run(self) -> Result<()> {
         info!("Starting airbender service (pipelined fetch / prove)");
         let me = Arc::new(self);
@@ -319,12 +329,31 @@ impl AirbenderService {
                     }
                 };
 
+                // The preflight runs as soon as the bundle exists, off the async runtime: a block
+                // that would wait in the queue for an earlier block's proof has it done by then
+                // instead of after. The worker gets the run with the block and checks it before
+                // proving (see prove_item).
+                let preflight = if should_prove && self.serial_preflight {
+                    let svc = Arc::clone(&self);
+                    let path = outcome.flat_bundle_path.clone();
+                    Some(
+                        tokio::task::spawn_blocking(move || {
+                            svc.preflight_block(block_number, &path)
+                        })
+                        .await
+                        .unwrap_or_else(|err| Err(eyre::eyre!("preflight task failed: {err}"))),
+                    )
+                } else {
+                    None
+                };
+
                 let item = WorkItem {
                     block_number,
                     bundle_path: outcome.flat_bundle_path,
                     execute: should_execute,
                     prove: should_prove,
                     queued_post,
+                    preflight,
                 };
 
                 // Backpressure: if the GPU is slower than fetching, the queue
@@ -391,7 +420,8 @@ impl AirbenderService {
 
             if item.prove {
                 let queued_post = item.queued_post.take();
-                self.prove_item(&item, queued_post).await;
+                let preflight = item.preflight.take();
+                self.prove_item(&item, queued_post, preflight).await;
             }
         }
 
@@ -402,11 +432,12 @@ impl AirbenderService {
     /// Proves one block, gated by the preflight: a proof is written and posted only if the
     /// simulator ran the block to the guest's exit point and the proof commits the block's hash.
     /// Its Ethproofs posts go out in order: `proving` after `queued_post`, `proved` after
-    /// `proving`.
+    /// `proving`. `preflight` is the fetcher's run of the block, if it made one.
     async fn prove_item(
         self: &Arc<Self>,
         item: &WorkItem,
         queued_post: Option<tokio::task::JoinHandle<()>>,
+        preflight: Option<Result<VmRunOutcome>>,
     ) {
         let skip = |cycle_count: u64, message: String| {
             error!(block = item.block_number, "{message}");
@@ -424,15 +455,18 @@ impl AirbenderService {
         // bound, before proving: a block that fails it is not proved at all. It must be: the
         // prover proves a run that ends in the guest's error exit, and then aborts the whole
         // process in the recursion layer (a panic in its JIT code, which cannot unwind), so
-        // the service restarts and misses the blocks of the next minute. Running the
-        // preflight first also keeps it off the CPU while the pipeline's own simulation feeds
-        // the GPUs. Z6M_CONCURRENT_PREFLIGHT=1 runs it alongside proving instead, gating only
-        // the proof's writing and posting, which saves its time (about 0.5 s) on every block
-        // at the cost of that abort on a block that fails it.
-        let serial_preflight = std::env::var("Z6M_CONCURRENT_PREFLIGHT").is_err();
+        // the service restarts and misses the blocks of the next minute. The fetcher runs it
+        // as soon as the block's bundle exists: at the chain tip the worker is idle by then and
+        // proving follows it at once, while a block that waits for an earlier block's proof has
+        // it done during that proof (sharing the CPU with the pipeline's own simulation)
+        // instead of after it. Z6M_CONCURRENT_PREFLIGHT=1 runs it alongside proving instead,
+        // gating only the proof's writing and posting, which saves its time (about 0.5 s) on
+        // every block at the cost of that abort on a block that fails it.
         let mut preflight_handle = None;
-        if serial_preflight {
-            match self.preflight_block(item.block_number, &item.bundle_path) {
+        if self.serial_preflight {
+            let run = preflight
+                .unwrap_or_else(|| self.preflight_block(item.block_number, &item.bundle_path));
+            match run {
                 Ok(run) => {
                     if let Some(reason) = self.preflight_failure(&run) {
                         return skip(run.cycle_count, format!("SKIPPED: {reason}"));
