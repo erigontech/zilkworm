@@ -18,6 +18,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
 #include <zilk_core/core/common_zz/keccak_prefix.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
@@ -150,6 +151,21 @@ struct BranchNode {
         ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(silkworm::keccak256(rlp));
     }
 
+    // set_child_hash() resumed from `r`, a state of the first r.blocks blocks of `rlp` (none if 0), which it consumes.
+    inline void set_child_hash(unsigned slot, ByteView rlp, kprefix::Resume r) noexcept {
+        if (r.blocks == 0) {
+            set_child_hash(slot, rlp);
+            return;
+        }
+        [[assume(slot < 16)]];
+        dirty |= static_cast<uint16_t>(1u << slot);
+        mask |= 1 << slot;
+        child_len[slot] = 32;
+        child_ptr[slot] = nullptr;
+        ::new (static_cast<void*>(child[slot].bytes))
+            ethash::hash256(ethash_keccak256_resume(r.state, r.blocks, rlp.data(), rlp.size()));
+    }
+
     // The keccak of the encoding of this branch, which hashes_from_witness() (rlp_sw.hpp) must accept:
     // read from the witness node and the new hashes of the dirty slots, with no copy. With `blocks`
     // nonzero, `state` holds the state of the node's first blocks (see take_resumable_blocks()),
@@ -191,6 +207,19 @@ struct ExtensionNode {
     inline void set_child_hash(ByteView rlp) noexcept {
         const ethash::hash256 h = silkworm::keccak256(rlp);
         // child follows the 68-byte path, so it is only 4-aligned: too little to hold a hash256.
+        typedef uint32_t __attribute__((may_alias)) w32;
+        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
+        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        child_len = 32;
+    }
+
+    // set_child_hash() resumed from `r`, as BranchNode's.
+    inline void set_child_hash(ByteView rlp, kprefix::Resume r) noexcept {
+        if (r.blocks == 0) {
+            set_child_hash(rlp);
+            return;
+        }
+        const ethash::hash256 h = ethash_keccak256_resume(r.state, r.blocks, rlp.data(), rlp.size());
         typedef uint32_t __attribute__((may_alias)) w32;
         w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
         for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
@@ -293,7 +322,7 @@ struct TrieNodeFlat {
     }
 
     bool operator<(const TrieNodeFlat& other) const {
-        return std::memcmp(key.bytes, other.key.bytes, 32) < 0;
+        return lt_bytes32(key.bytes, other.key.bytes);  // TrieNodeFlat is 4-aligned, key first
     }
 };
 
@@ -313,6 +342,28 @@ struct TrieNodeFlat {
     return 2 * j + (((a.key.bytes[j] ^ b.key.bytes[j]) & 0xF0) == 0);
 }
 
+/// Sorts n pointers to nodes by the nodes' keys: a walk that reads the nodes through them leaves
+/// the nodes in place (sort_trie_nodes() moves each out-of-place node once).
+inline void sort_trie_node_ptrs(const TrieNodeFlat** order, size_t n) {
+    if (n < 2) return;
+    const auto less = [](const TrieNodeFlat* a, const TrieNodeFlat* b) noexcept {
+        return lt_bytes32(a->key.bytes, b->key.bytes);
+    };
+    if (n <= 16) {
+        for (size_t i = 1; i < n; ++i) {
+            const TrieNodeFlat* const k = order[i];
+            size_t j = i;
+            while (j > 0 && less(k, order[j - 1])) {
+                order[j] = order[j - 1];
+                --j;
+            }
+            order[j] = k;
+        }
+    } else {
+        std::sort(order, order + n, less);
+    }
+}
+
 /// Sorts n nodes by key. A node is 155 bytes, so a sort that moves nodes (n^2/4 moves for the
 /// insertion sort below 17, n log n for std::sort) spends most of its time copying; this sorts
 /// indices and then applies the permutation, moving each node at most once (cycle following).
@@ -327,7 +378,7 @@ inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
     }
     for (size_t i = 0; i < n; ++i) idx[i] = static_cast<uint32_t>(i);
     const auto less = [data](uint32_t a, uint32_t b) noexcept {
-        return std::memcmp(data[a].key.bytes, data[b].key.bytes, 32) < 0;
+        return lt_bytes32(data[a].key.bytes, data[b].key.bytes);
     };
     if (n <= 16) {
         for (size_t i = 1; i < n; ++i) {
@@ -385,12 +436,14 @@ class GridMPT {
     nibbles64 search_nibbles_;  // The current key being searched for/inserted
 
     bool last_was_delete_{false};
-    // Set while the descent for an update that sets a value (a deletion of 0x80 counts as one) runs:
-    // only such an update rewrites the hash bytes of the branches it passes through, see unfold_slot().
-    // Clear everywhere else, where the search cursor is not the one unfold_slot() would read.
-    bool snap_writes_{false};
     // grid_[0] is the node find_node_rlp() verified to hash to prev_root_ (unchanged while unmodified).
     bool root_unfolded_{false};
+    // Set by the constructor and reset(): prev_root_ is looked up and unfolded by calc_root_impl(), which knows
+    // the first slot of the root its updates change, so that the lookup saves the right keccak state of the root.
+    bool root_pending_{false};
+    // Whether the walk's updates write anything, set with root_pending_: a walk that only reads changes no node,
+    // and its lookups save no keccak state (unfold_slot()).
+    bool snap_{false};
 
     // Node-store lookups go through DirectState::find_node_rlp, which owns
     // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload
@@ -412,11 +465,12 @@ class GridMPT {
 
     LeafNode make_cur_leaf(ByteView value_rlp);
 
-    // Shared by the constructor and reset(): if previous_root_hash is
-    // non-empty, look it up via DirectState::find_node_rlp and unfold onto
-    // grid_[0]. Defined in grid_mpt.cpp to keep the DirectState include out
-    // of mpt.hpp.
-    void init_from_root(bytes32 previous_root_hash);
+    // Run by calc_root_impl() before its walk, for the root the constructor or reset() named: if
+    // previous_root_hash is non-empty, look it up via DirectState::find_node_rlp and unfold onto grid_[0].
+    // A full branch verified there keeps the keccak state of its blocks before `first_slot`, the first slot of
+    // it the updates change (kNoSlot: none), for the final root to resume from. Defined in grid_mpt.cpp to keep
+    // the DirectState include out of mpt.hpp.
+    void init_from_root(bytes32 previous_root_hash, unsigned first_slot);
 
     // Update the grid_line's parent-child bookkeeping
     void link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, unsigned parent_depth);
@@ -426,6 +480,11 @@ class GridMPT {
 
     // Whether `lines` more lines fit the grid (see kMaxLines); the walk cannot go on if not.
     bool has_room(unsigned lines);
+
+    // The keccak state a fold of the full branch `b` of pool row `row` resumes from (fold_unfold.hpp).
+    kprefix::Resume take_resume_full(const BranchNode& b, size_t row);
+    // The same for a branch encode_branch() copies from its witness node and patches (fold_unfold.hpp).
+    kprefix::Resume take_resume_encoded(const BranchNode& b, size_t row);
 
   public:
     GridMPT(const DirectState& state, bytes32 previous_root_hash)
@@ -437,7 +496,7 @@ class GridMPT {
         // verifying a node stays that node's. A new instance may have a witness at the old one's
         // addresses (a host test), whose tags would then name other bytes.
         kprefix::clear_tags();
-        init_from_root(previous_root_hash);
+        root_pending_ = true;
     }
     // A copy would allocate its grid at the size it has, and its leaves would still view this one's copies.
     GridMPT(const GridMPT&) = delete;
@@ -453,7 +512,6 @@ class GridMPT {
         search_nib_cursor_ = 0;
         last_was_delete_ = false;
         missing_count_ = 0;
-        snap_writes_ = false;
         failed_ = false;
         prev_root_ = new_prev_root;
         grid_.clear();                  
@@ -461,7 +519,7 @@ class GridMPT {
         // search_nibbles_ is overwritten on each insert by the main algorithm
         // (calc_root_from_updates seeds it from the first update); no need to
         // zero it here.
-        init_from_root(new_prev_root);
+        root_pending_ = true;
     }
 
     // Helper methods
@@ -478,6 +536,8 @@ class GridMPT {
 
     // Main algorithm
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
+    // The same walk over an order of pointers (see sort_trie_node_ptrs()): the nodes stay where they are.
+    bytes32 calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted);
 
     template <typename NodeType>
     bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node);
@@ -499,6 +559,11 @@ class GridMPT {
     bool failed() const noexcept { return failed_; }
 
     unsigned cascade_delete(unsigned depth);
+
+  private:
+    // The walk of both calc_root_from_updates(), over the nodes or pointers to them (grid_mpt.cpp).
+    template <typename It>
+    bytes32 calc_root_impl(It updates_it, It updates_end);
 };
 
 }  // namespace zilkworm

@@ -40,8 +40,8 @@
 #endif
 
 // sanitize() pads the code store's payloads for the EVM where they lie, see code_store_seal.hpp.
-// Not with USE_HASH_KEY: its account recovery looks code up in the code store afterwards.
-#if EVMONE_IN_PLACE_CODE && !USE_HASH_KEY
+// With USE_HASH_KEY, account recovery looks code up after that in an index sanitize() keeps.
+#if EVMONE_IN_PLACE_CODE
 #define ZILK_SEAL_CODE_STORE 1
 #else
 #define ZILK_SEAL_CODE_STORE 0
@@ -159,6 +159,17 @@ class DirectState : public BlockState {
     /// lengths and parts of the keys of the entries: code_store_map_ then serves code_for() only,
     /// and no lookup by hash. The region it registered with evmone is reset with this object.
     bool code_store_sealed_{false};
+#if USE_HASH_KEY
+    /// The key, body offset and body size of every code-store entry, taken by sanitize() after it
+    /// bound each payload to its key and before the seal zeroes the lengths and keys: account
+    /// recovery looks the code of a recovered account up here once the map cannot.
+    struct SealedCodeEntry {
+        uint8_t key[32];
+        uint32_t body_off;
+        uint32_t body_len;
+    };
+    std::vector<SealedCodeEntry> sealed_code_index_;
+#endif
 #endif
 
     std::span<const AddrHashEntry> addr_hashes_;
@@ -185,6 +196,18 @@ class DirectState : public BlockState {
     FlatHashMap<evmc::bytes32, BlockHeader> headers_;
     // Set once a block has asked for the hash of an ancestor its headers do not lead to, see get_block_hash().
     mutable bool ancestor_missing_{false};
+    // get_block_hash()'s walk so far, for the header of number ancestors_number_ and parent hash
+    // ancestors_[0]: ancestors_[d] is the hash of block number - 1 - d. ancestors_end_ is set once the
+    // headers held do not lead past the last. insert_header() drops it.
+    mutable std::vector<evmc::bytes32> ancestors_;
+    mutable BlockNum ancestors_number_{0};
+    mutable bool ancestors_end_{false};
+    // Keeps sizeof(DirectState) a multiple of 16 on the rv32 guest (528 with USE_HASH_KEY, 464 without): 8 bytes
+    // off that moved the buffers placed after it off their phase, and the guest's CSR copies of them took about
+    // 1k more BigInt calls and 30-40k more cycles a block on nearly every mainnet block (504 bytes against
+    // 512 or 528). A member added here should keep the size a multiple of 16 (the static_assert after the
+    // class checks it), or be measured.
+    [[maybe_unused]] uint8_t ancestors_pad_[8]{};
 
     bool multi_block_{false};
     // Journal only used for multi-block cases
@@ -211,6 +234,8 @@ class DirectState : public BlockState {
     // Preimage-gap fallback; see USE_HASH_KEY option.
     mutable std::vector<std::unique_ptr<Account>> recovered_accounts_;
     const Account* recover_account_from_nodestore(const evmc::address& addr) const;
+    // The code-store entry body ([key][payload]) for a code hash, sealed or not.
+    std::optional<std::span<const uint8_t>> code_entry_by_hash_(const uint8_t (&hash)[32]) const noexcept;
     struct RecoveredSlot {
         evmc::bytes32 initial;
         evmc::bytes32 current;  // == initial until an SSTORE lands
@@ -223,6 +248,15 @@ class DirectState : public BlockState {
                                                           std::array<uint8_t, 32>& embedded_scratch) const;
     const RecoveredSlot* recover_slot_from_nodestore(const Account& pa, const evmc::address& addr,
                                                      const evmc::bytes32& key) const;
+    // The keccak states the walks save while they verify a branch (kprefix::kAddrRow, see
+    // keccak_prefix.hpp), for check_root's folds to resume from: a row per node address (kprefix::addr_row()),
+    // its tag the node's bytes' address and its block count. Allocated with the node store, whose nodes the
+    // tags name, so that no tag outlives the bytes it names; the tags start null.
+    mutable std::unique_ptr<kprefix::StateRow[]> walk_states_;
+    mutable std::unique_ptr<const uint8_t*[]> walk_tags_;
+    mutable std::unique_ptr<uint8_t[]> walk_sb_;
+    [[gnu::noinline]] bool walk_verify_and_snap(const uint8_t* node, size_t size, unsigned blocks,
+                                                const uint8_t* want) const noexcept;
 #endif
 
   public:
@@ -467,14 +501,35 @@ class DirectState : public BlockState {
                                const intx::uint256& balance) noexcept;
     void set_storage_slot(const evmc::address& addr, Account& pa,
                           const evmc::bytes32& key, const evmc::bytes32& value);
+    // `code_hash`, when not null, is keccak256(code), as the EVM's State computed it when it set the code.
     void apply_code_diff(const evmc::address& addr, Account& pa,
-                         const evmc::bytes& code);
+                         const evmc::bytes& code, const evmc::bytes32* code_hash = nullptr);
 
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept;
-    // find_node_rlp() that, when it has to hash a full branch, also saves the keccak state of its
-    // first blocks before a slot in a row of the kprefix pool. `request` is called then, and only then,
-    // for the kprefix::SnapRequest: the slot (kNoSlot for no snapshot) and the row.
+#if USE_HASH_KEY
+    /// The state a walk saved for the first blocks of the node at `node` (a branch), if it covers at most
+    /// `allowed` blocks: taken out of the table, as the resume permutes it in place. {nullptr, 0} if none.
+    kprefix::Resume take_walk_state(const uint8_t* node, unsigned allowed) const noexcept {
+        if (!walk_tags_) return {nullptr, 0};
+        const size_t r = kprefix::addr_row(node);
+        if (walk_tags_[r] != node) return {nullptr, 0};
+        const unsigned blocks = walk_sb_[r];
+        if (blocks == 0 || blocks > allowed) return {nullptr, 0};
+        walk_tags_[r] = nullptr;
+        return {walk_states_[r].lanes, blocks};
+    }
+    /// For tests: the block count of the state the table holds for the node at `node`, 0 if none.
+    unsigned walk_state_blocks(const uint8_t* node) const noexcept {
+        if (!walk_tags_) return 0;
+        const size_t r = kprefix::addr_row(node);
+        return walk_tags_[r] == node ? walk_sb_[r] : 0;
+    }
+#endif
+    // find_node_rlp() that, when it has to hash a node of a block or more, also saves the keccak state of its
+    // first blocks before a slot (kprefix::blocks_before_slot()) in a row of the kprefix pool, or of the table
+    // of the walks for kprefix::kAddrRow. `request` is called then, and only then, for the
+    // kprefix::SnapRequest: the slot (kNoSlot for no snapshot) and the row.
     template <class SnapRequestFn>
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash, SnapRequestFn&& request) const noexcept;
@@ -488,6 +543,10 @@ class DirectState : public BlockState {
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp_impl(const uint8_t (&node_hash)[32], SnapRequestFn&& request) const noexcept;
 };
+
+#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+static_assert(sizeof(DirectState) % 16 == 0, "keep the rv32 guest's DirectState a multiple of 16 bytes, see ancestors_pad_");
+#endif
 
 [[gnu::always_inline]] inline const Account*
 DirectState::find_pre_account_unchecked(const evmc::address& addr) const noexcept {
@@ -537,12 +596,28 @@ DirectState::find_node_rlp_impl(const uint8_t (&node_hash)[32], [[maybe_unused]]
             // The snapshot hash is the same keccak of the same bytes, compared in full all the same.
             bool verified;
             if constexpr (kSnap) {
-                const bool full = payload.size() == kprefix::kNodeSize && (reinterpret_cast<uintptr_t>(payload.data()) & 7) == 0;
-                const kprefix::SnapRequest snap = full ? request() : kprefix::SnapRequest{kprefix::kNoSlot, 0};
-                const unsigned blocks = kprefix::first_blocks(snap.slot);
-                verified = blocks != 0
-                               ? kprefix::verify_and_snap(payload.data(), snap.row, blocks, node_hash)
-                               : keccak256_equals(payload, node_hash);
+                // A node of a block or more and no larger than a full branch: a full branch (532 bytes) or any other
+                // branch encode_branch() copies and patches, whose hashes fold_line() resumes; rarely a long leaf,
+                // whose state no fold uses. Three blocks at most, as the tags' invariant has it (keccak_prefix.hpp).
+                const bool big = payload.size() >= kprefix::kBlock && payload.size() <= kprefix::kNodeSize &&
+                                 (reinterpret_cast<uintptr_t>(payload.data()) & 7) == 0;
+                const kprefix::SnapRequest snap = big ? request() : kprefix::SnapRequest{kprefix::kNoSlot, 0};
+                const unsigned blocks = big ? kprefix::blocks_before_slot(payload.data(), payload.size(), snap.slot) : 0;
+                if (blocks == 0) {
+                    verified = keccak256_equals(payload, node_hash);
+                } else {
+                    const size_t row = snap.row;
+#if USE_HASH_KEY
+                    if (row == kprefix::kAddrRow) {
+                        verified = walk_verify_and_snap(payload.data(), payload.size(), blocks, node_hash);
+                    } else
+#endif
+                    {
+                        verified = kprefix::verify_and_snap(payload.data(), payload.size(), kprefix::pool[row],
+                                                            kprefix::tag_orig[row], kprefix::tag_sb[row], blocks,
+                                                            node_hash);
+                    }
+                }
             } else {
                 verified = keccak256_equals(payload, node_hash);
             }
@@ -578,7 +653,7 @@ DirectState::read_code(const Account& pa) const noexcept {
         const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa.code_hash);
         const uint64_t k8 = hash_key8(h);
         if (auto it = created_code_.find(k8); it != created_code_.end() &&
-                                              std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
+                                              bytes_equal<32>(it->second.full_hash.bytes, h.bytes)) [[likely]] {
             return ByteView{it->second.bytes.data(), it->second.bytes.size()};
         }
         if (auto cit = created_code_collisions_.find(h);

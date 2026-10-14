@@ -561,6 +561,25 @@ TEST_CASE("code store seal: created code equal to witness code goes to created_c
     }
 }
 
+TEST_CASE("apply_code_diff names the code by the hash the diff carries", "[state_zz][code_store_seal]") {
+    const Bytes c0 = code_of(200, 1), c1 = code_of(300, 2);
+    Witness w = make_witness({c0});
+    DirectState ds{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
+    REQUIRE(ds.sanitize());
+    for (const auto& c : {c0, c1}) {
+        const bytes32 h = keccak_bytes(ByteView{c.data(), c.size()});
+        Account given{}, computed{};
+        ds.apply_code_diff(make_addr(0x34, 0x01), given, evmc::bytes{c.data(), c.size()}, &h);
+        ds.apply_code_diff(make_addr(0x34, 0x02), computed, evmc::bytes{c.data(), c.size()});
+        CHECK(std::memcmp(given.code_hash, h.bytes, 32) == 0);
+        CHECK(std::memcmp(computed.code_hash, h.bytes, 32) == 0);
+        CHECK(given.code_store_offset == computed.code_store_offset);
+        CHECK(given.code_store_len == c.size());
+        const ByteView code = ds.read_code(given);
+        CHECK(Bytes{code.data(), code.size()} == c);
+    }
+}
+
 TEST_CASE("code store seal: a code store overlapping another pre-state section is rejected",
           "[state_zz][code_store_seal]") {
     Witness w = make_witness({code_of(200, 1), code_of(300, 2)});

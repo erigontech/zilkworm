@@ -359,6 +359,33 @@ template <unsigned Off>
     return blocks;
 }
 
+// The most leading blocks of the full branch b's encoding (b satisfies hashes_from_witness()) that are still the
+// witness node's bytes: those before the hash bytes of its first dirty slot, all three whole blocks if no slot is
+// dirty. A state saved for the node serves the encoding if it covers no more blocks than this, the same test as
+// take_resumable_blocks()'s kHeadSlots one: slot i's hash bytes begin at 4 + 33 i, in block (4 + 33 i) / 136.
+[[gnu::always_inline]] inline unsigned full_branch_clean_blocks(const BranchNode& b) noexcept {
+    return b.dirty == 0 ? 3u : kprefix::first_blocks(lowest_set_bit(b.dirty));
+}
+
+// The leading whole blocks of encode_branch(b) that are bytes of b's witness node, for a b laid out as that node
+// (b.orig set, same_layout_as_orig()): encode_branch() copies the node and rewrites only the slots in b.dirty, each
+// from the first byte of its item, at the offset the items before it take in the node (a hash reference 33 bytes,
+// an empty slot 1, an embedded node its own length; the list header 1 to 3). So the bytes before the item of the
+// first dirty slot are the node's, and all of them are if no slot is dirty.
+[[gnu::always_inline]] inline unsigned same_layout_clean_blocks(const BranchNode& b) noexcept {
+    size_t clean = b.orig_size;
+    if (b.dirty != 0) {
+        const unsigned first = lowest_set_bit(b.dirty);
+        const unsigned b0 = b.orig[0];
+        clean = b0 < 0xf8u ? 1u : 1u + (b0 - 0xf7u);  // as encode_branch()
+        for (unsigned i = 0; i < first; ++i) {
+            const unsigned len = b.orig_child_len[i];
+            clean += len == 0 ? 1u : len == 32 ? 33u : len;
+        }
+    }
+    return static_cast<unsigned>(clean / kprefix::kBlock);
+}
+
 // Writes the list header of a leaf or extension payload at `out`, returns the position after it. A payload
 // below 256 bytes takes the one-byte long form without to_big_compact; a longer one (a leaf value of up to
 // kMaxLeafValueSize) goes through encode_list_header.
@@ -592,9 +619,10 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
         if (hashes) [[likely]] {
 #pragma GCC unroll 16
             for (size_t i = 0; i < 16; ++i) out_branch.child_ptr[i] = p + 33 * i + 1;
-            static constexpr uint32_t kAllHashLens[4] = {
-                0x20202020u, 0x20202020u, 0x20202020u, 0x20202020u};
-            std::memcpy(out_branch.child_len.data(), kAllHashLens, 16);  // 4 word stores
+            // 4 word stores (child_len is alignas(8)); a memcpy here compiled to a call.
+            typedef uint32_t __attribute__((may_alias)) w32;
+            w32* const cl = reinterpret_cast<w32*>(std::assume_aligned<8>(out_branch.child_len.data()));
+            cl[0] = cl[1] = cl[2] = cl[3] = 0x20202020u;
             out_branch.mask = 0xffff;
             out_branch.value = {};
             return kBranch;

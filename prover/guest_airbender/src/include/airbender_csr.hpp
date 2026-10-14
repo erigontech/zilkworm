@@ -13,7 +13,9 @@ namespace airbender {
 constexpr uint32_t CSR_NON_DETERMINISM = 0x7C0;
 constexpr uint32_t CSR_BLAKE2S = 0x7C7;
 constexpr uint32_t CSR_BIGINT = 0x7CA;
-constexpr uint32_t CSR_KECCAK_SPECIAL5 = 0x7CB;
+constexpr uint32_t CSR_KECCAK_THETA_RHO = 0x7CC;
+constexpr uint32_t CSR_KECCAK_COLUMN_PARITY = 0x7CD;
+constexpr uint32_t CSR_KECCAK_CHI5 = 0x7CE;
 
 // --- Basic CSR read/write ---
 
@@ -111,7 +113,8 @@ inline void blake_trigger_full_rounds(uint32_t* state, const uint32_t* input, ui
     return x12;
 }
 
-// Keccak-f[1600] (CSR 0x7CB) is delegated from evmone's keccak.c, as 649 contiguous csrrw.
+// Keccak-f[1600] (CSRs 0x7CD, 0x7CC, 0x7CE) is delegated from evmone's keccak.c, as 361 contiguous
+// csrrw.
 
 // --- Program termination ---
 

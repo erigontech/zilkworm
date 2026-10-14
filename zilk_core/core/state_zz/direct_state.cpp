@@ -3,6 +3,8 @@
 
 #include "direct_state.hpp"
 
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -304,26 +306,7 @@ namespace {
     /// Both are 8-aligned, as every slot is; with strict alignment (rv32 Airbender) they are compared a
     /// word at a time inline, as find_slot() does, instead of by a call to memcmp.
     [[gnu::always_inline]] inline bool key_below(const uint8_t* a, const uint8_t* b) noexcept {
-#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-        typedef uint32_t __attribute__((may_alias)) w32;
-        const w32* const wa = reinterpret_cast<const w32*>(a);
-        const w32* const wb = reinterpret_cast<const w32*>(b);
-        for (int i = 0; i < 8; ++i) {
-            const uint32_t x = wa[i];
-            const uint32_t y = wb[i];
-            if (x == y) continue;
-            // The first differing byte is the lowest nonzero byte of x ^ y, see find_slot().
-            const uint32_t d = x ^ y;
-            const uint32_t m = (d & 0xffu)       ? 0xffu
-                               : (d & 0xffffu)   ? 0xffffu
-                               : (d & 0xffffffu) ? 0xffffffu
-                                                 : ~uint32_t{0};
-            return (x & m) < (y & m);
-        }
-        return false;
-#else
-        return std::memcmp(a, b, 32) < 0;
-#endif
+        return ::zilkworm::lt_bytes32(a, b);
     }
 
     // SOUNDNESS-CRITICAL: the entries of an MphfMap must tile its data section exactly as the
@@ -384,6 +367,12 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
         }
         node_store_map_.reset(reinterpret_cast<MphfMapHeader*>(nodestore_bytes.data()));
         node_verified_.assign((node_store_map_.data_size() / 8 + 31) / 32, 0u);
+#if USE_HASH_KEY
+        // The states are written before they are read (verify_and_snap()); only the tags need clearing.
+        walk_states_.reset(new kprefix::StateRow[kprefix::kAddrRows]);
+        walk_tags_.reset(new const uint8_t*[kprefix::kAddrRows]());
+        walk_sb_.reset(new uint8_t[kprefix::kAddrRows]());
+#endif
     }
     reserve_block_maps_();
 }
@@ -413,6 +402,9 @@ DirectState::DirectState(DirectState&& other) noexcept
     }
 #if ZILK_SEAL_CODE_STORE
     code_store_sealed_ = std::exchange(other.code_store_sealed_, false);
+#if USE_HASH_KEY
+    sealed_code_index_ = std::move(other.sealed_code_index_);
+#endif
 #endif
     node_store_map_ = other.node_store_map_;
     node_verified_ = std::move(other.node_verified_);
@@ -420,6 +412,9 @@ DirectState::DirectState(DirectState&& other) noexcept
     recovered_accounts_ = std::move(other.recovered_accounts_);
     recovered_slots_ = std::move(other.recovered_slots_);
     recovery_ended_ = other.recovery_ended_;
+    walk_states_ = std::move(other.walk_states_);
+    walk_tags_ = std::move(other.walk_tags_);
+    walk_sb_ = std::move(other.walk_sb_);
 #endif
 
     created_accounts_ = std::move(other.created_accounts_);
@@ -430,6 +425,9 @@ DirectState::DirectState(DirectState&& other) noexcept
     created_code_collisions_ = std::move(other.created_code_collisions_);
     headers_ = std::move(other.headers_);
     ancestor_missing_ = other.ancestor_missing_;
+    ancestors_ = std::move(other.ancestors_);
+    ancestors_number_ = other.ancestors_number_;
+    ancestors_end_ = other.ancestors_end_;
     touched_ = std::move(other.touched_);
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
     changed_storage_journal_ = std::move(other.changed_storage_journal_);
@@ -577,7 +575,7 @@ void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
 }
 
 void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
-                                  const evmc::bytes& code) {
+                                  const evmc::bytes& code, const evmc::bytes32* code_hash) {
     if (code.empty()) [[unlikely]] {
         // Empty = a cleared EIP-7702 delegation; the authority's storage survives it.
         copy32(pa.code_hash, kEmptyHash);
@@ -604,8 +602,16 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
 #endif
     }
 
-    const auto h_eth = silkworm::keccak256(code);
-    const auto h = std::bit_cast<evmc::bytes32>(h_eth);
+    // The hash the EVM's State computed as it set the code, in this guest with the same keccak (evmone's
+    // Host::create() and its EIP-7702 delegations): created code is hashed once, not again here. It names the code in
+    // the account leaf and in the code stores below, as the hash computed here did.
+    const evmc::bytes32 h = code_hash != nullptr ? *code_hash : std::bit_cast<evmc::bytes32>(silkworm::keccak256(code));
+#if defined(NO_THREAD_LOCAL) || defined(SP1) || defined(QEMU_DEBUG) || defined(AIRBENDER)
+    // The guests take the hash as it is.
+#else
+    if (code_hash != nullptr && std::bit_cast<evmc::bytes32>(silkworm::keccak256(code)) != h) [[unlikely]]
+        fatal("ERROR: apply_code_diff: the diff's code hash is not the code's");
+#endif
     std::memcpy(pa.code_hash, h.bytes, 32);
     pa.code_store_len = static_cast<uint32_t>(code.size());
 
@@ -626,7 +632,7 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
         if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
             it->second.full_hash = h;
             it->second.bytes.assign(code.begin(), code.end());
-        } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
+        } else if (bytes_equal<32>(it->second.full_hash.bytes, h.bytes)) {
             // Exact dedup hit (same hash, possibly different addr). Skip insert.
         } else {
             if (auto [cit, cins] = created_code_collisions_.try_emplace(h);
@@ -874,7 +880,7 @@ void DirectState::apply_state_diff(const evmone::state::StateDiff& diff) {
                                  : find_or_create_account(m.addr);
         revive_if_deleted(m.addr, *pa);
         journal_address_changed(m.addr);
-        if (m.code) apply_code_diff(m.addr, *pa, *m.code);
+        if (m.code) apply_code_diff(m.addr, *pa, *m.code, m.code_hash ? &*m.code_hash : nullptr);
         set_account_from_diff(*pa, m.nonce, m.balance);
         for (const auto& [k, v] : m.modified_storage) {
             journal_slot_changed(m.addr, k);
@@ -895,6 +901,12 @@ std::optional<BlockHeader> DirectState::read_header(BlockNum,
 }
 
 #if USE_HASH_KEY
+bool DirectState::walk_verify_and_snap(const uint8_t* node, size_t size, unsigned blocks,
+                                       const uint8_t* want) const noexcept {
+    const size_t r = kprefix::addr_row(node);
+    return kprefix::verify_and_snap(node, size, walk_states_[r].lanes, walk_tags_[r], walk_sb_[r], blocks, want);
+}
+
 // Returned view may alias embedded_scratch.
 std::expected<ByteView, DirectState::WalkMiss>
 DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
@@ -908,7 +920,12 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
 
     for (unsigned guard = 0; guard < 70; ++guard) {
         if (!node_is_embedded) {
-            auto rlp = find_node_rlp(node_hash);
+            // A full branch verified here keeps the keccak state of its blocks before the slot the key goes
+            // through, as check_root's walks keep theirs: an SSTORE after the SLOAD of a key changes that slot, and
+            // check_root's fold of the branch then resumes from the state (see take_walk_state()).
+            auto rlp = find_node_rlp(node_hash, [&]() noexcept {
+                return kprefix::SnapRequest{depth < 64 ? want[depth] : kprefix::kNoSlot, kprefix::kAddrRow};
+            });
             if (!rlp) return std::unexpected{WalkMiss::kInvalid};  // witness incomplete
             node_rlp = *rlp;
         }
@@ -1019,7 +1036,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
         fatal("ERROR: USE_HASH_KEY: malformed account leaf RLP");
     if (std::memcmp(acc->code_hash, kEmptyHash.bytes, 32) != 0) {
         // Setting acc->code_store_len is fine here, checked in read_code
-        if (auto b = code_store_map_.find<32, 0, &hash_key8>(acc->code_hash)) {
+        if (auto b = code_entry_by_hash_(acc->code_hash)) {
             acc->code_store_offset = static_cast<uint32_t>(b->data() - code_store_map_.data());
             acc->code_store_len    = static_cast<uint32_t>(b->size() - FlatKv::kPayloadOffset);
         }
@@ -1056,6 +1073,9 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
     }
 
     const auto sroot = std::bit_cast<evmc::bytes32>(pa.storage_root);
+    // A trie with no root has no key: the walk below would say so before reading anything, so the
+    // key's hash (a keccak permutation for each new key) is not taken for it.
+    if (is_zero_quick(sroot) || sroot == kEmptyRoot) return &per_acct[key];  // negative, as the walk's kAbsent
     const nibbles64 want = nibbles64::from_bytes32(keccak_bytes32(key));
     std::array<uint8_t, 32> embedded_scratch;  // embedded RLP outlives walker-local BranchNode
     const auto leaf = walk_nodestore_leaf(sroot, want, embedded_scratch);
@@ -1084,6 +1104,7 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
 
 void DirectState::insert_header(const BlockHeader& header) {
     headers_[header.hash()] = header;
+    ancestors_.clear();  // The header may lead get_block_hash() further now.
 }
 
 bool DirectState::read_body(BlockNum, const evmc::bytes32&, BlockBody&) const noexcept {
@@ -1163,6 +1184,21 @@ bool DirectState::sanitize() {
         code_keccak_ok &= bytes_equal<32>(
             silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
     });
+#if ZILK_SEAL_CODE_STORE && USE_HASH_KEY
+    // Every entry is bound to its key now (the reader's bits stood for the same bytes), and the
+    // seal below takes the lengths and keys; recover_account_from_nodestore() looks code up here.
+    sealed_code_index_.clear();
+    if (code_keccak_ok) {
+        sealed_code_index_.reserve(code_store_map_.n_keys());
+        code_store_map_.for_each_offset([&](uint64_t off) {
+            SealedCodeEntry e;
+            std::memcpy(e.key, code_data + off + 8u, 32);
+            e.body_off = static_cast<uint32_t>(off + 8u);
+            e.body_len = static_cast<uint32_t>(load_u64_le(code_data + off));
+            sealed_code_index_.push_back(e);
+        });
+    }
+#endif
     if (!code_keccak_ok) {
         sys_println("sanitize: code-hash mismatch in witness bundle ");
         return false;
@@ -1262,6 +1298,24 @@ bool DirectState::sanitize() {
     return true;
 }
 
+#if USE_HASH_KEY
+std::optional<std::span<const uint8_t>>
+DirectState::code_entry_by_hash_(const uint8_t (&hash)[32]) const noexcept {
+#if ZILK_SEAL_CODE_STORE
+    if (code_store_sealed_) {
+        // The map's lengths and keys are zeroed: sanitize() kept them, each key bound to its payload.
+        for (const auto& e : sealed_code_index_) {
+            if (e.body_len >= FlatKv::kPayloadOffset && bytes_equal<32>(e.key, hash))
+                return std::span<const uint8_t>{code_store_map_.data() + e.body_off, e.body_len};
+        }
+        return std::nullopt;
+    }
+#endif
+    if (auto b = code_store_map_.find<32, 0, &hash_key8>(hash)) return std::span<const uint8_t>{*b};
+    return std::nullopt;
+}
+#endif
+
 // SOUNDNESS-CRITICAL: an ancestor's hash is the parent hash of its child, from `header` back, and each child
 // is the header keyed by the hash the one after it names (insert_header keys a header by its own hash), so
 // every hash returned is bound to `header`. Neither the witness's block-hash section nor the numbers of the
@@ -1269,16 +1323,26 @@ bool DirectState::sanitize() {
 evmc::bytes32 DirectState::get_block_hash(const BlockHeader& header, BlockNum n) const noexcept {
     if (n >= header.number) [[unlikely]]
         return {};
-    evmc::bytes32 hash = header.parent_hash;
-    for (BlockNum child = header.number - 1; child > n; --child) {
-        const auto it = headers_.find(hash);
+    // The walk is kept for the header, which BLOCKHASH asks again and again (up to 256 lookups each):
+    // ancestors_ holds the hashes it found, the parent's first, so a hash is looked up once a block.
+    if (ancestors_.empty() || ancestors_number_ != header.number || ancestors_[0] != header.parent_hash) {
+        ancestors_.clear();
+        ancestors_.reserve(257);  // The parent and the 256 blocks BLOCKHASH reaches.
+        ancestors_.push_back(header.parent_hash);
+        ancestors_number_ = header.number;
+        ancestors_end_ = false;
+    }
+    const BlockNum depth = header.number - 1 - n;
+    while (ancestors_.size() <= depth) {
+        const auto it = ancestors_end_ ? headers_.end() : headers_.find(ancestors_.back());
         if (it == headers_.end()) [[unlikely]] {
+            ancestors_end_ = true;
             ancestor_missing_ = true;
             return {};
         }
-        hash = it->second.parent_hash;
+        ancestors_.push_back(it->second.parent_hash);
     }
-    return hash;
+    return ancestors_[static_cast<size_t>(depth)];
 }
 
 }  // namespace zilkworm

@@ -119,19 +119,18 @@ The z6m witness format is a compact RLP encoding of the full block context (gene
 
 ## 4. Precompile Acceleration
 
-### Keccak-f[1600] via CSR 0x7CB
+### Keccak-f[1600] via CSRs 0x7CD, 0x7CC, 0x7CE
 
 Ethereum uses Keccak-256 for everything: address derivation, storage slot hashing, MPT node hashing, transaction hashing. Without acceleration, the pure-C `keccakf1600_implementation` in `keccak.c` runs ~300 lines of bit manipulation per permutation.
 
-**Hook**: In `third_party/evmone/lib/evmone_precompiles/keccak.c`, the `AIRBENDER` preprocessor path defines `syscall_keccak_permute()`, which permutes the state through `keccak_permute_buf()` and its CSR 0x7CB delegation. It is selected as `keccakf1600_best`.
+**Hook**: In `third_party/evmone/lib/evmone_precompiles/keccak.c`, the `AIRBENDER` preprocessor path defines `syscall_keccak_permute()`, which permutes the state through `keccak_permute_buf()` and Airbender's keccak_f1600 delegations. It is selected as `keccakf1600_best`.
 
-**Protocol**: The keccak CSR (0x7CB) uses a delegation model:
-1. Copy 25 u64 state words to a 256-byte-aligned buffer (+ 6 scratch words)
-2. Set x10=0 (control, auto-bumped by hardware), x11=buffer pointer
-3. Execute 649 contiguous `csrrw x0, 0x7CB, x0` instructions (`.rept 649`, not a loop: the transpiler recognizes exactly 649 contiguous CSR writes, runs the whole permutation on the first and moves the PC past the rest)
-4. Copy 25 u64 words back from buffer
+**Protocol**: the keccak_f1600 delegations (column parity 0x7CD, theta/rho 0x7CC, chi5 0x7CE):
+1. Keep the 25 u64 state words in a 256-byte-aligned buffer (+ scratch words)
+2. Set x10=0 (control, bumped by each call), x11=buffer pointer
+3. Execute 361 contiguous CSR writes: 24 rounds of 5 `csrrw x0, 0x7CD, x0`, 5 `csrrw x0, 0x7CC, x0` and 5 `csrrw x0, 0x7CE, x0`, then a last `csrrw x0, 0x7CD, x0` (`.rept`, not a loop: the transpiler recognizes the run by its first CSR and the call count, runs the whole permutation on the first write and moves the PC past the rest)
 
-Each CSR write performs one micro-step of the Keccak-f permutation. The simulator implements the full 24-round Keccak-f across these 649 calls.
+Each CSR write is one step of a round; the three delegation circuits prove them. They replaced the 649-write KeccakSpecial5 run (CSR 0x7CB), whose circuit takes about twice the witness cells; on mainnet blocks proving takes about 8.5% less time on 4 GPUs.
 
 ### BigInt U256 via CSR 0x7CA
 

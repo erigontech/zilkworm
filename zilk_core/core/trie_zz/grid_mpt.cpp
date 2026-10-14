@@ -195,19 +195,39 @@ template <bool DeletionEnabled>
     return false;
 }
 
+namespace {
+[[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat& u) noexcept { return u; }
+[[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat* u) noexcept { return *u; }
+}  // namespace
+
 template <bool DeletionEnabled>
-bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
+template <typename It>
+bytes32 GridMPT<DeletionEnabled>::calc_root_impl(It updates_it, const It updates_end) {
+    if (root_pending_) {
+        root_pending_ = false;
+        // Updates come in key order and a read changes nothing: the first slot of the root they change is the first
+        // nibble of the first key written. The scan stops there; a trie that is only read is scanned to its end.
+        unsigned first_slot = kprefix::kNoSlot;
+        for (It it = updates_it; it != updates_end; ++it) {
+            const TrieNodeFlat& u = deref_update(*it);
+            if (u.current_value().size() != 0) {
+                first_slot = u.key.bytes[0] >> 4;
+                break;
+            }
+        }
+        snap_ = first_slot != kprefix::kNoSlot;
+        init_from_root(prev_root_, first_slot);
+    }
     if (failed_) [[unlikely]] {
         return {};  // the root node could not be read: there is no trie to walk
     }
     // The update search_nibbles_ was last expanded from: the seek compares the keys themselves, and expanding
     // the new key straight into search_nibbles_ skips a zeroed temporary and its copy.
     const TrieNodeFlat* prev = nullptr;
-    for (auto updates_it = updates_sorted.begin(); updates_it != updates_sorted.end(); ++updates_it) {
-        const auto& trie_upd = *updates_it;
+    for (; updates_it != updates_end; ++updates_it) {
+        const TrieNodeFlat& trie_upd = deref_update(*updates_it);
 
         search_nib_cursor_ = 0;
-        snap_writes_ = false;  // for the folds of the seek below
 
         if (!grid_.empty() && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
@@ -236,7 +256,6 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
         }
 
         last_was_delete_ = false;
-        snap_writes_ = trie_upd.current_value().size() != 0;
 
         // MAIN LOOP
         // Every step goes down at least one nibble of the key, and only a leaf is reached with all 64 of them
@@ -497,7 +516,6 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
         }
     }
 
-    snap_writes_ = false;
     while (grid_.size() > 1) {
         fold_line(grid_.size() - 1);
     }
@@ -513,19 +531,28 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
     if (root_unfolded_ && !grid_[0].modified) {
         return prev_root_;
     }
-    // As fold_line() hashes such a branch, from the start: init_from_root() saves no keccak state.
+    // As fold_line() hashes such a branch, resumed from the state init_from_root() saved in row 0, the root's line,
+    // or a walk saved in DirectState's table.
     if (grid_[0].kind == kBranch && hashes_from_witness(grid_[0].branch)) {
-        return std::bit_cast<bytes32>(grid_[0].branch.full_branch_hash(nullptr, 0));
+        const kprefix::Resume r = take_resume_full(grid_[0].branch, 0);
+        return std::bit_cast<bytes32>(grid_[0].branch.full_branch_hash(r.state, r.blocks));
     }
+    const kprefix::Resume r =
+        grid_[0].kind == kBranch ? take_resume_encoded(grid_[0].branch, 0) : kprefix::Resume{nullptr, 0};
     auto encoded = encode_line(grid_[0]);
+    if (r.blocks != 0) {
+        return std::bit_cast<bytes32>(ethash_keccak256_resume(r.state, r.blocks, encoded.data(), encoded.size()));
+    }
     return keccak_bytes(encoded);
 }
 
 template <bool DeletionEnabled>
-void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
+void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash, unsigned first_slot) {
     root_unfolded_ = false;
     if (previous_root_hash != kEmptyRoot) {
-        auto rlp = state_->find_node_rlp(previous_root_hash);
+        // Row 0: the grid is empty, and the root's line is grid_[0].
+        auto rlp = state_->find_node_rlp(previous_root_hash,
+                                         [first_slot]() noexcept { return kprefix::SnapRequest{first_slot, 0}; });
         if (!rlp) [[unlikely]] {
             failed_ = true;
             sys_println("{\"err\":\"no_rlp\"}");
@@ -537,6 +564,16 @@ void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
             sys_println("{\"err\":\"init_from_root: malformed root rlp\"}");
         }
     }
+}
+
+template <bool DeletionEnabled>
+bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
+    return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
+}
+
+template <bool DeletionEnabled>
+bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted) {
+    return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
 }
 
 // Explicit template instantiations

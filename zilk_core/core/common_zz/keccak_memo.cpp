@@ -22,7 +22,15 @@ namespace {
     static_assert(sizeof(KeccakSlot) == 72);
     static_assert(alignof(KeccakSlot) == 8);
 
+#if defined(AIRBENDER)
+    // 65536 slots (4.7 MB of .bss, which costs nothing there: the guest's RAM reads as zero and is not
+    // cleared). A block hashes a few thousand distinct keys, and at 8192 slots the keys evicted and hashed
+    // again cost about 70 keccak permutations per block, each ~4,200 cycles' worth of proving time. On the
+    // 76-block corpus, 16384 slots save 31 of them and 65536 slots 54.
+    inline constexpr size_t kKeccakMemoSlots{65536};
+#else
     inline constexpr size_t kKeccakMemoSlots{8192};
+#endif
     static_assert(std::has_single_bit(kKeccakMemoSlots));
     // Table index = top log2(slots) bits of the mixed key.
     inline constexpr unsigned kKeccakMemoShift{64 - std::countr_zero(kKeccakMemoSlots)};

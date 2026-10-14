@@ -545,11 +545,21 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
                 "G6: account_storage_root merges written recovered slot");
 }
 
-std::vector<uint8_t> make_code_store(const bytes32& code_hash, const Bytes& code) {
+// The code store holds `code` and, with `decoys`, other codes no account uses: where the guest seals
+// the code store (code_store_seal.hpp), the lengths and keys of all entries but the first are zeroed
+// then, so a recovered contract's code is found through the index sanitize() keeps, not the map.
+std::vector<uint8_t> make_code_store(const bytes32& code_hash, const Bytes& code, unsigned decoys = 0) {
     MphfBuilder<32> cb{kMphfCodeStoreMagic, kMphfMapVersion};
     std::vector<uint8_t> body;
     FlatKv::encode(body, code_hash, ByteView{code.data(), code.size()});
     cb.add(hash_key8(code_hash), ByteView{body.data(), body.size()});
+    for (unsigned i = 0; i < decoys; ++i) {
+        const Bytes other{0x60, static_cast<uint8_t>(i), 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3};
+        const bytes32 other_hash = keccak_bytes(other);
+        body.clear();
+        FlatKv::encode(body, other_hash, ByteView{other.data(), other.size()});
+        cb.add(hash_key8(other_hash), ByteView{body.data(), body.size()});
+    }
     return std::move(cb).finalize();
 }
 
@@ -579,8 +589,19 @@ void HiddenContractAccount_CodeBoundFromCodeStore() {
     expect_true(keccak_bytes(root_rlp) == R, "V1: hand-built account root matches R");
 
     // Flat state = {W}; K's preimage is hidden but its code IS in the code store.
+    std::vector<uint8_t> code_store = make_code_store(code_hash, code, /*decoys=*/4);
+    {
+        // The seal keeps the length and key of the first entry in data order: K's code must be another for
+        // its lookup to go through the sealed index (it is the third today).
+        const MphfMap cs{reinterpret_cast<MphfMapHeader*>(code_store.data())};
+        uint64_t first = UINT64_MAX;
+        cs.for_each_offset([&](uint64_t off) noexcept { first = std::min(first, off); });
+        const auto e = cs.find<32, 0, &hash_key8>(code_hash.bytes);
+        expect_true(e.has_value() && static_cast<uint64_t>(e->data() - cs.data()) != first + 8u,
+                    "V1b: K's code is not the code store's first entry, whose key the seal keeps");
+    }
     std::vector<uint8_t> prestate = DirectState::build_blob_from_accounts(
-        {make_info(W, 0, 1000)}, /*block_hashes=*/{}, make_code_store(code_hash, code));
+        {make_info(W, 0, 1000)}, /*block_hashes=*/{}, std::move(code_store));
     expect_true(!prestate.empty(), "V2: prestate blob built");
 
     MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};

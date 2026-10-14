@@ -366,16 +366,16 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
     // A full branch that differs from its witness node only in hash references is hashed from that
     // node and its new hashes, with no encoding: before the line goes, as the hash reads it. If the
     // lookup saved the keccak state of the node's leading blocks and this update left them as they
-    // were, the hash resumes from that state.
+    // were, the hash resumes from that state: saved by check_root's walk in the line's row of the pool,
+    // or by an execution-time walk in DirectState's table (a node is verified once, so by one of them).
     if (grid_line.kind == kBranch && hashes_from_witness(grid_line.branch)) {
-        const size_t row = depth & (kprefix::kRows - 1);
-        const unsigned blocks = take_resumable_blocks(grid_line.branch, row);
+        const kprefix::Resume r = take_resume_full(grid_line.branch, depth & (kprefix::kRows - 1));
         switch (parent.kind) {
             case kBranch:
-                parent.branch.set_child_hash_of(slot, grid_line.branch, kprefix::pool[row], blocks);
+                parent.branch.set_child_hash_of(slot, grid_line.branch, r.state, r.blocks);
                 break;
             case kExt:
-                parent.ext.set_child_hash_of(grid_line.branch, kprefix::pool[row], blocks);
+                parent.ext.set_child_hash_of(grid_line.branch, r.state, r.blocks);
                 break;
             default:
                 std::unreachable();
@@ -383,6 +383,10 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         delete_line(depth);
         return;
     }
+    // Any other branch whose encoding is a copy of its witness node with the dirty slots patched resumes the
+    // same way, from a state of the node's blocks before its first dirty slot (take_resume_encoded()).
+    const kprefix::Resume r = grid_line.kind == kBranch ? take_resume_encoded(grid_line.branch, depth & (kprefix::kRows - 1))
+                                                        : kprefix::Resume{nullptr, 0};
     const ByteView encoded = encode_line(grid_line);
     // The line goes before its reference is written into the parent (its encoding is in
     // static_buffer, and the parent does not move): the keccak of an encoding of 32 bytes or more,
@@ -391,14 +395,14 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
     switch (parent.kind) {
         case kBranch:
             if (encoded.size() >= 32) {
-                parent.branch.set_child_hash(slot, encoded);
+                parent.branch.set_child_hash(slot, encoded, r);
             } else {
                 parent.branch.set_child(slot, encoded);
             }
             break;
         case kExt:
             if (encoded.size() >= 32) {
-                parent.ext.set_child_hash(encoded);
+                parent.ext.set_child_hash(encoded, r);
             } else {
                 parent.ext.set_child(encoded);
             }
@@ -406,6 +410,46 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         default:
             std::unreachable();
     }
+}
+
+// The saved state the full branch b (hashes_from_witness()) of the line in pool row `row` resumes from, taken
+// out of the pool or of DirectState's table; {.., 0} if neither holds one for b's node that covers only blocks
+// with no dirty slot.
+template <bool DeletionEnabled>
+[[gnu::always_inline]] inline kprefix::Resume GridMPT<DeletionEnabled>::take_resume_full(const BranchNode& b, size_t row) {
+    if (const unsigned blocks = take_resumable_blocks(b, row); blocks != 0) return {kprefix::pool[row], blocks};
+#if USE_HASH_KEY
+    return state_->take_walk_state(b.orig, full_branch_clean_blocks(b));
+#else
+    return {nullptr, 0};
+#endif
+}
+
+// The saved state a branch b that encode_branch() copies from its witness node and patches resumes from, taken
+// out of the pool row `row` of its line or DirectState's table: one for b's node that covers no byte of a dirty
+// slot (same_layout_clean_blocks()). The copy is at the node's phase modulo 32 (static_buffer), so it is 8-aligned
+// as the resume wants when the node is, as every node a state is saved for is. {nullptr, 0} if there is none.
+// Called only for a branch hashes_from_witness() does not take: fold_line() hashes those through
+// take_resume_full(), from the node itself.
+template <bool DeletionEnabled>
+inline kprefix::Resume GridMPT<DeletionEnabled>::take_resume_encoded(const BranchNode& b, size_t row) {
+    if (b.mask == 0 || b.orig == nullptr || (reinterpret_cast<uintptr_t>(b.orig) & 7) != 0 ||
+        b.orig_size < kprefix::kBlock || !b.same_layout_as_orig()) {
+        return {nullptr, 0};
+    }
+    const unsigned allowed = same_layout_clean_blocks(b);
+    if (allowed == 0) return {nullptr, 0};
+    if (kprefix::tag_orig[row] == b.orig) {
+        const unsigned blocks = kprefix::tag_sb[row];
+        if (blocks == 0 || blocks > allowed) return {nullptr, 0};
+        kprefix::tag_orig[row] = nullptr;
+        return {kprefix::pool[row], blocks};
+    }
+#if USE_HASH_KEY
+    return state_->take_walk_state(b.orig, allowed);
+#else
+    return {nullptr, 0};
+#endif
 }
 
 // Make a leaf of path after cursor of current search key
@@ -630,10 +674,15 @@ inline bool GridMPT<DeletionEnabled>::transform_line(GridLine& line, NodeType&& 
 // Returns kEmpty when the slot is empty - 0x80 (caller should insert here),
 // kMissing when a 32-byte hash ref has no entry in the node store
 // (witness incomplete — caller should hard-fail), kSuccess otherwise.
-// During the descent for an update that writes (snap_writes_), search_nibbles_ at search_nib_cursor_ is the
-// slot being unfolded, and a full branch verified here keeps the keccak state of its blocks before the first
-// slot the update changes in it, for fold_line() to resume from. Updates come in key order, so that slot
-// is the next nibble of the key (which ends after nibble 63).
+// During the descent for an update, search_nibbles_ at search_nib_cursor_ is the slot being unfolded, and a
+// full branch verified here keeps the keccak state of its blocks before the slot the key goes through in it,
+// for fold_line() to resume from. Updates come in key order, so no later update changes a slot before that
+// one, whether this update reads the key or writes it: the slot is the next nibble of the key (which ends
+// after nibble 63). A branch first reached by a read and changed by a later update resumes as well. Where
+// the cursor is not this update's (the folds of a seek unfold the last child of a branch), the slot is a
+// guess like any other: fold_line() uses a state only if no slot in the blocks it covers changed. A walk whose
+// updates only read (snap_ clear: check_root's walk of an unmodified account's storage) saves none, as no
+// fold of it hashes anything.
 template <bool DeletionEnabled>
 inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
     if (slot > 15) [[unlikely]] {
@@ -684,8 +733,8 @@ inline UnfoldResult GridMPT<DeletionEnabled>::unfold_slot(unsigned slot) {
         std::memcpy(ck, hs, 32);
 #endif
         auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
-            return kprefix::SnapRequest{snap_writes_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
-                                                                                : kprefix::kNoSlot,
+            return kprefix::SnapRequest{snap_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
+                                                                         : kprefix::kNoSlot,
                                         grid_.size() & (kprefix::kRows - 1)};
         });
         if (!rlp_opt) [[unlikely]] {
