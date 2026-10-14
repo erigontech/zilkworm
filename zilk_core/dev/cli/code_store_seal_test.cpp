@@ -32,7 +32,11 @@
 #include <vector>
 
 #include <fcntl.h>
+#if defined(__linux__)
 #include <sys/prctl.h>
+#else
+#include <sys/resource.h>
+#endif
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -234,8 +238,16 @@ constexpr bool kSeals = ZILK_SEAL_CODE_STORE != 0;
 
 /// For a child process that may abort: no core dump. With a core_pattern that pipes to a handler
 /// (apport, systemd-coredump), the kernel runs the handler on every dump even at RLIMIT_CORE 0,
-/// about a second each; the fuzz case below has some 900 of its 1500 children abort.
-void no_core_dump() { prctl(PR_SET_DUMPABLE, 0); }
+/// about a second each; the fuzz case below has some 900 of its 1500 children abort. Elsewhere
+/// (macOS) RLIMIT_CORE 0 is all there is.
+void no_core_dump() {
+#if defined(__linux__)
+    prctl(PR_SET_DUMPABLE, 0);
+#else
+    const rlimit none{0, 0};
+    setrlimit(RLIMIT_CORE, &none);
+#endif
+}
 
 /// Fails the test if the pre-state is accepted; true if the constructor aborted after printing
 /// `message`. The constructor aborts on a malformed layout, so it runs in a child process.
