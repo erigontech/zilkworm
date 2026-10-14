@@ -396,6 +396,9 @@ DirectState::DirectState(DirectState&& other) noexcept
     }
 #if ZILK_SEAL_CODE_STORE
     code_store_sealed_ = std::exchange(other.code_store_sealed_, false);
+#if USE_HASH_KEY
+    sealed_code_index_ = std::move(other.sealed_code_index_);
+#endif
 #endif
     node_store_map_ = other.node_store_map_;
     node_verified_ = std::move(other.node_verified_);
@@ -1002,7 +1005,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
         fatal("ERROR: USE_HASH_KEY: malformed account leaf RLP");
     if (std::memcmp(acc->code_hash, kEmptyHash.bytes, 32) != 0) {
         // Setting acc->code_store_len is fine here, checked in read_code
-        if (auto b = code_store_map_.find<32, 0, &hash_key8>(acc->code_hash)) {
+        if (auto b = code_entry_by_hash_(acc->code_hash)) {
             acc->code_store_offset = static_cast<uint32_t>(b->data() - code_store_map_.data());
             acc->code_store_len    = static_cast<uint32_t>(b->size() - FlatKv::kPayloadOffset);
         }
@@ -1146,6 +1149,21 @@ bool DirectState::sanitize() {
         code_keccak_ok &= bytes_equal<32>(
             silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
     });
+#if ZILK_SEAL_CODE_STORE && USE_HASH_KEY
+    // Every entry is bound to its key now (the reader's bits stood for the same bytes), and the
+    // seal below takes the lengths and keys; recover_account_from_nodestore() looks code up here.
+    sealed_code_index_.clear();
+    if (code_keccak_ok) {
+        sealed_code_index_.reserve(code_store_map_.n_keys());
+        code_store_map_.for_each_offset([&](uint64_t off) {
+            SealedCodeEntry e;
+            std::memcpy(e.key, code_data + off + 8u, 32);
+            e.body_off = static_cast<uint32_t>(off + 8u);
+            e.body_len = static_cast<uint32_t>(load_u64_le(code_data + off));
+            sealed_code_index_.push_back(e);
+        });
+    }
+#endif
     if (!code_keccak_ok) {
         sys_println("sanitize: code-hash mismatch in witness bundle ");
         return false;
@@ -1244,6 +1262,24 @@ bool DirectState::sanitize() {
 #endif
     return true;
 }
+
+#if USE_HASH_KEY
+std::optional<std::span<const uint8_t>>
+DirectState::code_entry_by_hash_(const uint8_t (&hash)[32]) const noexcept {
+#if ZILK_SEAL_CODE_STORE
+    if (code_store_sealed_) {
+        // The map's lengths and keys are zeroed: sanitize() kept them, each key bound to its payload.
+        for (const auto& e : sealed_code_index_) {
+            if (e.body_len >= FlatKv::kPayloadOffset && bytes_equal<32>(e.key, hash))
+                return std::span<const uint8_t>{code_store_map_.data() + e.body_off, e.body_len};
+        }
+        return std::nullopt;
+    }
+#endif
+    if (auto b = code_store_map_.find<32, 0, &hash_key8>(hash)) return std::span<const uint8_t>{*b};
+    return std::nullopt;
+}
+#endif
 
 // SOUNDNESS-CRITICAL: an ancestor's hash is the parent hash of its child, from `header` back, and each child
 // is the header keyed by the hash the one after it names (insert_header keys a header by its own hash), so

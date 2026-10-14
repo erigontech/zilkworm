@@ -40,8 +40,8 @@
 #endif
 
 // sanitize() pads the code store's payloads for the EVM where they lie, see code_store_seal.hpp.
-// Not with USE_HASH_KEY: its account recovery looks code up in the code store afterwards.
-#if EVMONE_IN_PLACE_CODE && !USE_HASH_KEY
+// With USE_HASH_KEY, account recovery looks code up after that in an index sanitize() keeps.
+#if EVMONE_IN_PLACE_CODE
 #define ZILK_SEAL_CODE_STORE 1
 #else
 #define ZILK_SEAL_CODE_STORE 0
@@ -159,6 +159,17 @@ class DirectState : public BlockState {
     /// lengths and parts of the keys of the entries: code_store_map_ then serves code_for() only,
     /// and no lookup by hash. The region it registered with evmone is reset with this object.
     bool code_store_sealed_{false};
+#if USE_HASH_KEY
+    /// The key, body offset and body size of every code-store entry, taken by sanitize() after it
+    /// bound each payload to its key and before the seal zeroes the lengths and keys: account
+    /// recovery looks the code of a recovered account up here once the map cannot.
+    struct SealedCodeEntry {
+        uint8_t key[32];
+        uint32_t body_off;
+        uint32_t body_len;
+    };
+    std::vector<SealedCodeEntry> sealed_code_index_;
+#endif
 #endif
 
     std::span<const AddrHashEntry> addr_hashes_;
@@ -211,6 +222,8 @@ class DirectState : public BlockState {
     // Preimage-gap fallback; see USE_HASH_KEY option.
     mutable std::vector<std::unique_ptr<Account>> recovered_accounts_;
     const Account* recover_account_from_nodestore(const evmc::address& addr) const;
+    // The code-store entry body ([key][payload]) for a code hash, sealed or not.
+    std::optional<std::span<const uint8_t>> code_entry_by_hash_(const uint8_t (&hash)[32]) const noexcept;
     struct RecoveredSlot {
         evmc::bytes32 initial;
         evmc::bytes32 current;  // == initial until an SSTORE lands
