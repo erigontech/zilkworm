@@ -193,7 +193,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     cumulative_gas_used_ = 0;
 
-#if defined(AIRBENDER)
+#if defined(AIRBENDER) || defined(SP1)
     // Recover all senders up front so their signatures share the field inversions; validation
     // and execution then read the cached results (identical to recovering each one lazily).
     Transaction::recover_senders(block_.transactions);

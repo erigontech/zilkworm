@@ -161,8 +161,8 @@ class Transaction : public UnsignedTransaction {
     void set_sender(const evmc::address& sender);
 
     /// Recovers, as one batch, the senders of the transactions not recovered yet: afterwards
-    /// sender() returns exactly what it would have computed on its own. On AIRBENDER this shares
-    /// the field inversions of all signatures (see secp256k1::ecrecover_batch()).
+    /// sender() returns exactly what it would have computed on its own. On AIRBENDER and SP1 this
+    /// shares the field inversions of all signatures (see secp256k1::ecrecover_batch()).
     static void recover_senders(std::span<const Transaction> txns);
 
     evmc::bytes32 hash() const;
