@@ -395,7 +395,6 @@ class HashState : public BlockState {
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;                                  // in-block created code (fills the old TODO)
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;              // key8-collision spill
     FlatHashSet<evmc::address> touched_;                                                    // EIP-158 touch set
-    FlatHashSet<evmc::address> delegated_designations_;                                     // EIP-7702 wipe-exemption set
     // DIVERGENCE (b): per-account storage-wiped marker replacing DirectState's in-place
     // inline-slot wipe (direct_state.cpp:410-412, :568). A wiped account reads all pre-state
     // (built-cache) slots as zero and its storage fold seeds from kEmptyRoot.

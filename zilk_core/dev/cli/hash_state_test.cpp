@@ -1913,6 +1913,42 @@ TEST_CASE("HashState apply_code_diff exempts an EIP-7702 delegation from the sto
     CHECK(eq32(hs.read_storage(addr, slot_key), slot_val));  // storage preserved
 }
 
+// An EIP-7702 authorization to the zero address clears a delegation the account had before the
+// block, and evmone reports it as empty code. Its storage survives, as in DirectState (mainnet block
+// 26189697, tx 218, wiped 0xb90ff343...'s storage and gave the wrong state root before the fix).
+TEST_CASE("HashState apply_code_diff keeps storage when a pre-state delegation is cleared",
+          "[hash_state]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0xC4);
+
+    evmc::bytes32 slot_key{};
+    slot_key.bytes[31] = 0xCE;
+    evmc::bytes32 slot_val{};
+    slot_val.bytes[31] = 0x56;
+    const Bytes ev = encode_storage_value(slot_val);
+    const auto spath = nibbles_of(keccak_slot(slot_key));
+    const LeafNode sleaf = make_leaf(spath.data(), 64, ByteView{ev});
+    const evmc::bytes32 sroot = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf)});
+    const Bytes accv = account_leaf_value(4, sroot);
+    const auto apath = nibbles_of(keccak_addr(addr));
+    const LeafNode aleaf = make_leaf(apath.data(), 64, ByteView{accv});
+    const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_leaf(aleaf)});
+    REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+
+    // Nothing delegated the account in this block: the delegation, if any, is the pre-state's.
+    Account* pa = hs.find_or_create_account(addr);
+    hs.apply_code_diff(addr, *pa, evmc::bytes{});
+
+    CHECK_FALSE(hs.storage_wiped(addr));                     // a cleared delegation wipes nothing
+    CHECK(eq32(hs.read_storage(addr, slot_key), slot_val));  // storage preserved
+    CHECK(hs.has_storage(addr));
+    CHECK(eq32(std::bit_cast<evmc::bytes32>(pa->code_hash), silkworm::kEmptyHash));
+    CHECK(pa->code_store_len == 0u);
+    CHECK(pa->modified);
+    CHECK(hs.read_code(addr).empty());
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}
+
 // apply_state_diff drives the whole mutation surface: modified account (nonce/balance/storage)
 // then a deleted account.
 TEST_CASE("HashState apply_state_diff applies modified and deleted accounts", "[hash_state]") {

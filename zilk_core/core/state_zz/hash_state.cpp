@@ -749,19 +749,25 @@ void HashState::set_storage_slot(const evmc::address& addr, Account& pa,
 
 void HashState::apply_code_diff(const evmc::address& addr, Account& pa,
                                 const evmc::bytes& code) {
+    if (code.empty()) [[unlikely]] {
+        // Empty = a cleared EIP-7702 delegation; the authority's storage survives it (as in
+        // DirectState::apply_code_diff). code_store_offset leaves the created-code sentinel.
+        std::memcpy(pa.code_hash, kEmptyHash.bytes, 32);
+        pa.code_store_len = 0;
+        pa.code_store_offset = 0;
+        pa.modified = true;
+        pa.acc_rlp_sroot_off = 0;
+        return;
+    }
     const ByteView code_view{code.data(), code.size()};
-    const bool is_delegated = eip7702::is_code_delegated(code_view);
 
-    // Wipe storage on contract creation unless the new code is a delegation or the address
-    // was already a delegation target (mirrors direct_state.cpp:406-415). DIVERGENCE (b):
-    // set the storage_wiped_ flag + drop overlay slots instead of the in-place inline-slot
-    // wipe (the built cache is immutable).
-    if (!is_delegated && !delegated_designations_.contains(addr)) {
+    // Creation is the only transition that wipes storage, and post-London EIP-3541 keeps
+    // deployed code off the 0xef prefix, so it can never look like a designation (as in
+    // DirectState::apply_code_diff). DIVERGENCE (b): set the storage_wiped_ flag + drop
+    // overlay slots instead of the in-place inline-slot wipe (the built cache is immutable).
+    if (!eip7702::is_code_delegated(code_view)) {
         overflow_slots_.erase(addr);
         storage_wiped_.insert(addr);
-    }
-    if (is_delegated) {
-        delegated_designations_.insert(addr);
     }
 
     const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(code_view));
@@ -863,9 +869,6 @@ void HashState::set_code(const evmc::address& addr, ByteView code) {
     auto* pa = find_or_create_account(addr);
     revive_if_deleted(addr, *pa);
 
-    if (eip7702::is_code_delegated(code)) {
-        delegated_designations_.insert(addr);
-    }
     const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(code));
     bool changed = false;
     if (std::memcmp(pa->code_hash, h.bytes, 32) != 0) {
