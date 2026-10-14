@@ -233,7 +233,7 @@ struct Model {
                 return out;
             }
             default: {
-                const size_t n = o - PUSH1 + 1;
+                const auto n = static_cast<size_t>(o - PUSH1 + 1);
                 bytes w(32, 0);
                 std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(pc), n,
                     w.begin() + static_cast<std::ptrdiff_t>(32 - n));
