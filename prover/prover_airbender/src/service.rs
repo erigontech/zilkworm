@@ -9,7 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -42,6 +42,8 @@ pub struct ServiceConfig {
     pub output_dir: PathBuf,
     pub guest: GuestFiles,
     pub max_cycles: usize,
+    /// The prover's trace replay threads (None: the backend's default).
+    pub replay_threads: Option<usize>,
     pub gpu: bool,
     pub ethproofs: Option<EthProofsConfig>,
 }
@@ -65,13 +67,11 @@ pub struct ProvingLog {
 struct WorkItem {
     block_number: u64,
     bundle_path: PathBuf,
-    /// Time the fetcher spent turning the execution witness into the MFBD bundle (0 when the
-    /// bundle was already on disk): witness generation, part of the reported proving time.
-    witness_millis: u64,
     execute: bool,
     prove: bool,
-    /// The block's Ethproofs `queued` post, which its `proving` post waits for: the posts are
-    /// background tasks, and one that lands late would move the block's status back.
+    /// The block's Ethproofs `queued` post, sent when the fetcher picks the block, which its
+    /// `proving` post waits for: the posts are background tasks, and one that lands late would
+    /// move the block's status back.
     queued_post: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -123,8 +123,12 @@ impl AirbenderService {
         let prover = if config.gpu {
             crate::vk::check_recursion_environment()?;
             info!("Building the GPU prover (one-time; {})", crate::fsv_dir_note());
-            let settings =
-                ProverSettings::new(config.guest.clone(), ProverBackend::Gpu, config.max_cycles)?;
+            let settings = ProverSettings::new(
+                config.guest.clone(),
+                ProverBackend::Gpu,
+                config.max_cycles,
+                config.replay_threads,
+            )?;
             Some(Arc::new(Mutex::new(BlockProver::new(settings)?)))
         } else {
             if config.prove_every.is_some() {
@@ -234,6 +238,8 @@ impl AirbenderService {
         // and skipped only after MAX_FETCH_ATTEMPTS, so a transient RPC error loses nothing.
         const MAX_FETCH_ATTEMPTS: u32 = 5;
         let mut fetch_failures: u32 = 0;
+        // The `queued` post of a block whose fetch failed and is retried: it is sent once.
+        let mut retried_queued_post: Option<(u64, tokio::task::JoinHandle<()>)> = None;
 
         'outer: loop {
             let latest = if let Some(end) = self.config.end_block {
@@ -270,6 +276,20 @@ impl AirbenderService {
                     block_number
                 );
 
+                // "queued" goes out as the block is picked, in the background: its HTTP round
+                // trip (up to a few seconds) overlaps the fetch, so the block's "proving" post,
+                // which waits for it, is not held back once proving starts.
+                let mut queued_post = None;
+                if should_prove {
+                    queued_post = match retried_queued_post.take() {
+                        Some((bn, post)) if bn == block_number => Some(post),
+                        _ => self.eth_client.as_ref().map(|c| {
+                            let c = Arc::clone(c);
+                            tokio::spawn(async move { c.queued(block_number).await; })
+                        }),
+                    };
+                }
+
                 let outcome = match fetch_block_and_witness(FetchRequest {
                     rpc_url: &self.config.rpc_url,
                     block_number: Some(block_number),
@@ -289,6 +309,7 @@ impl AirbenderService {
                         if fetch_failures < MAX_FETCH_ATTEMPTS {
                             error!(%block_number, attempt = fetch_failures, error = %err, "Failed to fetch block; will retry");
                             // Retry from this block after the wait below.
+                            retried_queued_post = queued_post.map(|post| (block_number, post));
                             break;
                         }
                         error!(%block_number, attempts = fetch_failures, error = %err, "Failed to fetch block; skipping it");
@@ -298,22 +319,9 @@ impl AirbenderService {
                     }
                 };
 
-                // Fire-and-forget "queued" state transition. We fire this at
-                // enqueue time (not at proving start) so it accurately
-                // reflects that the block is now in the prover's queue.
-                let mut queued_post = None;
-                if should_prove {
-                    if let Some(c) = &self.eth_client {
-                        let c = Arc::clone(c);
-                        let bn = block_number;
-                        queued_post = Some(tokio::spawn(async move { c.queued(bn).await; }));
-                    }
-                }
-
                 let item = WorkItem {
                     block_number,
                     bundle_path: outcome.flat_bundle_path,
-                    witness_millis: outcome.witness_millis,
                     execute: should_execute,
                     prove: should_prove,
                     queued_post,
@@ -413,11 +421,15 @@ impl AirbenderService {
         };
 
         // The preflight runs the block on the simulator, with the prover's machine and cycle
-        // bound. By default it runs CONCURRENTLY with proving and gates writing and posting
-        // the proof instead of the proof's start: a block that fails it costs one discarded
-        // proving run (a prover that panics on it is replaced). Set Z6M_SERIAL_PREFLIGHT=1 to
-        // run it first and not prove such blocks at all.
-        let serial_preflight = std::env::var("Z6M_SERIAL_PREFLIGHT").is_ok();
+        // bound, before proving: a block that fails it is not proved at all. It must be: the
+        // prover proves a run that ends in the guest's error exit, and then aborts the whole
+        // process in the recursion layer (a panic in its JIT code, which cannot unwind), so
+        // the service restarts and misses the blocks of the next minute. Running the
+        // preflight first also keeps it off the CPU while the pipeline's own simulation feeds
+        // the GPUs. Z6M_CONCURRENT_PREFLIGHT=1 runs it alongside proving instead, gating only
+        // the proof's writing and posting, which saves its time (about 0.5 s) on every block
+        // at the cost of that abort on a block that fails it.
+        let serial_preflight = std::env::var("Z6M_CONCURRENT_PREFLIGHT").is_err();
         let mut preflight_handle = None;
         if serial_preflight {
             match self.preflight_block(item.block_number, &item.bundle_path) {
@@ -613,10 +625,10 @@ impl AirbenderService {
         let block_number = item.block_number;
         let input_path = item.bundle_path.clone();
 
-        // The reported proving time covers witness generation (the fetcher's conversion of the
-        // execution witness into the MFBD bundle, and the guest's input words read from it)
-        // and proving; fetching is excluded.
-        let started = Instant::now();
+        // The reported proving time is the prover's own: from handing it the block's input to
+        // the proof, which is the pipeline's simulation feeding the GPUs and their proving.
+        // Fetching the block and its witness, converting it, reading the input words and the
+        // preflight come before it and are excluded.
         let proved = tokio::task::spawn_blocking(move || {
             let words = crate::build_oracle(&input_path, false)?;
             let mut prover = prover.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -624,7 +636,7 @@ impl AirbenderService {
         })
         .await
         .map_err(|e| eyre::eyre!("proving task failed: {e}"))??;
-        let proving_millis = (item.witness_millis + started.elapsed().as_millis() as u64).max(1);
+        let proving_millis = (proved.elapsed.as_millis() as u64).max(1);
 
         // A proof that commits another block than the input's is worthless: never keep it.
         // proof.bin is written by the worker, only once the preflight has passed too.

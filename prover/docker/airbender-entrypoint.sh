@@ -23,6 +23,10 @@
 #                         post to Ethproofs; with any of them unset nothing is posted (a dry run)
 #   RESTART_DELAY         seconds to wait before starting the service again (default 30)
 #   PROVER_EXTRA_ARGS     further prover options, word-split
+#   Z6M_REPLAY_THREADS    the prover's trace replay threads (default: Airbender's 8)
+#   Z6M_CONCURRENT_PREFLIGHT=1
+#                         simulate each block alongside proving instead of first (saves
+#                         ~0.5 s a block, but a block the guest rejects aborts the service)
 set -euo pipefail
 
 GUEST=${GUEST_BIN:-/opt/z6m/z6m_guest}

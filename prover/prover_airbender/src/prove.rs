@@ -33,18 +33,30 @@ pub struct ProverSettings {
     pub backend: ProverBackend,
     /// The proved run stops here; a longer one does not reach the guest's exit point.
     pub cycles_bound: u32,
+    /// CPU threads replaying the guest's execution into circuit traces; `None` keeps the
+    /// backend's default (8 on the GPU).
+    pub replay_threads: Option<usize>,
 }
 
 impl ProverSettings {
     /// `max_cycles` is clamped to what the prover can take.
-    pub fn new(guest: GuestFiles, backend: ProverBackend, max_cycles: usize) -> Result<Self> {
+    pub fn new(
+        guest: GuestFiles,
+        backend: ProverBackend,
+        max_cycles: usize,
+        replay_threads: Option<usize>,
+    ) -> Result<Self> {
         if backend == ProverBackend::Gpu && !cfg!(feature = "gpu") {
             bail!("this prover was built without the gpu feature: no GPU backend (prove takes --backend cpu)");
+        }
+        if replay_threads == Some(0) {
+            bail!("--replay-threads must be at least 1");
         }
         Ok(Self {
             guest,
             backend,
             cycles_bound: max_cycles.min(MAX_PROVABLE_CYCLES) as u32,
+            replay_threads,
         })
     }
 
@@ -59,6 +71,7 @@ impl ProverSettings {
                 target: ProofTarget::RecursionUnified,
                 backend: self.backend,
                 cycles_bound: Some(self.cycles_bound),
+                replay_threads: self.replay_threads,
                 ..ProgramProverConfig::default()
             },
         )
@@ -68,7 +81,8 @@ impl ProverSettings {
 /// A proof of one block.
 pub struct ProvedBlock {
     pub artifact: ProofArtifact,
-    /// Time spent proving.
+    /// The prover's time on the block: from handing it the input to the proof (the pipeline's
+    /// trace generation and the GPU's proving, through the recursion layers).
     pub elapsed: Duration,
 }
 
@@ -117,10 +131,13 @@ impl BlockProver {
         let started = Instant::now();
         let worker = Worker::spawn(&settings)?;
         info!(
-            "{:?} prover ready in {:.1}s (cycle bound {})",
+            "{:?} prover ready in {:.1}s (cycle bound {}, replay threads {})",
             settings.backend,
             started.elapsed().as_secs_f64(),
-            settings.cycles_bound
+            settings.cycles_bound,
+            settings
+                .replay_threads
+                .map_or_else(|| "default".to_string(), |n| n.to_string())
         );
         Ok(Self {
             settings,

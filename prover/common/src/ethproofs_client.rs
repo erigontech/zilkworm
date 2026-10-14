@@ -91,8 +91,8 @@ impl EthproofsClient {
     }
 
     /// Posts a proof. `proof_bytes` are the prover's proof file (for Airbender, gzip of the
-    /// EPROOF01 v2 envelope), sent base64 encoded; `proving_millis` covers witness generation
-    /// and proving, not fetching; `cycle_count` is the guest's own cycle count.
+    /// EPROOF01 v2 envelope), sent base64 encoded; `proving_millis` is the proving time the
+    /// caller measured; `cycle_count` is the guest's own cycle count.
     pub async fn proved(
         &self,
         proof_bytes: &[u8],
