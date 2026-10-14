@@ -4,6 +4,8 @@ CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im.cmake
 # Enable with `make z6m_guest USE_HASH_KEY=ON` (propagates from the root
 # Makefile: `make z6m_guest_airbender USE_HASH_KEY=ON`).
 USE_HASH_KEY ?= OFF
+# Enable with `make z6m_guest Z6M_HASH_STATE=ON`: the HashState backend, which takes SLIB input.
+Z6M_HASH_STATE ?= OFF
 LINKER_SCRIPT := $(CURDIR)/link.x
 START_ASM := start.S
 
@@ -15,6 +17,7 @@ zilkworm:
 	cmake -B$(BUILD_DIR)/zilkworm -S../.. \
 		-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
 		-DUSE_HASH_KEY=$(USE_HASH_KEY) \
+		-DZ6M_HASH_STATE=$(Z6M_HASH_STATE) \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE \
 		-DCMAKE_VERBOSE_MAKEFILE=ON \
@@ -29,6 +32,7 @@ z6m_guest: zilkworm
 	cmake -B$(BUILD_DIR) -S. \
 		-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
 		-DUSE_HASH_KEY=$(USE_HASH_KEY) \
+		-DZ6M_HASH_STATE=$(Z6M_HASH_STATE) \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE \
 		-DCMAKE_VERBOSE_MAKEFILE=ON \

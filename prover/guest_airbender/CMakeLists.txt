@@ -31,6 +31,14 @@ if(USE_HASH_KEY)
   target_compile_definitions(z6m_guest PRIVATE USE_HASH_KEY=1)
 endif()
 
+# Read-side state backend: HashState, which reads a StatelessInputBytes (SLIB) input, in place of
+# DirectState. Must match the zilkworm subbuild, as USE_HASH_KEY must; the top-level option does
+# not reach this separate project. See docs/hashstate.md, "Build flag and test targets".
+option(Z6M_HASH_STATE "Build the guest with the HashState/slib (StatelessInputBytes) backend" OFF)
+if(Z6M_HASH_STATE)
+  target_compile_definitions(z6m_guest PRIVATE Z6M_HASH_STATE)
+endif()
+
 
 # ====== For Zilkworm project at .. ===============
 set(SW_INSTALL_DIR ${CMAKE_BINARY_DIR}/zilkworm-install CACHE PATH "")
