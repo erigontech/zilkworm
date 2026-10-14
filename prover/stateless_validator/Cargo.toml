@@ -15,6 +15,7 @@ alloy-genesis = { version = "2.0", default-features = false }
 alloy-primitives = { version = "1.0", default-features = false }
 alloy-rlp = "0.3"
 alloy-rpc-types-debug = "2.0"
+alloy-trie = { version = "0.9", default-features = false }
 anyhow = "1"
 stateless = { git = "https://github.com/paradigmxyz/stateless", rev = "e5480e71a8031641ff471cad9dc482a7a14b32d5", default-features = false }
 
