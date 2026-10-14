@@ -292,6 +292,13 @@ Outcome run(const bytes& code, Entry entry, int64_t gas = 10000000,
     o.output.assign(result.output_data, result.output_size);
     o.logs = host.take_logs();
     o.diff = state.build_diff(rev);
+    // The diff carries the hash of every code it sets, the keccak of that code: DirectState::apply_code_diff() takes
+    // it instead of hashing the code again.
+    for (const auto& e : o.diff.modified_accounts) {
+        if (!e.code) continue;
+        REQUIRE(e.code_hash.has_value());
+        REQUIRE(std::memcmp(e.code_hash->bytes, ethash::keccak256(e.code->data(), e.code->size()).bytes, 32) == 0);
+    }
     std::sort(o.diff.modified_accounts.begin(), o.diff.modified_accounts.end(),
         [](const auto& x, const auto& y) { return x.addr < y.addr; });
     for (auto& e : o.diff.modified_accounts)

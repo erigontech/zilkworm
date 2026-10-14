@@ -500,8 +500,9 @@ class DirectState : public BlockState {
                                const intx::uint256& balance) noexcept;
     void set_storage_slot(const evmc::address& addr, Account& pa,
                           const evmc::bytes32& key, const evmc::bytes32& value);
+    // `code_hash`, when not null, is keccak256(code), as the EVM's State computed it when it set the code.
     void apply_code_diff(const evmc::address& addr, Account& pa,
-                         const evmc::bytes& code);
+                         const evmc::bytes& code, const evmc::bytes32* code_hash = nullptr);
 
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept;

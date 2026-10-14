@@ -575,7 +575,7 @@ void DirectState::set_storage_slot(const evmc::address& addr, Account& pa,
 }
 
 void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
-                                  const evmc::bytes& code) {
+                                  const evmc::bytes& code, const evmc::bytes32* code_hash) {
     if (code.empty()) [[unlikely]] {
         // Empty = a cleared EIP-7702 delegation; the authority's storage survives it.
         copy32(pa.code_hash, kEmptyHash);
@@ -602,8 +602,16 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
 #endif
     }
 
-    const auto h_eth = silkworm::keccak256(code);
-    const auto h = std::bit_cast<evmc::bytes32>(h_eth);
+    // The hash the EVM's State computed as it set the code, in this guest with the same keccak (evmone's
+    // Host::create() and its EIP-7702 delegations): created code is hashed once, not again here. It names the code in
+    // the account leaf and in the code stores below, as the hash computed here did.
+    const evmc::bytes32 h = code_hash != nullptr ? *code_hash : std::bit_cast<evmc::bytes32>(silkworm::keccak256(code));
+#if defined(NO_THREAD_LOCAL) || defined(SP1) || defined(QEMU_DEBUG) || defined(AIRBENDER)
+    // The guests take the hash as it is.
+#else
+    if (code_hash != nullptr && std::bit_cast<evmc::bytes32>(silkworm::keccak256(code)) != h) [[unlikely]]
+        fatal("ERROR: apply_code_diff: the diff's code hash is not the code's");
+#endif
     std::memcpy(pa.code_hash, h.bytes, 32);
     pa.code_store_len = static_cast<uint32_t>(code.size());
 
@@ -872,7 +880,7 @@ void DirectState::apply_state_diff(const evmone::state::StateDiff& diff) {
                                  : find_or_create_account(m.addr);
         revive_if_deleted(m.addr, *pa);
         journal_address_changed(m.addr);
-        if (m.code) apply_code_diff(m.addr, *pa, *m.code);
+        if (m.code) apply_code_diff(m.addr, *pa, *m.code, m.code_hash ? &*m.code_hash : nullptr);
         set_account_from_diff(*pa, m.nonce, m.balance);
         for (const auto& [k, v] : m.modified_storage) {
             journal_slot_changed(m.addr, k);
