@@ -55,7 +55,8 @@ docker build --target airbender -f prover/Dockerfile \
 ```
 
 `--build-arg CUDA_ARCHS="90"` builds the kernels for fewer architectures (faster). The build needs
-no GPU. `USE_HASH_KEY=ON` enables node-store account recovery in the guest.
+no GPU. The guest is built with node-store account recovery (`USE_HASH_KEY=ON`, see Known
+limitations); `--build-arg USE_HASH_KEY=OFF` leaves it out, which changes the verification key.
 
 ## Run
 
@@ -185,17 +186,24 @@ disk of a few tens of GB. Use `ghcr.io/erigontech/zilkworm-airbender:<commit sha
   witness conversion and the preflight are not in it; `proving_cycles` the guest's cycles,
   `proof` the base64 of `proof.bin`).
 - `Z6M_REPLAY_THREADS` sets the prover's CPU threads that replay the guest into circuit traces
-  (Airbender's default is 8). More threads only help where they, and not host memory or PCIe
-  bandwidth, limit the commitment of the base layer's memory.
+  (Airbender's default is 8). On a 24-core host, 16 threads did not shorten the commitment of
+  the base layer's memory, which the pipeline's one-thread simulator bounds there.
 
 ## Known limitations
 
 1. **Restart resumes at chain head.** A restarted service starts at the tip: blocks between a
    crash and the restart are not proved (the cadence of `PROVE_EVERY` holds, as blocks are chosen
    by number). A checkpoint of the last processed block is not implemented.
-2. **Pruned-witness-path blocks are skipped by design.** USE_HASH_KEY recovers accounts whose
-   *preimage* is missing from the witness `keys`; if the witness also omits the account's *trie
-   path*, recovery fails and so does the preflight. The fix belongs in the witness provider.
+2. **Witness preimage gaps.** reth's `debug_executionWitness` (v2.7.0) puts an account's address
+   in `keys` only if the account still exists after the block, though its trie path is always in
+   `state`. An account the block deletes, such as a funded address that a transaction CREATE2s a
+   contract into and that contract self-destructs in the same transaction, then has no record in
+   the bundle, and the guest takes it for empty: the transaction reverts, and the block fails
+   with kWrongBlockGas or kWrongReceiptsRoot. About 4% of mainnet blocks did, on 2026-10-14.
+   The guest's node-store recovery (`USE_HASH_KEY`, on in the Airbender guest) recovers such an
+   account from its trie path, checked against the parent's state root, for 1–1.5% more
+   cycles. A block whose witness also lacks the account's trie path still fails the preflight
+   and is skipped. The fix belongs in the witness provider.
 3. **Ethproofs flakes.** A failed `proved` upload is logged and not retried; the proof stays in
    `/data/proofs`.
 4. The prover's pinned host memory is not configurable (zksync-airbender's `prover_pipeline` uses

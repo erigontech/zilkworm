@@ -63,8 +63,9 @@ WORKDIR /build
 COPY . .
 
 # Build guest binary (C++ → RISC-V), produces .bin and .text
-# USE_HASH_KEY=ON enables node-store account recovery in the guest.
-ARG USE_HASH_KEY=OFF
+# Node-store account recovery in the guest (USE_HASH_KEY), which mainnet blocks need; the
+# verification key depends on it.
+ARG USE_HASH_KEY=ON
 WORKDIR /build/prover/guest_airbender
 RUN make z6m_guest USE_HASH_KEY=${USE_HASH_KEY}
 
