@@ -10,6 +10,8 @@
 # __sfvwrite_r writes to a stdio stream (assert and terminate messages), execute_stack_op unwinds
 # an exception (the guest has none to catch).
 #
+cmake_minimum_required(VERSION 3.20)  # IN_LIST in script mode
+
 # Run as: cmake -DOBJDUMP=<objdump> -DELF=<elf> -P check_unsigned_muldiv.cmake
 set(allowed __sfvwrite_r execute_stack_op)
 
