@@ -57,6 +57,7 @@ class StateTransition {
   private:
     uint64_t run_ejsn();
     uint64_t run_mfbd();
+    uint64_t run_slib_input();
     std::pair<uint64_t, bool> run_one_bundle(::zilkworm::FlatBundle& bundle);
 };
 

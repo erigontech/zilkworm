@@ -16,12 +16,18 @@ namespace zilkworm {
 
 inline constexpr uint32_t kInputMagicMFBD = 0x4442464Du;  // "MFBD"
 inline constexpr uint32_t kInputMagicEJSN = 0x4E534A45u;  // "EJSN"
+inline constexpr uint32_t kInputMagicSLIB = 0x42494C53u;  // "SLIB"
 
 inline constexpr uint32_t kInputVersionMFBD = 1u;
 inline constexpr uint32_t kInputVersionEJSN = 1u;
+inline constexpr uint32_t kInputVersionSLIB = 1u;
 
 inline constexpr std::size_t kInputHeaderSizeMFBD = 16;
 inline constexpr std::size_t kInputHeaderSizeEJSN = 8;
+// SLIB: one block for the HashState backend, binary throughout. After the header come the
+// network name, the block RLP, then statelessInputBytes (0x1501 || SSZ) to the end:
+//   [magic u32][version u32][network_len u32][block_rlp_len u32][network][block RLP][blob]
+inline constexpr std::size_t kInputHeaderSizeSLIB = 16;
 
 // Per-block flag bits (optional trailing bytes of the blocks section).
 inline constexpr uint8_t kBlockFlagExpectInvalid = 0x01;
