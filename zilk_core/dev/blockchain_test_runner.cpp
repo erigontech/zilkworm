@@ -10,7 +10,6 @@
 #include "state_transition.hpp"
 
 #include <cstring>
-#include <format>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -425,10 +424,9 @@ namespace {
             }
             for (std::size_t i = 1; i < ancestors.size(); ++i) {
                 if (ancestors[i].parent_hash != ancestors[i - 1].hash()) {
-                    sys_println(std::format(
-                                    "STRICT: witness ancestor headers are not a contiguous "
-                                    "parent-hash chain at index {} (number {})",
-                                    i, ancestors[i].number)
+                    sys_println(("STRICT: witness ancestor headers are not a contiguous "
+                                 "parent-hash chain at index " + std::to_string(i) + " (number " +
+                                 std::to_string(ancestors[i].number) + ")")
                                     .c_str());
                     return Status::kFailed;
                 }
@@ -451,8 +449,8 @@ namespace {
                 return strict_exception_match(*got, expectation);
             };
             const auto fail_strict = [&](std::string_view rejection_mode) {
-                sys_println(std::format("STRICT: rejected via {} but expected {}",
-                                        rejection_mode, expectation).c_str());
+                sys_println(("STRICT: rejected via " + std::string(rejection_mode) +
+                             " but expected " + expectation).c_str());
             };
 
             std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
@@ -521,11 +519,9 @@ namespace {
                     }
                 }
                 if (!parent_in_witness) {
-                    sys_println(std::format(
-                                    "STRICT: block {} parent header absent from witness "
-                                    "ancestor set (parent_hash {}) — mandatory parent "
-                                    "header missing",
-                                    block_index, to_hex(block.header.parent_hash))
+                    sys_println(("STRICT: block " + std::to_string(block_index) +
+                                 " parent header absent from witness ancestor set (parent_hash " +
+                                 to_hex(block.header.parent_hash) + ") — mandatory parent header missing")
                                     .c_str());
                     return Status::kFailed;
                 }
@@ -547,9 +543,9 @@ namespace {
                     ++block_index;
                     continue;  // expected-invalid correctly rejected.
                 }
-                sys_println(std::format("ERROR: validation error at block {}: {} ({})",
-                                        block_index, magic_enum::enum_name(err),
-                                        magic_enum::enum_integer(err))
+                sys_println(("ERROR: validation error at block " + std::to_string(block_index) + ": " +
+                             std::string(magic_enum::enum_name(err)) + " (" +
+                             std::to_string(magic_enum::enum_integer(err)) + ")")
                                 .c_str());
                 return Status::kFailed;
             }
@@ -564,12 +560,11 @@ namespace {
             //    header AND both witness-completeness counters (missing / unconfirmed reads) to
             //    be zero. (The overload prints the recomputed root itself.)
             if (!::zilkworm::check_root_hashstate(hs, prev_root, block.header.state_root)) {
-                sys_println(std::format(
-                                "ERROR: HashState accept failed at block {}: expected state_root {}",
-                                block_index, to_hex(block.header.state_root))
+                sys_println(("ERROR: HashState accept failed at block " + std::to_string(block_index) +
+                             ": expected state_root " + to_hex(block.header.state_root))
                                 .c_str());
-                sys_println(std::format("  missing_count={} unconfirmed_read_count={}",
-                                        hs.missing_count(), hs.unconfirmed_read_count())
+                sys_println(("  missing_count=" + std::to_string(hs.missing_count()) +
+                             " unconfirmed_read_count=" + std::to_string(hs.unconfirmed_read_count()))
                                 .c_str());
                 return Status::kFailed;
             }

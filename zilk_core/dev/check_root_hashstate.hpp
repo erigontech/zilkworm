@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <format>
+#include <string>
 #include <span>
 #include <vector>
 
@@ -113,8 +113,8 @@ struct HashStateAccountWrite {
     // sys_println("New Root: ...") (state_transition.cpp:646): surfaces the folded root for
     // the accept decision (the first true end-to-end signal in the slib runner arm). Purely
     // observational — the accept gate below is unchanged.
-    sys_println(std::format("New Root (hashstate): {}",
-                            silkworm::to_hex(ByteView{new_root.bytes, 32})));
+    // Not std::format, which links about 0.5 MB of text into the guest (see state_transition.cpp).
+    sys_println(("New Root (hashstate): " + silkworm::to_hex(ByteView{new_root.bytes, 32})).c_str());
 
     // Accept iff the recomputed root matches the header AND the witness was complete AND
     // every read was resolved. The pre-value / read-only check check_root runs inside the
