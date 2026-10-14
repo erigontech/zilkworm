@@ -4,7 +4,10 @@
 
 ### Toolchain
 - **Compiler**: `riscv-none-elf-gcc` / `riscv-none-elf-g++` (xPack GCC 15.2.0)
-- **ISA**: `rv32im_zicsr` — 32-bit RISC-V with integer multiply/divide and CSR instructions
+- **ISA**: `rv32im_zicsr` — 32-bit RISC-V with integer multiply/divide and CSR instructions, less
+  `mulh`, `mulhsu`, `div` and `rem`: Airbender's proving machine has only the unsigned M
+  instructions, and a post-link check (`cmake/check_unsigned_muldiv.cmake`) fails the build on a
+  signed one outside two library functions that only run on a failing guest
 - **ABI**: `ilp32` — 32-bit int, long, pointer
 - **Optimization**: `-O3 -fno-builtin -fipa-pta -funroll-loops`
 - **C++ mode**: `-fno-exceptions -fno-rtti -fno-threadsafe-statics`
@@ -230,3 +233,55 @@ UART: `[state_transition] run successful, gas used: 59681801`
 Took 2213982219 cycles to finish
 Executed block 24522000 (gas_used=59681801, cycles=2213982219, time=14.27s, freq=155M cycles/s, reached_end=true)
 ```
+
+---
+
+## 6. Proving (Airbender v3)
+
+`z6m_prover_airbender` proves with zksync-airbender's v3 stack (`prover_pipeline`, pinned to
+bd0d5153), always to the final unified recursion layer at 100-bit security. See
+`prover/prover_airbender/README.md` for the commands and `docs/airbender-docker-service.md` for
+the image and service.
+
+### Pipeline
+
+| Layer | Program | Machine |
+|-------|---------|---------|
+| base | the guest (`z6m_guest.{bin,text}`) | unrolled circuits, full-unsigned ISA (RV32IM without signed mul/div) |
+| unrolled recursion (0 or more) | `fsv_unrolled_base_layer` / `fsv_unrolled_recursion_layer` | unrolled circuits, reduced ISA; repeated while the next verifier would cost ≥ 52M cycles |
+| bridge | the unrolled verifier again | unified circuit |
+| final | `fsv_unified_recursion_layer` (repeated until 1 unified + 1 delegation proof) | unified circuit |
+
+The `fsv_*` verifier programs are binaries shipped in zksync-airbender's `tools/gkr_verifier`; the
+prover loads them from `FSV_DIR`. The guest's run is limited to 1,073,741,822 cycles (the prover's
+JIT keeps timestamps in 32 bits), and `RISCV_MERGE_WINDOW=0` must turn off the JIT's fusion of
+word load/store runs, because the guest jumps into such runs (keccak's `buf_zero_state_from`,
+`memset`'s jump table).
+
+### Statement and public output
+
+Every layer's verifier outputs 16 words. Words 0..7 are the guest's registers a0..a7 at its exit
+(the hash of the last block it validated, carried unchanged through the recursion). Words 8..15
+are the recursion chain: a Blake2s hash chain over each distinct layer's end parameters, the
+hash of its exit PC and setup commitments. The chain binds a proof to the guest binary and the
+verifier programs; the output binds it to a block.
+
+### Proof and verification key formats
+
+The formats are matter-labs/ethereum-prover's, which Ethproofs and its JS/WASM verifier take:
+
+- **Proof** (`proof.bin`, posted to Ethproofs in base64): gzip of the bincode-2 (standard config)
+  encoding of `{ magic: "EPROOF01", version: 2, security: 100, proof_words: Vec<u32> }`, where
+  `proof_words` is the final unified verifier's input stream (`build_unified_stream` of the last
+  proof and its setups).
+- **Verification key** (`vk.bin`, from `z6m_prover_airbender vk`): bincode-2 of
+  `{ magic: "EVKEY001", version: 2, security: 100, app_bin_keccak, app_text_keccak,
+  expected_chain_hashes: [[u32; 8]; 3] }`: the keccak256 of the guest's `.bin` and `.text`, and the
+  recursion chain hashes recomputed from the guest and the verifier programs for zero, one, and
+  two or more unrolled recursion layers.
+- **Verification**: run `verify_unified_circuit_recursion_layer_sec_100` over `proof_words`
+  (every word consumed), require output words 8..15 to equal one of `expected_chain_hashes`, and
+  output words 0..7 to commit the expected block hash.
+
+The key depends on the guest binary, the verifier programs and the `RECURSION_*_BLAKE` modes
+(the prover only accepts the defaults), not on the block.
