@@ -162,7 +162,12 @@ struct Env {
         msg.code_address = to;
         msg.sender = kSender;
         const auto r = host.call(msg);
-        return {r.status_code, r.gas_left, bytes(r.output_data, r.output_data + r.output_size)};
+        Outcome out{r.status_code, r.gas_left, {}};
+        // Not from an empty output, whose data is a null pointer: evmc::bytes copies with memcpy,
+        // which must not get one.
+        if (r.output_size != 0)
+            out.output.assign(r.output_data, r.output_size);
+        return out;
     }
 };
 

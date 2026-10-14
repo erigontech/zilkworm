@@ -13,6 +13,7 @@
 // (the native test build), the in-place path, the lazy byte-map scan and the rv32 dispatch with
 // its fusions run on the host; without it, there is no in-place path to test.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -54,8 +55,10 @@ struct Placed {
     Placed(const bytes& code, size_t misalign, const bytes& after) : size{code.size()} {
         at = 8 + misalign;
         buf.assign(at + code.size() + kPadding + after.size() + 8, 0);
-        std::memcpy(buf.data() + at, code.data(), code.size());
-        std::memcpy(buf.data() + at + code.size() + kPadding, after.data(), after.size());
+        // std::copy, not memcpy: an empty code (size 0 is a case) or `after` has a null data(),
+        // which memcpy must not get.
+        std::copy(code.begin(), code.end(), buf.data() + at);
+        std::copy(after.begin(), after.end(), buf.data() + at + code.size() + kPadding);
     }
     const uint8_t* code() const { return buf.data() + at; }
     void register_region() const { set_in_place_code_region(code(), code() + size); }

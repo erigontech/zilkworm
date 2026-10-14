@@ -356,17 +356,51 @@ TEST_CASE("secp256k1 recovery: random scalars over random points") {
 
 TEST_CASE("secp256k1 recovery: small scalars over small multiples of G") {
     // Q = (k1 + j k2) G: the digits of u1 over G and of u2 over R = jG are the same few points, so
-    // doublings, cancellations and restarts occur throughout.
+    // doublings, cancellations and restarts occur throughout. Its 73,964 recoveries are checked in
+    // the malleable mode against k1 G + k2 R from tables of the small multiples: with check(), its
+    // full reference multiplications, second mode and address, the case took 18 minutes of a Debug
+    // build and 23 of the sanitizer build, where ctest stops a test at 25. Neither the mode nor the
+    // address reaches the multiplication, and the other cases check both.
     std::mt19937_64 rng{11};
+    // k P for k from -20 to 20, at index k + 20 (index 20 the point at infinity).
+    const auto multiples = [](const AffinePoint& p) {
+        std::array<ecc::ProjPoint<Curve>, 41> m{};
+        for (size_t k = 1; k <= 20; ++k) {
+            m[20 + k] = ecc::add(m[19 + k], p);
+            m[20 - k] = -m[20 + k];
+        }
+        return m;
+    };
+    const auto g = multiples(G);
     size_t infinity = 0;
     for (const auto& pt : points(rng)) {
         for (const bool odd : {false, true}) {
             const auto R = with_parity(pt, odd);
+            // Affine, the point at infinity as (0, 0): the mixed addition below takes every pair,
+            // where the projective one asserts that its points are not each other's negation.
+            const auto rp = multiples(R);
+            std::array<AffinePoint, 41> r;
+            for (size_t i = 0; i < r.size(); ++i)
+                r[i] = ecc::to_affine(rp[i]);
             for (int k1 = -20; k1 <= 20; ++k1) {
                 for (int k2 = -20; k2 <= 20; ++k2) {
                     const auto u1 = k1 >= 0 ? uint256{static_cast<uint64_t>(k1)} : neg_mod_n(static_cast<uint64_t>(-k1));
                     const auto u2 = k2 >= 0 ? uint256{static_cast<uint64_t>(k2)} : neg_mod_n(static_cast<uint64_t>(-k2));
-                    infinity += check(sig_for(u1, u2, R), "small k1=" + std::to_string(k1) + " k2=" + std::to_string(k2)) ? size_t{1} : size_t{0};
+                    const auto sig = sig_for(u1, u2, R);
+                    INFO("small k1=" << k1 << " k2=" << k2);
+                    const auto got =
+                        secp256k1::secp256k1_ecdsa_recover(sig.h, sig.r, sig.s, sig.parity, RecoveryMode::malleable);
+                    const auto q = ecc::add(g[static_cast<size_t>(k1 + 20)], r[static_cast<size_t>(k2 + 20)]);
+                    // k2 = 0 makes s = 0, which is rejected, as the point at infinity is.
+                    if (k2 == 0 || q == 0) {
+                        REQUIRE(!got.has_value());
+                        ++infinity;
+                        continue;
+                    }
+                    REQUIRE(got.has_value());
+                    const auto want = ecc::to_affine(q);
+                    REQUIRE(got->x.value() == want.x.value());
+                    REQUIRE(got->y.value() == want.y.value());
                 }
             }
         }
