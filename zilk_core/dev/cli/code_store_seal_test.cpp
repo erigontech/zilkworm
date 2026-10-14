@@ -32,6 +32,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -231,6 +232,11 @@ void check_after_sanitize(Witness& w, const std::vector<uint8_t>& before, bool s
 
 constexpr bool kSeals = ZILK_SEAL_CODE_STORE != 0;
 
+/// For a child process that may abort: no core dump. With a core_pattern that pipes to a handler
+/// (apport, systemd-coredump), the kernel runs the handler on every dump even at RLIMIT_CORE 0,
+/// about a second each; the fuzz case below has some 900 of its 1500 children abort.
+void no_core_dump() { prctl(PR_SET_DUMPABLE, 0); }
+
 /// Fails the test if the pre-state is accepted; true if the constructor aborted after printing
 /// `message`. The constructor aborts on a malformed layout, so it runs in a child process.
 bool rejected_with(std::vector<uint8_t> blob, const std::string& message) {
@@ -239,6 +245,7 @@ bool rejected_with(std::vector<uint8_t> blob, const std::string& message) {
     const pid_t pid = fork();
     REQUIRE(pid >= 0);
     if (pid == 0) {
+        no_core_dump();
         dup2(fds[1], STDOUT_FILENO);
         close(fds[0]);
         { DirectState ds{std::span<uint8_t>{blob}}; }
@@ -495,6 +502,7 @@ TEST_CASE("code store seal: an account no addr_hashes entry names zeroes nothing
         const pid_t pid = fork();
         REQUIRE(pid >= 0);
         if (pid == 0) {
+            no_core_dump();
             const int null = open("/dev/null", O_WRONLY);
             if (null >= 0) dup2(null, STDOUT_FILENO);
             DirectState ds{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
@@ -1143,6 +1151,7 @@ int run_in_child(std::vector<uint8_t> blob, std::vector<uint8_t> nodestore,
     const pid_t pid = fork();
     REQUIRE(pid >= 0);
     if (pid == 0) {
+        no_core_dump();
         const int null = open("/dev/null", O_WRONLY);
         if (null >= 0) dup2(null, STDOUT_FILENO);
         _exit(fuzz_child(blob, nodestore, expect));
