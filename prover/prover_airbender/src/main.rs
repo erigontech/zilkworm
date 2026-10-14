@@ -121,7 +121,7 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Direct path to the input file (MFBD flat witness bundle)
+        /// Direct path to the input file (MFBD flat witness bundle, or a SLIB envelope for a HashState guest)
         #[arg(long)]
         file_name: Option<PathBuf>,
 
@@ -152,7 +152,7 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Direct path to the input file (MFBD flat witness bundle)
+        /// Direct path to the input file (MFBD flat witness bundle, or a SLIB envelope for a HashState guest)
         #[arg(long)]
         file_name: Option<PathBuf>,
 
@@ -246,7 +246,7 @@ pub(crate) fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>>
     let bytes = fs::read(input_file)
         .map_err(|e| eyre!("failed to read input file '{}': {}", input_file.display(), e))?;
 
-    // The guest dispatches on the envelope's leading 4-byte magic (MFBD/EJSN).
+    // The guest dispatches on the envelope's leading 4-byte magic (MFBD/EJSN/SLIB).
     // MFBD files are already enveloped on disk by the flat-bundle converter;
     // EEST JSON test fixtures are minified and wrapped in an EJSN envelope here.
     let bytes = if is_test {

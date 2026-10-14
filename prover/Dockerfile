@@ -65,8 +65,10 @@ COPY . .
 # Build guest binary (C++ → RISC-V), produces .bin and .text
 # USE_HASH_KEY=ON enables node-store account recovery in the guest.
 ARG USE_HASH_KEY=OFF
+# Z6M_HASH_STATE=ON builds the HashState guest, which takes SLIB input instead of MFBD.
+ARG Z6M_HASH_STATE=OFF
 WORKDIR /build/prover/guest_airbender
-RUN make z6m_guest USE_HASH_KEY=${USE_HASH_KEY}
+RUN make z6m_guest USE_HASH_KEY=${USE_HASH_KEY} Z6M_HASH_STATE=${Z6M_HASH_STATE}
 
 # Build Rust GPU prover (gpu is default feature, deps fetched from git).
 # witness_ffi's libstdc++ (gcc-15) is newer than the runtime image's, so link

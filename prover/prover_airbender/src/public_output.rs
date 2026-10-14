@@ -28,6 +28,11 @@ pub struct Expected {
 const INPUT_MAGIC_MFBD: u32 = 0x4442_464D; // "MFBD"
 const INPUT_VERSION_MFBD: u32 = 1;
 const INPUT_HEADER_SIZE_MFBD: usize = 16;
+/// One block for the HashState guest (built with Z6M_HASH_STATE=ON):
+/// [magic][version][network_len u32][block_rlp_len u32][network][block RLP][statelessInputBytes].
+const INPUT_MAGIC_SLIB: u32 = 0x4249_4C53; // "SLIB"
+const INPUT_VERSION_SLIB: u32 = 1;
+const INPUT_HEADER_SIZE_SLIB: usize = 16;
 const FLAT_BUNDLE_MAGIC: u32 = 0x444E_4246; // "FBND"
 const FLAT_BUNDLE_VERSION: u32 = 14;
 const FLAT_BUNDLE_HEADER_SIZE: usize = 56;
@@ -45,7 +50,29 @@ pub fn expected_for_file(input_file: &Path, is_test: bool) -> Result<Expected> {
     }
     let bytes = fs::read(input_file)
         .map_err(|e| eyre!("failed to read input file '{}': {}", input_file.display(), e))?;
+    if read_u32(&bytes, 0)? == INPUT_MAGIC_SLIB {
+        return expected_for_slib(&bytes);
+    }
     expected_for_mfbd(&bytes)
+}
+
+/// Reads a SLIB envelope as StateTransition::run_slib_input does: a successful run validated its
+/// one block, so the committed hash is that block's.
+pub fn expected_for_slib(envelope: &[u8]) -> Result<Expected> {
+    if read_u32(envelope, 0)? != INPUT_MAGIC_SLIB || read_u32(envelope, 4)? != INPUT_VERSION_SLIB {
+        bail!("input is not a SLIB v{} envelope", INPUT_VERSION_SLIB);
+    }
+    let network_len = read_u32(envelope, 8)? as usize;
+    let block_len = read_u32(envelope, 12)? as usize;
+    let start = INPUT_HEADER_SIZE_SLIB + network_len;
+    let block = envelope
+        .get(start..start + block_len)
+        .ok_or_else(|| eyre!("SLIB block RLP out of range"))?;
+    if rlp_item(block)?.len != block_len {
+        bail!("SLIB block RLP is not one item of the declared length");
+    }
+    let (block_hash, gas_used) = block_hash_and_gas(block)?;
+    Ok(Expected { block_hash, gas_used })
 }
 
 /// Walks an MFBD envelope as StateTransition::run_mfbd does. A successful run validated every
@@ -414,6 +441,44 @@ mod tests {
         let mut two_bundles = good.clone();
         two_bundles[8] = 2;
         assert!(expected_for_mfbd(&two_bundles).is_err());
+    }
+
+    fn slib_envelope(block: &[u8]) -> Vec<u8> {
+        let network = b"Mainnet";
+        let mut out = INPUT_MAGIC_SLIB.to_le_bytes().to_vec();
+        out.extend_from_slice(&INPUT_VERSION_SLIB.to_le_bytes());
+        out.extend_from_slice(&(network.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(block.len() as u32).to_le_bytes());
+        out.extend_from_slice(network);
+        out.extend_from_slice(block);
+        out.extend_from_slice(&[0x15, 0x01, 0xde, 0xad]); // statelessInputBytes: not read here
+        out
+    }
+
+    #[test]
+    fn slib_commits_its_block_hash() {
+        let h = header(7, 1_234_567, 0xaa);
+        let expected = expected_for_slib(&slib_envelope(&block(&h))).unwrap();
+        assert_eq!(expected.block_hash, keccak256(&h));
+        assert_eq!(expected.gas_used, 1_234_567);
+        check(&expected.block_hash, &words(&expected.block_hash)).unwrap();
+    }
+
+    #[test]
+    fn malformed_slib_inputs_are_rejected() {
+        let b = block(&header(7, 100, 0xaa));
+        let good = slib_envelope(&b);
+        let mut bad_version = good.clone();
+        bad_version[4] ^= 1;
+        assert!(expected_for_slib(&bad_version).is_err());
+        let mut long_block = good.clone();
+        long_block[12..16].copy_from_slice(&((b.len() + 1) as u32).to_le_bytes());
+        assert!(expected_for_slib(&long_block).is_err());
+        let mut past_end = good.clone();
+        past_end[12..16].copy_from_slice(&(good.len() as u32).to_le_bytes());
+        assert!(expected_for_slib(&past_end).is_err());
+        assert!(expected_for_slib(&good[..12]).is_err());
+        assert!(expected_for_mfbd(&good).is_err());
     }
 
     /// Mainnet block 24,491,136 from the 200-block corpus: its RLP header, its hash as a separate
