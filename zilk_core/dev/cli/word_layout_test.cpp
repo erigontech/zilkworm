@@ -710,3 +710,57 @@ TEST_CASE("growing uses of the layout's buffers allocate under 4 times the large
     check_allocation("CREATE", 20000 + 32 * 99, creates.op(STOP).code);
 }
 #endif
+
+// KECCAK256 memoizes the inputs of one block (evmone's keccak_memo; a few slots in this build, so
+// inputs evict each other) and the aligned 64-byte ones (ethash_keccak256_64_be on the guest). A
+// hash that repeats an input, one whose input changed in its last byte or only past its end, and
+// inputs of every size and alignment around the word and block boundaries must all be the hash
+// of the bytes as they are at the time.
+TEST_CASE("KECCAK256 of repeated and changed inputs equals the hash of the bytes", "[word_layout]") {
+    Rng rng{0x9E3779B97F4A7C15ull};
+    for (int program = 0; program < 40; ++program) {
+        Asm a;
+        Model m;
+        for (uint64_t off = 0; off < 512; off += 32) {
+            bytes32 w;
+            for (auto& b : w.bytes)
+                b = static_cast<uint8_t>(rng.below(4) == 0 ? rng.next() & 1 : rng.next());
+            a.mstore(off, w);
+            m.store(off, w);
+        }
+        std::vector<bytes32> expected;
+        const uint64_t out = 1024;
+        const auto hash = [&](uint64_t offset, uint64_t size) {
+            a.push(size).push(offset).op(KECCAK).push(out + 32 * expected.size()).op(MSTORE);
+            const auto h = ethash::keccak256(m.mem.data() + offset, size);
+            bytes32 w;
+            std::memcpy(w.bytes, h.bytes, 32);
+            expected.push_back(w);
+        };
+        for (int i = 0; i < 24; ++i) {
+            const uint64_t size = rng.below(3) == 0 ? 64 : 1 + rng.below(140);
+            const uint64_t offset = rng.below(4) == 0 ? 32 * rng.below(8) : rng.below(300);
+            hash(offset, size);
+            hash(offset, size);  // A repeat: the memo's answer.
+            const auto change = [&](uint64_t at) {
+                const auto v = static_cast<uint8_t>(m.mem[at] ^ (1 + rng.below(255)));
+                a.mstore8(at, v);
+                m.mem[at] = v;
+            };
+            switch (rng.below(3)) {
+            case 0: change(offset + size - 1); break;  // The last byte: in the masked word.
+            case 1: change(offset + size); break;      // Past the end: the same input.
+            default: change(offset + rng.below(size)); break;
+            }
+            hash(offset, size);
+            if (rng.below(2) == 0)
+                hash(rng.below(300), size);  // Another input of the same size.
+        }
+        a.ret(out, 32 * expected.size());
+        const auto o = run(a.code, {});
+        REQUIRE(o.status == EVMC_SUCCESS);
+        REQUIRE(o.output.size() == 32 * expected.size());
+        for (size_t i = 0; i < expected.size(); ++i)
+            CHECK(std::memcmp(o.output.data() + 32 * i, expected[i].bytes, 32) == 0);
+    }
+}
