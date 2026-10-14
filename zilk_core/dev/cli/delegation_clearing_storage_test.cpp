@@ -136,8 +136,16 @@ TEST_CASE("clearing a delegation set earlier in the same run preserves storage",
 
 TEST_CASE("deploying contract code wipes storage", "[state_zz][eip7702]") {
     Fixture f{Bytes{}};
-    f.apply_diff(Bytes{0x60, 0x00, 0x60, 0x00, 0xf3});
+    const Bytes code{0x60, 0x00, 0x60, 0x00, 0xf3};
+    f.apply_diff(code);
     CHECK(f.state->read_storage(kAuthority, kSlot) == bytes32{});
+
+    // The read of the wiped slot claims nothing of the pre-state's storage trie, and the post-state's
+    // storage is empty.
+    const MirrorRoot m = f.mirror();
+    CHECK_FALSE(m.rejected);
+    CHECK(m.missing == 0);
+    CHECK(m.root == expected_root(code, {}));
 }
 
 TEST_CASE("deploying contract code wipes slots written earlier in the same block",
@@ -146,7 +154,13 @@ TEST_CASE("deploying contract code wipes slots written earlier in the same block
     f.apply_diff({}, {{kFreshSlot, kFreshValue}});
     REQUIRE(f.state->read_storage(kAuthority, kFreshSlot) == kFreshValue);
 
-    f.apply_diff(Bytes{0x60, 0x00, 0x60, 0x00, 0xf3});
+    const Bytes code{0x60, 0x00, 0x60, 0x00, 0xf3};
+    f.apply_diff(code);
     CHECK(f.state->read_storage(kAuthority, kFreshSlot) == bytes32{});
     CHECK(f.state->read_storage(kAuthority, kSlot) == bytes32{});
+
+    const MirrorRoot m = f.mirror();
+    CHECK_FALSE(m.rejected);
+    CHECK(m.missing == 0);
+    CHECK(m.root == expected_root(code, {}));
 }

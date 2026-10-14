@@ -587,6 +587,12 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
     if (!eip7702::is_code_delegated(code)) {
         note_wiped_storage_(pa);
         pa.slot_count = 0;
+        // What is left is the empty trie, and what the block writes into it after: a read finds every
+        // other key absent there (with USE_HASH_KEY too, whose recovery walks this root), and check_root
+        // commits the post-state's storage from it. The pre-state's root went with the wiped storage.
+        // (EIP-7610 makes a creation over a non-empty storage root collide, so a block can only get here
+        // with the root empty already; DirectState does not rely on it.)
+        copy32(pa.storage_root, kEmptyRoot);
         overflow_slots_.erase(addr);
 #if USE_HASH_KEY
         recovered_slots_.erase(addr);
@@ -712,7 +718,9 @@ void DirectState::set_nonce(const evmc::address& addr, uint64_t nonce) {
 [[gnu::noinline]] void DirectState::note_wiped_storage_(const Account& pa) {
     if (pa.slot_count == 0 && pa.absent_reads == 0) return;
     wiped_storage_.push_back({slots_for(pa), std::bit_cast<evmc::bytes32>(pa.storage_root), pa.absent_reads});
-    pa.absent_reads = 0;  // handed over: a destructed record reads nothing, a revived one reads under the empty root
+    // Handed over: a destructed record reads nothing, a revived one, or one a deployment wiped, reads under
+    // the empty root.
+    pa.absent_reads = 0;
 }
 
 void DirectState::destruct(const evmc::address& addr) {
