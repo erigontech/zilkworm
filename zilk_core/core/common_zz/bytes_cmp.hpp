@@ -11,9 +11,9 @@ namespace zilkworm {
 
 /// a[0..32) < b[0..32) in memcmp order, both 4-aligned. With strict alignment (rv32 Airbender)
 /// an ordering memcmp is a call; here the words are compared inline and the first differing byte
-/// decides, as DirectState's key_below() does.
+/// decides. The native test build (EVMONE_RV32_DISPATCH_TEST) compiles it for the tests.
 [[gnu::always_inline]] inline bool lt_bytes32(const uint8_t* a, const uint8_t* b) noexcept {
-#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
+#if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
     typedef uint32_t __attribute__((may_alias)) w32;
     const w32* const wa = reinterpret_cast<const w32*>(std::assume_aligned<4>(a));
     const w32* const wb = reinterpret_cast<const w32*>(std::assume_aligned<4>(b));

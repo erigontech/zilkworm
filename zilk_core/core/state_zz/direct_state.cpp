@@ -3,6 +3,8 @@
 
 #include "direct_state.hpp"
 
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -304,26 +306,7 @@ namespace {
     /// Both are 8-aligned, as every slot is; with strict alignment (rv32 Airbender) they are compared a
     /// word at a time inline, as find_slot() does, instead of by a call to memcmp.
     [[gnu::always_inline]] inline bool key_below(const uint8_t* a, const uint8_t* b) noexcept {
-#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-        typedef uint32_t __attribute__((may_alias)) w32;
-        const w32* const wa = reinterpret_cast<const w32*>(a);
-        const w32* const wb = reinterpret_cast<const w32*>(b);
-        for (int i = 0; i < 8; ++i) {
-            const uint32_t x = wa[i];
-            const uint32_t y = wb[i];
-            if (x == y) continue;
-            // The first differing byte is the lowest nonzero byte of x ^ y, see find_slot().
-            const uint32_t d = x ^ y;
-            const uint32_t m = (d & 0xffu)       ? 0xffu
-                               : (d & 0xffffu)   ? 0xffffu
-                               : (d & 0xffffffu) ? 0xffffffu
-                                                 : ~uint32_t{0};
-            return (x & m) < (y & m);
-        }
-        return false;
-#else
-        return std::memcmp(a, b, 32) < 0;
-#endif
+        return ::zilkworm::lt_bytes32(a, b);
     }
 
     // SOUNDNESS-CRITICAL: the entries of an MphfMap must tile its data section exactly as the

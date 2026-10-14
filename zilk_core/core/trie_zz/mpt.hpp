@@ -503,8 +503,6 @@ class GridMPT {
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
     // The same walk over an order of pointers (see sort_trie_node_ptrs()): the nodes stay where they are.
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted);
-    template <typename It>
-    bytes32 calc_root_impl(It updates_it, It updates_end);
 
     template <typename NodeType>
     bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node);
@@ -526,6 +524,11 @@ class GridMPT {
     bool failed() const noexcept { return failed_; }
 
     unsigned cascade_delete(unsigned depth);
+
+  private:
+    // The walk of both calc_root_from_updates(), over the nodes or pointers to them (grid_mpt.cpp).
+    template <typename It>
+    bytes32 calc_root_impl(It updates_it, It updates_end);
 };
 
 }  // namespace zilkworm

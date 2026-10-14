@@ -545,7 +545,6 @@ void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
     }
 }
 
-// Explicit template instantiations
 template <bool DeletionEnabled>
 bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
     return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
@@ -556,6 +555,7 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNod
     return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
 }
 
+// Explicit template instantiations
 template class GridMPT<false>;
 template class GridMPT<true>;
 

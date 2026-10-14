@@ -570,7 +570,7 @@ DirectState::read_code(const Account& pa) const noexcept {
         const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa.code_hash);
         const uint64_t k8 = hash_key8(h);
         if (auto it = created_code_.find(k8); it != created_code_.end() &&
-                                              std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) [[likely]] {
+                                              bytes_equal<32>(it->second.full_hash.bytes, h.bytes)) [[likely]] {
             return ByteView{it->second.bytes.data(), it->second.bytes.size()};
         }
         if (auto cit = created_code_collisions_.find(h);
