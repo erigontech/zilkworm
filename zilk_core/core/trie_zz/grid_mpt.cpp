@@ -537,7 +537,12 @@ bytes32 GridMPT<DeletionEnabled>::calc_root_impl(It updates_it, const It updates
         const kprefix::Resume r = take_resume_full(grid_[0].branch, 0);
         return std::bit_cast<bytes32>(grid_[0].branch.full_branch_hash(r.state, r.blocks));
     }
+    const kprefix::Resume r =
+        grid_[0].kind == kBranch ? take_resume_encoded(grid_[0].branch, 0) : kprefix::Resume{nullptr, 0};
     auto encoded = encode_line(grid_[0]);
+    if (r.blocks != 0) {
+        return std::bit_cast<bytes32>(ethash_keccak256_resume(r.state, r.blocks, encoded.data(), encoded.size()));
+    }
     return keccak_bytes(encoded);
 }
 

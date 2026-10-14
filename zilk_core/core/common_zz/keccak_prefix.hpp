@@ -9,15 +9,17 @@
 #include <evmone_precompiles/keccak.hpp>
 #include <zilk_core/core/common_zz/mphf_map.hpp>
 
-// Keccak states of the leading blocks of full trie branches, saved while a witness node is verified
+// Keccak states of the leading blocks of trie branches, saved while a witness node is verified
 // and resumed when the same branch is hashed again after an update. A branch of 16 hash children
 // is 532 bytes: three 136-byte blocks and a last one of 124. An update rewrites the 32 hash bytes of
-// some slots, and the blocks before the first one it rewrites are the witness bytes still.
+// some slots, and the blocks before the first one it rewrites are the witness bytes still. A branch
+// with empty or embedded slots (136 to 531 bytes) is hashed as a copy of the witness node with the
+// items of its dirty slots rewritten, and the blocks before the first such item are the node's too.
 //
 // Invariant: while tag_orig[i] is not null, pool[i] holds the Keccak state after the first
-// 136 * tag_sb[i] bytes of the 532-byte witness node at tag_orig[i] (rows 0..24; the delegation's
-// scratch lanes after them are meaningless), those bytes being verified against their hash, and
-// tag_sb[i] is 1..3 (take_resumable_blocks() masks it with 3 all the same, see there).
+// 136 * tag_sb[i] bytes of the witness node at tag_orig[i], of 136 to 532 bytes (rows 0..24; the
+// delegation's scratch lanes after them are meaningless), those bytes being verified against their
+// hash, and tag_sb[i] is 1..3 (take_resumable_blocks() masks it with 3 all the same, see there).
 // Everything that writes a pool row clears its tag first and sets it again only once the node
 // hashed to the hash it was looked up by, and a resume clears the tag as it permutes the row in
 // place. Witness bytes do not change, so a tag never goes stale, and it names the node by its
@@ -92,6 +94,26 @@ struct SnapRequest {
 [[gnu::always_inline]] inline unsigned first_blocks(unsigned j) noexcept {
     static constexpr uint8_t kTable[17] = {0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 0};
     return kTable[j];
+}
+
+/// The whole blocks of the branch node at `node` (`size` bytes, at least kBlock) before the first byte an update of
+/// slot `j` can rewrite (0 for kNoSlot): for a full branch the slot's hash, first_blocks(); for any other branch the
+/// slot's item, at the offset the items before it take (a hash reference 33 bytes, an empty slot 1, an embedded node
+/// its own length), as encode_branch() rewrites a slot of a copy of the node. At most size / kBlock.
+/// The node is not verified when this runs. That is harmless: the count only picks how many of the node's leading
+/// blocks the state saved while hashing it covers, the state is that of those bytes whatever they hold, and a fold
+/// resumes from it only when its own test, on the verified node, allows that many blocks.
+inline unsigned blocks_before_slot(const uint8_t* node, size_t size, unsigned j) noexcept {
+    if (size == kNodeSize) return first_blocks(j);
+    if (j >= 16) return 0;
+    const uint8_t b0 = node[0];
+    if (b0 != 0xf8 && b0 != 0xf9) return 0;  // a list of 136 to 65535 bytes has one or two length bytes
+    size_t off = b0 == 0xf8 ? 2 : 3;
+    for (unsigned i = 0; i < j && off < size; ++i) {
+        const unsigned c = node[off];
+        off += c == 0xa0u ? 33u : (c >= 0xc0u && c <= 0xf7u) ? 1u + (c - 0xc0u) : 1u;
+    }
+    return static_cast<unsigned>((off < size ? off : size) / kBlock);
 }
 
 /// The slots of a full branch whose hash bytes begin inside the first `blocks` blocks (136 bytes each): slot i

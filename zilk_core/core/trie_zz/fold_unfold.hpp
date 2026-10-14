@@ -383,6 +383,10 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
         delete_line(depth);
         return;
     }
+    // Any other branch whose encoding is a copy of its witness node with the dirty slots patched resumes the
+    // same way, from a state of the node's blocks before its first dirty slot (take_resume_encoded()).
+    const kprefix::Resume r = grid_line.kind == kBranch ? take_resume_encoded(grid_line.branch, depth & (kprefix::kRows - 1))
+                                                        : kprefix::Resume{nullptr, 0};
     const ByteView encoded = encode_line(grid_line);
     // The line goes before its reference is written into the parent (its encoding is in
     // static_buffer, and the parent does not move): the keccak of an encoding of 32 bytes or more,
@@ -391,14 +395,14 @@ inline void GridMPT<DeletionEnabled>::fold_line(unsigned depth) {
     switch (parent.kind) {
         case kBranch:
             if (encoded.size() >= 32) {
-                parent.branch.set_child_hash(slot, encoded);
+                parent.branch.set_child_hash(slot, encoded, r);
             } else {
                 parent.branch.set_child(slot, encoded);
             }
             break;
         case kExt:
             if (encoded.size() >= 32) {
-                parent.ext.set_child_hash(encoded);
+                parent.ext.set_child_hash(encoded, r);
             } else {
                 parent.ext.set_child(encoded);
             }
@@ -416,6 +420,33 @@ template <bool DeletionEnabled>
     if (const unsigned blocks = take_resumable_blocks(b, row); blocks != 0) return {kprefix::pool[row], blocks};
 #if USE_HASH_KEY
     return state_->take_walk_state(b.orig, full_branch_clean_blocks(b));
+#else
+    return {nullptr, 0};
+#endif
+}
+
+// The saved state a branch b that encode_branch() copies from its witness node and patches resumes from, taken
+// out of the pool row `row` of its line or DirectState's table: one for b's node that covers no byte of a dirty
+// slot (same_layout_clean_blocks()). The copy is at the node's phase modulo 32 (static_buffer), so it is 8-aligned
+// as the resume wants when the node is, as every node a state is saved for is. {nullptr, 0} if there is none.
+// Called only for a branch hashes_from_witness() does not take: fold_line() hashes those through
+// take_resume_full(), from the node itself.
+template <bool DeletionEnabled>
+inline kprefix::Resume GridMPT<DeletionEnabled>::take_resume_encoded(const BranchNode& b, size_t row) {
+    if (b.mask == 0 || b.orig == nullptr || (reinterpret_cast<uintptr_t>(b.orig) & 7) != 0 ||
+        b.orig_size < kprefix::kBlock || !b.same_layout_as_orig()) {
+        return {nullptr, 0};
+    }
+    const unsigned allowed = same_layout_clean_blocks(b);
+    if (allowed == 0) return {nullptr, 0};
+    if (kprefix::tag_orig[row] == b.orig) {
+        const unsigned blocks = kprefix::tag_sb[row];
+        if (blocks == 0 || blocks > allowed) return {nullptr, 0};
+        kprefix::tag_orig[row] = nullptr;
+        return {kprefix::pool[row], blocks};
+    }
+#if USE_HASH_KEY
+    return state_->take_walk_state(b.orig, allowed);
 #else
     return {nullptr, 0};
 #endif

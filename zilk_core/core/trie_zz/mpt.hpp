@@ -151,6 +151,21 @@ struct BranchNode {
         ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(silkworm::keccak256(rlp));
     }
 
+    // set_child_hash() resumed from `r`, a state of the first r.blocks blocks of `rlp` (none if 0), which it consumes.
+    inline void set_child_hash(unsigned slot, ByteView rlp, kprefix::Resume r) noexcept {
+        if (r.blocks == 0) {
+            set_child_hash(slot, rlp);
+            return;
+        }
+        [[assume(slot < 16)]];
+        dirty |= static_cast<uint16_t>(1u << slot);
+        mask |= 1 << slot;
+        child_len[slot] = 32;
+        child_ptr[slot] = nullptr;
+        ::new (static_cast<void*>(child[slot].bytes))
+            ethash::hash256(ethash_keccak256_resume(r.state, r.blocks, rlp.data(), rlp.size()));
+    }
+
     // The keccak of the encoding of this branch, which hashes_from_witness() (rlp_sw.hpp) must accept:
     // read from the witness node and the new hashes of the dirty slots, with no copy. With `blocks`
     // nonzero, `state` holds the state of the node's first blocks (see take_resumable_blocks()),
@@ -192,6 +207,19 @@ struct ExtensionNode {
     inline void set_child_hash(ByteView rlp) noexcept {
         const ethash::hash256 h = silkworm::keccak256(rlp);
         // child follows the 68-byte path, so it is only 4-aligned: too little to hold a hash256.
+        typedef uint32_t __attribute__((may_alias)) w32;
+        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
+        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        child_len = 32;
+    }
+
+    // set_child_hash() resumed from `r`, as BranchNode's.
+    inline void set_child_hash(ByteView rlp, kprefix::Resume r) noexcept {
+        if (r.blocks == 0) {
+            set_child_hash(rlp);
+            return;
+        }
+        const ethash::hash256 h = ethash_keccak256_resume(r.state, r.blocks, rlp.data(), rlp.size());
         typedef uint32_t __attribute__((may_alias)) w32;
         w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
         for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
@@ -455,6 +483,8 @@ class GridMPT {
 
     // The keccak state a fold of the full branch `b` of pool row `row` resumes from (fold_unfold.hpp).
     kprefix::Resume take_resume_full(const BranchNode& b, size_t row);
+    // The same for a branch encode_branch() copies from its witness node and patches (fold_unfold.hpp).
+    kprefix::Resume take_resume_encoded(const BranchNode& b, size_t row);
 
   public:
     GridMPT(const DirectState& state, bytes32 previous_root_hash)

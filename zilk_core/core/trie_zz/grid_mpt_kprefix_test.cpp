@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <optional>
 #include <random>
@@ -271,6 +272,146 @@ TEST_CASE("kprefix: a failed verification leaves no tag over the overwritten row
     dirty_slot(b, 15, rng);
     CHECK(fold(b, row).blocks == 0);
 }
+
+// Branches that are not full (empty slots, embedded nodes): encode_branch() copies the witness node and patches the
+// dirty slots, and the hash resumes from a state of the node's blocks before the item of the first dirty slot.
+namespace {
+
+enum : uint8_t { kEmptySlot, kHashSlot, kEmbeddedSlot };
+
+// A branch with slot i of kind kinds[i] and an empty value at `at`; returns its size. Embedded nodes are 2 to 31
+// bytes, a list header and random bytes (decode_node() copies them as they are).
+size_t fill_branch(uint8_t* at, const std::array<uint8_t, 16>& kinds, std::mt19937_64& rng) {
+    uint8_t body[600];
+    size_t n = 0;
+    for (size_t i = 0; i < 16; ++i) {
+        if (kinds[i] == kEmptySlot) {
+            body[n++] = 0x80;
+        } else if (kinds[i] == kHashSlot) {
+            body[n++] = 0xa0;
+            for (size_t k = 0; k < 32; ++k) body[n++] = static_cast<uint8_t>(rng());
+        } else {
+            const size_t len = 1 + rng() % 30;
+            body[n++] = static_cast<uint8_t>(0xc0 + len);
+            for (size_t k = 0; k < len; ++k) body[n++] = static_cast<uint8_t>(rng());
+        }
+    }
+    body[n++] = 0x80;
+    size_t h = 0;
+    if (n < 256) {
+        at[h++] = 0xf8;
+    } else {
+        at[h++] = 0xf9;
+        at[h++] = static_cast<uint8_t>(n >> 8);
+    }
+    at[h++] = static_cast<uint8_t>(n);
+    std::memcpy(at + h, body, n);
+    return h + n;
+}
+
+// Rewrites slot i of b with new bytes of the same length class, as an update that keeps the node's layout does.
+void dirty_same_layout(BranchNode& b, unsigned i, std::mt19937_64& rng) {
+    const unsigned len = b.child_len[i];
+    if (len == 0) {
+        b.delete_child(i);
+        return;
+    }
+    uint8_t x[32];
+    for (auto& v : x) v = static_cast<uint8_t>(rng());
+    if (len != 32) x[0] = static_cast<uint8_t>(0xc0 + len - 1);
+    b.set_child(i, ByteView{x, len});
+}
+
+}  // namespace
+
+TEST_CASE("kprefix: a branch copied and patched resumes from the blocks before its first dirty slot", "[trie][kprefix]") {
+    std::mt19937_64 rng(15);
+    alignas(256) static uint8_t buf[640];
+    size_t resumed = 0, saved = 0;
+    for (unsigned trial = 0; trial < 3000; ++trial) {
+        std::array<uint8_t, 16> kinds;
+        unsigned hashes = 0;
+        for (auto& k : kinds) {
+            const unsigned r = static_cast<unsigned>(rng() % 10);
+            k = r < 6 ? kHashSlot : r < 8 ? kEmptySlot : kEmbeddedSlot;
+            hashes += k == kHashSlot;
+        }
+        if (hashes == 16) kinds[rng() % 16] = kEmptySlot;  // not a full branch
+        uint8_t* const node = buf + 8 * (trial % 4);       // every 8-aligned phase modulo 32
+        const size_t size = fill_branch(node, kinds, rng);
+        if (size < kprefix::kBlock) continue;
+        const ethash::hash256 h = ethash_keccak256(node, size);
+        const size_t row = rng() % kprefix::kRows;
+        kprefix::tag_orig[row] = nullptr;
+        // The state the lookup saves when the walk goes through slot j.
+        const unsigned j = static_cast<unsigned>(rng() % 17);
+        const unsigned blocks = kprefix::blocks_before_slot(node, size, j);
+        if (blocks != 0) {
+            REQUIRE(kprefix::verify_and_snap(node, size, kprefix::pool[row], kprefix::tag_orig[row], kprefix::tag_sb[row],
+                                             blocks, h.bytes));
+            ++saved;
+        }
+        BranchNode b = unfold(node, size);
+        REQUIRE_FALSE(hashes_from_witness(b));
+        // A random set of slots, the lowest of them often at or after j, each rewritten keeping its length class.
+        const unsigned from = rng() % 2 ? j % 16 : 0;
+        for (unsigned i = from; i < 16; ++i)
+            if (rng() % 4 == 0) dirty_same_layout(b, i, rng);
+        REQUIRE(b.same_layout_as_orig());
+        const ByteView enc = encode_branch(b);
+        REQUIRE(enc.size() == size);
+        REQUIRE((reinterpret_cast<uintptr_t>(enc.data()) & 7) == 0);
+        // The blocks the fold may resume over are the node's bytes in the encoding.
+        const unsigned allowed = same_layout_clean_blocks(b);
+        CHECK(std::memcmp(enc.data(), node, kprefix::kBlock * allowed) == 0);
+        // Any dirty slot is in the block after them: its item starts no earlier.
+        if (b.dirty != 0 && allowed < size / kprefix::kBlock) {
+            size_t off = node[0] == 0xf8 ? 2 : 3;
+            for (unsigned i = 0; i < lowest_set_bit(b.dirty); ++i) off += b.child_len[i] == 0 ? 1u : b.child_len[i] == 32 ? 33u : unsigned{b.child_len[i]};
+            CHECK(off < kprefix::kBlock * (allowed + 1));
+        }
+        const ethash::hash256 plain = ethash_keccak256(enc.data(), enc.size());
+        // fold_line()'s take: the state of this node, no more blocks than allowed.
+        if (kprefix::tag_orig[row] == node && kprefix::tag_sb[row] <= allowed) {
+            const ethash::hash256 got = ethash_keccak256_resume(kprefix::pool[row], kprefix::tag_sb[row], enc.data(), enc.size());
+            kprefix::tag_orig[row] = nullptr;
+            REQUIRE(std::memcmp(got.bytes, plain.bytes, 32) == 0);
+            ++resumed;
+        }
+    }
+    CHECK(saved > 1000);
+    CHECK(resumed > 500);
+}
+
+TEST_CASE("kprefix: the blocks before a slot of a branch that is not full", "[trie][kprefix]") {
+    // Slots 0-9 hash references, 10 and 11 empty, 12 a hash, 13 empty, 14 a hash, 15 empty: 404 bytes, f9 01 91.
+    std::mt19937_64 rng(16);
+    alignas(256) static uint8_t node[640];
+    std::array<uint8_t, 16> kinds{};
+    for (unsigned i = 0; i < 16; ++i) kinds[i] = (i < 10 || i == 12 || i == 14) ? kHashSlot : kEmptySlot;
+    REQUIRE(fill_branch(node, kinds, rng) == 404);
+    // Slot i's item at 3 + 33 * (hashes before it) + (empties before it).
+    CHECK(kprefix::blocks_before_slot(node, 404, 0) == 0);   // 3
+    CHECK(kprefix::blocks_before_slot(node, 404, 4) == 0);   // 135
+    CHECK(kprefix::blocks_before_slot(node, 404, 5) == 1);   // 168
+    CHECK(kprefix::blocks_before_slot(node, 404, 8) == 1);   // 267
+    CHECK(kprefix::blocks_before_slot(node, 404, 9) == 2);   // 300
+    CHECK(kprefix::blocks_before_slot(node, 404, 12) == 2);  // 335
+    CHECK(kprefix::blocks_before_slot(node, 404, 15) == 2);  // 402
+    CHECK(kprefix::blocks_before_slot(node, 404, kprefix::kNoSlot) == 0);
+    // The same offsets at the fold.
+    BranchNode b = unfold(node, 404);
+    CHECK(same_layout_clean_blocks(b) == 2);  // nothing dirty: all 404 bytes
+    for (const auto& [slot, blocks] : std::vector<std::pair<unsigned, unsigned>>{{0, 0}, {4, 0}, {5, 1}, {9, 2}, {13, 2}}) {
+        BranchNode d = b;
+        dirty_same_layout(d, slot, rng);
+        CHECK(same_layout_clean_blocks(d) == blocks);
+    }
+    // A malformed node (not a long list) gives no block.
+    node[0] = 0xc5;
+    CHECK(kprefix::blocks_before_slot(node, 404, 12) == 0);
+}
+
 
 namespace {
 
@@ -623,6 +764,95 @@ TEST_CASE("kprefix: tags do not outlive a GridMPT", "[trie][gridmpt][kprefix]") 
     for (size_t i = 0; i < kprefix::kRows; ++i) CHECK(kprefix::tag_orig[i] == nullptr);
 }
 
+namespace {
+
+// A trie whose root is a full branch and whose branch under root slot 5 is not: slots 0-9, 12 and 14 of it hold one
+// leaf each (a hash reference), the others are empty, so it is the 404-byte node of the test above. `key(j)` is the key
+// of its leaf in slot j. Keys come from `make(top, second, rng)`, a key with those first two nibbles.
+template <class MakeKey>
+struct SparseBranchTrie {
+    Map pre;
+    std::array<bytes32, 16> key{};
+    SparseBranchTrie(std::mt19937_64& rng, MakeKey make, std::function<Bytes(std::mt19937_64&)> value) {
+        for (unsigned top = 0; top < 16; ++top)
+            if (top != 5) pre.emplace(make(top, static_cast<unsigned>(rng() % 16), rng), value(rng));
+        for (unsigned j = 0; j < 16; ++j) {
+            if (j >= 10 && j != 12 && j != 14) continue;
+            key[j] = make(5, j, rng);
+            pre.emplace(key[j], value(rng));
+        }
+    }
+};
+
+bytes32 random_key(unsigned top, unsigned second, std::mt19937_64& rng) {
+    bytes32 k;
+    for (auto& b : k.bytes) b = static_cast<uint8_t>(rng());
+    k.bytes[0] = static_cast<uint8_t>(top << 4 | second);
+    return k;
+}
+
+}  // namespace
+
+TEST_CASE("kprefix: a branch that is not full, read first, resumes when a later update writes it", "[trie][gridmpt][kprefix]") {
+    std::mt19937_64 rng(17);
+    const SparseBranchTrie t{rng, &random_key, [](std::mt19937_64& r) { return value_of(r, 1 + r() % 40); }};
+    Map nodes;
+    const bytes32 pre_root = hb_root(t.pre, &nodes);
+    const auto& [kz, vz] = *t.pre.rbegin();  // under root slot 15: written with its own value, it changes nothing
+    const auto branch_of = [&](const DirectState& state) {
+        const auto r = state.find_node_rlp(pre_root);
+        REQUIRE(r.has_value());
+        return child_node(state, *r, 5);
+    };
+    {
+        Witness w{nodes};
+        GridMPT<true> grid{w.state, pre_root};
+        const std::vector<TrieNodeFlat> ups{read_of(t.key[12], t.pre.at(t.key[12])), write_of(kz, vz, vz)};
+        CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
+        CHECK_FALSE(grid.failed());
+        const ByteView branch = branch_of(w.state);
+        REQUIRE(branch.size() == 404);
+        const size_t row = row_of(branch.data());
+        REQUIRE(row < kprefix::kRows);
+        CHECK(kprefix::tag_sb[row] == 2);  // slot 12's item at byte 335
+    }
+    for (const unsigned written : {12u, 14u}) {
+        CAPTURE(written);
+        Witness w{nodes};
+        GridMPT<true> grid{w.state, pre_root};
+        const Bytes nv = value_of(rng, 30);
+        // The write of slot 12 descends first itself; that of slot 14 after the read of slot 12.
+        std::vector<TrieNodeFlat> ups;
+        if (written != 12) ups.push_back(read_of(t.key[12], t.pre.at(t.key[12])));
+        ups.push_back(write_of(t.key[written], t.pre.at(t.key[written]), nv));
+        Map post = t.pre;
+        post[t.key[written]] = nv;
+        CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
+        CHECK_FALSE(grid.failed());
+        CHECK(row_of(branch_of(w.state).data()) == kprefix::kRows);  // consumed
+    }
+    {
+        // A later walk of the same witness (check_root's storage tries share one GridMPT) that writes slot 3 of the
+        // branch: the state of its first two blocks covers that slot's item, and is not used.
+        Witness w{nodes};
+        GridMPT<true> grid{w.state, silkworm::kEmptyRoot};
+        grid.reset(pre_root);
+        const std::vector<TrieNodeFlat> first{read_of(t.key[12], t.pre.at(t.key[12])), write_of(kz, vz, vz)};
+        CHECK(grid.calc_root_from_updates({first.data(), first.size()}) == pre_root);
+        const size_t row = row_of(branch_of(w.state).data());
+        REQUIRE(row < kprefix::kRows);
+        grid.reset(pre_root);
+        const Bytes nv = value_of(rng, 30);
+        const std::vector<TrieNodeFlat> second{write_of(t.key[3], t.pre.at(t.key[3]), nv)};
+        Map post = t.pre;
+        post[t.key[3]] = nv;
+        CHECK(grid.calc_root_from_updates({second.data(), second.size()}) == hb_root(post, nullptr));
+        CHECK_FALSE(grid.failed());
+        CHECK(kprefix::tag_orig[row] == branch_of(w.state).data());  // still there, unused
+        CHECK(kprefix::tag_sb[row] == 2);
+    }
+}
+
 #if USE_HASH_KEY
 namespace {
 
@@ -746,6 +976,45 @@ TEST_CASE("kprefix: a write before the slot a walk saved for hashes the branch i
     CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
     CHECK_FALSE(grid.failed());
     CHECK(sw.state.walk_state_blocks(branch.data()) == 3);  // left where it was
+}
+
+TEST_CASE("kprefix: a branch that is not full, verified by an SLOAD walk, resumes when check_root writes it",
+          "[trie][gridmpt][kprefix]") {
+    std::mt19937_64 rng(18);
+    evmc::address addr{};
+    addr.bytes[19] = 0x44;
+    // Slot words whose hashed keys have the nibbles SparseBranchTrie asks for.
+    std::map<bytes32, bytes32, Less> word_of;
+    uint32_t next = 0;
+    const auto make = [&](unsigned top, unsigned second, std::mt19937_64&) {
+        for (;; ++next) {
+            bytes32 w{};
+            std::memcpy(w.bytes + 28, &next, 4);
+            const bytes32 hk = keccak_bytes32(w);
+            if (hk.bytes[0] == (top << 4 | second) && !word_of.contains(hk)) {
+                word_of.emplace(hk, w);
+                return hk;
+            }
+        }
+    };
+    const SparseBranchTrie t{rng, make, &slot_rlp};
+    Map nodes;
+    const bytes32 root = hb_root(t.pre, &nodes);
+    StorageWitness sw{addr, root, nodes};
+    (void)sw.state.read_storage(addr, word_of.at(t.key[12]));
+    const auto root_node = sw.state.find_node_rlp(root);
+    REQUIRE(root_node.has_value());
+    const ByteView branch = child_node(sw.state, *root_node, 5);
+    REQUIRE(branch.size() == 404);
+    CHECK(sw.state.walk_state_blocks(branch.data()) == 2);
+    const Bytes nv = slot_rlp(rng);
+    const std::vector<TrieNodeFlat> ups{write_of(t.key[14], t.pre.at(t.key[14]), nv)};
+    Map post = t.pre;
+    post[t.key[14]] = nv;
+    GridMPT<true> grid{sw.state, root};
+    CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
+    CHECK_FALSE(grid.failed());
+    CHECK(sw.state.walk_state_blocks(branch.data()) == 0);  // consumed by the fold
 }
 
 TEST_CASE("kprefix: a walk's corrupt node fails verification with no state saved", "[trie][kprefix]") {
