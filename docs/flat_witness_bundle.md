@@ -874,7 +874,15 @@ the prestate map nor the created-accounts overlay holds the address, it walks th
 account trie from the parent `state_root` along `keccak(addr)` to recover an
 account whose preimage was missing from the addr-map. An empty child or a
 diverging path is a valid absence (the caller materializes an absent record); a
-missing or malformed node halts execution.
+missing or malformed node halts execution. `recover_slot_from_nodestore` does the
+same for a slot, from the account's storage root (the empty root once the block has
+wiped its storage). Neither runs past block 0: the node store holds the tries of the
+parent state only, so `check_root` ends recovery. Later blocks run on the records the
+guest holds (the witness's, and those block 0 created or recovered), which it has
+checked rebuild to block 0's state root (`state_root_hash()`), and
+`check_root_new_block` rebuilds their roots from the same records. Nor is an address the witness carries a record of (its hash
+in `addr_hashes`) recovered: only a forged addr-map lookup misses one, and the
+created/existing clash in `check_root` rejects that, as without the option.
 `witness_hide_node_test.cpp` documents the gap this guards against.
 
 `check_root` (block 0 of a bundle) and `check_root_new_block` (subsequent
