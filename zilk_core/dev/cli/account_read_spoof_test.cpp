@@ -427,6 +427,9 @@ TEST_CASE("StateTransition::run rejects read-only account spoofing across zero-g
                 // BEFORE the root is even computed - no "New Root" line was emitted.
                 CHECK(log.find("sanitize") == std::string::npos);
                 CHECK(log.find("New Root") == std::string::npos);
+                // With USE_HASH_KEY too: its recovery takes no account the witness carries a record of,
+                // which a lookup misses only through a forged address map.
+                CHECK(log.find("recovered account") == std::string::npos);
             }
         }
     }

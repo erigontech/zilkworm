@@ -462,11 +462,12 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
-        // A later block's root is rebuilt from the accounts and slots the witness holds (check_root_new_block),
-        // so it is the root of the state that block ran on only if the witness holds all of it: an account or
-        // slot the witness left out was absent to the block, and no trie was asked. The walk of the first
-        // block binds what the witness carries, not that it carries everything, so the state it leaves has to
-        // rebuild to its root from the witness alone too.
+        // A later block's root is rebuilt from the accounts and slots the guest holds (check_root_new_block): the
+        // witness's records, and those the first block created or, with USE_HASH_KEY, recovered from the node
+        // store. So it is the root of the state that block ran on only if they are all of it: an account or slot
+        // the witness left out was absent to the block, and no trie was asked. The walk of the first block binds
+        // what the witness carries, not that it carries everything, so the state it leaves has to rebuild to its
+        // root from those records alone too.
         if (first_root_check && bundle.block_rlps.size() > 1 &&
             bundle.direct.state_root_hash() != block.header.state_root) [[unlikely]] {
             sys_println(("ERROR: the witness is not the whole state of block " + std::to_string(i)).c_str());
@@ -882,6 +883,10 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         pa->rlp_into_cache(storage_root);
     }
     direct_state.clear_change_journal();
+#if USE_HASH_KEY
+    // The node store holds the tries of the state before this block, not of the one it leaves.
+    direct_state.end_recovery();
+#endif
     return ok;
 }
 
@@ -937,6 +942,20 @@ bool StateTransition::check_root_new_block(DirectState& direct_state, BlockHeade
         r.rlp = ByteView{pa.acc_rlp_buf, pa.acc_rlp_len};
         leaves.push_back(r);
     }
+#if USE_HASH_KEY
+    // And the accounts the first block recovered from the node store, which the witness carries no record of:
+    // a later block that finds one deleted and pays it revives it there. None has the hash of a record above:
+    // recovery takes no address the witness carries a record of, and a lookup reaches a recovered record only
+    // where it found no created one, and creates none where it reached one. The journal loop above has encoded
+    // the leaf of each this block changed.
+    for (const auto& up : direct_state.recovered_accounts()) {
+        if (up->deleted) continue;
+        LeafRef r;
+        r.addr_hash = keccak_bytes(up->addr);
+        r.rlp = ByteView{up->acc_rlp_buf, up->acc_rlp_len};
+        leaves.push_back(r);
+    }
+#endif
     std::sort(leaves.begin(), leaves.end(),
               [](const LeafRef& a, const LeafRef& b) {
                   return std::memcmp(a.addr_hash.bytes, b.addr_hash.bytes, 32) < 0;

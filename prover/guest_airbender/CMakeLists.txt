@@ -24,7 +24,7 @@ add_executable(z6m_guest
 # without it they fall back to the iostream host implementation.
 target_compile_definitions(z6m_guest PRIVATE AIRBENDER)
 
-option(USE_HASH_KEY "Enable node-store account recovery for witness preimage gaps" OFF)
+option(USE_HASH_KEY "Enable node-store account recovery for witness preimage gaps" ON)
 if(USE_HASH_KEY)
   # Must match the zilkworm subbuild: the flag gates header code compiled
   # into both the static libs and this target's TUs.

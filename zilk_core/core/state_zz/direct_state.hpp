@@ -217,6 +217,7 @@ class DirectState : public BlockState {
         bool found;             // false = walk proved absence
     };
     mutable FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, RecoveredSlot>> recovered_slots_;
+    bool recovery_ended_{false};  // see end_recovery()
     enum class WalkMiss : uint8_t { kAbsent, kInvalid };  // kInvalid halts; see fatal()
     std::expected<ByteView, WalkMiss> walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
                                                           std::array<uint8_t, 32>& embedded_scratch) const;
@@ -267,10 +268,11 @@ class DirectState : public BlockState {
         // SOUNDNESS-CRITICAL: decides EIP-7610 create collisions, by the storage root and never by the
         // witness slots: a zero slot is what an absent key holds, and the collision check reads no slot,
         // so the witness need not carry any. A pre-state record's root is the one its account leaf
-        // commits to, which check_root binds; a created or revived record's is the empty root. Only code
-        // running at the address clears the storage under a non-empty root, and that leaves the account
-        // code or a nonce, a collision either way, until it is destructed. The root of an (8-aligned)
-        // record is compared by words: with strict alignment it would be copied out byte by byte first.
+        // commits to, which check_root binds; a created or revived record's is the empty root, as is that
+        // of one a deployment wiped. Only code running at the address clears the storage under a non-empty
+        // root, and that leaves the account code or a nonce, a collision either way, until it is
+        // destructed. The root of an (8-aligned) record is compared by words: with strict alignment it
+        // would be copied out byte by byte first.
         if (!eq_hash32(std::assume_aligned<8>(pa.storage_root), kEmptyRoot.bytes)) return true;
         // Under the empty root, what the block has written: into a witness slot, which check_root binds
         // to a zero initial value, or into overflow_slots_, which holds no zero.
@@ -401,6 +403,12 @@ class DirectState : public BlockState {
     void clear_absent_reads() noexcept { absent_reads_.clear(); }
 #if USE_HASH_KEY
     const std::vector<std::unique_ptr<Account>>& recovered_accounts() const noexcept { return recovered_accounts_; }
+    /// Ends the recovery of accounts and slots from the node store, once check_root has walked the bundle's
+    /// first block. The node store holds the tries of the state before that block, and the next block runs
+    /// on the state it leaves, which the guest has checked the records it holds rebuild to that block's root:
+    /// the witness's, and those the block created or recovered. An account or slot a later block does not
+    /// find among them is absent, as without USE_HASH_KEY. What was recovered stays.
+    void end_recovery() noexcept { recovery_ended_ = true; }
 
     [[gnu::always_inline]] inline const FlatHashMap<evmc::bytes32, RecoveredSlot>*
     recovered_slots_for(const evmc::address& addr) const noexcept {

@@ -399,6 +399,11 @@ DirectState::DirectState(DirectState&& other) noexcept
 #endif
     node_store_map_ = other.node_store_map_;
     node_verified_ = std::move(other.node_verified_);
+#if USE_HASH_KEY
+    recovered_accounts_ = std::move(other.recovered_accounts_);
+    recovered_slots_ = std::move(other.recovered_slots_);
+    recovery_ended_ = other.recovery_ended_;
+#endif
 
     created_accounts_ = std::move(other.created_accounts_);
     overflow_slots_ = std::move(other.overflow_slots_);
@@ -570,6 +575,12 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
     if (!eip7702::is_code_delegated(code)) {
         note_wiped_storage_(pa);
         pa.slot_count = 0;
+        // What is left is the empty trie, and what the block writes into it after: a read finds every
+        // other key absent there (with USE_HASH_KEY too, whose recovery walks this root), and check_root
+        // commits the post-state's storage from it. The pre-state's root went with the wiped storage.
+        // (EIP-7610 makes a creation over a non-empty storage root collide, so a block can only get here
+        // with the root empty already; DirectState does not rely on it.)
+        copy32(pa.storage_root, kEmptyRoot);
         overflow_slots_.erase(addr);
 #if USE_HASH_KEY
         recovered_slots_.erase(addr);
@@ -695,7 +706,9 @@ void DirectState::set_nonce(const evmc::address& addr, uint64_t nonce) {
 [[gnu::noinline]] void DirectState::note_wiped_storage_(const Account& pa) {
     if (pa.slot_count == 0 && pa.absent_reads == 0) return;
     wiped_storage_.push_back({slots_for(pa), std::bit_cast<evmc::bytes32>(pa.storage_root), pa.absent_reads});
-    pa.absent_reads = 0;  // handed over: a destructed record reads nothing, a revived one reads under the empty root
+    // Handed over: a destructed record reads nothing, a revived one, or one a deployment wiped, reads under
+    // the empty root.
+    pa.absent_reads = 0;
 }
 
 void DirectState::destruct(const evmc::address& addr) {
@@ -815,6 +828,15 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
     for (const auto& [addr, pa] : created_accounts_) {
         emit(addr, pa);
     }
+#if USE_HASH_KEY
+    // The accounts recovered from the node store are in the state as well, though the witness carries no
+    // record of them. No hash of theirs is a key above, see check_root_new_block().
+    for (const auto& up : recovered_accounts_) {
+        evmc::address addr;
+        std::memcpy(addr.bytes, up->addr, sizeof(addr.bytes));
+        emit(addr, *up);
+    }
+#endif
 
     if (account_rlp.empty()) return kEmptyRoot;
 
@@ -940,6 +962,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
             return up.get();
         }
     }
+    if (recovery_ended_) return nullptr;  // a later block: the address is absent, see end_recovery()
 
     // Account-trie pre-root = parent block's state_root. get_account has no
     // header context here; the highest-numbered header in headers_ is the
@@ -951,6 +974,17 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     if (!parent) return nullptr;
 
     const auto hashed = to_bytes32(keccak256(ByteView{addr.bytes, sizeof(addr.bytes)}).bytes);
+    // Never an address the witness carries a record of (sanitize() bound addr_hashes_, ascending, to the
+    // records): its lookup missed that record, which only a forged address map does. The absent record the
+    // caller materializes for it then clashes with the witness's in check_root, as without USE_HASH_KEY;
+    // a recovered one would put a second update for its key into the walk of the account trie.
+    if (const auto it = std::lower_bound(addr_hashes_.begin(), addr_hashes_.end(), hashed,
+                                         [](const AddrHashEntry& e, const evmc::bytes32& h) {
+                                             return std::memcmp(e.addr_hash, h.bytes, 32) < 0;
+                                         });
+        it != addr_hashes_.end() && std::memcmp(it->addr_hash, hashed.bytes, 32) == 0) [[unlikely]] {
+        return nullptr;
+    }
     const nibbles64 want = nibbles64::from_bytes32(hashed);
 
     std::array<uint8_t, 32> embedded_scratch;  // embedded RLP outlives walker-local BranchNode
@@ -992,6 +1026,13 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
                                          const evmc::bytes32& key) const {
     if (!node_store_map_.valid()) return nullptr;
 
+    if (recovery_ended_) [[unlikely]] {
+        // A later block: what was recovered stays, and any other key is absent, see end_recovery().
+        const auto it = recovered_slots_.find(addr);
+        if (it == recovered_slots_.end()) return nullptr;
+        const auto kv = it->second.find(key);
+        return kv != it->second.end() ? &kv->second : nullptr;
+    }
     auto& per_acct = recovered_slots_[addr];
     if (auto it = per_acct.find(key); it != per_acct.end()) {
         return &it->second;
