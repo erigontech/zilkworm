@@ -1,4 +1,4 @@
 [submodule "evmone"]
 	path = third_party/evmone
 	url = https://github.com/erigontech/zvm1.git
-	branch = som/airbender
+	branch = main
