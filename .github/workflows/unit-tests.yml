@@ -61,7 +61,9 @@ jobs:
   # multiplication, the JUMPDEST byte map, the DIV/MOD front end) compile on the host only with
   # EVMONE_RV32_DISPATCH_TEST; the job above builds the byte-order paths. This one runs the same
   # tests on the rv32 paths, under AddressSanitizer and UndefinedBehaviorSanitizer. -O2, which the
-  # strict-aliasing guard needs to act, without -DNDEBUG, so that asserts stay on.
+  # strict-aliasing guard needs to act, without -DNDEBUG, so that asserts stay on. With
+  # USE_HASH_KEY=ON, as the Airbender guest (the rv32 paths' only user) is built: its node-store
+  # account recovery and the unsealed code store are tested here, the job above tests without.
   unit-tests-rv32-paths:
     name: Run Unit Tests (rv32 paths, ASan+UBSan)
     runs-on: ubuntu-latest
@@ -91,7 +93,7 @@ jobs:
 
       - name: Configure
         run: >
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON -DUSE_HASH_KEY=ON
           "-DCMAKE_C_FLAGS=$SAN_FLAGS" "-DCMAKE_CXX_FLAGS=$SAN_FLAGS"
           "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 -g" "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g"
           -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined

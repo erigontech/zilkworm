@@ -27,7 +27,8 @@ clean:
 	rm -rf prover/guest_hypercube/build/
 	rm -rf prover/target
 	
-# USE_HASH_KEY=ON enables node-store account recovery.
+# USE_HASH_KEY=ON enables node-store account recovery. For the hypercube guest only: the
+# Airbender guest's own Makefile defaults it ON (don't export this one, which would turn it off).
 USE_HASH_KEY ?= OFF
 z6m_guest:
 	cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \

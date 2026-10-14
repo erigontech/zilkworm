@@ -868,7 +868,8 @@ the block-0 state-root recompute:
 
 There is also a third, fallback reader — `DirectState::recover_account_from_nodestore`,
 compiled only under `USE_HASH_KEY` (CMake option, `-DUSE_HASH_KEY=ON` at configure
-time; default OFF, i.e. compiled away): when neither
+time; OFF by default for host, hypercube and qemu builds, ON in the Airbender guest, whose
+Makefile, CMake and image default to it): when neither
 the prestate map nor the created-accounts overlay holds the address, it walks the
 account trie from the parent `state_root` along `keccak(addr)` to recover an
 account whose preimage was missing from the addr-map. An empty child or a

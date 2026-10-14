@@ -201,7 +201,7 @@ disk of a few tens of GB. Use `ghcr.io/erigontech/zilkworm-airbender:<commit sha
    the bundle, and the guest takes it for empty: the transaction reverts, and the block fails
    with kWrongBlockGas or kWrongReceiptsRoot. About 4% of mainnet blocks did, on 2026-10-14.
    The guest's node-store recovery (`USE_HASH_KEY`, on in the Airbender guest) recovers such an
-   account from its trie path, checked against the parent's state root, for about 1% more
+   account from its trie path, checked against the parent's state root, for 1–1.5% more
    cycles. A block whose witness also lacks the account's trie path still fails the preflight
    and is skipped. The fix belongs in the witness provider.
 3. **Ethproofs flakes.** A failed `proved` upload is logged and not retried; the proof stays in
