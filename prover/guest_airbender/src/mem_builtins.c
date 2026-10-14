@@ -403,6 +403,13 @@ void *memset(void *dest, int c, size_t n) {
         // (evmc_message, Account, StorageValue, Transaction); the generic path below steers
         // such a fill through its 32-byte alignment, CSR and remainder stages for ~90 cycles,
         // this costs the stores plus about 10 instructions.
+        //
+        // Relies on RISCV_MERGE_WINDOW=0 in the Airbender prover, which z6m_prover_airbender
+        // sets: the switch is a jump table into the middle of a run of word stores, and the
+        // prover's JIT otherwise fuses runs of word stores into groups on the assumption that
+        // no jump lands inside one (a jump past a group's head runs it from the head). GCC
+        // emits this run in descending address order, which the fusion (ascending runs only)
+        // happens to leave alone; nothing keeps it that way.
         if (n <= 256) {
             switch (n >> 2) {
         case 64: dw[63] = 0; __attribute__((fallthrough));
