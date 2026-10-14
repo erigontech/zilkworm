@@ -67,6 +67,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -75,6 +76,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <evmc/evmc.hpp>
 #include <intx/intx.hpp>
@@ -869,6 +873,50 @@ class StdoutCapture {
     std::ostringstream buf_;
     std::streambuf* prev_;
 };
+
+// ---------------------------------------------------------------------------
+// Guest halts (fatal() exits the process on the host)
+// ---------------------------------------------------------------------------
+
+/// A run of the guest in a child process.
+struct ChildRun {
+    // The child exited with the status fatal() exits with, 1. A sanitizer's report exits with it too, so a
+    // caller checks the line fatal() printed as well.
+    bool halted{false};
+    std::string log;  // what it printed
+};
+
+/// Runs the guest on the MFBD envelope `env` in a child process, for a run the guest may halt with
+/// fatal(), which ends the process it runs in. Its stdout comes back through a pipe.
+inline ChildRun run_envelope_in_child(std::vector<uint8_t> env) {
+    ChildRun r;
+    int fds[2];
+    if (pipe(fds) != 0) return r;
+    std::cout.flush();
+    std::fflush(stdout);
+    const pid_t pid = fork();
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[1]);
+        silkworm::cmd::state_transition::StateTransition st{std::span<uint8_t>{env}};
+        (void)st.run();
+        std::cout.flush();
+        std::fflush(stdout);
+        _exit(0);  // the guest did not halt
+    }
+    close(fds[1]);
+    if (pid < 0) {
+        close(fds[0]);
+        return r;
+    }
+    char buf[4096];
+    for (ssize_t n; (n = read(fds[0], buf, sizeof buf)) > 0;) r.log.append(buf, static_cast<std::size_t>(n));
+    close(fds[0]);
+    int status = 0;
+    r.halted = waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 1;
+    return r;
+}
 
 // ---------------------------------------------------------------------------
 // Small EVM bytecode helpers
