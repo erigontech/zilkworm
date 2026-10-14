@@ -11,19 +11,16 @@ edition = "2021"
 name = "z6m_prover_airbender"
 path = "src/main.rs"
 
+# Airbender v3: matter-labs/zksync-airbender bd0d5153, which no upstream branch head contains;
+# somnergy/zksync-airbender's v3/bd0d5153 branch keeps the commit fetchable. The rev pins it.
+#
+# prover_pipeline's default `deterministic_pow` feature must stay off for production proofs.
 [dependencies]
-# Core VM (always needed for execution)
-riscv_transpiler = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", features = ["delegation", "flamegraph"] }
-
-# Proving dependencies
-execution_utils = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", default-features = false, features = ["prover", "verifier_binaries"] }
-prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", features = ["prover"] }
-worker = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev" }
-setups = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev" }
-verifier_common = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev" }
-
-# GPU prover (optional, requires CUDA)
-gpu_prover = { git = "https://github.com/somnergy/zksync-airbender", branch = "dev", optional = true }
+prover_pipeline = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff", default-features = false }
+full_statement_verifier = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff", default-features = false, features = ["host_utils", "unified_verifier_only"] }
+riscv_transpiler = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff", features = ["jit", "flamegraph"] }
+setups = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff" }
+field = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff" }
 
 # Shared z6m prover infrastructure (block fetching, RLP encoding)
 z6m_common = { path = "../common" }
@@ -42,11 +39,9 @@ eyre = "0.6"
 chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = "1.3"
-# bincode 2.x with serde feature for WASM verifier compat (ethproofs/ethereum-prover format)
+# bincode 2.x with serde: the EthProofs proof and verification-key envelopes
 bincode2 = { package = "bincode", version = "2", features = ["serde"] }
 flate2 = "1"
-base64 = "0.22"
 log = "0.4"
 
 # Logging
@@ -55,4 +50,4 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [features]
 default = ["gpu"]
-gpu = ["dep:gpu_prover", "execution_utils/gpu_prover"]
+gpu = ["prover_pipeline/gpu"]

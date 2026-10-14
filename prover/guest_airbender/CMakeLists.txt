@@ -135,6 +135,17 @@ add_custom_command(TARGET z6m_guest POST_BUILD
     VERBATIM
 )
 
+# Unsigned M guard: see cmake/check_unsigned_muldiv.cmake.
+if(NOT CMAKE_OBJDUMP)
+    find_program(CMAKE_OBJDUMP NAMES riscv-none-elf-objdump llvm-objdump objdump)
+endif()
+add_custom_command(TARGET z6m_guest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DOBJDUMP=${CMAKE_OBJDUMP} -DELF=$<TARGET_FILE:z6m_guest>
+            -P ${CMAKE_CURRENT_LIST_DIR}/cmake/check_unsigned_muldiv.cmake
+    COMMENT "Checking z6m_guest.elf for signed multiplies and divides"
+    VERBATIM
+)
+
 if(NOT CMAKE_OBJCOPY)
     find_program(CMAKE_OBJCOPY NAMES llvm-objcopy objcopy)
 endif()

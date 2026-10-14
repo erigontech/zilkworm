@@ -1,49 +1,33 @@
-#![allow(incomplete_features)]
-#![feature(generic_const_exprs)]
-#![feature(allocator_api)]
-
 use clap::{Parser, Subcommand};
 use eyre::{bail, eyre, Result};
-use riscv_transpiler::abstractions::non_determinism::QuasiUARTSource;
-use riscv_transpiler::ir::{preprocess_bytecode, FullMachineDecoderConfig};
-use riscv_transpiler::vm::{
-    DelegationsCounters, FlamegraphConfig, RamWithRomRegion, SimpleTape, State,
-    VmFlamegraphProfiler, VM,
-};
+use prover_pipeline::ProverBackend;
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+mod guest;
+mod proof_format;
 mod prove;
 mod public_output;
 mod service;
+mod vk;
 
-use prove::ProvingLimit;
+use guest::{Guest, GuestFiles};
+use prove::{BlockProver, ProverSettings, MAX_PROVABLE_CYCLES};
+use vk::VerificationKey;
 
 /// Default path to the airbender guest binary, relative to the project root.
 const DEFAULT_GUEST_BIN: &str = "prover/guest_airbender/build/z6m_guest";
 
-/// Default maximum cycles for the simulator.
+/// Default maximum cycles for the simulator. Proving clamps it to MAX_PROVABLE_CYCLES.
 const DEFAULT_CYCLES: usize = 5_000_000_000;
-
-/// Default RAM bound in bytes (1 GB).
-const DEFAULT_RAM_BOUND: usize = 1 << 30;
-
-/// Map the --security bits value to the airbender SecurityModel.
-fn security_model(bits: u32) -> Result<verifier_common::SecurityModel> {
-    match bits {
-        80 => Ok(verifier_common::SecurityModel::Security80),
-        100 => Ok(verifier_common::SecurityModel::Security100),
-        other => bail!("unsupported --security {} (expected 80 or 100)", other),
-    }
-}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "z6m_prover_airbender",
-    about = "Zilkworm prover using zksync-airbender RISC-V simulator"
+    about = "Zilkworm prover on Airbender (zksync-airbender v3): RISC-V simulator, prover and verifier"
 )]
 struct Args {
     #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "command")]
@@ -71,7 +55,7 @@ struct Args {
     #[arg(long)]
     guest_bin: Option<PathBuf>,
 
-    /// Maximum simulator cycles
+    /// Maximum simulator cycles. Proving takes at most 1,073,741,822 (the prover's limit).
     #[arg(long, default_value_t = DEFAULT_CYCLES)]
     cycles: usize,
 
@@ -84,7 +68,7 @@ struct Args {
     #[arg(long)]
     ws_url: Option<String>,
 
-    /// Use GPU (CUDA) for proving in service mode
+    /// Prove on the GPU in service mode (required with --prove-every)
     #[arg(long, action = clap::ArgAction::SetTrue)]
     gpu: bool,
 
@@ -104,21 +88,9 @@ struct Args {
     #[arg(long, default_value = "proofs")]
     output_dir: PathBuf,
 
-    /// How far to prove (base, unrolled, or unified)
-    #[arg(long, value_enum)]
-    until: Option<ProvingLimit>,
-
     /// Save all RPC responses (service mode)
     #[arg(long, action = clap::ArgAction::SetTrue)]
     save_all_responses: bool,
-
-    /// Path to precomputed setup cache directory (from `setup` command)
-    #[arg(long)]
-    setup_dir: Option<PathBuf>,
-
-    /// Proof security level in bits (80 or 100)
-    #[arg(long, default_value_t = 100)]
-    security: u32,
 
     /// Ethproofs API endpoint URL
     #[arg(long, env = "ETHPROOFS_ENDPOINT")]
@@ -138,13 +110,13 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Execute a block without proving
+    /// Execute a block on the simulator, without proving
     Execute {
         /// Block number (used to locate the input file in data_dir)
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Direct path to the unified RLP input file
+        /// Direct path to the input file (MFBD flat witness bundle)
         #[arg(long)]
         file_name: Option<PathBuf>,
 
@@ -152,33 +124,30 @@ enum Command {
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// Input file is an EEST JSON test fixture (not unified RLP)
+        /// Input file is an EEST JSON test fixture (not an MFBD bundle)
         #[arg(long, action = clap::ArgAction::SetTrue)]
         is_test: bool,
 
-        /// Generate a flamegraph SVG at this path (uses interpreted mode, slower)
+        /// Generate a flamegraph SVG at this path (slower)
         #[arg(long)]
         flamegraph: Option<PathBuf>,
     },
 
-    /// Precompute circuit setup (cached to disk for reuse by prove/service)
-    Setup {
-        /// Output directory for the setup cache file
-        #[arg(long, default_value = "temp")]
-        setup_dir: PathBuf,
-
-        /// How far to prove (base, unrolled, or unified)
-        #[arg(long, value_enum, default_value = "base")]
-        until: ProvingLimit,
+    /// Write the guest's verification key (EVKEY001 v2), against which `verify` and the
+    /// Ethproofs verifier check proofs
+    Vk {
+        /// Output file
+        #[arg(long, default_value = "vk.bin")]
+        output: PathBuf,
     },
 
-    /// Prove a block (generate ZK proof)
+    /// Prove a block to the final unified recursion layer and write proof.bin (gzip EPROOF01 v2)
     Prove {
         /// Block number (used to locate the input file in data_dir)
         #[arg(long, default_value_t = 0)]
         block_number: u64,
 
-        /// Direct path to the unified RLP input file
+        /// Direct path to the input file (MFBD flat witness bundle)
         #[arg(long)]
         file_name: Option<PathBuf>,
 
@@ -186,30 +155,26 @@ enum Command {
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// Input file is an EEST JSON test fixture (not unified RLP)
+        /// Input file is an EEST JSON test fixture (not an MFBD bundle)
         #[arg(long, action = clap::ArgAction::SetTrue)]
         is_test: bool,
 
-        /// Use GPU (CUDA) for proving
-        #[arg(long, action = clap::ArgAction::SetTrue)]
+        /// Proving backend; the CPU one is very slow and needs about 96 GB of RAM
+        #[arg(long, value_enum, default_value = "gpu")]
+        backend: ProverBackend,
+
+        /// Same as --backend gpu
+        #[arg(long, hide = true, action = clap::ArgAction::SetTrue, conflicts_with = "backend")]
         gpu: bool,
 
-        /// Output directory for proof artifacts
+        /// Output directory for proof.bin
         #[arg(long, default_value = "proofs")]
         output_dir: PathBuf,
-
-        /// How far to prove (base, unrolled, or unified)
-        #[arg(long, value_enum)]
-        until: Option<ProvingLimit>,
-
-        /// Path to precomputed setup cache (from `setup` command)
-        #[arg(long)]
-        setup_dir: Option<PathBuf>,
     },
 
     /// Benchmark: prove the same block repeatedly with a persistent prover
     Bench {
-        /// Path to a cached MFBD input file
+        /// Path to an MFBD input file
         #[arg(long)]
         file_name: PathBuf,
 
@@ -217,20 +182,20 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         iterations: u32,
 
-        /// Path to setup cache dir (needs `setup --until unified`)
-        #[arg(long, default_value = "temp")]
-        setup_dir: PathBuf,
+        /// Proving backend
+        #[arg(long, value_enum, default_value = "gpu")]
+        backend: ProverBackend,
     },
 
-    /// Verify a unified-layer proof against a setup cache
+    /// Verify a proof file against a verification key and the block it must cover
     Verify {
-        /// Path to proof.bin (gzip or raw bincode2 UnrolledProgramProof)
+        /// Path to proof.bin (gzip EPROOF01 v2)
         #[arg(long)]
         proof: PathBuf,
 
-        /// Path to setup cache dir (needs `setup --until unified`)
-        #[arg(long, default_value = "temp")]
-        setup_dir: PathBuf,
+        /// Path to the guest's verification key (from `vk`)
+        #[arg(long)]
+        vk: PathBuf,
 
         /// Input the proof must cover (MFBD file): the proof's public output must equal the
         /// hash of its last valid block. A proof binds its block only through that output.
@@ -263,7 +228,7 @@ struct ExecutionLog {
     input_path: PathBuf,
 }
 
-/// Build the oracle data that the QuasiUARTSource feeds to the guest.
+/// Build the oracle data the guest reads from CSR 0x7C0.
 ///
 /// Protocol:
 ///   word 0: num_bytes (u32, little-endian byte count)
@@ -329,30 +294,18 @@ fn resolve_input_path(
     Ok(block_dir.join(format!("unifiedBlockAndStateRlp{}.bin", block_number)))
 }
 
-/// Locate the guest binary base path (without .bin/.text extension).
-fn resolve_guest_bin(cli_override: Option<&Path>) -> Result<PathBuf> {
-    if let Some(p) = cli_override {
-        // If user passed path ending in .bin, strip it
-        let base = if p.extension().map_or(false, |e| e == "bin") {
-            p.with_extension("")
+/// The guest's files: --guest-bin, or the default build output under the project root.
+fn guest_files(cli_override: Option<&Path>) -> Result<GuestFiles> {
+    let base = cli_override.unwrap_or(Path::new(DEFAULT_GUEST_BIN));
+    let files = GuestFiles::at(base).map_err(|e| {
+        if cli_override.is_none() {
+            eyre!("{e}; pass --guest-bin or run from the project root")
         } else {
-            p.to_path_buf()
-        };
-        let bin_path = PathBuf::from(format!("{}.bin", base.display()));
-        if bin_path.exists() {
-            return Ok(base);
+            e
         }
-        bail!("guest binary not found at {}", bin_path.display());
-    }
-    let default = PathBuf::from(DEFAULT_GUEST_BIN);
-    let bin_path = PathBuf::from(format!("{}.bin", default.display()));
-    if bin_path.exists() {
-        return Ok(default);
-    }
-    bail!(
-        "guest binary not found at default path '{}'; pass --guest-bin or run from the project root",
-        bin_path.display()
-    );
+    })?;
+    println!("Guest binary base: {}", files.bin.with_extension("").display());
+    Ok(files)
 }
 
 fn format_timestamp() -> String {
@@ -361,9 +314,9 @@ fn format_timestamp() -> String {
         .to_string()
 }
 
-/// Run the VM on a single block and return the execution log.
+/// Run the simulator on a single block and return the execution log.
 fn execute_block(
-    guest_base: &Path,
+    guest: &Guest,
     input_path: &Path,
     block_number: u64,
     max_cycles: usize,
@@ -379,78 +332,15 @@ fn execute_block(
     }
 
     let oracle = build_oracle(input_path, is_test)?;
-    let source = QuasiUARTSource::new_with_reads(oracle);
-
-    let bin_path = format!("{}.bin", guest_base.display());
-    let text_path = format!("{}.text", guest_base.display());
-    let elf_path = format!("{}.elf", guest_base.display());
-
-    let (binary_bytes, binary_u32) = execution_utils::setups::read_binary(Path::new(&bin_path));
-    let (_, text_u32) = execution_utils::setups::read_binary(Path::new(&text_path));
-    let exit_pc = execution_utils::find_binary_exit_point(&binary_bytes);
-
-    let instructions = preprocess_bytecode::<FullMachineDecoderConfig>(&text_u32);
-    let tape = SimpleTape::new(&instructions);
-    let mut ram =
-        RamWithRomRegion::<{ prover::common_constants::rom::ROM_SECOND_WORD_BITS }>::from_rom_content(
-            &binary_u32,
-            DEFAULT_RAM_BOUND,
-        );
-
-    let mut state = State::initial_with_counters(DelegationsCounters::default());
-    let mut non_determinism_source = source;
-
-    let wall_start = Instant::now();
-    let finished = if let Some(fg_path) = flamegraph_path {
-        let config = FlamegraphConfig::new(PathBuf::from(&elf_path), fg_path.to_path_buf());
-        let mut profiler = VmFlamegraphProfiler::new(config)
-            .map_err(|e| eyre!("flamegraph init: {e}"))?;
-        let result = VM::<DelegationsCounters>::run_basic_unrolled_with_flamegraph(
-            &mut state,
-            &mut ram,
-            &mut (),
-            &tape,
-            max_cycles,
-            &mut non_determinism_source,
-            &mut profiler,
-        )
-        .map_err(|e| eyre!("flamegraph execution: {e}"))?;
-        let stats = profiler.stats();
-        eprintln!(
-            "Flamegraph: {} samples collected / {} total, written to {}",
-            stats.samples_collected, stats.samples_total, fg_path.display()
-        );
-        result
-    } else {
-        VM::<DelegationsCounters>::run_basic_unrolled(
-            &mut state,
-            &mut ram,
-            &mut (),
-            &tape,
-            max_cycles,
-            &mut non_determinism_source,
-        )
-    };
-    let wall_elapsed = wall_start.elapsed();
-
-    let cycles = (state.timestamp - riscv_transpiler::common_constants::INITIAL_TIMESTAMP)
-        / riscv_transpiler::common_constants::TIMESTAMP_STEP;
-    let exec_secs = wall_elapsed.as_secs_f64();
-    let freq = if exec_secs > 0.0 {
-        (cycles as f64 / exec_secs) as u64
-    } else {
-        0
-    };
+    let run = guest.run(oracle, max_cycles, flamegraph_path)?;
+    let succeeded = run.succeeded(guest.exit_pc);
 
     // A successful run parks in the exit sequence's self-loop with its public output in a0..a7;
     // a failed one parks in finish_error's loop and commits nothing. The gas used is the input's,
     // which the guest checks against the header; it is no longer read from the output registers.
-    let expected = if finished && state.pc == exit_pc {
+    let expected = if succeeded {
         let expected = public_output::expected_for_file(input_path, is_test)?;
-        public_output::check(
-            &expected.block_hash,
-            &std::array::from_fn(|i| state.registers[10 + i].value),
-        )?;
+        public_output::check(&expected.block_hash, &run.output)?;
         Some(expected)
     } else {
         None
@@ -460,12 +350,12 @@ fn execute_block(
         block_number,
         gas_used: expected.map_or(0, |e| e.gas_used),
         block_hash: expected.map(|e| e.block_hash),
-        cycle_count: cycles,
-        exec_time_secs: wall_elapsed.as_secs_f64(),
-        freq_cycles_per_sec: freq,
-        reached_end: finished,
-        succeeded: finished && state.pc == exit_pc,
-        final_pc: state.pc,
+        cycle_count: run.cycles,
+        exec_time_secs: run.elapsed.as_secs_f64(),
+        freq_cycles_per_sec: run.cycles_per_sec(),
+        reached_end: run.reached_end,
+        succeeded,
+        final_pc: run.final_pc,
         input_path: input_path.to_path_buf(),
     })
 }
@@ -497,7 +387,7 @@ fn persist_execution_log(log_file: &Path, log: &ExecutionLog) -> Result<()> {
     Ok(())
 }
 
-/// Extract block number from a unified RLP file name like "unifiedBlockAndStateRlp24522000.bin".
+/// Extract block number from an input file name like "flatWitnessBundle24522000.mfbd".
 fn block_number_from_filename(path: &Path) -> u64 {
     let stem = path
         .file_stem()
@@ -513,7 +403,7 @@ fn run_test_service(
     start_block: u64,
     end_block: u64,
     data_dir: &Path,
-    guest_base: &Path,
+    guest: &Guest,
     max_cycles: usize,
     execution_log_file: Option<&Path>,
 ) -> Result<()> {
@@ -546,7 +436,7 @@ fn run_test_service(
             format_timestamp(),
             block_number
         );
-        match execute_block(guest_base, &input_path, block_number, max_cycles, false, None) {
+        match execute_block(guest, &input_path, block_number, max_cycles, false, None) {
             Ok(log) => {
                 println!(
                     "[{}] block={} gas_used={} cycles={} time={:.2}s freq={:.2}GHz reached_end={} ok={} block_hash={}",
@@ -577,8 +467,36 @@ fn run_test_service(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Where the prover loads the recursion verifier programs from, for the logs.
+fn fsv_dir_note() -> String {
+    match std::env::var("FSV_DIR") {
+        Ok(dir) => format!("FSV_DIR={dir}"),
+        Err(_) => "FSV_DIR unset: tools/gkr_verifier of the zksync-airbender checkout the prover was built from".to_string(),
+    }
+}
+
+/// The variable that controls the prover JIT's fusion of word load/store runs.
+const MERGE_WINDOW_VAR: &str = "RISCV_MERGE_WINDOW";
+
+fn main() -> Result<()> {
+    // Airbender v3's JIT fuses runs of consecutive same-base word loads or stores (immediate
+    // stride +4) into groups of RISCV_MERGE_WINDOW (default 4), on the assumption that no jump
+    // lands inside a run. The guest breaks that assumption: keccak.c's buf_zero_state_from
+    // (evmone) and mem_builtins.c's memset jump into the middle of runs of `sw`, and a jump past
+    // a group's head would run the group from its head, storing below the target. 0 turns the
+    // fusion off. The JIT reads the variable once, from any thread, so it is set here, before
+    // the runtime or any other thread starts.
+    if std::env::var_os(MERGE_WINDOW_VAR).is_none() {
+        std::env::set_var(MERGE_WINDOW_VAR, "0");
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -586,13 +504,19 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    if let Ok(window) = std::env::var(MERGE_WINDOW_VAR) {
+        eyre::ensure!(
+            window == "0",
+            "{MERGE_WINDOW_VAR}={window}: the guest jumps into runs of word stores, which the \
+             prover's JIT would then fuse, proving a wrong execution. Unset it or set it to 0."
+        );
+    }
 
-    let guest_base = resolve_guest_bin(args.guest_bin.as_deref())?;
-    println!("Guest binary base: {}", guest_base.display());
+    let args = Args::parse();
 
     // ── Service mode ────────────────────────────────────────────────────
     if args.service {
+        let guest = guest_files(args.guest_bin.as_deref())?;
         let rpc_url = args
             .rpc_url
             .ok_or_else(|| eyre!("--service requires --rpc-url"))?;
@@ -623,16 +547,13 @@ async fn main() -> Result<()> {
             save_all_responses: args.save_all_responses,
             data_dir: args.data_dir.clone(),
             output_dir: args.output_dir,
-            guest_base: guest_base.clone(),
+            guest,
             max_cycles: args.cycles,
             gpu: args.gpu,
-            until: args.until,
-            setup_dir: args.setup_dir.clone(),
-            security: security_model(args.security)?,
             ethproofs,
         };
 
-        let svc = service::AirbenderService::new(svc_config)?;
+        let svc = tokio::task::block_in_place(|| service::AirbenderService::new(svc_config))?;
         return svc.run().await;
     }
 
@@ -644,11 +565,12 @@ async fn main() -> Result<()> {
         let end = args
             .end_block
             .ok_or_else(|| eyre!("--test-service requires --end-block"))?;
+        let guest = Guest::load(guest_files(args.guest_bin.as_deref())?)?;
         return run_test_service(
             start,
             end,
             &args.data_dir,
-            &guest_base,
+            &guest,
             args.cycles,
             args.execution_log_file.as_deref(),
         );
@@ -662,6 +584,7 @@ async fn main() -> Result<()> {
             is_test,
             flamegraph,
         }) => {
+            let guest = Guest::load(guest_files(args.guest_bin.as_deref())?)?;
             let data_dir = data_dir.unwrap_or_else(|| args.data_dir.clone());
             let input_path = resolve_input_path(block_number, file_name, &data_dir)?;
             let block_num = if block_number > 0 {
@@ -671,7 +594,7 @@ async fn main() -> Result<()> {
             };
 
             let log = execute_block(
-                &guest_base,
+                &guest,
                 &input_path,
                 block_num,
                 args.cycles,
@@ -704,166 +627,38 @@ async fn main() -> Result<()> {
                 Some(hash) => println!("Public output: block hash {} (matches the input)", hash),
                 None => println!("Public output: none (the guest did not finish successfully)"),
             }
-        }
-
-        Some(Command::Bench {
-            file_name,
-            iterations,
-            setup_dir,
-        }) => {
-            #[cfg(feature = "gpu")]
-            {
-                use std::time::Instant;
-
-                let cache = prove::load_setup(&setup_dir.join("setup.bin"))?;
-                let t = Instant::now();
-                let prover = prove::create_gpu_prover_from_cache(cache);
-                println!("BENCH gpu init in {:.2?}", t.elapsed());
-                let oracle = build_oracle(&file_name, false)?;
-
-                let mut times = Vec::new();
-                for i in 0..iterations {
-                    let t = Instant::now();
-                    let (_proof, cycles) = prove::gpu_prove(&prover, oracle.clone(), i as u64);
-                    let ms = t.elapsed().as_millis();
-                    times.push(ms);
-                    println!("BENCH iter={} cycles={} time_ms={}", i, cycles, ms);
-                }
-                times.sort();
+            if log.cycle_count > MAX_PROVABLE_CYCLES as u64 {
                 println!(
-                    "BENCH done iters={} min={}ms median={}ms max={}ms",
-                    iterations,
-                    times.first().unwrap_or(&0),
-                    times.get(times.len() / 2).unwrap_or(&0),
-                    times.last().unwrap_or(&0)
+                    "warning: {} cycles exceed the {} the prover takes; this input cannot be proved",
+                    log.cycle_count, MAX_PROVABLE_CYCLES
                 );
-            }
-            #[cfg(not(feature = "gpu"))]
-            {
-                let _ = (file_name, iterations, setup_dir);
-                return Err(eyre!("bench requires the gpu build"));
             }
         }
 
-        Some(Command::Verify {
-            proof,
-            setup_dir,
-            file_name,
-            block_hash,
-        }) => {
-            #[cfg(feature = "gpu")]
-            {
-                use execution_utils::unrolled_gpu::UnrolledProverLevel;
-                use flate2::read::GzDecoder;
-                use std::io::Read as _;
-                use std::time::Instant;
-
-                let cache = prove::load_setup(&setup_dir.join("setup.bin"))?;
-                let unified = cache
-                    .level_data
-                    .get(&UnrolledProverLevel::RecursionUnified)
-                    .ok_or_else(|| {
-                        eyre!("setup cache has no unified level; run `setup --until unified`")
-                    })?;
-
-                let raw = fs::read(&proof)
-                    .map_err(|e| eyre!("failed to read {}: {}", proof.display(), e))?;
-                let decoded = if raw.starts_with(&[0x1f, 0x8b]) {
-                    let mut out = Vec::new();
-                    GzDecoder::new(&raw[..])
-                        .read_to_end(&mut out)
-                        .map_err(|e| eyre!("failed to gunzip proof: {}", e))?;
-                    out
-                } else {
-                    raw
-                };
-                // Strip the EPROOF01 security envelope if present (new format)
-                let decoded = if decoded.starts_with(prove::PROOF_ENVELOPE_MAGIC) {
-                    decoded[prove::PROOF_ENVELOPE_MAGIC.len() + 2..].to_vec()
-                } else {
-                    decoded
-                };
-                let (program_proof, _): (execution_utils::unrolled::UnrolledProgramProof, usize) =
-                    bincode2::serde::decode_from_slice(&decoded, bincode2::config::standard())
-                        .map_err(|e| eyre!("failed to decode proof: {}", e))?;
-
-                let started = Instant::now();
-                let regs = execution_utils::unified_circuit::verify_proof_in_unified_layer(
-                    &program_proof,
-                    &unified.setup,
-                    &unified.compiled_layouts,
-                    false,
-                    cache.security(),
-                )
-                .map_err(|_| eyre!("VERIFIER REJECTED the proof"))?;
-
-                println!("Verifier accepted in {:.2?}", started.elapsed());
-                println!("verifier output[0..8]  = {:08x?}", &regs[..8]);
-                println!("verifier output[8..16] = {:08x?}", &regs[8..]);
-                println!("setup unified chain    = {:08x?}", unified.hash_chain);
-                println!(
-                    "proof chain hash       = {:08x?}",
-                    program_proof.recursion_chain_hash
-                );
-                // output[0..8] are the guest's x10..x17 (its own output), output[8..16] the
-                // recursion chain over the end parameters: the setups, which include the guest
-                // binary, and the final PC. Only the latter binds the proof to this guest.
-                if regs[8..] != unified.hash_chain {
-                    bail!("CHAIN BINDING FAILED: output[8..16] does not match the setup hash chain");
-                }
-                println!("CHAIN BINDING OK: output[8..16] matches setup hash chain");
-
-                // output[0..8] is the guest's public output: the hash of the last block the run
-                // validated. The proof binds its block only through it.
-                let expected = match (file_name, block_hash) {
-                    (Some(path), _) => public_output::expected_for_file(&path, false)?.block_hash,
-                    (None, Some(hash)) => hash,
-                    (None, None) => unreachable!("clap requires --file-name or --block-hash"),
-                };
-                public_output::check(&expected, &regs[..8].try_into().unwrap())?;
-                println!("PUBLIC OUTPUT OK: output[0..8] commits block hash {}", expected);
+        Some(Command::Vk { output }) => {
+            let guest = guest_files(args.guest_bin.as_deref())?;
+            println!(
+                "[{}] Computing the verification key ({})",
+                format_timestamp(),
+                fsv_dir_note()
+            );
+            let started = Instant::now();
+            let key = tokio::task::block_in_place(|| VerificationKey::compute(&guest))?;
+            if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)?;
             }
-            #[cfg(not(feature = "gpu"))]
-            {
-                let _ = (proof, setup_dir, file_name, block_hash);
-                return Err(eyre!("verify requires the gpu build (SetupCache support)"));
-            }
-        }
-
-        Some(Command::Setup {
-            setup_dir,
-            until,
-        }) => {
-            #[cfg(feature = "gpu")]
-            {
-                let security = security_model(args.security)?;
-                let guest_path = guest_base.display().to_string();
-                println!(
-                    "[{}] Computing setup (until={:?}, security={:?}, guest={})",
-                    format_timestamp(), until, security, guest_path,
-                );
-                let start = Instant::now();
-                let cache = prove::compute_setup(&guest_path, &until, security);
-                println!(
-                    "[{}] Setup computed in {:.2}s",
-                    format_timestamp(), start.elapsed().as_secs_f64(),
-                );
-                fs::create_dir_all(&setup_dir)?;
-                let setup_path = setup_dir.join("setup.bin");
-                prove::save_setup(&cache, &setup_path)?;
-
-                // If we computed up to Unified, also dump WASM-verifier-compatible
-                // setup.bin + layout.bin (bincode 2.x standard config, unified layer only).
-                if matches!(until, prove::ProvingLimit::Unified) {
-                    let wasm_dir = setup_dir.join("wasm");
-                    if let Err(e) = prove::save_for_wasm_verifier(&cache, &wasm_dir) {
-                        eprintln!("[warn] WASM verifier files not written: {e}");
-                    }
-                }
-            }
-            #[cfg(not(feature = "gpu"))]
-            {
-                bail!("Compiled without GPU support. Rebuild with --features gpu");
+            fs::write(&output, key.encode()?)
+                .map_err(|e| eyre!("failed to write {}: {e}", output.display()))?;
+            println!(
+                "[{}] Wrote the verification key to {} in {:.1}s",
+                format_timestamp(),
+                output.display(),
+                started.elapsed().as_secs_f64()
+            );
+            println!("  app.bin keccak256  0x{}", hex(&key.app_bin_keccak));
+            println!("  app.text keccak256 0x{}", hex(&key.app_text_keccak));
+            for (layers, hash) in ["0", "1", ">=2"].iter().zip(&key.expected_chain_hashes) {
+                println!("  chain hash ({layers:>3} unrolled layers) {}", hex_words(hash));
             }
         }
 
@@ -872,11 +667,13 @@ async fn main() -> Result<()> {
             file_name,
             data_dir,
             is_test,
+            backend,
             gpu,
             output_dir,
-            until,
-            setup_dir,
         }) => {
+            vk::check_recursion_environment()?;
+            let backend = if gpu { ProverBackend::Gpu } else { backend };
+            let guest = Guest::load(guest_files(args.guest_bin.as_deref())?)?;
             let data_dir = data_dir.unwrap_or_else(|| args.data_dir.clone());
             let input_path = resolve_input_path(block_number, file_name, &data_dir)?;
             let block_num = if block_number > 0 {
@@ -884,99 +681,154 @@ async fn main() -> Result<()> {
             } else {
                 block_number_from_filename(&input_path)
             };
-
-            if !input_path.exists() {
-                bail!(
-                    "input file for block {} not found at {}",
-                    block_num,
-                    input_path.display()
-                );
-            }
-
-            let until = until.unwrap_or(ProvingLimit::Base);
+            let settings = ProverSettings::new(guest.files.clone(), backend, args.cycles)?;
 
             // The prover proves whatever the run did, wherever it stopped: a run that parked in
-            // finish_error (or reported a skip) would yield a proof that verify then rejects.
-            // Run it on the simulator first, as the service's preflight does.
-            if gpu {
-                let preflight =
-                    execute_block(&guest_base, &input_path, block_num, args.cycles, is_test, None)?;
-                if !preflight.succeeded {
-                    bail!(
-                        "preflight: block {} did not finish successfully (final_pc=0x{:08x} reached_end={} cycles={}); not proving",
-                        block_num,
-                        preflight.final_pc,
-                        preflight.reached_end,
-                        preflight.cycle_count,
-                    );
-                }
-                println!(
-                    "[{}] Preflight ok: block {} gas_used={} cycles={}",
-                    format_timestamp(),
+            // finish_error, or ran into the cycle bound, would yield a proof that commits no
+            // block. Run it on the simulator first, as the service's preflight does.
+            let preflight = execute_block(
+                &guest,
+                &input_path,
+                block_num,
+                settings.cycles_bound as usize,
+                is_test,
+                None,
+            )?;
+            // The simulator bounds its steps, the prover the timestamp, which a delegation call
+            // advances by more than one cycle: check the cycle count as well.
+            if !preflight.succeeded || preflight.cycle_count >= settings.cycles_bound as u64 {
+                bail!(
+                    "preflight: block {} did not finish successfully within {} cycles (final_pc=0x{:08x} reached_end={} cycles={}); not proving",
                     block_num,
-                    preflight.gas_used,
+                    settings.cycles_bound,
+                    preflight.final_pc,
+                    preflight.reached_end,
                     preflight.cycle_count,
                 );
             }
-
             println!(
-                "[{}] Proving block {} (gpu={}, until={:?}, input={})",
+                "[{}] Preflight ok: block {} gas_used={} cycles={}",
                 format_timestamp(),
                 block_num,
-                gpu,
-                until,
-                input_path.display(),
+                preflight.gas_used,
+                preflight.cycle_count,
             );
+            let expected = public_output::expected_for_file(&input_path, is_test)?;
 
-            let oracle = build_oracle(&input_path, is_test)?;
+            println!(
+                "[{}] Proving block {} ({:?} backend, input={}, {})",
+                format_timestamp(),
+                block_num,
+                backend,
+                input_path.display(),
+                fsv_dir_note(),
+            );
             let wall_start = Instant::now();
+            let proved = tokio::task::block_in_place(|| -> Result<_> {
+                let mut prover = BlockProver::new(settings)?;
+                prover.prove(build_oracle(&input_path, is_test)?)
+            })?;
+            prove::check_output(&expected, &proved.output())?;
+            println!("Proof commits block hash {} (matches the input)", expected.block_hash);
 
-            if gpu {
-                #[cfg(feature = "gpu")]
-                {
-                    let prover = if let Some(dir) = setup_dir {
-                        let setup_path = dir.join("setup.bin");
-                        println!("Loading cached setup from {}", setup_path.display());
-                        let cache = prove::load_setup(&setup_path)?;
-                        if cache.security() != security_model(args.security)? {
-                            bail!(
-                                "setup cache at {} was computed for {:?}, but --security {} was requested",
-                                setup_path.display(), cache.security(), args.security,
+            let proof_file = proof_format::proof_file_bytes(&proved.artifact)?;
+            fs::create_dir_all(&output_dir)?;
+            let proof_path = output_dir.join("proof.bin");
+            fs::write(&proof_path, &proof_file)
+                .map_err(|e| eyre!("failed to write {}: {e}", proof_path.display()))?;
+            println!(
+                "[{}] Proved block {} in {:.2}s (proving {:.2}s, cycles={}, proofs={}); wrote {} ({} bytes)",
+                format_timestamp(),
+                block_num,
+                wall_start.elapsed().as_secs_f64(),
+                proved.elapsed.as_secs_f64(),
+                proved.program_cycles(),
+                proved.proof_count(),
+                proof_path.display(),
+                proof_file.len(),
+            );
+        }
+
+        Some(Command::Bench {
+            file_name,
+            iterations,
+            backend,
+        }) => {
+            vk::check_recursion_environment()?;
+            let guest = guest_files(args.guest_bin.as_deref())?;
+            let settings = ProverSettings::new(guest, backend, args.cycles)?;
+            let expected = public_output::expected_for_file(&file_name, false)?;
+            let oracle = build_oracle(&file_name, false)?;
+            tokio::task::block_in_place(|| -> Result<()> {
+                let t = Instant::now();
+                let mut prover = BlockProver::new(settings)?;
+                println!("BENCH {:?} prover init in {:.2?}", backend, t.elapsed());
+
+                let mut times = Vec::new();
+                for i in 0..iterations {
+                    let t = Instant::now();
+                    match prover.prove(oracle.clone()) {
+                        Ok(proved) => {
+                            let ms = t.elapsed().as_millis();
+                            prove::check_output(&expected, &proved.output())?;
+                            times.push(ms);
+                            println!(
+                                "BENCH iter={} cycles={} proofs={} time_ms={}",
+                                i,
+                                proved.program_cycles(),
+                                proved.proof_count(),
+                                ms
                             );
                         }
-                        prove::create_gpu_prover_from_cache(cache)
-                    } else {
-                        let guest_path = guest_base.display().to_string();
-                        prove::create_gpu_prover(&guest_path, &until, security_model(args.security)?)
-                    };
-                    let (proof, cycles) = prove::gpu_prove(&prover, oracle, block_num);
-                    let expected = public_output::expected_for_file(&input_path, is_test)?;
-                    public_output::check(&expected.block_hash, &prove::output_words(&proof))?;
-                    println!("Proof commits block hash {} (matches the input)", expected.block_hash);
-
-                    fs::create_dir_all(&output_dir)?;
-                    prove::serialize_proof_to_file_enveloped(
-                        &proof,
-                        security_model(args.security)?,
-                        &output_dir.join("proof.bin"),
-                    );
-
-                    let total_wall = wall_start.elapsed();
-                    println!(
-                        "[{}] Proving complete for block {} in {:.2}s (cycles={})",
-                        format_timestamp(),
-                        block_num,
-                        total_wall.as_secs_f64(),
-                        cycles,
-                    );
+                        Err(err) => println!("BENCH iter={} FAILED: {err}", i),
+                    }
                 }
-                #[cfg(not(feature = "gpu"))]
-                {
-                    bail!("Compiled without GPU support. Rebuild with --features gpu");
-                }
-            } else {
-                bail!("CPU proving not yet implemented in z6m. Use --gpu.");
-            }
+                times.sort();
+                println!(
+                    "BENCH done iters={} ok={} min={}ms median={}ms max={}ms",
+                    iterations,
+                    times.len(),
+                    times.first().unwrap_or(&0),
+                    times.get(times.len() / 2).unwrap_or(&0),
+                    times.last().unwrap_or(&0)
+                );
+                Ok(())
+            })?;
+        }
+
+        Some(Command::Verify {
+            proof,
+            vk,
+            file_name,
+            block_hash,
+        }) => {
+            let key = VerificationKey::decode(
+                &fs::read(&vk).map_err(|e| eyre!("failed to read {}: {e}", vk.display()))?,
+            )?;
+            let proof_file =
+                fs::read(&proof).map_err(|e| eyre!("failed to read {}: {e}", proof.display()))?;
+
+            let started = Instant::now();
+            let output =
+                tokio::task::block_in_place(|| vk::verify_proof_file(&proof_file, &key))
+                    .map_err(|e| eyre!("VERIFIER REJECTED the proof: {e}"))?;
+            println!("Verifier accepted in {:.2?}", started.elapsed());
+            println!("verifier output[0..8]  = {:08x?}", &output[..8]);
+            println!("verifier output[8..16] = {:08x?}", &output[8..]);
+            // output[0..8] are the guest's x10..x17 (its own output), output[8..16] the
+            // recursion chain over the end parameters: the setups, which include the guest
+            // binary, and the final PC. Only the latter binds the proof to this guest.
+            println!("CHAIN BINDING OK: output[8..16] is a chain hash of the key");
+
+            // output[0..8] is the guest's public output: the hash of the last block the run
+            // validated. The proof binds its block only through it.
+            let expected = match (file_name, block_hash) {
+                (Some(path), _) => public_output::expected_for_file(&path, false)?.block_hash,
+                (None, Some(hash)) => hash,
+                (None, None) => unreachable!("clap requires --file-name or --block-hash"),
+            };
+            public_output::check(&expected, &output[..8].try_into().unwrap())?;
+            println!("PUBLIC OUTPUT OK: output[0..8] commits block hash {}", expected);
         }
 
         None => {
@@ -985,4 +837,12 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_words(words: &[u32]) -> String {
+    words.iter().map(|w| format!("{w:08x}")).collect::<Vec<_>>().join(" ")
 }

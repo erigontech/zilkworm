@@ -90,13 +90,15 @@ impl EthproofsClient {
         }
     }
 
+    /// Posts a proof. `proof_bytes` are the prover's proof file (for Airbender, gzip of the
+    /// EPROOF01 v2 envelope), sent base64 encoded; `proving_millis` covers witness generation
+    /// and proving, not fetching; `cycle_count` is the guest's own cycle count.
     pub async fn proved(
         &self,
         proof_bytes: &[u8],
         block_number: u64,
         cycle_count: u64,
         proving_millis: u64,
-        verifier_id: &str,
     ) {
         let proof_b64 = base64::engine::general_purpose::STANDARD.encode(proof_bytes);
         info!(
@@ -110,7 +112,6 @@ impl EthproofsClient {
             "proving_time": proving_millis,
             "proving_cycles": cycle_count,
             "proof": proof_b64,
-            "verifier_id": verifier_id,
         });
 
         if let Err(e) = self.post_json("/proofs/proved", &json).await {

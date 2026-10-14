@@ -1,77 +1,117 @@
-# Airbender prover service — Docker image & run report
+# Airbender prover service — Docker image
 
-Status report for the dockerized airbender proving service and documentation
-for building and running the image. Covers the 2026-07-18/19 validation runs.
+How to build, get and run the dockerized Airbender proving service (zksync-airbender v3,
+100-bit security, proofs in the Ethproofs EPROOF01 v2 format).
 
 ## Image
 
 | | |
 |---|---|
-| Image | built from `prover/Dockerfile` target `airbender` (~2.4 GB) |
-| Lineage | `release/airbender` with USE_HASH_KEY node-store recovery enabled at build time |
+| Image | `ghcr.io/erigontech/zilkworm-airbender:<commit sha>` (full or short sha), `:main` for the latest; built from `prover/Dockerfile` target `airbender` |
+| Published by | `.github/workflows/airbender-image.yml`, for every commit pushed to `main` (and on manual dispatch) |
 | Base | `nvidia/cuda:13.1.0-devel` (builder) / `nvidia/cuda:13.1.0-runtime` (runtime), Ubuntu 24.04 |
-| Runs as | uid 1000, workdir `/home/ubuntu` |
+| GPU code | CUDA kernels for compute capabilities 8.0, 8.9, 9.0 and 12.0 (A100, RTX 40xx/L40/L4, H100/H200, RTX 50xx/RTX PRO Blackwell; not B200, which is 10.0); build arg `CUDA_ARCHS` changes the list |
+| Runs as | root, workdir `/data` |
 
 Contents:
-- `/usr/local/bin/z6m_prover_airbender` — Rust GPU prover (gpu feature, unified recursion)
-- `/opt/z6m/z6m_guest.bin` + `.text` — rv32 guest
-- the witness→MFBD converter is linked into the prover (`prover/witness_ffi`),
-  so no separate converter binary ships in the image
+- `/usr/local/bin/z6m_prover_airbender` — the prover (gpu feature); the witness→MFBD converter
+  (`prover/witness_ffi`) is linked into it
+- `/opt/z6m/z6m_guest.bin` + `.text` — the rv32 guest
+- `/opt/z6m/fsv/` — the six recursion verifier program files (`fsv_*_sec_100_blake2_with_compression.{bin,text}`),
+  checked at build time against `prover/docker/fsv.sha256`
+- `/usr/local/bin/airbender-entrypoint` — the entrypoint (`prover/docker/airbender-entrypoint.sh`)
 
-Entrypoint is `z6m_prover_airbender --guest-bin /opt/z6m/z6m_guest`; all CLI args
-append to it.
+Environment baked into the image, which the verification key depends on or the prover needs:
+`FSV_DIR=/opt/z6m/fsv`, `RISCV_MERGE_WINDOW=0`, `RUST_MIN_STACK=1073741824`, and
+`RECURSION_UNROLLED_BLAKE`, `RECURSION_BRIDGE_BLAKE`, `RECURSION_FINAL_BLAKE` set to their default
+`blake2_with_compression` (the prover refuses other values). Don't override them.
+
+The package is private until it is made public once, by an org admin: GitHub → erigontech →
+Packages → `zilkworm-airbender` → Package settings → Change visibility → Public. Until then,
+`docker login ghcr.io` with a token that can read the org's packages before pulling.
+
+## Host requirements
+
+- NVIDIA GPU(s) with at least 32 GB of VRAM each. All GPUs visible to the container prove the
+  same block together: one service per host, and `NVIDIA_VISIBLE_DEVICES` (or `--gpus`) picks the
+  GPUs.
+- About 24 GB of pinned host RAM per GPU (the prover's host buffers: 16 GB per proving job and
+  8 GB per device), plus a few GB for the service, the simulator and the block data.
+- An NVIDIA driver that supports CUDA 13.1 or newer (the runtime image's `NVIDIA_REQUIRE_CUDA`
+  checks it), and the NVIDIA container toolkit.
+- An execution client JSON-RPC endpoint that serves `debug_executionWitness` (and optionally a
+  WebSocket endpoint for `newHeads`).
+- Disk for `/data`: fetched blocks and MFBD bundles (a few MB per block) and proofs (about 1 MB
+  each).
 
 ## Build
 
 From the repo root (submodules initialized):
 
 ```bash
-docker build --target airbender -f prover/Dockerfile -t z6m_prover:airbender .
+docker build --target airbender -f prover/Dockerfile \
+  --build-arg ZILKWORM_REVISION=$(git rev-parse HEAD) \
+  -t zilkworm-airbender:local .
 ```
 
-Build fixes baked into the branch (earlier lineages do NOT build the image
-without them):
-- builder installs `python3` + `patch` (blst / secp256k1 patch steps need them)
-- guest CMakeLists includes evmc headers from the submodule and drops the
-  stale `libevmc-loader.a` / `libevmc-instructions.a` link references (EVMC was
-  folded into evmone upstream; the subbuild no longer produces them)
-- builder installs xpack gcc-15 for `prover/witness_ffi` (needs g++ >= 14;
-  Ubuntu 24.04 ships 13) and links libstdc++ statically
-  (`Z6M_STATIC_LIBSTDCXX=1`) so the prover runs on the CUDA runtime image
+`--build-arg CUDA_ARCHS="90"` builds the kernels for fewer architectures (faster). The build needs
+no GPU. `USE_HASH_KEY=ON` enables node-store account recovery in the guest.
 
 ## Run
 
-Single line (what the validation run used — prove every 10th block, execute
-every block, post to ethproofs staging):
+### The service, configured from the environment
+
+Without arguments the entrypoint runs the proving service, configured from these variables, and
+starts it again whenever it exits:
+
+| Variable | |
+|---|---|
+| `RPC_URL` | execution client JSON-RPC serving `debug_executionWitness` (required) |
+| `WS_URL` | its WebSocket endpoint, for newHeads (optional; polls without it) |
+| `PROVE_EVERY` | prove the blocks whose number is a multiple of this (default 100) |
+| `EXECUTE_EVERY` | execute without proving every N-th block (default: none) |
+| `START_BLOCK` | first block (default: the chain's tip) |
+| `DATA_DIR` | verification key, blocks, logs and proofs (default `/data`; mount a volume) |
+| `ETHPROOFS_ENDPOINT`, `ETHPROOFS_TOKEN`, `ETHPROOFS_CLUSTER_ID` | post to Ethproofs; with any of them unset nothing is posted (a dry run) |
+| `RESTART_DELAY` | seconds before the service is started again (default 30) |
+| `PROVER_EXTRA_ARGS` | further prover options, word-split |
+
+On first start for an image the entrypoint computes the guest's verification key into
+`$DATA_DIR/vk-<revision>-<inputs>/vk.bin`, where `<inputs>` is a hash of the guest and the
+recursion programs (on the CPU, about two minutes), and logs its sha256; later starts reuse it. Publish it with the proofs: `verify --vk` and the Ethproofs verifier check proofs
+against it. The service then builds the GPU prover once (the setups of the guest and the
+recursion programs) and starts at the chain's tip.
 
 ```bash
-docker run -d --name z6m-prover --gpus all --restart unless-stopped \
-  -v "$PWD/prover/prover_airbender/temp:/home/ubuntu/temp" \
-  z6m_prover:airbender \
-  --gpu --until unified --service \
-  --rpc-url http://<your-rpc-endpoint>:8545 \
-  --data-dir /home/ubuntu/temp \
-  --prove-every 10 --execute-every 1 \
-  --ethproofs-endpoint https://staging--ethproofs.netlify.app/api/v0 \
-  --ethproofs-token "$ETHPROOFS_TOKEN" --ethproofs-cluster-id 4
+docker run -d --name zilkworm-airbender --gpus all --restart unless-stopped \
+  -v /srv/zilkworm-airbender:/data \
+  -e RPC_URL=http://<execution-client>:8545 \
+  -e WS_URL=ws://<execution-client>:8546 \
+  -e PROVE_EVERY=100 \
+  -e ETHPROOFS_ENDPOINT=https://staging--ethproofs.netlify.app/api/v0 \
+  -e ETHPROOFS_TOKEN="$ETHPROOFS_TOKEN" -e ETHPROOFS_CLUSTER_ID=<cluster id> \
+  ghcr.io/erigontech/zilkworm-airbender:<commit sha>
 ```
+
+On hosts whose NVIDIA container runtime is set up for CDI, `--gpus all` does not reach the GPUs;
+use `--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all` instead (or a device list such as
+`NVIDIA_VISIBLE_DEVICES=0,1`).
 
 Equivalent docker-compose:
 
 ```yaml
 services:
-  z6m-prover:
-    image: z6m_prover:airbender
+  zilkworm-airbender:
+    image: ghcr.io/erigontech/zilkworm-airbender:<commit sha>
     restart: unless-stopped
-    command: >
-      --gpu --until unified --service
-      --rpc-url http://<your-rpc-endpoint>:8545
-      --data-dir /home/ubuntu/temp
-      --prove-every 10 --execute-every 1
-      --ethproofs-endpoint https://staging--ethproofs.netlify.app/api/v0
-      --ethproofs-token ${ETHPROOFS_TOKEN} --ethproofs-cluster-id 4
+    environment:
+      RPC_URL: http://<execution-client>:8545
+      PROVE_EVERY: "100"
+      ETHPROOFS_ENDPOINT: https://staging--ethproofs.netlify.app/api/v0
+      ETHPROOFS_TOKEN: ${ETHPROOFS_TOKEN}
+      ETHPROOFS_CLUSTER_ID: "<cluster id>"
     volumes:
-      - ./prover-data:/home/ubuntu/temp
+      - ./prover-data:/data
     deploy:
       resources:
         reservations:
@@ -81,55 +121,75 @@ services:
               capabilities: [gpu]
 ```
 
-Notes:
-- **GPU**: needs the nvidia container runtime and host driver ≥ 580 (CUDA 13.x).
-- **Volume**: `--data-dir /home/ubuntu/temp` matches the mount (the default is
-  the relative path `temp`, which only resolves to the same place because the
-  workdir is `/home/ubuntu` — pass it explicitly) — fetched blocks, MFBD bundles,
-  and `provingLogs.log` (one line per proof) land there. Mount it or lose the
-  recording on container removal. The container user is uid 1000; make the host
-  dir owned by uid 1000.
-- **Service output** goes to stdout: `docker logs -f z6m-prover`.
-- The one-time GPU setup (base+unrolled+unified layers) recomputes at startup,
-  ~2 min, before the first block flows.
-- Drop the `--ethproofs-*` flags to run without posting.
-- One-off execution of a bundle (no service):
-  `docker run --rm --gpus all -v /path/to/block:/data:ro z6m_prover:airbender execute --file-name /data/flatWitnessBundle<N>.mfbd`
+Service output goes to stdout (`docker logs -f zilkworm-airbender`); `/data/provingLogs.log`
+has one line per proved (or skipped, or failed) block, and proofs land in
+`/data/proofs/<block>/proof.bin`.
 
-## Validation run results
+### One-off commands
 
-Dockerized run (2026-07-18 12:20 UTC → 2026-07-19 07:02 UTC, ~18.7 h,
-blocks 25559560–25565128):
+With arguments the entrypoint runs the prover with them (the guest is passed for you):
 
-| Metric | Value |
-|---|---|
-| Blocks processed | 5,569 — every block in range, no gaps |
-| Executed (preflight) ok | 5,012 / 5,012 — **zero failures** |
-| Proofs (every 10th, 3 layers to unified) | 557 / 557, avg 25.0 s, max 58.9 s |
-| USE_HASH_KEY recoveries | 244 events (144 distinct accounts), **all recovered blocks passed** |
-| ethproofs `proved` posts | 551 OK / 6 failed (staging-side 500s & network errors, ~1%) |
-| Service restarts | 0 |
+```bash
+# Execute a bundle on the simulator
+docker run --rm -v /path/to/block:/in:ro ghcr.io/erigontech/zilkworm-airbender:<sha> \
+  execute --file-name /in/flatWitnessBundle<N>.mfbd
 
-Host runs earlier the same day (same guest lineage) additionally validated:
-release state-root check 200/200 on the benchmark corpus, and preimage-gap
-blocks 25538620 / 25540940 / 25540990 pass with recovery.
+# Prove it (writes /out/proof.bin)
+docker run --rm --gpus all -v /path/to/block:/in:ro -v "$PWD/out:/out" \
+  ghcr.io/erigontech/zilkworm-airbender:<sha> \
+  prove --file-name /in/flatWitnessBundle<N>.mfbd --output-dir /out
+
+# Write the verification key, and verify a proof against it (CPU only)
+docker run --rm -v "$PWD/out:/out" ghcr.io/erigontech/zilkworm-airbender:<sha> vk --output /out/vk.bin
+docker run --rm -v "$PWD/out:/out" -v /path/to/block:/in:ro ghcr.io/erigontech/zilkworm-airbender:<sha> \
+  verify --proof /out/proof.bin --vk /out/vk.bin --file-name /in/flatWitnessBundle<N>.mfbd
+```
+
+### vast.ai
+
+Pick an instance with ≥ 32 GB VRAM per GPU and ≥ 24 GB of RAM per GPU (more is better), and a
+disk of a few tens of GB. Use `ghcr.io/erigontech/zilkworm-airbender:<commit sha>` as the image
+(with registry credentials while the package is private).
+
+- **Entrypoint launch mode** ("Docker ENTRYPOINT"): the image's entrypoint runs the service. Pass
+  the configuration as `-e` options in the docker options field, e.g.
+  `-e RPC_URL=http://... -e PROVE_EVERY=100 -e ETHPROOFS_ENDPOINT=... -e ETHPROOFS_TOKEN=... -e ETHPROOFS_CLUSTER_ID=...`.
+  vast.ai has no restart policy; the entrypoint restarts the service itself.
+- **SSH (or Jupyter) launch mode**: vast.ai replaces the entrypoint with its own, so start the
+  service from the on-start script, with the variables exported there or set as `-e` options:
+
+  ```bash
+  export RPC_URL=http://... PROVE_EVERY=100
+  export ETHPROOFS_ENDPOINT=... ETHPROOFS_TOKEN=... ETHPROOFS_CLUSTER_ID=...
+  nohup airbender-entrypoint > /data/service.log 2>&1 &
+  ```
+
+  The image's environment (`FSV_DIR` and the rest) is in the container's environment in this
+  mode too; if a shell does not see it, `env | grep -E 'FSV_DIR|RECURSION|RISCV'` shows what to
+  export.
+
+## Behavior
+
+- A block is proved only if the simulator runs it to the guest's exit point within the prover's
+  cycle limit (1,073,741,822 cycles) and both that run and the proof commit the block's hash; a
+  proof is written and posted to Ethproofs only then. A block over the limit, or one the guest
+  rejects, is logged as `SKIPPED` in `provingLogs.log`. The simulator runs concurrently with
+  proving by default (`Z6M_SERIAL_PREFLIGHT=1` runs it first).
+- A prover panic fails that block (`FAILED` in the log); the prover is rebuilt and the service
+  carries on with the next block.
+- Ethproofs receives `queued`, `proving` and `proved` (`proving_time` in ms covers witness
+  generation and proving, `proving_cycles` the guest's cycles, `proof` the base64 of
+  `proof.bin`).
 
 ## Known limitations
 
-1. **Restart resumes at chain head.** With fixed args, a crash-restart loses the
-   blocks between crash and recovery (and a hardcoded `--start-block` would
-   rewind to a stale block). Designed fix (not yet implemented): checkpoint the
-   last processed block into the data dir, resume from checkpoint+1 at startup,
-   with a `--max-backfill` cap — see `service.rs` `fetcher_loop`.
-2. **Pruned-witness-path blocks are skipped by design.** USE_HASH_KEY recovers
-   accounts whose *preimage* is missing from the witness `keys`; if the witness
-   also omits the account's *trie path* (observed with existing precompile
-   accounts, e.g. `0x…03`), recovery returns null and the preflight fails
-   (`kWrongBlockGas`/root mismatch). Fix belongs upstream in the witness
-   provider. Zero such blocks occurred in the 18.7 h dockerized run.
-3. **ethproofs staging flakes** (~1% of `proved` uploads, 500s or connection
-   errors, sometimes clustered). Proofs are always kept locally; the service
-   does not retry a failed `proved` upload.
-4. The validated image guest was built with **USE_HASH_KEY=1** (the flag is
-   default-off in the source tree and must be enabled at build time); proofs
-   cover executions that may include node-store-recovered accounts.
+1. **Restart resumes at chain head.** A restarted service starts at the tip: blocks between a
+   crash and the restart are not proved (the cadence of `PROVE_EVERY` holds, as blocks are chosen
+   by number). A checkpoint of the last processed block is not implemented.
+2. **Pruned-witness-path blocks are skipped by design.** USE_HASH_KEY recovers accounts whose
+   *preimage* is missing from the witness `keys`; if the witness also omits the account's *trie
+   path*, recovery fails and so does the preflight. The fix belongs in the witness provider.
+3. **Ethproofs flakes.** A failed `proved` upload is logged and not retried; the proof stays in
+   `/data/proofs`.
+4. The prover's pinned host memory is not configurable (zksync-airbender's `prover_pipeline` uses
+   its defaults: 256 × 64 MB per job and 128 × 64 MB per GPU).

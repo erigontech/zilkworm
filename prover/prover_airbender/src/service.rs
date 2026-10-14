@@ -1,25 +1,21 @@
 use z6m_common::{EthProofsConfig, EthproofsClient};
-use crate::prove::ProvingLimit;
 
-use z6m_common::alloy_provider::{Provider, ProviderBuilder};
+use crate::guest::{Guest, GuestFiles};
+use crate::prove::{BlockProver, ProverSettings, MAX_PROVABLE_CYCLES};
 use eyre::{bail, Result};
-use riscv_transpiler::abstractions::non_determinism::QuasiUARTSource;
-use riscv_transpiler::ir::{preprocess_bytecode, FullMachineDecoderConfig};
-use riscv_transpiler::vm::{DelegationsCounters, RamWithRomRegion, SimpleTape, State, VM};
+use prover_pipeline::ProverBackend;
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use url::Url;
+use z6m_common::alloy_provider::{Provider, ProviderBuilder};
 use z6m_common::{fetch_block_and_witness, FetchRequest};
-
-#[cfg(feature = "gpu")]
-use execution_utils::unrolled_gpu::UnrolledProver;
 
 /// Capacity of the fetcher → prover-worker work queue.
 ///
@@ -44,12 +40,9 @@ pub struct ServiceConfig {
     pub save_all_responses: bool,
     pub data_dir: PathBuf,
     pub output_dir: PathBuf,
-    pub guest_base: PathBuf,
+    pub guest: GuestFiles,
     pub max_cycles: usize,
     pub gpu: bool,
-    pub until: Option<ProvingLimit>,
-    pub setup_dir: Option<PathBuf>,
-    pub security: verifier_common::SecurityModel,
     pub ethproofs: Option<EthProofsConfig>,
 }
 
@@ -72,25 +65,24 @@ pub struct ProvingLog {
 struct WorkItem {
     block_number: u64,
     bundle_path: PathBuf,
+    /// Time the fetcher spent turning the execution witness into the MFBD bundle (0 when the
+    /// bundle was already on disk): witness generation, part of the reported proving time.
+    witness_millis: u64,
     execute: bool,
     prove: bool,
+    /// The block's Ethproofs `queued` post, which its `proving` post waits for: the posts are
+    /// background tasks, and one that lands late would move the block's status back.
+    queued_post: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub struct AirbenderService {
     config: ServiceConfig,
     eth_client: Option<Arc<EthproofsClient>>,
-    #[cfg(feature = "gpu")]
-    gpu_prover: Option<Arc<UnrolledProver>>,
-    /// Hex-encoded end_params from the highest recursion level setup.
-    /// Used as verifier_id when posting to ethproofs.
-    verifier_id: String,
-    /// Guest ROM image, loaded once for VM runs.
-    guest_binary_u32: Vec<u32>,
-    /// Preprocessed guest instruction tape, decoded once for VM runs.
-    guest_instructions: Vec<riscv_transpiler::ir::Instruction>,
-    /// PC of the final self-loop of the guest's canonical EXIT_SEQUENCE.
-    /// A run that ends on any other PC took the `finish_error` path.
-    guest_exit_pc: u32,
+    /// The prover, built once and reused for every block (rebuilt after a panic). Only the
+    /// prover worker uses it.
+    prover: Option<Arc<Mutex<BlockProver>>>,
+    /// The guest, decoded once for simulator runs (preflight and execute-only).
+    guest: Arc<Guest>,
 }
 
 /// Result of running a block through the VM simulator (no proving).
@@ -114,78 +106,38 @@ impl VmRunOutcome {
 
 impl AirbenderService {
     pub fn new(config: ServiceConfig) -> Result<Self> {
-        let bin_path = format!("{}.bin", config.guest_base.display());
-        info!("Guest binary: {}", bin_path);
-        if !Path::new(&bin_path).exists() {
-            bail!("Guest binary not found at {}", bin_path);
-        }
+        info!("Guest binary: {}", config.guest.bin.display());
 
-        // Load and decode the guest once for simulator runs (preflight and
-        // execute-only runs), and locate the canonical exit point so runs
-        // that take the finish_error path can be recognized.
-        let text_path = format!("{}.text", config.guest_base.display());
-        let (binary_bytes, guest_binary_u32) =
-            execution_utils::setups::read_binary(Path::new(&bin_path));
-        let (_, text_u32) = execution_utils::setups::read_binary(Path::new(&text_path));
-        let guest_instructions = preprocess_bytecode::<FullMachineDecoderConfig>(&text_u32);
-        let guest_exit_pc = execution_utils::find_binary_exit_point(&binary_bytes);
-        info!("Guest exit sequence PC: 0x{:08x}", guest_exit_pc);
+        // Decode the guest once for simulator runs (preflight and execute-only runs), and
+        // locate the canonical exit point so runs that take the finish_error path can be
+        // recognized.
+        let guest = Arc::new(Guest::load(config.guest.clone())?);
+        info!("Guest exit sequence PC: 0x{:08x}", guest.exit_pc);
 
         let eth_client = config
             .ethproofs
             .clone()
             .map(|c| Arc::new(EthproofsClient::new(c)));
 
-        // Initialize GPU prover once — reused for all blocks
-        #[cfg(feature = "gpu")]
-        let gpu_prover = if config.gpu {
-            info!("Initializing GPU prover (one-time)");
-            let start = Instant::now();
-            let prover = if let Some(ref dir) = config.setup_dir {
-                let setup_path = dir.join("setup.bin");
-                let cache = crate::prove::load_setup(&setup_path)?;
-                if cache.security() != config.security {
-                    bail!(
-                        "setup cache at {} was computed for {:?}, but the service requested {:?}",
-                        setup_path.display(), cache.security(), config.security,
-                    );
-                }
-                crate::prove::create_gpu_prover_from_cache(cache)
-            } else {
-                let guest_path = config.guest_base.display().to_string();
-                let until = config.until.clone().unwrap_or(ProvingLimit::Base);
-                crate::prove::create_gpu_prover(&guest_path, &until, config.security)
-            };
-            info!("GPU prover initialized in {:.2}s", start.elapsed().as_secs_f64());
-            Some(Arc::new(prover))
+        // Build the prover once; every block reuses it.
+        let prover = if config.gpu {
+            crate::vk::check_recursion_environment()?;
+            info!("Building the GPU prover (one-time; {})", crate::fsv_dir_note());
+            let settings =
+                ProverSettings::new(config.guest.clone(), ProverBackend::Gpu, config.max_cycles)?;
+            Some(Arc::new(Mutex::new(BlockProver::new(settings)?)))
         } else {
+            if config.prove_every.is_some() {
+                bail!("--prove-every needs --gpu");
+            }
             None
         };
-
-        // Compute verifier_id from the highest-level setup's end_params
-        #[cfg(feature = "gpu")]
-        let verifier_id = if let Some(ref p) = gpu_prover {
-            let max_level = p.max_level;
-            let data = &p.level_data[&max_level];
-            let end_params = &data.setup.end_params;
-            let hex: String = end_params.iter().map(|w| format!("{:08x}", w)).collect();
-            info!("Verifier ID (end_params): 0x{}", hex);
-            format!("0x{}", hex)
-        } else {
-            "airbender-z6m".to_string()
-        };
-        #[cfg(not(feature = "gpu"))]
-        let verifier_id = "airbender-z6m".to_string();
 
         Ok(Self {
             config,
             eth_client,
-            #[cfg(feature = "gpu")]
-            gpu_prover,
-            verifier_id,
-            guest_binary_u32,
-            guest_instructions,
-            guest_exit_pc,
+            prover,
+            guest,
         })
     }
 
@@ -349,19 +301,22 @@ impl AirbenderService {
                 // Fire-and-forget "queued" state transition. We fire this at
                 // enqueue time (not at proving start) so it accurately
                 // reflects that the block is now in the prover's queue.
+                let mut queued_post = None;
                 if should_prove {
                     if let Some(c) = &self.eth_client {
                         let c = Arc::clone(c);
                         let bn = block_number;
-                        tokio::spawn(async move { c.queued(bn).await; });
+                        queued_post = Some(tokio::spawn(async move { c.queued(bn).await; }));
                     }
                 }
 
                 let item = WorkItem {
                     block_number,
                     bundle_path: outcome.flat_bundle_path,
+                    witness_millis: outcome.witness_millis,
                     execute: should_execute,
                     prove: should_prove,
+                    queued_post,
                 };
 
                 // Backpressure: if the GPU is slower than fetching, the queue
@@ -414,7 +369,7 @@ impl AirbenderService {
         self: Arc<Self>,
         mut rx: mpsc::Receiver<WorkItem>,
     ) -> Result<()> {
-        while let Some(item) = rx.recv().await {
+        while let Some(mut item) = rx.recv().await {
             if item.execute {
                 println!(
                     "[{}] Executing block {}",
@@ -427,147 +382,8 @@ impl AirbenderService {
             }
 
             if item.prove {
-                // Preflight interprets the block to catch executions that
-                // would make the recursion stage abort the process. By
-                // default it runs CONCURRENTLY with proving and gates proof
-                // persistence/submission instead of proof start: clean
-                // validation failures still produce a valid (discarded)
-                // execution proof, and only trap-class failures — the same
-                // ones that can crash the prover — keep the abort risk,
-                // recovered by the container restart policy. Set
-                // Z6M_SERIAL_PREFLIGHT=1 to restore the safe serial order.
-                let serial_preflight = std::env::var("Z6M_SERIAL_PREFLIGHT").is_ok();
-                let mut preflight_handle = None;
-                if serial_preflight {
-                    match self.preflight_block(item.block_number, &item.bundle_path) {
-                        Ok(run) if run.succeeded(self.guest_exit_pc) => {}
-                        Ok(run) => {
-                            error!(
-                                block = item.block_number,
-                                final_pc = format!("0x{:08x}", run.final_pc),
-                                reached_end = run.reached_end,
-                                "Guest validation failed in preflight; skipping prove"
-                            );
-                            let _ = self.persist_proving_log(&ProvingLog {
-                                block_number: item.block_number,
-                                gas_used: 0,
-                                cycle_count: run.cycle_count,
-                                num_proofs: 0,
-                                proving_millis: 0,
-                                message: format!(
-                                    "SKIPPED: guest validation failure (final_pc=0x{:08x} reached_end={})",
-                                    run.final_pc, run.reached_end
-                                ),
-                            });
-                            continue;
-                        }
-                        Err(err) => {
-                            error!(block = item.block_number, error = %err, "Preflight errored; skipping prove");
-                            let _ = self.persist_proving_log(&ProvingLog {
-                                block_number: item.block_number,
-                                gas_used: 0,
-                                cycle_count: 0,
-                                num_proofs: 0,
-                                proving_millis: 0,
-                                message: format!("SKIPPED: preflight error: {}", err),
-                            });
-                            continue;
-                        }
-                    }
-                } else {
-                    let svc = Arc::clone(&self);
-                    let bn = item.block_number;
-                    let path = item.bundle_path.clone();
-                    preflight_handle =
-                        Some(tokio::task::spawn_blocking(move || svc.preflight_block(bn, &path)));
-                }
-
-                println!(
-                    "[{}] Proving block {}",
-                    Self::format_timestamp(),
-                    item.block_number
-                );
-
-                // Fire-and-forget "proving" state transition.
-                if let Some(c) = &self.eth_client {
-                    let c = Arc::clone(c);
-                    let bn = item.block_number;
-                    tokio::spawn(async move { c.proving(bn).await; });
-                }
-
-                let prove_result = self.prove_inner(item.block_number, &item.bundle_path).await;
-
-                if let Some(handle) = preflight_handle.take() {
-                    let verdict = handle.await;
-                    let ok =
-                        matches!(&verdict, Ok(Ok(run)) if run.succeeded(self.guest_exit_pc));
-                    if !ok {
-                        error!(
-                            block = item.block_number,
-                            "Concurrent preflight failed; discarding proof"
-                        );
-                        let _ = self.persist_proving_log(&ProvingLog {
-                            block_number: item.block_number,
-                            gas_used: 0,
-                            cycle_count: 0,
-                            num_proofs: 0,
-                            proving_millis: 0,
-                            message: "SKIPPED: concurrent preflight failed; proof discarded"
-                                .to_string(),
-                        });
-                        continue;
-                    }
-                }
-
-                match prove_result {
-                    Ok((proof_bytes, log)) => {
-                        // Written only now, once the preflight has passed: proof_bytes is the
-                        // same gzip(EPROOF01 envelope) as serialize_proof_to_file_enveloped.
-                        let block_dir = self.config.output_dir.join(log.block_number.to_string());
-                        if let Err(e) = fs::create_dir_all(&block_dir)
-                            .and_then(|()| fs::write(block_dir.join("proof.bin"), &proof_bytes))
-                        {
-                            error!(block = log.block_number, error = %e, "Failed to write proof.bin");
-                        }
-                        println!(
-                            "[{}] Proved block {} gas_used={} cycles={} proofs={} time={}ms",
-                            Self::format_timestamp(),
-                            log.block_number,
-                            log.gas_used,
-                            log.cycle_count,
-                            log.num_proofs,
-                            log.proving_millis,
-                        );
-
-                        // Fire-and-forget "proved" submission. proof_bytes is
-                        // moved into the task so the worker can immediately
-                        // pick up the next item.
-                        if let Some(c) = &self.eth_client {
-                            let c = Arc::clone(c);
-                            let bn = log.block_number;
-                            let cycles = log.cycle_count;
-                            let ms = log.proving_millis;
-                            let vid = self.verifier_id.clone();
-                            tokio::spawn(async move {
-                                c.proved(&proof_bytes, bn, cycles, ms, &vid).await;
-                            });
-                        }
-
-                        let _ = self.persist_proving_log(&log);
-                    }
-                    Err(err) => {
-                        error!(block = item.block_number, error = %err, "Proving failed");
-                        let fail_log = ProvingLog {
-                            block_number: item.block_number,
-                            gas_used: 0,
-                            cycle_count: 0,
-                            num_proofs: 0,
-                            proving_millis: 0,
-                            message: format!("FAILED: {}", err),
-                        };
-                        let _ = self.persist_proving_log(&fail_log);
-                    }
-                }
+                let queued_post = item.queued_post.take();
+                self.prove_item(&item, queued_post).await;
             }
         }
 
@@ -575,59 +391,183 @@ impl AirbenderService {
         Ok(())
     }
 
-    /// Run a block through the VM simulator (no proving) using the cached
-    /// guest tape, and report the final machine state.
-    fn run_vm(&self, input_path: &Path) -> Result<VmRunOutcome> {
-        let oracle = crate::build_oracle(input_path, false)?;
-        let source = QuasiUARTSource::new_with_reads(oracle);
+    /// Proves one block, gated by the preflight: a proof is written and posted only if the
+    /// simulator ran the block to the guest's exit point and the proof commits the block's hash.
+    /// Its Ethproofs posts go out in order: `proving` after `queued_post`, `proved` after
+    /// `proving`.
+    async fn prove_item(
+        self: &Arc<Self>,
+        item: &WorkItem,
+        queued_post: Option<tokio::task::JoinHandle<()>>,
+    ) {
+        let skip = |cycle_count: u64, message: String| {
+            error!(block = item.block_number, "{message}");
+            let _ = self.persist_proving_log(&ProvingLog {
+                block_number: item.block_number,
+                gas_used: 0,
+                cycle_count,
+                num_proofs: 0,
+                proving_millis: 0,
+                message,
+            });
+        };
 
-        let tape = SimpleTape::new(&self.guest_instructions);
-        let mut ram =
-            RamWithRomRegion::<{ prover::common_constants::rom::ROM_SECOND_WORD_BITS }>::from_rom_content(
-                &self.guest_binary_u32,
-                crate::DEFAULT_RAM_BOUND,
-            );
+        // The preflight runs the block on the simulator, with the prover's machine and cycle
+        // bound. By default it runs CONCURRENTLY with proving and gates writing and posting
+        // the proof instead of the proof's start: a block that fails it costs one discarded
+        // proving run (a prover that panics on it is replaced). Set Z6M_SERIAL_PREFLIGHT=1 to
+        // run it first and not prove such blocks at all.
+        let serial_preflight = std::env::var("Z6M_SERIAL_PREFLIGHT").is_ok();
+        let mut preflight_handle = None;
+        if serial_preflight {
+            match self.preflight_block(item.block_number, &item.bundle_path) {
+                Ok(run) => {
+                    if let Some(reason) = self.preflight_failure(&run) {
+                        return skip(run.cycle_count, format!("SKIPPED: {reason}"));
+                    }
+                }
+                Err(err) => return skip(0, format!("SKIPPED: preflight error: {err}")),
+            }
+        } else {
+            let svc = Arc::clone(self);
+            let bn = item.block_number;
+            let path = item.bundle_path.clone();
+            preflight_handle =
+                Some(tokio::task::spawn_blocking(move || svc.preflight_block(bn, &path)));
+        }
 
-        let mut state = State::initial_with_counters(DelegationsCounters::default());
-        let mut non_determinism_source = source;
-
-        let wall_start = Instant::now();
-        let finished = VM::<DelegationsCounters>::run_basic_unrolled(
-            &mut state,
-            &mut ram,
-            &mut (),
-            &tape,
-            self.config.max_cycles,
-            &mut non_determinism_source,
+        println!(
+            "[{}] Proving block {}",
+            Self::format_timestamp(),
+            item.block_number
         );
-        let wall_elapsed = wall_start.elapsed();
 
-        let cycles = (state.timestamp - riscv_transpiler::common_constants::INITIAL_TIMESTAMP)
-            / riscv_transpiler::common_constants::TIMESTAMP_STEP;
+        // "proving" state transition, in the background once "queued" is through.
+        let mut proving_post = None;
+        if let Some(c) = &self.eth_client {
+            let c = Arc::clone(c);
+            let bn = item.block_number;
+            proving_post = Some(tokio::spawn(async move {
+                if let Some(queued) = queued_post {
+                    let _ = queued.await;
+                }
+                c.proving(bn).await;
+            }));
+        }
 
+        let prove_result = self.prove_inner(item).await;
+
+        if let Some(handle) = preflight_handle.take() {
+            let failure = match handle.await {
+                Ok(Ok(run)) => self
+                    .preflight_failure(&run)
+                    .map(|reason| (run.cycle_count, reason)),
+                Ok(Err(err)) => Some((0, format!("preflight error: {err}"))),
+                Err(err) => Some((0, format!("preflight task failed: {err}"))),
+            };
+            if let Some((cycle_count, reason)) = failure {
+                return skip(cycle_count, format!("SKIPPED: {reason}; proof discarded"));
+            }
+        }
+
+        match prove_result {
+            Ok((proof_bytes, log)) => {
+                // Written only now, once the preflight has passed and the proof's output has
+                // matched the block: proof_bytes is the gzip(EPROOF01 v2) proof file.
+                let block_dir = self.config.output_dir.join(log.block_number.to_string());
+                if let Err(e) = fs::create_dir_all(&block_dir)
+                    .and_then(|()| fs::write(block_dir.join("proof.bin"), &proof_bytes))
+                {
+                    error!(block = log.block_number, error = %e, "Failed to write proof.bin");
+                }
+                println!(
+                    "[{}] Proved block {} gas_used={} cycles={} proofs={} time={}ms",
+                    Self::format_timestamp(),
+                    log.block_number,
+                    log.gas_used,
+                    log.cycle_count,
+                    log.num_proofs,
+                    log.proving_millis,
+                );
+
+                // "proved" submission, in the background once "proving" is through. proof_bytes
+                // is moved into the task so the worker can immediately pick up the next item.
+                if let Some(c) = &self.eth_client {
+                    let c = Arc::clone(c);
+                    let bn = log.block_number;
+                    let cycles = log.cycle_count;
+                    let ms = log.proving_millis;
+                    tokio::spawn(async move {
+                        if let Some(proving) = proving_post {
+                            let _ = proving.await;
+                        }
+                        c.proved(&proof_bytes, bn, cycles, ms).await;
+                    });
+                }
+
+                let _ = self.persist_proving_log(&log);
+            }
+            Err(err) => {
+                error!(block = item.block_number, error = %err, "Proving failed");
+                let fail_log = ProvingLog {
+                    block_number: item.block_number,
+                    gas_used: 0,
+                    cycle_count: 0,
+                    num_proofs: 0,
+                    proving_millis: 0,
+                    message: format!("FAILED: {}", err),
+                };
+                let _ = self.persist_proving_log(&fail_log);
+            }
+        }
+    }
+
+    /// Why a preflight run rules its block out, if it does.
+    fn preflight_failure(&self, run: &VmRunOutcome) -> Option<String> {
+        // The simulator bounds its steps, the prover the timestamp, which a delegation call
+        // advances by more than one cycle: a run can reach the exit point past the prover's
+        // bound, which the prover would cut short.
+        let bound = self.config.max_cycles.min(MAX_PROVABLE_CYCLES) as u64;
+        if run.cycle_count >= bound {
+            Some(format!(
+                "the block takes {} cycles or more, more than the prover takes ({} cycles)",
+                run.cycle_count, bound
+            ))
+        } else if run.succeeded(self.guest.exit_pc) {
+            None
+        } else {
+            Some(format!(
+                "guest validation failure (final_pc=0x{:08x} reached_end={} cycles={})",
+                run.final_pc, run.reached_end, run.cycle_count
+            ))
+        }
+    }
+
+    /// Run a block through the VM simulator (no proving) using the decoded guest, for at most
+    /// `max_cycles` cycles, and report the final machine state.
+    fn run_vm(&self, input_path: &Path, max_cycles: usize) -> Result<VmRunOutcome> {
+        let oracle = crate::build_oracle(input_path, false)?;
+        let state = self.guest.run(oracle, max_cycles, None)?;
         let mut run = VmRunOutcome {
             gas_used: 0,
-            cycle_count: cycles,
-            reached_end: finished,
-            final_pc: state.pc,
-            elapsed_secs: wall_elapsed.as_secs_f64(),
+            cycle_count: state.cycles,
+            reached_end: state.reached_end,
+            final_pc: state.final_pc,
+            elapsed_secs: state.elapsed.as_secs_f64(),
         };
         // A successful run commits the hash of its last block in a0..a7. Any other value means
         // the run, and a proof of it, covers some other block: fail (preflight then skips or
         // discards the proof).
-        if run.succeeded(self.guest_exit_pc) {
+        if run.succeeded(self.guest.exit_pc) {
             let expected = crate::public_output::expected_for_file(input_path, false)?;
-            crate::public_output::check(
-                &expected.block_hash,
-                &std::array::from_fn(|i| state.registers[10 + i].value),
-            )?;
+            crate::public_output::check(&expected.block_hash, &state.output)?;
             run.gas_used = expected.gas_used;
         }
         Ok(run)
     }
 
     fn execute_block(&self, block_number: u64, input_path: &Path) -> Result<()> {
-        let run = self.run_vm(input_path)?;
+        let run = self.run_vm(input_path, self.config.max_cycles)?;
         println!(
             "[{}] Executed block {} gas_used={} cycles={} time={:.2}s reached_end={} ok={}",
             Self::format_timestamp(),
@@ -636,102 +576,71 @@ impl AirbenderService {
             run.cycle_count,
             run.elapsed_secs,
             run.reached_end,
-            run.succeeded(self.guest_exit_pc),
+            run.succeeded(self.guest.exit_pc),
         );
         Ok(())
     }
 
-    /// Cheap JIT dry-run before committing the GPU to a block. A guest
-    /// validation failure (e.g. state/receipts root mismatch) takes the
-    /// `finish_error` path; proving such a run makes the recursion verifier
-    /// reject it via a non-unwindable JIT panic that aborts the whole
-    /// process, so those blocks must be skipped before proving starts.
+    /// The simulator's run of a block before (or while) the prover proves it, on the
+    /// prover's machine and within its cycle bound. Only a run that ends at the guest's exit
+    /// point, with the block's hash as its output, lets the block's proof be kept: any other
+    /// run (a guest validation failure such as a state root mismatch, a block over the cycle
+    /// bound, an instruction the machine lacks) would make a proof of something else.
     fn preflight_block(&self, block_number: u64, input_path: &Path) -> Result<VmRunOutcome> {
-        let run = self.run_vm(input_path)?;
+        let run = self.run_vm(input_path, self.config.max_cycles.min(MAX_PROVABLE_CYCLES))?;
         println!(
             "[{}] Preflight block {} cycles={} time={:.2}s ok={} (final_pc=0x{:08x})",
             Self::format_timestamp(),
             block_number,
             run.cycle_count,
             run.elapsed_secs,
-            run.succeeded(self.guest_exit_pc),
+            run.succeeded(self.guest.exit_pc),
             run.final_pc,
         );
         Ok(run)
     }
 
-    /// Run the GPU proof for a single block and return the serialized proof
-    /// bytes plus a `ProvingLog`; the worker writes `proof.bin` once the
-    /// preflight verdict is in.
+    /// Prove a single block and return the proof file bytes plus a `ProvingLog`; the worker
+    /// writes `proof.bin` once the preflight verdict is in.
     ///
     /// Does **not** touch ethproofs — the caller is responsible for
     /// spawning any state-transition HTTP calls in the background.
-    async fn prove_inner(
-        &self,
-        block_number: u64,
-        input_path: &Path,
-    ) -> Result<(Vec<u8>, ProvingLog)> {
-        let oracle = crate::build_oracle(input_path, false)?;
-        let start = Instant::now();
+    async fn prove_inner(&self, item: &WorkItem) -> Result<(Vec<u8>, ProvingLog)> {
+        let prover = self
+            .prover
+            .clone()
+            .ok_or_else(|| eyre::eyre!("no prover (the service runs without --gpu)"))?;
+        let block_number = item.block_number;
+        let input_path = item.bundle_path.clone();
 
-        #[cfg(feature = "gpu")]
-        {
-            let prover = self
-                .gpu_prover
-                .as_ref()
-                .ok_or_else(|| eyre::eyre!("GPU prover not initialized (--gpu not set?)"))?
-                .clone();
+        // The reported proving time covers witness generation (the fetcher's conversion of the
+        // execution witness into the MFBD bundle, and the guest's input words read from it)
+        // and proving; fetching is excluded.
+        let started = Instant::now();
+        let proved = tokio::task::spawn_blocking(move || {
+            let words = crate::build_oracle(&input_path, false)?;
+            let mut prover = prover.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            prover.prove(words)
+        })
+        .await
+        .map_err(|e| eyre::eyre!("proving task failed: {e}"))??;
+        let proving_millis = (item.witness_millis + started.elapsed().as_millis() as u64).max(1);
 
-            let result = tokio::task::spawn_blocking(move || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::prove::gpu_prove(&prover, oracle, block_number)
-                }))
-            })
-            .await
-            .map_err(|e| eyre::eyre!("Proving task join error: {}", e))?;
+        // A proof that commits another block than the input's is worthless: never keep it.
+        // proof.bin is written by the worker, only once the preflight has passed too.
+        let expected = crate::public_output::expected_for_file(&item.bundle_path, false)?;
+        crate::prove::check_output(&expected, &proved.output())?;
 
-            let (proof, cycles) = match result {
-                Ok(v) => v,
-                Err(payload) => {
-                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                        (*s).to_string()
-                    } else if let Some(s) = payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "non-string panic payload".to_string()
-                    };
-                    bail!("gpu_prove panicked: {}", msg);
-                }
-            };
-
-            let proving_millis = start.elapsed().as_millis() as u64;
-
-            // A proof that commits another block than the input's is worthless: never keep it.
-            // proof.bin is written by the worker, only once the preflight has passed too.
-            let expected = crate::public_output::expected_for_file(input_path, false)?;
-            crate::public_output::check(&expected.block_hash, &crate::prove::output_words(&proof))?;
-
-            let gas_used = expected.gas_used;
-            let (family_proofs, init_proofs, delegation_proofs) = proof.get_proof_counts();
-            let total_proofs = family_proofs + init_proofs + delegation_proofs;
-
-            let proof_bytes =
-                crate::prove::serialize_proof_to_bytes_enveloped(&proof, self.config.security);
-            let log = ProvingLog {
-                block_number,
-                gas_used,
-                cycle_count: cycles,
-                num_proofs: total_proofs,
-                proving_millis,
-                message: String::from("Success"),
-            };
-            Ok((proof_bytes, log))
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            let _ = (input_path, block_number, start);
-            bail!("Compiled without GPU support. Rebuild with --features gpu");
-        }
+        let proof_bytes = crate::proof_format::proof_file_bytes(&proved.artifact)?;
+        let log = ProvingLog {
+            block_number,
+            gas_used: expected.gas_used,
+            cycle_count: proved.program_cycles(),
+            num_proofs: proved.proof_count(),
+            proving_millis,
+            message: String::from("Success"),
+        };
+        Ok((proof_bytes, log))
     }
 
     fn persist_proving_log(&self, log: &ProvingLog) -> Result<()> {
