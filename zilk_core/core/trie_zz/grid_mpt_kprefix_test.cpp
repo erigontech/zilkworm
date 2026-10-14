@@ -464,17 +464,17 @@ size_t row_of(const uint8_t* node) {
     return kprefix::kRows;
 }
 
-// Two keys of `pre` under the same branch below the root, a full one (all 16 second nibbles present), the
-// first going through slot `lo` of it and the second through slot `hi` or a later one.
+// Two keys of `pre` under the same branch below the root, a full one (all 16 second nibbles present) in root slot
+// `min_top` or a later one, the first going through slot `lo` of it and the second through slot `hi` or a later one.
 struct KeyPair {
     bytes32 k1, k2;
 };
-std::optional<KeyPair> pair_under_full_branch(const Map& pre, unsigned lo, unsigned hi) {
+std::optional<KeyPair> pair_under_full_branch(const Map& pre, unsigned lo, unsigned hi, unsigned min_top = 0) {
     std::array<uint16_t, 16> present{};
     for (const auto& [k, v] : pre) present[k.bytes[0] >> 4] |= static_cast<uint16_t>(1u << (k.bytes[0] & 0x0f));
     for (auto it = pre.begin(); it != pre.end(); ++it) {
         const unsigned top = it->first.bytes[0] >> 4;
-        if (present[top] != 0xffff || (it->first.bytes[0] & 0x0f) != lo) continue;
+        if (top < min_top || present[top] != 0xffff || (it->first.bytes[0] & 0x0f) != lo) continue;
         for (auto jt = std::next(it); jt != pre.end() && (jt->first.bytes[0] >> 4) == top; ++jt)
             if ((jt->first.bytes[0] & 0x0f) >= hi) return KeyPair{it->first, jt->first};
     }
@@ -530,6 +530,53 @@ TEST_CASE("kprefix: a branch read first is resumed when a later update writes it
             CHECK(row_of(branch_below_root(w.state, pre_root, kp->k1).data()) == kprefix::kRows);
         }
     }
+}
+
+// The root is looked up when the walk starts, and keeps the state of its blocks before the first slot the updates
+// write (the first nibble of the first key written): the new root resumes from it.
+TEST_CASE("kprefix: the root keeps the state of its blocks before the first slot written", "[trie][gridmpt][kprefix]") {
+    std::mt19937_64 rng(14);
+    Map nodes;
+    const Map pre = random_trie(rng, 1500);
+    const bytes32 pre_root = hb_root(pre, &nodes);
+    std::array<bool, 16> seen{};
+    for (const auto& [k, v] : pre) {
+        const unsigned top = k.bytes[0] >> 4;
+        if (top < 4 || seen[top]) continue;
+        seen[top] = true;
+        CAPTURE(top);
+        // Reads first, then a write of the key's own value: the root is verified with the state saved and does not
+        // change, so the state stays in row 0.
+        std::vector<TrieNodeFlat> ups;
+        for (const auto& [k0, v0] : pre) {
+            if ((k0.bytes[0] >> 4) >= top) break;
+            if (ups.size() < 3) ups.push_back(read_of(k0, v0));
+        }
+        ups.push_back(write_of(k, v, v));
+        {
+            Witness w{nodes};
+            GridMPT<true> grid{w.state, pre_root};
+            CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
+            CHECK_FALSE(grid.failed());
+            const auto root = w.state.find_node_rlp(pre_root);
+            REQUIRE(root.has_value());
+            REQUIRE(root->size() == kNode);
+            CHECK(kprefix::tag_orig[0] == root->data());
+            CHECK(kprefix::tag_sb[0] == kprefix::first_blocks(top));
+        }
+        // The same with a new value: the new root resumes from the state, which goes.
+        ups.back() = write_of(k, v, value_of(rng, 20));
+        {
+            Witness w{nodes};
+            GridMPT<true> grid{w.state, pre_root};
+            Map post = pre;
+            post[k] = Bytes{ups.back().current_value()};
+            CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
+            CHECK_FALSE(grid.failed());
+            CHECK(kprefix::tag_orig[0] == nullptr);
+        }
+    }
+    CHECK(std::count(seen.begin(), seen.end(), true) == 12);
 }
 
 TEST_CASE("kprefix: a corrupt node at a row holding a live tag fails verification", "[trie][gridmpt][kprefix]") {
@@ -615,9 +662,11 @@ TEST_CASE("kprefix: a branch an SLOAD walk verified is resumed when check_root w
     }
     Map nodes;
     const bytes32 root = hb_root(slots, &nodes);
+    unsigned roots_with_state = 0;
     for (const unsigned lo : {4u, 9u, 13u}) {
         CAPTURE(lo);
-        const auto kp = pair_under_full_branch(slots, lo, lo);
+        // Under root slot 0 for one key, and 4 or later (a root state of a block or more) for the others.
+        const auto kp = pair_under_full_branch(slots, lo, lo, lo == 4 ? 0u : lo - 3);
         REQUIRE(kp.has_value());
         const bytes32 hk = kp->k1;
         StorageWitness sw{addr, root, nodes};
@@ -645,7 +694,11 @@ TEST_CASE("kprefix: a branch an SLOAD walk verified is resumed when check_root w
         CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
         CHECK_FALSE(grid.failed());
         CHECK(sw.state.walk_state_blocks(branch.data()) == 0);  // consumed by the fold
+        // The root, which the walk verified first too, resumes from its state in the table as well.
+        CHECK(sw.state.walk_state_blocks(root_node->data()) == 0);
+        roots_with_state += (hk.bytes[0] >> 4) >= 4;
     }
+    CHECK(roots_with_state > 0);
 }
 
 TEST_CASE("kprefix: a write before the slot a walk saved for hashes the branch in full", "[trie][gridmpt][kprefix]") {

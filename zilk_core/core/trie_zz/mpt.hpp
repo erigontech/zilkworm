@@ -410,6 +410,9 @@ class GridMPT {
     bool last_was_delete_{false};
     // grid_[0] is the node find_node_rlp() verified to hash to prev_root_ (unchanged while unmodified).
     bool root_unfolded_{false};
+    // Set by the constructor and reset(): prev_root_ is looked up and unfolded by calc_root_impl(), which knows
+    // the first slot of the root its updates change, so that the lookup saves the right keccak state of the root.
+    bool root_pending_{false};
 
     // Node-store lookups go through DirectState::find_node_rlp, which owns
     // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload
@@ -431,11 +434,12 @@ class GridMPT {
 
     LeafNode make_cur_leaf(ByteView value_rlp);
 
-    // Shared by the constructor and reset(): if previous_root_hash is
-    // non-empty, look it up via DirectState::find_node_rlp and unfold onto
-    // grid_[0]. Defined in grid_mpt.cpp to keep the DirectState include out
-    // of mpt.hpp.
-    void init_from_root(bytes32 previous_root_hash);
+    // Run by calc_root_impl() before its walk, for the root the constructor or reset() named: if
+    // previous_root_hash is non-empty, look it up via DirectState::find_node_rlp and unfold onto grid_[0].
+    // A full branch verified there keeps the keccak state of its blocks before `first_slot`, the first slot of
+    // it the updates change (kNoSlot: none), for the final root to resume from. Defined in grid_mpt.cpp to keep
+    // the DirectState include out of mpt.hpp.
+    void init_from_root(bytes32 previous_root_hash, unsigned first_slot);
 
     // Update the grid_line's parent-child bookkeeping
     void link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, unsigned parent_depth);
@@ -459,7 +463,7 @@ class GridMPT {
         // verifying a node stays that node's. A new instance may have a witness at the old one's
         // addresses (a host test), whose tags would then name other bytes.
         kprefix::clear_tags();
-        init_from_root(previous_root_hash);
+        root_pending_ = true;
     }
     // A copy would allocate its grid at the size it has, and its leaves would still view this one's copies.
     GridMPT(const GridMPT&) = delete;
@@ -482,7 +486,7 @@ class GridMPT {
         // search_nibbles_ is overwritten on each insert by the main algorithm
         // (calc_root_from_updates seeds it from the first update); no need to
         // zero it here.
-        init_from_root(new_prev_root);
+        root_pending_ = true;
     }
 
     // Helper methods
