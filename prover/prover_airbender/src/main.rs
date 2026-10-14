@@ -505,12 +505,11 @@ async fn run() -> Result<()> {
         .init();
 
     if let Ok(window) = std::env::var(MERGE_WINDOW_VAR) {
-        if window != "0" {
-            tracing::warn!(
-                "{MERGE_WINDOW_VAR}={window}: the guest jumps into runs of word stores, which the \
-                 prover's JIT then fuses; proofs may be of a wrong execution. Unset it."
-            );
-        }
+        eyre::ensure!(
+            window == "0",
+            "{MERGE_WINDOW_VAR}={window}: the guest jumps into runs of word stores, which the \
+             prover's JIT would then fuse, proving a wrong execution. Unset it or set it to 0."
+        );
     }
 
     let args = Args::parse();

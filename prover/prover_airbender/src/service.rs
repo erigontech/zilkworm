@@ -506,10 +506,11 @@ impl AirbenderService {
         // The simulator bounds its steps, the prover the timestamp, which a delegation call
         // advances by more than one cycle: a run can reach the exit point past the prover's
         // bound, which the prover would cut short.
-        if run.cycle_count >= MAX_PROVABLE_CYCLES as u64 {
+        let bound = self.config.max_cycles.min(MAX_PROVABLE_CYCLES) as u64;
+        if run.cycle_count >= bound {
             Some(format!(
                 "the block takes {} cycles or more, more than the prover takes ({} cycles)",
-                run.cycle_count, MAX_PROVABLE_CYCLES
+                run.cycle_count, bound
             ))
         } else if run.succeeded(self.guest.exit_pc) {
             None

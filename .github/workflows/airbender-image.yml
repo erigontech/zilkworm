@@ -11,6 +11,20 @@ name: Airbender Prover Image
 on:
   push:
     branches: [main]
+    # What goes into the image; a commit that changes none of it keeps the previous image.
+    paths:
+      - prover/**
+      - zilk_core/**
+      - third_party/**
+      - cmake/**
+      - CMakeLists.txt
+      - Makefile
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .gitmodules
+      - .dockerignore
+      - .github/workflows/airbender-image.yml
   workflow_dispatch:
 
 permissions:

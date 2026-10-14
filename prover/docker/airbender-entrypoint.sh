@@ -38,10 +38,12 @@ PROVE_EVERY=${PROVE_EVERY:-100}
 RESTART_DELAY=${RESTART_DELAY:-30}
 
 # The verification key (EVKEY001) that the service's proofs verify against: a function of the
-# guest and the prover's recursion programs, so it is computed once per image revision, and a
-# volume reused by a newer image gets its own. Publish it next to the proofs (the Ethproofs
-# verifier and `verify --vk` take it).
-VK_DIR=${VK_DIR:-$DATA_DIR/vk-${ZILKWORM_REVISION:-local}}
+# guest and the prover's recursion programs, so it is computed once for each of them, and a
+# volume reused by another image (or a local build of another guest) gets its own. Publish it
+# next to the proofs (the Ethproofs verifier and `verify --vk` take it).
+VK_ID=$(cat "$GUEST.bin" "$GUEST.text" "${FSV_DIR:?FSV_DIR is required}"/fsv_*.bin "$FSV_DIR"/fsv_*.text \
+        | sha256sum | cut -c1-16)
+VK_DIR=${VK_DIR:-$DATA_DIR/vk-${ZILKWORM_REVISION:-local}-$VK_ID}
 mkdir -p "$DATA_DIR" "$VK_DIR"
 
 if [ -n "${ETHPROOFS_ENDPOINT:-}" ] && [ -n "${ETHPROOFS_TOKEN:-}" ] && [ -n "${ETHPROOFS_CLUSTER_ID:-}" ]; then

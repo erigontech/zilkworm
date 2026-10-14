@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Proves every MFBD flat-bundle block in the given corpus directory with the
-# Airbender GPU prover (base layer by default). Sequential — the GPU is the
-# bottleneck. Resumable: blocks whose proof.bin already exists are skipped.
+# Airbender GPU prover, to the final recursion layer. Sequential — the GPU is
+# the bottleneck. Resumable: blocks whose proof.bin already exists are skipped.
 #
 # Corpus layout (from `make sp1-benchmark-corpus`):
 #   <blocks_dir>/<N>/flatWitnessBundle<N>.mfbd
@@ -16,15 +16,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PROVER="$PROJECT_DIR/prover/prover_airbender/target/release/z6m_prover_airbender"
 GUEST_BASE="$PROJECT_DIR/prover/guest_airbender/build/z6m_guest"
-SETUP_DIR="$PROJECT_DIR/temp/airbender_setup"
 LOG_DIR="$PROJECT_DIR/temp/airbender_prove"
 PROOF_DIR="$PROJECT_DIR/temp/airbender_proofs"
-UNTIL="base"
 BLOCKS_DIR=""
 TIMEOUT_S=1200
 
 usage() {
-    echo "Usage: $0 --dir <blocks_dir> [-s start] [-e end] [-l log_dir] [-o proof_dir] [-u base|unrolled|unified] [-t timeout_s]"
+    echo "Usage: $0 --dir <blocks_dir> [-s start] [-e end] [-l log_dir] [-o proof_dir] [-t timeout_s]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -34,7 +32,6 @@ while [[ $# -gt 0 ]]; do
         -e)    END="$2";        shift 2 ;;
         -l)    LOG_DIR="$2";    shift 2 ;;
         -o)    PROOF_DIR="$2";  shift 2 ;;
-        -u)    UNTIL="$2";      shift 2 ;;
         -t)    TIMEOUT_S="$2";  shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) usage; exit 1 ;;
@@ -52,12 +49,6 @@ mkdir -p "$LOG_DIR/blocks" "$PROOF_DIR"
 SUMMARY_LOG="$LOG_DIR/summary.log"
 > "$SUMMARY_LOG"
 
-# Setup cache (compute once if missing)
-if [[ ! -f "$SETUP_DIR/setup.bin" ]]; then
-    echo "Computing setup cache into $SETUP_DIR ..."
-    "$PROVER" --guest-bin "$GUEST_BASE" setup --setup-dir "$SETUP_DIR" --until "$UNTIL" || exit 1
-fi
-
 BLOCK_LIST=()
 mapfile -t ALL_BLOCKS < <(ls "$BLOCKS_DIR" | sort -n)
 for block_num in "${ALL_BLOCKS[@]}"; do
@@ -69,7 +60,7 @@ for block_num in "${ALL_BLOCKS[@]}"; do
 done
 
 TOTAL=${#BLOCK_LIST[@]}
-echo "=== Airbender prove-all: $TOTAL blocks (until=$UNTIL) ===" | tee -a "$SUMMARY_LOG"
+echo "=== Airbender prove-all: $TOTAL blocks ===" | tee -a "$SUMMARY_LOG"
 
 PASSED=0; FAILED=0; SKIPPED=0; k=0
 FAILED_BLOCKS=()
@@ -87,16 +78,14 @@ for block_num in "${BLOCK_LIST[@]}"; do
 
     t0=$SECONDS
     timeout "$TIMEOUT_S" "$PROVER" --guest-bin "$GUEST_BASE" prove \
-        --file-name "$mfbd" --gpu --until "$UNTIL" \
-        --setup-dir "$SETUP_DIR" --output-dir "$out_dir" \
+        --file-name "$mfbd" --backend gpu --output-dir "$out_dir" \
         > "$log_file" 2>&1
     rc=$?
     dt=$(( SECONDS - t0 ))
 
-    # A proof of a FAILED guest execution is not a pass: the prover proves
-    # whatever ran, including runs that ended in a state-root mismatch.
-    if [[ $rc -eq 0 ]] && grep -q "Proving complete" "$log_file" && [[ -f "$out_dir/proof.bin" ]] \
-       && ! grep -q "run FAILED\|ERROR: State Root Mismatch" "$log_file"; then
+    # The prover refuses a block whose guest run fails (or does not commit the
+    # block's hash) and exits non-zero, so a written proof is a pass.
+    if [[ $rc -eq 0 ]] && grep -q "Proved block" "$log_file" && [[ -f "$out_dir/proof.bin" ]]; then
         PASSED=$((PASSED+1))
         echo "PROGRESS $k/$TOTAL block $block_num ok (${dt}s)"
     else

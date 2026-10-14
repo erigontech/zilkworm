@@ -76,9 +76,9 @@ starts it again whenever it exits:
 | `RESTART_DELAY` | seconds before the service is started again (default 30) |
 | `PROVER_EXTRA_ARGS` | further prover options, word-split |
 
-On first start for an image revision the entrypoint computes the guest's verification key into
-`$DATA_DIR/vk-<revision>/vk.bin` (on the CPU, about two minutes) and logs its sha256; later starts
-reuse it. Publish it with the proofs: `verify --vk` and the Ethproofs verifier check proofs
+On first start for an image the entrypoint computes the guest's verification key into
+`$DATA_DIR/vk-<revision>-<inputs>/vk.bin`, where `<inputs>` is a hash of the guest and the
+recursion programs (on the CPU, about two minutes), and logs its sha256; later starts reuse it. Publish it with the proofs: `verify --vk` and the Ethproofs verifier check proofs
 against it. The service then builds the GPU prover once (the setups of the guest and the
 recursion programs) and starts at the chain's tip.
 
