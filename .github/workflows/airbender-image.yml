@@ -3,7 +3,7 @@
 
 # Publishes the Airbender GPU prover image (prover/Dockerfile, target airbender) for every commit
 # merged to main, tagged with the commit: ghcr.io/erigontech/zilkworm-airbender:<sha> (full and
-# short) and :main for the latest. The image runs as is on a GPU host or on vast.ai; see
+# short) and :main for the latest. A manual run on another branch pushes only the commit tags. The image runs as is on a GPU host or on vast.ai; see
 # docs/airbender-docker-service.md. The package stays private until an org admin makes it public
 # (once, in its package settings). A pull request that changes the image's build builds it
 # without pushing, to show that it still builds on the runner.
@@ -88,7 +88,7 @@ jobs:
           tags: |
             type=sha,format=long,prefix=
             type=sha,prefix=
-            type=raw,value=main
+            type=raw,value=main,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.title=zilkworm-airbender
             org.opencontainers.image.description=Zilkworm Airbender GPU prover and proving service
