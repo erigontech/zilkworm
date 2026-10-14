@@ -186,8 +186,8 @@ disk of a few tens of GB. Use `ghcr.io/erigontech/zilkworm-airbender:<commit sha
   witness conversion and the preflight are not in it; `proving_cycles` the guest's cycles,
   `proof` the base64 of `proof.bin`).
 - `Z6M_REPLAY_THREADS` sets the prover's CPU threads that replay the guest into circuit traces
-  (Airbender's default is 8). More threads only help where they, and not host memory or PCIe
-  bandwidth, limit the commitment of the base layer's memory.
+  (Airbender's default is 8). On a 24-core host, 16 threads did not shorten the commitment of
+  the base layer's memory, which the pipeline's one-thread simulator bounds there.
 
 ## Known limitations
 
