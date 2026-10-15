@@ -253,6 +253,67 @@ TEST_CASE("a callee's calldata ends at the size of the arguments", "[word_layout
     }
 }
 
+TEST_CASE("CALLDATALOAD equals a byte-order model at every index", "[word_layout]") {
+    // Every index from 0 to past the end of the calldata, so that the word is whole, partial or
+    // empty, and indexes whose low 32 bits are inside the calldata but whose high bits are not
+    // zero: the rv32 build tests the index a 32-bit word at a time (see calldataload()). The
+    // calldata of the transaction is in byte order; a callee's is the caller's memory (in the word
+    // layout on the rv32 test build) at each alignment, between bytes that are not zero.
+    std::vector<bytes32> indexes;
+    for (uint8_t i = 0; i < 104; ++i) {
+        bytes32 w{};
+        w.bytes[31] = i;
+        indexes.push_back(w);
+    }
+    for (const unsigned high : {27u, 23u, 0u}) {  // 2^32 + 4, 2^64 + 4 and 2^255 + 4.
+        bytes32 w{};
+        w.bytes[high] = high == 0 ? uint8_t{0x80} : uint8_t{1};
+        w.bytes[31] = 4;
+        indexes.push_back(w);
+    }
+    indexes.push_back(filled(0xff));
+
+    Asm loader;
+    for (size_t k = 0; k < indexes.size(); ++k)
+        loader.push_word(indexes[k]).op(CALLDATALOAD).push(32 * k).op(MSTORE);
+    const uint64_t out_size = 32 * indexes.size();
+    loader.ret(0, out_size);
+
+    const auto model = [&indexes](const bytes& calldata) {
+        bytes out;
+        for (const auto& w : indexes) {
+            const bool small = std::all_of(w.bytes, w.bytes + 31, [](uint8_t b) { return b == 0; });
+            for (uint64_t i = 0; i < 32; ++i) {
+                const uint64_t at = uint64_t{w.bytes[31]} + i;
+                out.push_back(small && at < calldata.size() ? calldata[at] : uint8_t{0});
+            }
+        }
+        return out;
+    };
+
+    Rng rng{0x9E3779B97F4A7C15ull};
+    for (uint64_t size = 0; size <= 72; ++size) {
+        bytes calldata(size, 0);
+        for (auto& b : calldata)
+            b = rng.below(3) == 0 ? uint8_t{0} : static_cast<uint8_t>(rng.next());
+        const bytes expected = model(calldata);
+
+        const auto direct = run(loader.code, calldata);
+        REQUIRE(direct.status == EVMC_SUCCESS);
+        CHECK(direct.output == expected);
+
+        for (uint64_t in = 0; in < 8; ++in) {
+            Asm caller;
+            for (uint64_t offset = 0; offset < 160; offset += 32)
+                caller.mstore(offset, filled(0x11));
+            caller.copy(CALLDATACOPY, in, 0, size).call(kEcho, in, size, 256, out_size).op(POP);
+            const auto nested = run(caller.ret(256, out_size).code, calldata, loader.code);
+            REQUIRE(nested.status == EVMC_SUCCESS);
+            CHECK(nested.output == expected);
+        }
+    }
+}
+
 TEST_CASE("a CALL writes only the bytes of the output range", "[word_layout]") {
     // The callee returns 3 bytes; with the memory full of 0xff the byte after them stays.
     const bytes three = Asm{}.mstore(0, filled(0xab)).ret(0, 3).code;
