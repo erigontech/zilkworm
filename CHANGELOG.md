@@ -6,6 +6,8 @@
 
 This release adds Airbender ([zksync-airbender](https://github.com/matter-labs/zksync-airbender) v3, rv32im) as Zilkworm's second zkVM, next to SP1 Hypercube: an rv32 guest, a GPU prover and a proving service on the Airbender v3 stack, and a GPU prover image published to GHCR. On Ethproofs mainnet the service proved 470 consecutive blocks at a 3.82 s median on 2x RTX 5090, and proved at a 2.58 s median on 4x RTX 5090. Five rounds of rv32 optimizations and the keccak_f1600 delegations cut the guest's cycles on the 200-block mainnet corpus from 54.23B to 27.86B (-48.6%). The witness checks were tightened along the way: every state read, including a claim that an account or slot is absent, is now checked against the parent's state root. ZVM1 now carries upstream evmone v0.25.0.
 
+The release also brings alpha.4's ERE stateless-input work from `release/0.1.0-alpha.4` into main (#115); see v0.1.0-alpha.4 below.
+
 #### Airbender
 
 Guest (`prover/guest_airbender`):
@@ -22,7 +24,7 @@ Prover (`prover/prover_airbender`):
 
 Proving service (`--service`):
 - Follows the chain tip (`newHeads` over WebSocket, or polling), fetches `debug_executionWitness`, converts it to MFBD in-process and proves every N-th block
-- Posts `queued`, `proving` and `proved` to Ethproofs. `queued` is posted as soon as a block is picked, and the proving time reported is the prover's own run (#111). A `proved` post that is rate limited (429), gets a 5xx or gets no response is retried up to 4 times (#113)
+- Posts `queued`, `proving` and `proved` to Ethproofs. `queued` is posted as soon as a block is picked, and the proving time reported is the prover's own run (#111). A `proved` post that is rate limited (429), gets a 5xx or gets no response is posted up to 4 times (#113)
 
 Image (`ghcr.io/erigontech/zilkworm-airbender`, public):
 - `prover/Dockerfile` target `airbender`, with CUDA kernels for compute capabilities 8.0, 8.9, 9.0 and 12.0 (A100, Ada, Hopper, RTX 50xx)
@@ -30,7 +32,7 @@ Image (`ghcr.io/erigontech/zilkworm-airbender`, public):
 - Tagged `:<commit sha>` and `:main` for every commit on main that changes the image, and `:vX.Y.Z` for each release. The release attaches the image's guest (`z6m_guest_airbender.bin`, `.text`) and its verification key (`z6m_guest_airbender.vk`)
 - The verification key changes whenever the guest does. An Ethproofs cluster that moves to this release's image needs this release's key on its cluster version before its proofs show as verified
 
-Igor Borodin (@hatemosphere) wrote the prover's first `verify` and `bench` commands, the tip-following service and the Ethproofs envelope.
+Igor Borodin (@hatemosphere) wrote the prover's first `verify` and `bench` commands, its Ethproofs envelopes, and the service's tip-following latency work (fast polling and `newHeads` over WebSocket).
 
 #### Airbender proving performance
 
@@ -38,10 +40,10 @@ Live on Ethproofs mainnet, with the guest as of #113:
 
 | Host | Blocks | Median proving time |
 |---|---|---|
-| 2x RTX 5090, Core Ultra 7 270K Plus | 470 consecutive (26191456..26191925), all proved and posted | 3.82 s |
+| 2x RTX 5090, Core Ultra 7 270K Plus | 470 consecutive (26191456..26191925), all proved | 3.82 s |
 | 4x RTX 5090, Threadripper PRO 7965WX (vast.ai) | 174+ at the tip | 2.58 s |
 
-On 200 consecutive mainnet blocks (26190513..26190712) and 2x RTX 5090, the keccak_f1600 delegations alone took the median from 5.14 s (#112's guest) to 4.06 s (-21.8%). The same 200 blocks prove at a 2.87 s median on 4x RTX 5090 with an EPYC 9654P. The base layer's memory commitments are fed by a single-threaded trace simulator, so the host CPU's per-core speed limits how much more GPUs help.
+On 200 consecutive mainnet blocks (26190513..26190712) and 2x RTX 5090, the keccak_f1600 delegations alone took the median from 5.14 s (#112's guest) to 4.06 s (-21.1%). The same 200 blocks prove at a 2.87 s median on 4x RTX 5090 with an EPYC 9654P. The base layer's memory commitments run on the host CPU, where a single-threaded simulator feeds the trace replay, so on 4 GPUs the host's per-core speed matters too: with 4x RTX 5090, the same build proved about 7% faster on a Threadripper PRO 7965WX host than on an EPYC 9B14 host.
 
 Guest cycles on the 200-block mainnet corpus (`Airbender 200-block Bench`):
 
@@ -50,7 +52,7 @@ Guest cycles on the 200-block mainnet corpus (`Airbender 200-block Bench`):
 | Airbender integration (#28) | 54.23B | |
 | Guest performance (#31) | 39.21B | -27.7% |
 | Round 4 (#34) | 33.51B | -14.5% |
-| Witness soundness fixes (#35..#77) and #85..#90 | 34.10B | +1.8% |
+| Witness soundness fixes and follow-ups (#35..#90, #108) | 34.10B | +1.8% |
 | Round 5: 35 optimizations (#105) | 32.19B | -5.6% |
 | `USE_HASH_KEY` recovery on by default (#112) | 32.76B | +1.8% |
 | keccak_f1600 delegations, keccak prefix resumes, KECCAK256 memos, BLOCKHASH cache (#113) | 28.00B | -14.5% |
@@ -85,7 +87,7 @@ ZVM1 now corresponds to upstream evmone v0.25.0 (Amsterdam) plus the zkVM work, 
   - BigInt-delegation Montgomery arithmetic for secp256k1, bn254, BLS12-381 (blst) and 256-bit MODEXP
   - Keccak on the keccak_f1600 delegation, with KECCAK256 inputs memoized per block and trie hashing resumed from a saved prefix state
   - secp256k1 batch signer recovery with shared inversions, a GLV scalar split and NAF tables; bn254 ECMUL by width-5 NAFs; KZG point evaluation with one Miller loop
-  - The interpreter keeps gas and bounds checks in 32 bits and fuses opcodes: PUSH1 with ADD, AND, NOT and SWAP1; PUSH2 with JUMP and JUMPI; comparisons with the conditional jump they decide; SAR and SIGNEXTEND with PUSH1
+  - The interpreter charges fused instructions' gas with one low-word test, keeps bounds checks in 32 bits, and fuses opcodes: PUSH1 with ADD, AND, NOT and SWAP1; PUSH2 with JUMP and JUMPI; comparisons with the conditional jump they decide; SAR and SIGNEXTEND with PUSH1
   - EVM memory is kept in a big-endian word layout, JUMPDESTs are scanned on demand, and a lean code cache is used
 - State: a transaction's context is computed once instead of once per frame, the refund cap is computed without a division, and the state diff carries the hash of the code it sets
 - Fixes: the memory cost square is widened to 64 bits, MODEXP lengths are added in 64 bits, gas products of sizes use unsigned arithmetic, and CALLDATALOAD at the end of the input loads 0 first
@@ -98,8 +100,6 @@ ZVM1 now corresponds to upstream evmone v0.25.0 (Amsterdam) plus the zkVM work, 
 - `Airbender Prover Image`: builds and pushes the GPU image; a PR that changes the image's build builds it without pushing
 - The rv32 paths are tested under ASan and UBSan (#108), and main's unit-test and EEST jobs were fixed (#110)
 - Release workflow: the release commit's Airbender image is tagged with the release tag, and its guest and verification key are attached and listed in `SHA256SUMS.txt`
-
-#115 brings alpha.4's ERE stateless-input work from `release/0.1.0-alpha.4` into main; see v0.1.0-alpha.4 below.
 
 ### Contributors
 

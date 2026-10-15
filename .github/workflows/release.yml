@@ -135,6 +135,10 @@ jobs:
           if [[ ! -s RELEASE_NOTES.md ]]; then
             echo "No CHANGELOG.md section found for $TAG." > RELEASE_NOTES.md
           fi
+          if [[ -z "$AIRBENDER_DIGEST" || -z "$AIRBENDER_VK_SHA256" ]]; then
+            echo "The Airbender job did not report the image digest and the verification key's sha256" >&2
+            exit 1
+          fi
           {
             echo
             echo "### Airbender prover image and verification key"

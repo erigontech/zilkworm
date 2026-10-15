@@ -131,11 +131,12 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           # A release is tagged with its commit (resolved from the tag, not the triggering event)
-          # and the release tag; :main moves only with main.
+          # and the release tag; :main moves only with main, never in a release (even one
+          # dispatched from main).
           tags: |
             type=sha,format=long,prefix=,enable=${{ inputs.release_tag == '' }}
             type=sha,prefix=,enable=${{ inputs.release_tag == '' }}
-            type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=main,enable=${{ inputs.release_tag == '' && github.ref == 'refs/heads/main' }}
             type=raw,value=${{ steps.rev.outputs.sha }},enable=${{ inputs.release_tag != '' }}
             type=raw,value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
           labels: |
@@ -185,6 +186,8 @@ jobs:
           name: airbender-release-assets
           path: airbender-release/
           if-no-files-found: error
+          # A re-run of all of the release's jobs uploads it again.
+          overwrite: true
 
       - name: Summary
         if: github.event_name != 'pull_request'
