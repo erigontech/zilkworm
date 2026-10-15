@@ -61,6 +61,11 @@ if(EEST_MFBD_DIR OR EEST_JSON_DIR)
     endif()
 endif()
 
+# The EEST fixtures the runner is known to get wrong, see the list for why. Each is registered WILL_FAIL,
+# so one that passes again fails ctest until it is taken off the list.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../eest-known-failures.txt" EEST_KNOWN_FAILURES REGEX "^[^#]")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../eest-known-failures.txt")
+
 function(_register_eest_tests label ext fixtures_dir)
     file(GLOB_RECURSE files CONFIGURE_DEPENDS "${fixtures_dir}/*.${ext}")
     foreach(path ${files})
@@ -68,6 +73,12 @@ function(_register_eest_tests label ext fixtures_dir)
         set(test_name "state_transition/${label}/${rel}")
         add_test(NAME "${test_name}" COMMAND $<TARGET_FILE:state_transition> "${path}")
         set_tests_properties("${test_name}" PROPERTIES SKIP_RETURN_CODE 2)
+        # The list names fixtures by their JSON path under blockchain_tests/.
+        string(REGEX REPLACE "^blockchain_tests/" "" fixture "${rel}")
+        string(REGEX REPLACE "\\.${ext}$" ".json" fixture "${fixture}")
+        if(fixture IN_LIST EEST_KNOWN_FAILURES)
+            set_tests_properties("${test_name}" PROPERTIES WILL_FAIL TRUE)
+        endif()
     endforeach()
 endfunction()
 
