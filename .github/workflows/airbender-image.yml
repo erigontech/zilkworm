@@ -3,10 +3,14 @@
 
 # Publishes the Airbender GPU prover image (prover/Dockerfile, target airbender) for every commit
 # merged to main, tagged with the commit: ghcr.io/erigontech/zilkworm-airbender:<sha> (full and
-# short) and :main for the latest. A manual run on another branch pushes only the commit tags. The image runs as is on a GPU host or on vast.ai; see
-# docs/airbender-docker-service.md. The package stays private until an org admin makes it public
-# (once, in its package settings). A pull request that changes the image's build builds it
-# without pushing, to show that it still builds on the runner.
+# short) and :main for the latest. A manual run on another branch pushes only the commit tags. The
+# image runs as is on a GPU host or on vast.ai; see docs/airbender-docker-service.md. A pull
+# request that changes the image's build builds it without pushing, to show that it still builds
+# on the runner.
+#
+# release.yml calls it with a release tag: the release commit's image (built here if the commit
+# has none yet) is tagged :<release tag>, and the guest and its verification key are taken from it
+# for the release (tools/scripts/airbender_release_assets.sh).
 name: Airbender Prover Image
 
 on:
@@ -32,6 +36,19 @@ on:
       - prover/docker/**
       - .github/workflows/airbender-image.yml
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: The release tag, e.g. v0.1.0-alpha.5
+        type: string
+        required: true
+    outputs:
+      digest:
+        description: The release image's digest
+        value: ${{ jobs.build-and-push.outputs.digest }}
+      vk_sha256:
+        description: sha256 of the release guest's verification key
+        value: ${{ jobs.build-and-push.outputs.vk_sha256 }}
 
 permissions:
   contents: read
@@ -43,6 +60,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/erigontech/zilkworm-airbender
+  RELEASE_TAG: ${{ inputs.release_tag }}
 
 jobs:
   build-and-push:
@@ -50,27 +68,21 @@ jobs:
     runs-on: ubuntu-latest
     environment: ci
     timeout-minutes: 240
+    outputs:
+      digest: ${{ steps.assets.outputs.digest }}
+      vk_sha256: ${{ steps.assets.outputs.vk_sha256 }}
     steps:
-      # The CUDA devel base image and the prover's build need more disk than the runner leaves free.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          sudo docker image prune -af
-          df -h /
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # The release tag, when called from release.yml (empty: the event's commit).
+          ref: ${{ inputs.release_tag }}
           token: ${{ secrets.PAT_TOKEN || github.token }}
           submodules: false
 
-      - name: Init submodules
-        uses: ./.github/actions/init-submodules
-        with:
-          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Resolve the commit
+        id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -80,20 +92,60 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A release reuses the image that the push to main already built for its commit.
+      - name: Tag the commit's image with the release tag
+        id: reuse
+        if: env.RELEASE_TAG != ''
+        env:
+          SHA: ${{ steps.rev.outputs.sha }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$SHA" > /dev/null 2>&1; then
+            docker buildx imagetools create -t "$IMAGE:$RELEASE_TAG" "$IMAGE:$SHA"
+            echo "reused=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No image for $SHA yet: building it"
+          fi
+
+      # The CUDA devel base image and the prover's build need more disk than the runner leaves free.
+      - name: Free disk space
+        if: steps.reuse.outputs.reused != 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af
+          df -h /
+
+      - name: Init submodules
+        if: steps.reuse.outputs.reused != 'true'
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: steps.reuse.outputs.reused != 'true'
+        uses: docker/setup-buildx-action@v3
+
       - name: Extract metadata
         id: meta
+        if: steps.reuse.outputs.reused != 'true'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # A release is tagged with its commit (resolved from the tag, not the triggering event)
+          # and the release tag; :main moves only with main, never in a release (even one
+          # dispatched from main).
           tags: |
-            type=sha,format=long,prefix=
-            type=sha,prefix=
-            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=long,prefix=,enable=${{ inputs.release_tag == '' }}
+            type=sha,prefix=,enable=${{ inputs.release_tag == '' }}
+            type=raw,value=main,enable=${{ inputs.release_tag == '' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.rev.outputs.sha }},enable=${{ inputs.release_tag != '' }}
+            type=raw,value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
           labels: |
             org.opencontainers.image.title=zilkworm-airbender
             org.opencontainers.image.description=Zilkworm Airbender GPU prover and proving service
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
 
       - name: Build and push
+        if: steps.reuse.outputs.reused != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -103,19 +155,54 @@ jobs:
           # ZILKWORM_REVISION names the verification key the entrypoint computes; CUDA_ARCHS keeps
           # the Dockerfile's default ("80;89;90;120": A100, Ada, Hopper, RTX Blackwell).
           build-args: |
-            ZILKWORM_REVISION=${{ github.sha }}
+            ZILKWORM_REVISION=${{ steps.rev.outputs.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=airbender-image
           cache-to: type=gha,scope=airbender-image,mode=min
 
+      # Computing the verification key peaks at ~15 GB of memory, about all the runner has.
+      - name: Add swap
+        if: env.RELEASE_TAG != ''
+        run: |
+          sudo fallocate -l 16G /mnt/release.swap
+          sudo chmod 600 /mnt/release.swap
+          sudo mkswap /mnt/release.swap
+          sudo swapon /mnt/release.swap
+          free -h
+
+      - name: Stage the release assets
+        id: assets
+        if: env.RELEASE_TAG != ''
+        run: |
+          tools/scripts/airbender_release_assets.sh "$IMAGE:$RELEASE_TAG" airbender-release
+          echo "vk_sha256=$(sha256sum airbender-release/z6m_guest_airbender.vk | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "digest=$(docker buildx imagetools inspect "$IMAGE:$RELEASE_TAG" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the release assets
+        if: env.RELEASE_TAG != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: airbender-release-assets
+          path: airbender-release/
+          if-no-files-found: error
+          # A re-run of all of the release's jobs uploads it again.
+          overwrite: true
+
       - name: Summary
         if: github.event_name != 'pull_request'
+        env:
+          SHA: ${{ steps.rev.outputs.sha }}
+          VK_SHA256: ${{ steps.assets.outputs.vk_sha256 }}
         run: |
           {
             echo "### Airbender prover image"
             echo
             echo '```'
-            echo "${{ env.IMAGE }}:${{ github.sha }}"
+            echo "$IMAGE:${RELEASE_TAG:-$SHA}"
             echo '```'
+            if [ -n "$RELEASE_TAG" ]; then
+              echo
+              echo "Commit \`$SHA\`, verification key sha256 \`$VK_SHA256\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
