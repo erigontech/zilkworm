@@ -197,6 +197,11 @@ if(BUILD_TESTING)
     set_source_files_properties(
       zilk_core/dev/cli/mem_builtins_host.c PROPERTIES COMPILE_OPTIONS "${MEM_BUILTINS_HOST_FLAGS}"
     )
+    # The same for the calldata scans of data_byte_count.hpp, which load only aligned words.
+    set_source_files_properties(
+      zilk_core/core/common_zz/data_byte_count_test.cpp
+      PROPERTIES COMPILE_OPTIONS "-fsanitize=alignment;-fno-sanitize-recover=alignment"
+    )
     target_link_options(zilkworm.tests PRIVATE -fsanitize=alignment)
   endif()
   # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the

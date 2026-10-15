@@ -1,12 +1,13 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// count_nonzero_bytes_words (the rv32 guest's calldata counter, four bytes per step) is compared with the
-// plain per-byte loop. The views start at every alignment of 0 to 7 and the sizes run through the head, the
-// 8-byte steps, the 127-pair blocks (1016 bytes) and the tail, with byte values chosen to hit the lane
-// arithmetic: 0x80 (bit 7 only), 0x7F, 0x01, 0xFF, a single non-zero byte at every position, and all-non-zero
-// inputs long enough to fill a lane past 255 if a block were longer than 127 pairs. The buffers that end or
-// start at a protected page check that no byte outside the view is read.
+// count_nonzero_bytes_words, the guests' calldata counter, is compared with the plain per-byte loop at both
+// of its word widths: four bytes (the rv32 guest's) and eight (the rv64 guest's). The views start at every
+// alignment of 0 to 7 and the sizes run through the head, the word steps, the 255-word blocks (1020 and 2040
+// bytes) and the tail, with byte values chosen to hit the lane arithmetic: 0x80 (bit 7 only), 0x7F, 0x01,
+// 0xFF, a single non-zero byte at every position, and all-non-zero inputs long enough to fill a lane past
+// 255 if a block were longer than 255 words. The buffers that end or start at a protected page check that
+// no byte outside the view is read.
 
 #include "data_byte_count.hpp"
 
@@ -34,10 +35,15 @@ namespace {
         return count;
     }
 
+    void require_count(silkworm::ByteView view, size_t want) {
+        REQUIRE(count_nonzero_bytes_words<uint32_t>(view) == want);
+        REQUIRE(count_nonzero_bytes_words<uint64_t>(view) == want);
+    }
+
     void check_view(const uint8_t* p, size_t n) {
         const size_t want = reference(p, n);
         const silkworm::ByteView view{p, n};
-        REQUIRE(count_nonzero_bytes_words(view) == want);
+        require_count(view, want);
         REQUIRE(count_nonzero_bytes(view) == want);
     }
 
@@ -47,23 +53,25 @@ namespace {
         check_view(buf.data() + offset, n);
     }
 
-    // Sizes that matter: all of 0..80, and around every block boundary of 1016 bytes (and the 8-byte step).
+    // Sizes that matter: all of 0..80, and around the first block boundaries of either width (1020 and 2040
+    // bytes).
     std::vector<size_t> interesting_sizes() {
         std::vector<size_t> sizes;
         for (size_t n = 0; n <= 80; ++n)
             sizes.push_back(n);
-        for (size_t block = 1; block <= 4; ++block)
-            for (int d = -10; d <= 10; ++d)
-                sizes.push_back(static_cast<size_t>(static_cast<int>(block * 1016) + d));
-        for (const size_t n : {size_t{1023}, size_t{1024}, size_t{1025}, size_t{2032}, size_t{2040}, size_t{4096},
-                               size_t{65535}, size_t{65536}, size_t{65536 + 7}})
+        for (const size_t block : {size_t{1020}, size_t{2040}})
+            for (size_t k = 1; k <= 3; ++k)
+                for (int d = -10; d <= 10; ++d)
+                    sizes.push_back(static_cast<size_t>(static_cast<int>(k * block) + d));
+        for (const size_t n : {size_t{1023}, size_t{1024}, size_t{1025}, size_t{4096}, size_t{65535}, size_t{65536},
+                               size_t{65536 + 7}})
             sizes.push_back(n);
         return sizes;
     }
 
 }  // namespace
 
-TEST_CASE("count_nonzero_bytes_words: uniform fills at every alignment and size", "[data_byte_count]") {
+TEST_CASE("count_nonzero_bytes word scans: uniform fills at every alignment and size", "[data_byte_count]") {
     constexpr size_t kMax = 65536 + 16;
     for (const uint8_t fill : {uint8_t{0x00}, uint8_t{0x01}, uint8_t{0x7F}, uint8_t{0x80}, uint8_t{0xFF},
                                uint8_t{0x55}, uint8_t{0xAA}}) {
@@ -74,23 +82,21 @@ TEST_CASE("count_nonzero_bytes_words: uniform fills at every alignment and size"
     }
 }
 
-TEST_CASE("count_nonzero_bytes_words: all-non-zero 64 KiB cannot overflow a lane or the reduction", "[data_byte_count]") {
-    // A block longer than 127 pairs would carry a lane past 255 here, and a multiply-by-0x01010101
-    // reduction would wrap; every value 1..255 is its own fill.
+TEST_CASE("count_nonzero_bytes word scans: all-non-zero 64 KiB cannot overflow a lane or the reduction", "[data_byte_count]") {
+    // A block longer than 255 words would carry a lane past 255 here, and a multiply-by-0x01..01 reduction
+    // of the byte lanes would wrap; every value 1..255 is its own fill. Full blocks are 1020 and 2040 bytes.
     std::vector<uint8_t> buf(65536 + 8);
     for (unsigned v = 1; v <= 255; ++v) {
         std::fill(buf.begin(), buf.end(), static_cast<uint8_t>(v));
-        for (size_t offset : {size_t{0}, size_t{1}, size_t{2}, size_t{3}, size_t{4}}) {
-            REQUIRE(count_nonzero_bytes_words({buf.data() + offset, 65536}) == 65536);
-            REQUIRE(count_nonzero_bytes_words({buf.data() + offset, 2040}) == 2040);
-            REQUIRE(count_nonzero_bytes_words({buf.data() + offset, 1016}) == 1016);
-            REQUIRE(count_nonzero_bytes_words({buf.data() + offset, 1024}) == 1024);
-        }
+        for (size_t offset = 0; offset < 8; ++offset)
+            for (const size_t n : {size_t{65536}, size_t{1020}, size_t{2040}, size_t{4080}, size_t{1024}})
+                require_count({buf.data() + offset, n}, n);
     }
 }
 
-TEST_CASE("count_nonzero_bytes_words: one non-zero byte at every position and value", "[data_byte_count]") {
-    // 41 bytes: the head (up to 3), several 8-byte steps and the tail at every alignment.
+TEST_CASE("count_nonzero_bytes word scans: one non-zero byte at every position and value", "[data_byte_count]") {
+    // 41 bytes: the head (up to 3, or 7 at eight bytes per word), several words and the tail at every
+    // alignment.
     constexpr size_t kLen = 41;
     std::vector<uint8_t> buf(kLen + 8);
     for (size_t offset = 0; offset < 8; ++offset)
@@ -98,19 +104,21 @@ TEST_CASE("count_nonzero_bytes_words: one non-zero byte at every position and va
             for (unsigned v = 0; v <= 255; ++v) {
                 std::fill(buf.begin(), buf.end(), uint8_t{0});
                 buf[offset + pos] = static_cast<uint8_t>(v);
-                REQUIRE(count_nonzero_bytes_words({buf.data() + offset, kLen}) == (v != 0 ? 1u : 0u));
+                require_count({buf.data() + offset, kLen}, v != 0 ? 1u : 0u);
             }
-    // The same with one zero byte in an all-non-zero view of 1100 bytes (across a block boundary).
-    std::vector<uint8_t> full(1100 + 8, uint8_t{0xFF});
-    for (size_t offset = 0; offset < 4; ++offset)
-        for (size_t pos = 0; pos < 1100; ++pos) {
+    // The same with one zero byte in an all-non-zero view of 2100 bytes (across a block boundary of either
+    // width).
+    constexpr size_t kFull = 2100;
+    std::vector<uint8_t> full(kFull + 8, uint8_t{0xFF});
+    for (size_t offset = 0; offset < 8; ++offset)
+        for (size_t pos = 0; pos < kFull; ++pos) {
             full[offset + pos] = 0;
-            REQUIRE(count_nonzero_bytes_words({full.data() + offset, 1100}) == 1099);
+            require_count({full.data() + offset, kFull}, kFull - 1);
             full[offset + pos] = 0xFF;
         }
 }
 
-TEST_CASE("count_nonzero_bytes_words: lane edge values", "[data_byte_count]") {
+TEST_CASE("count_nonzero_bytes word scans: lane edge values", "[data_byte_count]") {
     // Every byte pair of neighbours from the values that sit on the carry and the bit-7 boundaries, in
     // every lane of a word (a carry out of a lane would corrupt its neighbour).
     const uint8_t edge[]{0x00, 0x01, 0x02, 0x3F, 0x40, 0x7E, 0x7F, 0x80, 0x81, 0xBF, 0xC0, 0xFE, 0xFF};
@@ -118,7 +126,7 @@ TEST_CASE("count_nonzero_bytes_words: lane edge values", "[data_byte_count]") {
     for (const uint8_t a : edge)
         for (const uint8_t b : edge)
             for (const uint8_t c : edge)
-                for (size_t offset = 0; offset < 4; ++offset) {
+                for (size_t offset = 0; offset < 8; ++offset) {
                     for (size_t i = 0; i < 24; ++i)
                         buf[offset + i] = (i % 3 == 0) ? a : (i % 3 == 1) ? b : c;
                     check_view(buf.data() + offset, 24);
@@ -127,7 +135,19 @@ TEST_CASE("count_nonzero_bytes_words: lane edge values", "[data_byte_count]") {
                 }
 }
 
-TEST_CASE("count_nonzero_bytes_words: random buffers", "[data_byte_count]") {
+TEST_CASE("count_nonzero_bytes word scans: every zero pattern of an aligned word", "[data_byte_count]") {
+    // Each of the 256 patterns of zero and non-zero bytes in an aligned eight-byte word (two words at four
+    // bytes per word), with the non-zero bytes at the carry and bit-7 edge values.
+    alignas(8) uint8_t word[8];
+    for (unsigned mask = 0; mask < 256; ++mask)
+        for (const uint8_t v : {uint8_t{0x01}, uint8_t{0x7F}, uint8_t{0x80}, uint8_t{0xFF}}) {
+            for (size_t i = 0; i < 8; ++i)
+                word[i] = ((mask >> i) & 1) != 0 ? v : uint8_t{0};
+            check_view(word, 8);
+        }
+}
+
+TEST_CASE("count_nonzero_bytes word scans: random buffers", "[data_byte_count]") {
     std::mt19937_64 rng{0xCA11DA7AULL};
     std::vector<uint8_t> buf(70000 + 8);
     const std::vector<size_t> sizes = interesting_sizes();
@@ -161,7 +181,7 @@ TEST_CASE("count_nonzero_bytes_words: random buffers", "[data_byte_count]") {
 }
 
 #ifdef ZILK_GUARD_PAGES
-TEST_CASE("count_nonzero_bytes_words: reads nothing outside the view", "[data_byte_count]") {
+TEST_CASE("count_nonzero_bytes word scans: reads nothing outside the view", "[data_byte_count]") {
     const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
     // Three pages; the outer two are inaccessible, so a read one byte before or after the view faults.
     void* const raw = mmap(nullptr, 3 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -176,7 +196,7 @@ TEST_CASE("count_nonzero_bytes_words: reads nothing outside the view", "[data_by
             uint8_t* const start = at_end ? mid + page - n : mid;
             for (size_t i = 0; i < n; ++i)
                 start[i] = (rng() & 3) == 0 ? uint8_t{0} : static_cast<uint8_t>(1 + rng() % 255);
-            REQUIRE(count_nonzero_bytes_words({start, n}) == reference(start, n));
+            require_count({start, n}, reference(start, n));
         }
     }
     // A longer view that ends at the page boundary, with each start alignment.
@@ -184,7 +204,7 @@ TEST_CASE("count_nonzero_bytes_words: reads nothing outside the view", "[data_by
         const size_t n = page - 8 + shift;
         uint8_t* const start = mid + page - n;
         std::fill(start, start + n, uint8_t{0xFF});
-        REQUIRE(count_nonzero_bytes_words({start, n}) == n);
+        require_count({start, n}, n);
     }
     munmap(raw, 3 * page);
 }
