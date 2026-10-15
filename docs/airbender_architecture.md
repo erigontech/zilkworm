@@ -50,7 +50,7 @@ Produces `z6m_guest.elf`, then `objcopy -O binary` creates `z6m_guest.bin` (flat
 | `airbender_runtime.cpp` | Memory init (copies .rodata/.data from ROM to RAM), calls `main()` |
 | `main.cpp` | Application: reads input via CSR, runs block execution |
 | `simple_allocator.cpp` | Bump allocator for `operator new` / `operator delete` |
-| `mem_builtins.c` | Word-aligned `memcpy`, `memmove`, `memset`, `memcmp` |
+| `prover/guest_common/src/mem_builtins.cpp` | Word-aligned `memcpy`, `memmove`, `memset`, `memcmp`, shared with the SP1 guest |
 | `runtime_stubs.c` | Stubs for `floor`, `fegetround`, `__dso_handle` |
 | `airbender_csr.hpp` | All CSR operations: read/write, UART, blake2s, bigint, keccak, finish |
 

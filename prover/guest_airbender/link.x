@@ -97,7 +97,7 @@ SECTIONS
     *(.bss._ZZN8silkworm6endian14to_big_compactERKN4intx4uintILj256EEEE7full_be)
     *(.rodata._bls_np_hi)
     *(.rodata.*decode_node*12kAllHashLens)
-    *(.rodata.memset_zeros)
+    *(.rodata._ZN12_GLOBAL__N_1L7zeros32E)
     *(.sbss._ZZN8silkworm6endian14to_big_compactEyE7full_be)
     *(.sdata.heap_next .sdata.heap_end)
     *(.rodata._ZN6evmone6crypto3ecc12FieldElementINS0_9secp256k15Curve6FrSpecEE2FpE)
