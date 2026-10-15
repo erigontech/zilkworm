@@ -1790,8 +1790,8 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
         s.sr.post.root = root_after(state, [&](std::vector<AcctSpec>& post) { spec_of(post, t.sender).nonce = 1; });
 #if USE_HASH_KEY
         // The guest recovers kHolder along its trie path, which the witness holds, but not the code its code
-        // hash names, which the witness leaves out too: it halts at the call.
-        expect_halted(s, blob, ps.nodestore, "read_code: code omitted from witness for non-empty code_hash");
+        // hash names, which the witness leaves out too: the block is invalid.
+        expect_rejected(run_guest(s, blob, ps.nodestore), "read_code: code omitted from witness for non-empty code_hash");
 #else
         expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value mismatch in existing leaf");
 #endif

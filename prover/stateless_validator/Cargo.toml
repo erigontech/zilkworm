@@ -11,6 +11,7 @@ license = "Apache-2.0"
 
 [dependencies]
 alloy-consensus = { version = "2.0", default-features = false }
+alloy-eips = { version = "2.0", default-features = false }
 alloy-genesis = { version = "2.0", default-features = false }
 alloy-primitives = { version = "1.0", default-features = false }
 alloy-rlp = "0.3"
@@ -18,14 +19,18 @@ alloy-rpc-types-debug = "2.0"
 anyhow = "1"
 stateless = { git = "https://github.com/paradigmxyz/stateless", rev = "e5480e71a8031641ff471cad9dc482a7a14b32d5", default-features = false }
 
+# Canonical EEST statelessInputBytes decode per EIP-8025 (tests-zkevm v21.0.1 schema).
+stateless-validator-common = { git = "https://github.com/eth-act/ere-guests", tag = "v0.18.0", package = "stateless-validator-common", default-features = false, features = ["std"] }
+libssz = { version = "0.3.0", default-features = false, features = ["alloc"] }
+
 # Optional, gated by the `download` feature: fetch the SP1 guest ELF and VK from GitHub Releases.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
 
 # Optional, gated by the `vk-derive` feature: derive the SP1 program VK for release packaging.
-sp1-sdk = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.0.2", optional = true }
-bincode = { version = "2.0.1", features = ["serde"], optional = true }
+# Same SP1 as ere (v0.18.1), so the published VK matches ere-guests' regenerated program VK.
+sp1-sdk = { git = "https://github.com/succinctlabs/sp1", tag = "v6.6.0", optional = true }
 
 # Optional deps used by the parity-check binary only.
 serde_json = { version = "1", optional = true }
@@ -33,7 +38,7 @@ serde_json = { version = "1", optional = true }
 [features]
 default = []
 download = ["dep:reqwest", "dep:serde", "dep:tokio"]
-vk-derive = ["dep:sp1-sdk", "dep:tokio", "dep:bincode"]
+vk-derive = ["dep:sp1-sdk", "dep:tokio"]
 parity-check = ["dep:serde", "dep:serde_json"]
 
 [[bin]]

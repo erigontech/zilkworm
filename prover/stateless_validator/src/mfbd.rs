@@ -50,6 +50,15 @@ const MPHF_MAX_SEED_RETRIES: u32 = 32;
 
 // Per-block flag bit.
 const BLOCK_FLAG_EXPECT_INVALID: u8 = 0x01;
+const BLOCK_FLAG_ENGINE_RECORD: u8 = 0x02;
+
+/// New-payload request data the block RLP does not carry; the guest checks it before execution.
+pub struct EngineRecord<'a> {
+    /// `execution_payload.block_hash` as claimed by the request.
+    pub block_hash: [u8; 32],
+    /// `versioned_hashes` of the request, in order.
+    pub versioned_hashes: &'a [[u8; 32]],
+}
 
 // Layout sizes — must match C++ static_asserts.
 const ACCOUNT_SIZE: usize = 256;
@@ -908,12 +917,17 @@ fn build_flat_bundle(
     node_store_blob: &[u8],
     network: &str,
     block_flags: &[u8],
+    engine: Option<&EngineRecord<'_>>,
 ) -> Vec<u8> {
     let mut blocks_payload = 0usize;
     for br in block_rlps {
         blocks_payload += align8(br.len());
     }
-    let blocks_section_size = 8 + blocks_payload + block_flags.len();
+    // Engine record: [block_hash 32][u64 n][n * 32 versioned hashes], 8-aligned after the flags.
+    let engine_size = engine.map_or(0, |e| 40 + 32 * e.versioned_hashes.len());
+    let flags_end = 8 + blocks_payload + block_flags.len();
+    let blocks_section_size =
+        if engine_size > 0 { align8(flags_end) + engine_size } else { flags_end };
 
     let hdr_size = align8(FLAT_BUNDLE_HEADER_SIZE);
     let genesis_off = hdr_size;
@@ -955,6 +969,16 @@ fn build_flat_bundle(
     }
     if !block_flags.is_empty() {
         out[cursor..cursor + block_flags.len()].copy_from_slice(block_flags);
+    }
+    if let Some(e) = engine {
+        let mut pos = blocks_off + align8(flags_end);
+        out[pos..pos + 32].copy_from_slice(&e.block_hash);
+        out[pos + 32..pos + 40].copy_from_slice(&(e.versioned_hashes.len() as u64).to_le_bytes());
+        pos += 40;
+        for vh in e.versioned_hashes {
+            out[pos..pos + 32].copy_from_slice(vh);
+            pos += 32;
+        }
     }
     out[anc_off..anc_off + ancestors_rlp.len()].copy_from_slice(ancestors_rlp);
     out[direct_off..direct_off + direct_state_blob.len()].copy_from_slice(direct_state_blob);
@@ -1004,6 +1028,29 @@ pub fn build_mfbd_from_parts(
     witness_headers: &[Bytes],
     fork: &str,
     expect_invalid: bool,
+) -> Result<Vec<u8>> {
+    build_mfbd(
+        current_block_rlp,
+        witness_state,
+        witness_codes,
+        witness_keys,
+        witness_headers,
+        fork,
+        expect_invalid,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_mfbd(
+    current_block_rlp: &[u8],
+    witness_state: &[Bytes],
+    witness_codes: &[Bytes],
+    witness_keys: &[Bytes],
+    witness_headers: &[Bytes],
+    fork: &str,
+    expect_invalid: bool,
+    engine: Option<&EngineRecord<'_>>,
 ) -> Result<Vec<u8>> {
     if witness_headers.is_empty() {
         bail!("witness.headers must contain at least the parent header");
@@ -1181,11 +1228,11 @@ pub fn build_mfbd_from_parts(
     // Match the C++ host: only emit block_flags when expect_invalid is true.
     // (The guest treats an empty block_flags section as "all blocks are expected
     // valid"; emitting [0] would be a no-op semantically but breaks byte parity.)
-    let block_flags_buf: &[u8] = if expect_invalid {
-        const FLAGS: [u8; 1] = [BLOCK_FLAG_EXPECT_INVALID];
-        &FLAGS
-    } else {
-        &[]
+    let invalid_flag = if expect_invalid { BLOCK_FLAG_EXPECT_INVALID } else { 0 };
+    let block_flags_buf: Vec<u8> = match engine {
+        Some(_) => vec![invalid_flag | BLOCK_FLAG_ENGINE_RECORD],
+        None if expect_invalid => vec![invalid_flag],
+        None => Vec::new(),
     };
     let bundle = build_flat_bundle(
         &prev_block_rlp,
@@ -1194,10 +1241,176 @@ pub fn build_mfbd_from_parts(
         &direct_blob,
         &node_store_blob,
         fork,
-        block_flags_buf,
+        &block_flags_buf,
+        engine,
     );
 
     Ok(wrap_mfbd(&bundle))
+}
+
+// ---------- EEST canonical (SIOB) entry point ----------
+
+/// Body-level bits an Amsterdam block reconstruction needs beyond the
+/// header. Passed by value into [`build_mfbd_from_amsterdam_parts`].
+#[derive(Debug, Clone)]
+pub struct AmsterdamWithdrawal {
+    pub index: u64,
+    pub validator_index: u64,
+    pub address: [u8; 20],
+    pub amount: u64,
+}
+
+/// All primitive pieces needed to reconstruct an Amsterdam block from an
+/// EEST `statelessInputBytes` payload. The caller (typically
+/// [`crate::ere_eest`]) decodes the SSZ container and hands over plain Rust
+/// values — this keeps `mfbd.rs` decoupled from the SIOB SSZ types.
+///
+/// `transactions` are EIP-2718 encoded envelopes (raw wire bytes for typed
+/// txs; raw RLP for legacy). `execution_requests` entries are each
+/// `[request_type_byte, request_data...]` per EIP-7685. `block_access_list`
+/// is the raw RLP payload from `ExecutionPayloadV4.block_access_list`; the
+/// same bytes serve both as the source of `witness.keys` (via
+/// [`crate::ere_eest::keys_from_bal_bytes`]) and as the input to the
+/// `block_access_list_hash` (Amsterdam header field, per EIP-7928).
+#[derive(Debug, Clone)]
+pub struct AmsterdamBlockParts<'a> {
+    pub parent_hash: [u8; 32],
+    pub beneficiary: [u8; 20],
+    pub state_root: [u8; 32],
+    pub receipts_root: [u8; 32],
+    pub logs_bloom: [u8; 256],
+    pub prev_randao: [u8; 32],
+    pub block_number: u64,
+    pub gas_limit: u64,
+    pub gas_used: u64,
+    pub timestamp: u64,
+    pub extra_data: &'a [u8],
+    /// Big-endian 32-byte SSZ representation; must fit in u64 in practice.
+    pub base_fee_per_gas: [u8; 32],
+    pub blob_gas_used: u64,
+    pub excess_blob_gas: u64,
+    pub slot_number: u64,
+    pub parent_beacon_block_root: [u8; 32],
+    /// EIP-7685 typed requests: `[type_byte, data...]` per entry.
+    pub execution_requests: &'a [Bytes],
+    pub transactions: &'a [Bytes],
+    pub withdrawals: &'a [AmsterdamWithdrawal],
+    pub block_access_list: &'a [u8],
+    /// `execution_payload.block_hash` claimed by the request.
+    pub block_hash: [u8; 32],
+    /// `versioned_hashes` of the request, in order.
+    pub versioned_hashes: &'a [[u8; 32]],
+}
+
+/// EEST canonical (SIOB) equivalent of [`build_mfbd_from_parts`].
+/// Reconstructs the Amsterdam block RLP from `parts`, derives `witness.keys`
+/// from the embedded Block Access List (EIP-7928), and delegates the rest to
+/// the existing MFBD encoder path.
+pub fn build_mfbd_from_amsterdam_parts(
+    parts: &AmsterdamBlockParts<'_>,
+    witness_state: &[Bytes],
+    witness_codes: &[Bytes],
+    witness_headers: &[Bytes],
+    fork: &str,
+    expect_invalid: bool,
+) -> Result<Vec<u8>> {
+    let current_block_rlp = amsterdam_block_rlp(parts)?;
+    let keys = crate::ere_eest::keys_from_bal_bytes(parts.block_access_list)?;
+    let engine =
+        EngineRecord { block_hash: parts.block_hash, versioned_hashes: parts.versioned_hashes };
+    build_mfbd(
+        &current_block_rlp,
+        witness_state,
+        witness_codes,
+        &keys,
+        witness_headers,
+        fork,
+        expect_invalid,
+        Some(&engine),
+    )
+}
+
+fn amsterdam_block_rlp(parts: &AmsterdamBlockParts<'_>) -> Result<Vec<u8>> {
+    use alloy_consensus::proofs::{calculate_transaction_root, calculate_withdrawals_root};
+    use alloy_consensus::EMPTY_OMMER_ROOT_HASH;
+    use alloy_eips::eip4895::{Withdrawal, Withdrawals};
+    use alloy_eips::eip7685::Requests;
+    use alloy_eips::Decodable2718;
+    use alloy_primitives::{Address, Bloom, B256, B64};
+
+    // Decode raw tx envelopes.
+    let mut txs: Vec<TxEnvelope> = Vec::with_capacity(parts.transactions.len());
+    for tx_bytes in parts.transactions {
+        let mut slice: &[u8] = tx_bytes.as_ref();
+        let tx = TxEnvelope::decode_2718(&mut slice)
+            .map_err(|e| anyhow!("decode tx envelope failed: {e:?}"))?;
+        txs.push(tx);
+    }
+
+    // Convert withdrawals to the alloy type (same fields, different crate).
+    let withdrawals: Vec<Withdrawal> = parts
+        .withdrawals
+        .iter()
+        .map(|w| Withdrawal {
+            index: w.index,
+            validator_index: w.validator_index,
+            address: Address::from(w.address),
+            amount: w.amount,
+        })
+        .collect();
+
+    // Derived roots.
+    let transactions_root = calculate_transaction_root(&txs);
+    let withdrawals_root = calculate_withdrawals_root(&withdrawals);
+    let requests_hash = Requests::new(parts.execution_requests.iter().map(|b| b.clone()).collect())
+        .requests_hash();
+    let block_access_list_hash = keccak256(parts.block_access_list);
+
+    // base_fee_per_gas is a Uint256Bytes in SIOB but semantically fits in u64.
+    let base_fee_per_gas = {
+        let high_zero = parts.base_fee_per_gas[..24].iter().all(|b| *b == 0);
+        if !high_zero {
+            bail!("Amsterdam base_fee_per_gas exceeds u64 range");
+        }
+        let mut b8 = [0u8; 8];
+        b8.copy_from_slice(&parts.base_fee_per_gas[24..32]);
+        u64::from_be_bytes(b8)
+    };
+
+    let header = Header {
+        parent_hash: B256::from(parts.parent_hash),
+        ommers_hash: EMPTY_OMMER_ROOT_HASH,
+        beneficiary: Address::from(parts.beneficiary),
+        state_root: B256::from(parts.state_root),
+        transactions_root,
+        receipts_root: B256::from(parts.receipts_root),
+        logs_bloom: Bloom::from(parts.logs_bloom),
+        difficulty: U256::ZERO,
+        number: parts.block_number,
+        gas_limit: parts.gas_limit,
+        gas_used: parts.gas_used,
+        timestamp: parts.timestamp,
+        extra_data: Bytes::copy_from_slice(parts.extra_data),
+        mix_hash: B256::from(parts.prev_randao),
+        nonce: B64::ZERO,
+        base_fee_per_gas: Some(base_fee_per_gas),
+        withdrawals_root: Some(withdrawals_root),
+        blob_gas_used: Some(parts.blob_gas_used),
+        excess_blob_gas: Some(parts.excess_blob_gas),
+        parent_beacon_block_root: Some(B256::from(parts.parent_beacon_block_root)),
+        requests_hash: Some(requests_hash),
+        block_access_list_hash: Some(block_access_list_hash),
+        slot_number: Some(parts.slot_number),
+    };
+
+    let body = BlockBody::<TxEnvelope> {
+        transactions: txs,
+        ommers: Vec::new(),
+        withdrawals: Some(Withdrawals::new(withdrawals)),
+    };
+
+    let block = Block { header, body };
+    Ok(alloy_rlp::encode(&block))
 }
 
 /// Walk an MPT exhaustively from `root` and return every leaf as `(path, value_rlp)`.

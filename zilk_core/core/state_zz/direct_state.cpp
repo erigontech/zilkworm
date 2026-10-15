@@ -428,6 +428,8 @@ DirectState::DirectState(DirectState&& other) noexcept
     ancestors_ = std::move(other.ancestors_);
     ancestors_number_ = other.ancestors_number_;
     ancestors_end_ = other.ancestors_end_;
+    witness_incomplete_ = other.witness_incomplete_;
+    require_block_hash_headers_ = other.require_block_hash_headers_;
     touched_ = std::move(other.touched_);
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
     changed_storage_journal_ = std::move(other.changed_storage_journal_);
@@ -1342,7 +1344,12 @@ evmc::bytes32 DirectState::get_block_hash(const BlockHeader& header, BlockNum n)
         }
         ancestors_.push_back(it->second.parent_hash);
     }
-    return ancestors_[static_cast<size_t>(depth)];
+    const evmc::bytes32& hash = ancestors_[static_cast<size_t>(depth)];
+    if (require_block_hash_headers_ && !headers_.contains(hash)) [[unlikely]] {
+        ancestor_missing_ = true;
+        return {};
+    }
+    return hash;
 }
 
 }  // namespace zilkworm

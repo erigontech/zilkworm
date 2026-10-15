@@ -30,7 +30,7 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
 endif()
 
 project(zilkworm)
-set(PROJECT_VERSION 0.1.0-alpha.3)
+set(PROJECT_VERSION 0.1.0-alpha.4)
 
 include(CTest)
 
@@ -182,6 +182,9 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/code_store_seal_test.cpp
     zilk_core/dev/cli/in_place_code_test.cpp
     zilk_core/dev/cli/strict_diag_test.cpp
+    zilk_core/dev/cli/omitted_code_from_create_test.cpp
+    zilk_core/dev/cli/flat_bundle_engine_test.cpp
+    zilk_core/dev/cli/evmone_delegate_code_read_test.cpp
   )
   # The guest's memcpy and friends, built for the host with the guest's code-generation flags: the
   # byte loops must not be turned into the libc calls this file replaces. The guest is built with

@@ -25,6 +25,14 @@ inline constexpr std::size_t kInputHeaderSizeEJSN = 8;
 
 // Per-block flag bits (optional trailing bytes of the blocks section).
 inline constexpr uint8_t kBlockFlagExpectInvalid = 0x01;
+// An engine record follows the flag bytes for this block.
+inline constexpr uint8_t kBlockFlagEngineRecord = 0x02;
+
+// New-payload request data the block RLP does not carry.
+struct BlockEngineRecord {
+    evmc::bytes32 block_hash;                   // payload.block_hash
+    std::span<const uint8_t> versioned_hashes;  // request versioned hashes, 32 bytes each
+};
 
 // blob must be declared before direct; direct holds spans into blob.
 struct FlatBundle {
@@ -35,6 +43,9 @@ struct FlatBundle {
     DirectState direct;
     std::string_view network;
     std::span<const uint8_t> block_flags;  // empty when absent
+    std::vector<std::optional<BlockEngineRecord>> engine_records;  // per block; empty when absent
+    std::vector<silkworm::ByteView> ancestor_rlps;  // raw ancestor header RLPs, views into blob
+    bool ancestors_well_formed{true};  // every ancestor entry is one header RLP with no trailing bytes
 
     FlatBundle(const FlatBundle&) = delete;
     FlatBundle& operator=(const FlatBundle&) = delete;
@@ -78,6 +89,7 @@ std::vector<uint8_t> build_flat_bundle(
     const std::vector<uint8_t>& direct_state_blob,
     const std::vector<uint8_t>& node_store_blob,
     std::string_view network,
-    std::span<const uint8_t> block_flags = {});
+    std::span<const uint8_t> block_flags = {},
+    std::span<const std::optional<BlockEngineRecord>> engine_records = {});
 
 }  // namespace zilkworm

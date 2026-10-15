@@ -1,17 +1,17 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Derive the SP1 program verifying key for a guest ELF and write it as a bincode-serialised `SP1VerifyingKey`.
+//! Derive the SP1 program verifying key for a guest ELF and write its 32-byte `bytes32_raw` digest,
+//! the program VK form ere checks and ere-guests publishes.
 //!
 //! Usage: derive_vk <input.elf> <output.vk>
 
 use std::env;
-use std::fs::{self, File};
-use std::io::BufWriter;
+use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
-use sp1_sdk::{Prover, ProverClient, ProvingKey};
+use sp1_sdk::{HashableKey, Prover, ProverClient, ProvingKey};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,16 +33,12 @@ async fn main() -> Result<()> {
         .setup(elf.into())
         .await
         .map_err(|e| anyhow!("sp1 setup failed: {e}"))?;
-    let vk = pk.verifying_key().clone();
+    let vk = pk.verifying_key().bytes32_raw();
 
     if let Some(parent) = vk_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent dir for {}", vk_path.display()))?;
     }
-    let f = File::create(&vk_path)
-        .with_context(|| format!("failed to create {}", vk_path.display()))?;
-    let mut w = BufWriter::new(f);
-    bincode::serde::encode_into_std_write(&vk, &mut w, bincode::config::standard())
-        .context("bincode-encode SP1VerifyingKey")?;
+    fs::write(&vk_path, vk).with_context(|| format!("failed to write {}", vk_path.display()))?;
     Ok(())
 }
