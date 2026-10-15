@@ -178,7 +178,8 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/state_transition_chain_test.cpp
     zilk_core/dev/cli/env_push_log_test.cpp
     zilk_core/dev/cli/mem_builtins_test.cpp
-    zilk_core/dev/cli/mem_builtins_host.c
+    zilk_core/dev/cli/mem_builtins_host.cpp
+    prover/guest_common/src/mem_builtins_test.cpp
     zilk_core/dev/cli/code_store_seal_test.cpp
     zilk_core/dev/cli/in_place_code_test.cpp
     zilk_core/dev/cli/strict_diag_test.cpp
@@ -186,16 +187,19 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/flat_bundle_engine_test.cpp
     zilk_core/dev/cli/evmone_delegate_code_read_test.cpp
   )
-  # The guest's memcpy and friends, built for the host with the guest's code-generation flags: the
-  # byte loops must not be turned into the libc calls this file replaces. The guest is built with
-  # -mstrict-align, where a misaligned word access traps but x86 runs it silently, so the alignment
-  # sanitizer stands in for it.
+  # The guests' memcpy and friends (prover/guest_common/src/mem_builtins.cpp), built for the host with
+  # the guests' code-generation flags: the loops must not be turned into the libc calls the file
+  # replaces. The guests are built with -mstrict-align, where a misaligned word access traps but x86
+  # runs it silently, so the alignment sanitizer stands in for it. Both test files build it at the
+  # -O3 it always gets in the guests: its word loops depend on the order of their loads and stores,
+  # which only an optimizer could get wrong.
   if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(MEM_BUILTINS_HOST_FLAGS -fno-builtin -fno-tree-loop-distribute-patterns -fsanitize=alignment
                                 -fno-sanitize-recover=alignment
     )
     set_source_files_properties(
-      zilk_core/dev/cli/mem_builtins_host.c PROPERTIES COMPILE_OPTIONS "${MEM_BUILTINS_HOST_FLAGS}"
+      zilk_core/dev/cli/mem_builtins_host.cpp prover/guest_common/src/mem_builtins_test.cpp
+      PROPERTIES COMPILE_OPTIONS "${MEM_BUILTINS_HOST_FLAGS};-O3"
     )
     # The same for the calldata scans of data_byte_count.hpp, which load only aligned words.
     set_source_files_properties(

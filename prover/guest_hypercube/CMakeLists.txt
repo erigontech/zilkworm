@@ -27,14 +27,21 @@ add_subdirectory("${Z6M_ROOT}/third_party" "${SW_BIN}/third_party")
 
 add_subdirectory("${Z6M_ROOT}/zilk_core"   "${SW_BIN}/zilk_core")
 
+# memcpy, memmove, memset and memcmp, shared with the Airbender guest; here the __wrap_ targets of
+# the -Wl,--wrap flags below.
+set(MEM_BUILTINS_SRC "${Z6M_ROOT}/prover/guest_common/src/mem_builtins.cpp")
+
 add_executable(z6m_guest
     src/sp1_entrypoint.S
     src/sp1_runtime.cpp
     src/main.cpp
     src/atomic_stubs.c
-    src/memcpy.cpp
-    src/memmove.cpp
+    ${MEM_BUILTINS_SRC}
 )
+
+# -fno-builtin: the copy and fill loops must not become the calls that -Wl,--wrap makes recurse.
+# -O3: these are the guest's hot path whatever the build type is set to.
+set_source_files_properties(${MEM_BUILTINS_SRC} PROPERTIES COMPILE_OPTIONS "-fno-builtin;-O3")
 
 target_include_directories(z6m_guest PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/include"
@@ -51,6 +58,8 @@ target_link_options(z6m_guest PRIVATE
     -Wl,-e,_start
     -Wl,--wrap=memcpy
     -Wl,--wrap=memmove
+    -Wl,--wrap=memcmp
+    -Wl,--wrap=memset
 )
 
 # Library search path: use the toolchain's rv64im/lp64 sysroot libraries.

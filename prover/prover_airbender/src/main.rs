@@ -487,7 +487,7 @@ fn main() -> Result<()> {
     // Airbender v3's JIT fuses runs of consecutive same-base word loads or stores (immediate
     // stride +4) into groups of RISCV_MERGE_WINDOW (default 4), on the assumption that no jump
     // lands inside a run. The guest breaks that assumption: keccak.c's buf_zero_state_from
-    // (evmone) and mem_builtins.c's memset jump into the middle of runs of `sw`, and a jump past
+    // (evmone) and mem_builtins.cpp's memset jump into the middle of runs of `sw`, and a jump past
     // a group's head would run the group from its head, storing below the target. 0 turns the
     // fusion off. The JIT reads the variable once, from any thread, so it is set here, before
     // the runtime or any other thread starts.

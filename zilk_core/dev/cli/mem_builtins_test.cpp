@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Host tests of the Airbender guest's memcpy, memmove, memset and memcmp
-// (prover/guest_airbender/src/mem_builtins.c, built for the host by mem_builtins_host.c).
+// (prover/guest_common/src/mem_builtins.cpp as Airbender builds it, built for the host by
+// mem_builtins_host.cpp). prover/guest_common/src/mem_builtins_test.cpp tests the same file
+// without the CSR MEMCOPY, at both word sizes.
 //
 // The guest cannot run here, so two things stand in for it. The oracle is the plain byte-by-byte
 // semantics of each function, with canary bytes around every destination: a wrong byte, a store
@@ -101,13 +103,12 @@ std::string describe(const char* fn, size_t n, size_t doff, size_t soff) {
 // Bytes guarded on each side of the destination range and compared after the call.
 constexpr size_t kGuard = 64;
 
-// CSR MEMCOPY calls memcpy() must make when it takes the large path at word alignment with both
-// addresses in the same phase modulo 32: one per whole 32-byte chunk after the lead. n == 96 is
-// copied inline by words, as are n <= 67; the other shapes are left unchecked (SIZE_MAX).
+// CSR MEMCOPY calls memcpy() must make at word alignment: none for n <= 131, which a jump into a
+// run of word copies takes, and none between addresses in different phases modulo 32; else one per
+// whole 32-byte chunk after the lead. The unaligned shapes are left unchecked (SIZE_MAX).
 size_t expected_csr_calls(size_t n, size_t doff, size_t soff) {
     if ((doff & 3) != 0 || (soff & 3) != 0) return SIZE_MAX;
-    if (n == 96) return 0;
-    if (n <= 67 || ((doff ^ soff) & 31) != 0) return SIZE_MAX;
+    if (n <= 131 || ((doff ^ soff) & 31) != 0) return 0;
     const size_t lead = (32 - (doff & 31)) & 31;
     return (n - lead) / 32;
 }
@@ -121,15 +122,17 @@ void check_memcpy(size_t n, size_t doff, size_t soff) {
     std::memcpy(g_expect, g_pristine, total);
     for (size_t i = 0; i < n; ++i) g_expect[dpos + i] = g_src[soff + i];
 
-    g_csr.calls = 0;
+    // g_csr.calls keeps counting across the test, which checks that some copy used the CSR.
+    const size_t calls_before = g_csr.calls;
     void* ret = zilk_guest_memcpy(g_dst + dpos, g_src + soff, n);
+    const size_t calls = g_csr.calls - calls_before;
     if (ret != g_dst + dpos) fail(describe("memcpy returns dest", n, doff, soff));
     if (std::memcmp(g_dst, g_expect, total) != 0) fail(describe("memcpy bytes", n, doff, soff));
     const size_t want = expected_csr_calls(n, doff, soff);
-    if (want != SIZE_MAX && g_csr.calls != want)
-        fail(describe("memcpy CSR calls", n, doff, soff) + " got " + std::to_string(g_csr.calls) +
+    if (want != SIZE_MAX && calls != want)
+        fail(describe("memcpy CSR calls", n, doff, soff) + " got " + std::to_string(calls) +
              " want " + std::to_string(want));
-    if (g_csr.calls * 32 > n) fail(describe("memcpy CSR over-copy", n, doff, soff));
+    if (calls * 32 > n) fail(describe("memcpy CSR over-copy", n, doff, soff));
 }
 
 // memmove(arena + d, arena + s, n) against std::memmove on a copy of the arena.
@@ -182,10 +185,11 @@ TEST_CASE("guest memcpy: sizes to 2200 cross the 512-byte CSR loop and its remai
 TEST_CASE("guest memcpy: boundary sizes and the inline paths", "[mem_builtins]") {
     init_arenas(0xdeadbeefcafef00dULL);
     reset_log();
-    // Sizes where memcpy() changes path: <8, 8, 32, 64..68 (the inline word run ends at 67), 96,
-    // and the first CSR chunk (lead up to 28 plus 32 is 60, but n > 67 only reaches it at 68).
-    constexpr std::array<size_t, 24> sizes{0,  1,  3,  4,  7,  8,  12, 16, 31, 32, 33, 63,
-                                           64, 65, 67, 68, 69, 95, 96, 97, 127, 128, 511, 512};
+    // Sizes where memcpy() changes path: <16 (unaligned bytes), 16, 32, 128..132 (the inline word
+    // run ends at 131), the CSR blocks by a jump into a run of up to 15 and 16 at a time from 512
+    // bytes after the lead, and the last words and bytes after them.
+    constexpr std::array<size_t, 24> sizes{0,   1,   3,   4,   7,   8,   15,  16,  31,  32,  33,  63,
+                                           127, 128, 131, 132, 133, 159, 160, 255, 256, 260, 511, 512};
     for (size_t n : sizes)
         for (size_t doff = 0; doff < 64; ++doff)
             for (size_t soff = 0; soff < 64; ++soff) check_memcpy(n, doff, soff);
@@ -285,8 +289,9 @@ TEST_CASE("guest memmove: larger overlapping and disjoint moves", "[mem_builtins
 TEST_CASE("guest memset: every size and alignment against the byte loop", "[mem_builtins]") {
     init_arenas(0x2468ace02468ace0ULL);
     reset_log();
+    // Past 256 bytes zeros go by CSR blocks, a jump into a run of up to 15 and 16 at a time.
     for (int c : {0, 0xff, 0x5a, 0x1a5 /* the int is truncated to a byte */})
-        for (size_t n = 0; n <= 400; ++n)
+        for (size_t n = 0; n <= 640; ++n)
             for (size_t off = 0; off < 36; ++off) {
                 const size_t dpos = kGuard + off;
                 const size_t total = dpos + n + kGuard;

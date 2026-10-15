@@ -15,8 +15,9 @@ set(common_flags "-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany
 # mainnet corpus: -2.03% guest cycles, guest image 2.53 MB -> 3.00 MB (of the 4 MiB ROM).
 # Builtins stay on so GCC expands fixed-size memcpy/memset/memcmp inline: under -fno-builtin every
 # `std::memcpy(&u64, p, 8)` load was a ~35-cycle call, 41M of them per 200 blocks. Loops are still
-# never turned into library calls (-fno-tree-loop-distribute-patterns), and src/mem_builtins.c,
-# which implements those functions, keeps -fno-builtin. 200-block cycles -2.62%.
+# never turned into library calls (-fno-tree-loop-distribute-patterns), and
+# prover/guest_common/src/mem_builtins.cpp, which implements those functions, keeps -fno-builtin.
+# 200-block cycles -2.62%.
 # -mbranch-cost=1 prices a conditional branch at one instruction, which is what it costs here,
 # instead of the default rocket tuning's three. At three GCC if-converts short branches into
 # straight-line sequences and evaluates both sides of && and ||, executing instructions that the

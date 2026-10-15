@@ -10,11 +10,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(LINKER_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/link.x")
 set(MEMORY_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/memory.x")
 
+# memcpy, memmove, memset and memcmp, shared with the SP1 guest.
+set(MEM_BUILTINS_SRC "${CMAKE_CURRENT_LIST_DIR}/../guest_common/src/mem_builtins.cpp")
+
 add_executable(z6m_guest
     src/main.cpp
     src/airbender_runtime.cpp
     src/simple_allocator.cpp
-    src/mem_builtins.c
+    ${MEM_BUILTINS_SRC}
     src/hashtable_policy.cpp
     src/runtime_stubs.c
     src/start.S
@@ -62,20 +65,18 @@ target_include_directories(z6m_guest SYSTEM PRIVATE
 # ======================================
 
 
-# Prevent GCC/LTO from pattern-matching our custom memcpy/memmove/memset
-# loops back into library calls.  Also compile without LTO so the strong
-# symbol definition survives into the final link and overrides newlib.
-# -fno-toplevel-reorder keeps the functions in source order: memcpy_large() is memcpy()'s callee
-# and GCC would emit it first, moving memcpy() and the functions after it nearly four kilobytes up,
-# which pushes the call sites at the end of their jal range out of it (each then costs an auipc +
-# jalr).
-set_source_files_properties(src/mem_builtins.c PROPERTIES
+# Prevent GCC/LTO from pattern-matching the mem builtins' loops back into library calls. Also
+# compile without LTO so the strong symbol definitions survive into the final link and override
+# newlib. -fno-toplevel-reorder keeps the functions in source order: memcpy_rest() is memcpy()'s
+# callee and GCC would emit it first, moving memcpy() and the functions after it kilobytes up, which
+# pushes the call sites at the end of their jal range out of it (each then costs an auipc + jalr).
+set_source_files_properties(${MEM_BUILTINS_SRC} PROPERTIES
     COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto;-fno-toplevel-reorder"
 )
 
-# src/hashtable_policy.cpp defines the __wrap_ target of the --wrap below. Like mem_builtins.c it is
-# compiled without LTO, so the link-time renaming applies to an ordinary object, and its code lands
-# next to mem_builtins.c, within jal range of the LTO code that calls it.
+# src/hashtable_policy.cpp defines the __wrap_ target of the --wrap below. Like mem_builtins.cpp it
+# is compiled without LTO, so the link-time renaming applies to an ordinary object, and its code
+# lands next to mem_builtins.cpp, within jal range of the LTO code that calls it.
 set_source_files_properties(src/hashtable_policy.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
