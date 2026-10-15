@@ -64,8 +64,7 @@ execute-block: z6m_prover
 # `make test-fixtures` downloads, sha256-verifies and extracts every entry
 # into test-fixtures-cache/<key>/. Re-runs are no-ops while the pin matches.
 FIXTURES_CACHE := $(CURDIR)/test-fixtures-cache
-# Manifest key selecting which pinned corpus to run. Override to eest_devnet
-# to run the Glamsterdam devnet fixtures instead of the stable release.
+# Manifest key selecting which pinned corpus to run.
 EEST_KEY ?= eest_stable
 EEST_FIXTURES_DIR := $(FIXTURES_CACHE)/$(EEST_KEY)/fixtures
 

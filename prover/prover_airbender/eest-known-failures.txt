@@ -3,10 +3,18 @@
 #
 # EEST blockchain tests (paths relative to the fixtures' blockchain_tests/) that the Airbender
 # guest is known not to finish. These are resource limits, not wrong results: CI fails only
-# on failures outside this list. Measured against tests@v20.0.1 (test-fixtures.json).
+# on failures outside this list. Measured against tests@v21.0.1 (test-fixtures.json).
 
 # Exceed the 5B-cycle execution limit: BLS12-381 MSM / pairing, quadratic-complexity and
-# maximum block-RLP-size tests.
+# maximum block-RLP-size tests, and Amsterdam's invalid_negative_excess_blob_gas, whose higher
+# blob limits put 2,744 cases in one file (216 for Osaka).
+for_amsterdam/cancun/eip4844_blobs/excess_blob_gas/invalid_negative_excess_blob_gas.json
+for_amsterdam/osaka/eip7934_block_rlp_limit/max_block_rlp_size/block_at_rlp_size_limit_boundary.json
+for_amsterdam/osaka/eip7934_block_rlp_limit/max_block_rlp_size/block_rlp_size_at_limit_with_all_typed_transactions.json
+for_amsterdam/prague/eip2537_bls_12_381_precompiles/bls12_g1msm/valid.json
+for_amsterdam/prague/eip2537_bls_12_381_precompiles/bls12_g2msm/valid.json
+for_amsterdam/prague/eip2537_bls_12_381_precompiles/bls12_variable_length_input_contracts/valid_gas_g1msm.json
+for_amsterdam/prague/eip2537_bls_12_381_precompiles/bls12_variable_length_input_contracts/valid_gas_g2msm.json
 for_cancun/ported_static/stQuadraticComplexityTest/call50000_sha256/call50000_sha256.json
 for_cancuntopragueattime15k/prague/eip2935_historical_block_hashes_from_state/block_hashes/block_hashes_history_at_transition.json
 for_osaka/osaka/eip7934_block_rlp_limit/max_block_rlp_size/block_at_rlp_size_limit_boundary.json
@@ -24,12 +32,7 @@ for_praguetoosakaattime15k/osaka/eip7934_block_rlp_limit/max_block_rlp_size/fork
 
 # Multi-test fixture files: the guest's bump allocator never frees, so the heap runs out
 # part-way through the file.
-for_berlin/frontier/scenarios/scenarios/scenarios.json
+for_amsterdam/frontier/scenarios/scenarios/scenarios.json
 for_cancun/frontier/scenarios/scenarios/scenarios.json
-for_constantinoplefix/frontier/scenarios/scenarios/scenarios.json
-for_istanbul/frontier/scenarios/scenarios/scenarios.json
-for_london/frontier/scenarios/scenarios/scenarios.json
 for_osaka/frontier/scenarios/scenarios/scenarios.json
-for_paris/frontier/scenarios/scenarios/scenarios.json
 for_prague/frontier/scenarios/scenarios/scenarios.json
-for_shanghai/frontier/scenarios/scenarios/scenarios.json

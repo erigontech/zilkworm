@@ -105,7 +105,9 @@ jobs:
           grep -rlE '^CRASHED! ' target/eest-logs/ 2>/dev/null | sort > crashed.txt
           comm -23 reported.txt crashed.txt > ok.txt
           comm -23 all.txt ok.txt | sed 's#^target/eest-logs/##; s#\.log$#.json#' > failed.txt
-          grep -vE '^[[:space:]]*(#|$)' eest-known-failures.txt | sort > known.txt
+          # This guest's resource limits, and the fixtures the runner itself gets wrong.
+          cat eest-known-failures.txt ../../zilk_core/dev/eest-known-failures.txt |
+            grep -vE '^[[:space:]]*(#|$)' | sort > known.txt
           comm -23 failed.txt known.txt > unexpected.txt
           comm -13 failed.txt known.txt > fixed.txt
 
