@@ -471,11 +471,13 @@ Outcome run(evmc::VM& vm, const World& world, const address& entry) {
         acc.code = bytes{c.code.data(), c.code.size()};
         acc.code_hash = c.hash;
         acc.balance = 1000000;
-        state.insert(c.addr, std::move(acc));
+        acc.loaded = true;  // Seeded: the view is not asked for it.
+        state.access(c.addr) = std::move(acc);
     }
     evmone::state::Account sender;
     sender.balance = 1000000;
-    state.insert(kSender, std::move(sender));
+    sender.loaded = true;
+    state.access(kSender) = std::move(sender);
 
     evmone::state::BlockInfo block;
     block.gas_limit = 2000000000;

@@ -5,8 +5,8 @@
 // sequences they replace, access_storage() + get_storage() and access_storage() + set_storage().
 // The orderings they must keep are not covered by any fixture: a cold SLOAD that runs out of gas
 // reads nothing, because a stateless witness may omit a slot that the reference client never
-// read; and a revert of a cold SSTORE must erase a fresh slot only after the value change that
-// points at it has been undone.
+// read; and a revert of a cold SSTORE must undo the value change before the access that loaded
+// the slot, which then stays loaded: a read remains a read (EIP-7928).
 
 #include <array>
 #include <cstdint>
@@ -61,7 +61,7 @@ struct Fixture {
     evmone::state::Transaction tx;
     evmone::state::Host host{EVMC_CANCUN, vm, state, block, block_hashes, tx};
 
-    Fixture() { state.insert(kContract); }
+    Fixture() { state.get(kContract); }  // Loaded, as the account whose code runs.
 
     evmc::Host& h() { return host; }
     const StorageValue* slot(const bytes32& key) {
@@ -178,7 +178,7 @@ TEST_CASE("SLOAD and SSTORE equal the sequences they replace", "[storage_host]")
     }
 }
 
-TEST_CASE("reverting a cold SSTORE of a fresh slot erases it", "[storage_host]") {
+TEST_CASE("reverting a cold SSTORE of a fresh slot keeps it loaded and cold", "[storage_host]") {
     Fixture f;
     const auto key = word(4);
     const auto cp = f.state.checkpoint();
@@ -187,7 +187,12 @@ TEST_CASE("reverting a cold SSTORE of a fresh slot erases it", "[storage_host]")
     CHECK(access == EVMC_ACCESS_COLD);
     REQUIRE(f.slot(key) != nullptr);
     f.state.rollback(cp);
-    CHECK(f.slot(key) == nullptr);
+    REQUIRE(f.slot(key) != nullptr);
+    CHECK(f.slot(key)->access_status == EVMC_ACCESS_COLD);
+    CHECK(f.slot(key)->loaded);
+    CHECK(f.slot(key)->current == word(5));
+    CHECK(f.slot(key)->original == word(5));
+    CHECK(f.view.storage_reads == 1);
 
     // Warm and loaded: a revert restores the value and the warm flag of the entry that stays.
     CHECK(f.h().sstore(kContract, key, word(7), access) == EVMC_STORAGE_MODIFIED);

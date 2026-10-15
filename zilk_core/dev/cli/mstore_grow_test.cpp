@@ -132,7 +132,8 @@ struct Env {
         block.timestamp = 1;
         evmone::state::Account sender;
         sender.balance = 1000000;
-        state.insert(kSender, std::move(sender));
+        sender.loaded = true;  // Seeded: the view is not asked for it.
+        state.access(kSender) = std::move(sender);
     }
 
     static evmone::state::Account account(const bytes& code) {
@@ -140,10 +141,11 @@ struct Env {
         acc.code = code;
         std::memcpy(acc.code_hash.bytes, ethash::keccak256(code.data(), code.size()).bytes, 32);
         acc.balance = 1000000;
+        acc.loaded = true;
         return acc;
     }
 
-    void set_code(const address& a, const bytes& code) { state.insert(a, account(code)); }
+    void set_code(const address& a, const bytes& code) { state.access(a) = account(code); }
 
     // kDirty with dirty_code(size), whose account is made once per size.
     void set_dirty(uint64_t size) {
@@ -151,7 +153,7 @@ struct Env {
         auto it = std::find_if(made.begin(), made.end(), [&](const auto& m) { return m.first == size; });
         if (it == made.end())
             it = made.insert(made.end(), {size, account(dirty_code(size))});
-        state.insert(kDirty, evmone::state::Account{it->second});
+        state.access(kDirty) = it->second;
     }
 
     Outcome run(const address& to, int64_t gas) {

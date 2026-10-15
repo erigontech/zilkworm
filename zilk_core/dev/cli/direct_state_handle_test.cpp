@@ -14,6 +14,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <evmone/test/state/bal.hpp>
+#include <evmone/test/state/state.hpp>
 #include <evmone/test/state/state_diff.hpp>
 #include <zilk_core/core/state_zz/account_read_test_util.hpp>
 
@@ -25,7 +26,6 @@ namespace {
 
 using evmc::bytes32;
 using evmone::state::BalBuilder;
-using evmone::state::BalStateView;
 using evmone::state::StateDiff;
 using namespace evmc::literals;
 
@@ -225,19 +225,20 @@ TEST_CASE("apply_state_diff gives the same root with and without handles", "[sta
     CHECK(with.state->read_storage(kSlotIndex, index_key(1000)) == index_key(78));
 }
 
-TEST_CASE("BalStateView records storage reads made through a handle", "[state_zz][handle]") {
+TEST_CASE("the block access list records storage reads made through a handle", "[state_zz][handle]") {
     Fixture f;
     DirectStateView view{*f.state};
+    evmone::state::State state{view};
+
+    // The State reads the slot of a loaded account through the account's handle.
+    REQUIRE(!state.get(kOneSlot).nonexistent);
+    CHECK(state.get_storage(kOneSlot, index_key(5)).current == index_key(55));
+
     BalBuilder builder;
-    BalStateView bal{view, builder};
-
-    const auto acc = bal.get_account(kOneSlot);
-    REQUIRE(acc.has_value());
-    CHECK(bal.get_storage_at(acc->handle, kOneSlot, index_key(5)) == index_key(55));
-
+    builder.record_diff(1, state.build_diff(EVMC_AMSTERDAM), view);
     const auto list = builder.build();
     REQUIRE(list.accounts.size() == 1);
     CHECK(list.accounts[0].addr == kOneSlot);
     REQUIRE(list.accounts[0].storage_reads.size() == 1);
-    CHECK(list.accounts[0].storage_reads[0] == index_key(5));
+    CHECK(list.accounts[0].storage_reads[0] == intx::be::load<intx::uint256>(index_key(5)));
 }
