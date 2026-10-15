@@ -27,6 +27,22 @@ equal `PROJECT_VERSION`; any `-` suffix marks the release as a pre-release.
 The workflow then builds the release binaries, generates `SHA256SUMS.txt`, and publishes them
 to the `vX.Y.Z` GitHub release with the CHANGELOG section as the body.
 
+## Airbender image and assets
+
+After checking the tag, and before building anything, the workflow calls
+[`airbender-image.yml`](../.github/workflows/airbender-image.yml) for the tag:
+- It tags the release commit's Airbender prover image `ghcr.io/erigontech/zilkworm-airbender:vX.Y.Z`.
+  The push to `main` already built that image (`:<commit sha>`), so it is only tagged again. A
+  commit with no image yet, such as one only on a `release/*` branch, gets it built here (about
+  40 minutes). Tag a commit on `main` after its **Airbender Prover Image** run has finished, or the
+  release builds the image a second time.
+- It copies the guest out of the image (`z6m_guest_airbender.bin`, `.text`). The image's prover
+  then computes the guest's verification key (`z6m_guest_airbender.vk`, EVKEY001) on the runner's
+  CPU, with swap added for its ~15 GB peak.
+
+The release attaches those three files, lists them in `SHA256SUMS.txt`, and adds the image digest
+and the key's sha256 to the notes. Ethproofs verifies a cluster's proofs against that key.
+
 ## Releasing from any branch
 
 The workflow is tag-driven, not branch-driven: the tag is checked out by commit,

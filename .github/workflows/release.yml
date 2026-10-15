@@ -17,20 +17,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build artifacts and publish release
+  # Before anything is published (the Airbender job tags an image).
+  version:
+    name: Check the tag
     runs-on: ubuntu-latest
-    environment: ci
     permissions:
-      contents: write
-      packages: read
-    container:
-      image: ghcr.io/erigontech/zilkworm-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      contents: read
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    outputs:
+      prerelease: ${{ steps.ver.outputs.prerelease }}
     steps:
       - name: Resolve version
         id: ver
@@ -49,13 +45,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-          submodules: false
-
-      - name: Init submodules
-        uses: ./.github/actions/init-submodules
-        with:
-          token: ${{ secrets.PAT_TOKEN || github.token }}
-          sparse-eest-fixtures: "skip"
+          sparse-checkout: CMakeLists.txt
+          sparse-checkout-cone-mode: false
 
       - name: Verify tag matches PROJECT_VERSION
         shell: bash
@@ -65,6 +56,47 @@ jobs:
             echo "Tag $TAG implies version ${{ steps.ver.outputs.version }}, but CMakeLists.txt PROJECT_VERSION is $cmake_ver" >&2
             exit 1
           fi
+
+  # The release commit's Airbender prover image, tagged with the release tag, and the guest and
+  # verification key taken from it.
+  airbender:
+    name: Airbender image and assets
+    needs: version
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/airbender-image.yml
+    with:
+      release_tag: ${{ github.event.inputs.tag || github.ref_name }}
+    secrets: inherit
+
+  release:
+    name: Build artifacts and publish release
+    needs: [version, airbender]
+    runs-on: ubuntu-latest
+    environment: ci
+    permissions:
+      contents: write
+      packages: read
+    container:
+      image: ghcr.io/erigontech/zilkworm-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          submodules: false
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          sparse-eest-fixtures: "skip"
 
       - name: Build guest ELF, guest VK and prover
         run: make z6m_prover ere-bin
@@ -77,8 +109,23 @@ jobs:
       - name: Stage release artifacts
         run: make release-artifacts
 
+      - name: Download the Airbender assets
+        uses: actions/download-artifact@v4
+        with:
+          name: airbender-release-assets
+          path: temp
+
+      - name: Add the Airbender assets to SHA256SUMS.txt
+        working-directory: temp
+        run: |
+          sha256sum z6m_guest_airbender.bin z6m_guest_airbender.text z6m_guest_airbender.vk >> SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Extract changelog section
         shell: bash
+        env:
+          AIRBENDER_DIGEST: ${{ needs.airbender.outputs.digest }}
+          AIRBENDER_VK_SHA256: ${{ needs.airbender.outputs.vk_sha256 }}
         run: |
           awk -v tag="$TAG" '
             $0 ~ "^## " tag "([ ]|$)" { f=1; print; next }
@@ -88,6 +135,13 @@ jobs:
           if [[ ! -s RELEASE_NOTES.md ]]; then
             echo "No CHANGELOG.md section found for $TAG." > RELEASE_NOTES.md
           fi
+          {
+            echo
+            echo "### Airbender prover image and verification key"
+            echo
+            echo "- Image: \`ghcr.io/erigontech/zilkworm-airbender:$TAG\` (\`$AIRBENDER_DIGEST\`)"
+            echo "- Guest: \`z6m_guest_airbender.bin\` and \`.text\`; verification key (EVKEY001): \`z6m_guest_airbender.vk\`, sha256 \`$AIRBENDER_VK_SHA256\`"
+          } >> RELEASE_NOTES.md
           printf '\n---\nReleased by @%s\n' "$GITHUB_ACTOR" >> RELEASE_NOTES.md
 
       - name: Publish GitHub release
@@ -96,13 +150,16 @@ jobs:
           tag_name: ${{ env.TAG }}
           name: Zilkworm ${{ env.TAG }}
           body_path: RELEASE_NOTES.md
-          prerelease: ${{ steps.ver.outputs.prerelease }}
+          prerelease: ${{ needs.version.outputs.prerelease }}
           fail_on_unmatched_files: true
           files: |
             temp/z6m_guest_hypercube.elf
             temp/z6m_guest_hypercube.vk
             temp/z6m_prover_hypercube
             temp/state_transition_linux_x86_64
+            temp/z6m_guest_airbender.bin
+            temp/z6m_guest_airbender.text
+            temp/z6m_guest_airbender.vk
             temp/SHA256SUMS.txt
 
   # Called rather than triggered: releases published with GITHUB_TOKEN emit no release event.

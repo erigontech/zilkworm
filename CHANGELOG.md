@@ -1,5 +1,185 @@
 # Changelog
 
+## v0.1.0-alpha.5 - Airbender v3 GPU proving
+
+### Highlights
+
+This release adds Airbender ([zksync-airbender](https://github.com/matter-labs/zksync-airbender) v3, rv32im) as Zilkworm's second zkVM, next to SP1 Hypercube: an rv32 guest, a GPU prover and a proving service on the Airbender v3 stack, and a GPU prover image published to GHCR. On Ethproofs mainnet the service proved 470 consecutive blocks at a 3.82 s median on 2x RTX 5090, and proved at a 2.58 s median on 4x RTX 5090. Five rounds of rv32 optimizations and the keccak_f1600 delegations cut the guest's cycles on the 200-block mainnet corpus from 54.23B to 27.86B (-48.6%). The witness checks were tightened along the way: every state read, including a claim that an account or slot is absent, is now checked against the parent's state root. ZVM1 now carries upstream evmone v0.25.0.
+
+#### Airbender
+
+Guest (`prover/guest_airbender`):
+- Bare-metal rv32im guest in a 4 MiB ROM, built with the pinned xPack `riscv-none-elf-gcc` 15.2.0-1.1. It reads its input through the CSR oracle, allocates from a bump heap, keeps hot read-only data in a guarded gp window, and hands BigInt and keccak_f1600 work to Airbender's delegations
+- Public output: the hash of the last block the run validated (#39). Through the parent hash it binds the parent's state root; the post-state root, gas used and receipts root are checked against that block's header. The host checks the hash against the input
+- Node-store account recovery (`USE_HASH_KEY`) is on by default (#112): reth's `debug_executionWitness` leaves out the address of an account the block destroys, so the guest recovers the account from trie nodes that hash up to the parent's state root
+- Airbender v3 decodes `mulh`, `mulhsu`, `div` and `rem` as illegal instructions, so a post-link check fails the build if the guest contains any
+
+Prover (`prover/prover_airbender`):
+- On the Airbender v3 stack of matter-labs/ethereum-prover#30: zksync-airbender `bd0d5153`, airbender-platform `68fc0605`, zksync-os `ef6a87b2`
+- Commands `execute`, `vk`, `prove`, `bench` and `verify`. Proofs (EPROOF01 v2) and verification keys (EVKEY001 v2) are byte-compatible with ethereum-prover's; proofs verify with `verify` and with `@matterlabs/ethproofs-airbender-verifier` 1.2.0, the verifier Ethproofs uses
+- A preflight run must reach the exit point and commit the block's hash within the cycle limit before the block is proved, and the proof must commit the same hash before it is written or posted. A block the guest rejects is skipped instead of aborting the prover (#111)
+- `--replay-threads` (`Z6M_REPLAY_THREADS`) sets the trace replay threads; `RISCV_MERGE_WINDOW` is fixed at 0, because the guest jumps into runs of word loads and stores that v3's JIT would fuse
+
+Proving service (`--service`):
+- Follows the chain tip (`newHeads` over WebSocket, or polling), fetches `debug_executionWitness`, converts it to MFBD in-process and proves every N-th block
+- Posts `queued`, `proving` and `proved` to Ethproofs. `queued` is posted as soon as a block is picked, and the proving time reported is the prover's own run (#111). A `proved` post that is rate limited (429), gets a 5xx or gets no response is retried up to 4 times (#113)
+
+Image (`ghcr.io/erigontech/zilkworm-airbender`, public):
+- `prover/Dockerfile` target `airbender`, with CUDA kernels for compute capabilities 8.0, 8.9, 9.0 and 12.0 (A100, Ada, Hopper, RTX 50xx)
+- The entrypoint runs the proving service from environment variables and restarts it on exit, so the image runs as is on a GPU host or on vast.ai. See `docs/airbender-docker-service.md` and `docs/airbender_architecture.md`
+- Tagged `:<commit sha>` and `:main` for every commit on main that changes the image, and `:vX.Y.Z` for each release. The release attaches the image's guest (`z6m_guest_airbender.bin`, `.text`) and its verification key (`z6m_guest_airbender.vk`)
+- The verification key changes whenever the guest does. An Ethproofs cluster that moves to this release's image needs this release's key on its cluster version before its proofs show as verified
+
+Igor Borodin (@hatemosphere) wrote the prover's first `verify` and `bench` commands, the tip-following service and the Ethproofs envelope.
+
+#### Airbender proving performance
+
+Live on Ethproofs mainnet, with the guest as of #113:
+
+| Host | Blocks | Median proving time |
+|---|---|---|
+| 2x RTX 5090, Core Ultra 7 270K Plus | 470 consecutive (26191456..26191925), all proved and posted | 3.82 s |
+| 4x RTX 5090, Threadripper PRO 7965WX (vast.ai) | 174+ at the tip | 2.58 s |
+
+On 200 consecutive mainnet blocks (26190513..26190712) and 2x RTX 5090, the keccak_f1600 delegations alone took the median from 5.14 s (#112's guest) to 4.06 s (-21.8%). The same 200 blocks prove at a 2.87 s median on 4x RTX 5090 with an EPYC 9654P. The base layer's memory commitments are fed by a single-threaded trace simulator, so the host CPU's per-core speed limits how much more GPUs help.
+
+Guest cycles on the 200-block mainnet corpus (`Airbender 200-block Bench`):
+
+| After | Cycles | Change |
+|---|---|---|
+| Airbender integration (#28) | 54.23B | |
+| Guest performance (#31) | 39.21B | -27.7% |
+| Round 4 (#34) | 33.51B | -14.5% |
+| Witness soundness fixes (#35..#77) and #85..#90 | 34.10B | +1.8% |
+| Round 5: 35 optimizations (#105) | 32.19B | -5.6% |
+| `USE_HASH_KEY` recovery on by default (#112) | 32.76B | +1.8% |
+| keccak_f1600 delegations, keccak prefix resumes, KECCAK256 memos, BLOCKHASH cache (#113) | 28.00B | -14.5% |
+| evmone v0.25.0 (#114) | 27.86B | -0.5% |
+
+Every step was measured with exact cycle counts and gas parity on all 200 blocks.
+
+#### Witness and state validation
+
+Every state value the guest reads, and every claim that an account or slot is absent, is now checked against the parent block's state root:
+- Failed trie walks are flagged in release builds and reject the block (#35); a claimed pre-value for a key absent from the trie is rejected (#36)
+- The storage walk of an unmodified account is checked against its storage root (#37), and so are the witness slots of an account the block wipes (#51)
+- Every witness slot starts at its verified initial value (#38)
+- Reads of accounts and slots the witness leaves out are walked as claims of absence (#69)
+- CREATE collisions (EIP-7610) are decided by the bound storage root, not by the witness slots (#53)
+- The witness of a multi-block bundle must hold the whole state (#63), and each block must extend the block before it in its bundle (#39)
+- BLOCKHASH is bound to the parent hashes going back from the block (#71)
+- Slot keys in witness records must be strictly ascending (#70), and witness sections and records may not overlap (#77)
+
+GridMPT fixes: a single-child branch's new extension folds into its parent at once, which fixes a wrong root on an honest witness (#59); empty leaves stay out of the grid (#60); the grid is allocated once (#61); and the saved block count is masked before indexing (#62).
+
+#### Execution (all guests)
+
+- The transactions root and transaction hashes come from the canonical transaction RLP (#16), with thread_local RLP scratch for hash and sender pre-images (#17)
+- `tx.data` is passed to evmone as a view (#18), each receipt's RLP is written in one pass (#88), and ecrecover copies at most the 128 bytes it reads (#67)
+
+#### ZVM1/EVMone changes
+
+ZVM1 now corresponds to upstream evmone v0.25.0 (Amsterdam) plus the zkVM work, up from v0.24.0 (#114).
+- intx is vendored inside evmone instead of being a submodule (#107)
+- Airbender rv32:
+  - BigInt-delegation Montgomery arithmetic for secp256k1, bn254, BLS12-381 (blst) and 256-bit MODEXP
+  - Keccak on the keccak_f1600 delegation, with KECCAK256 inputs memoized per block and trie hashing resumed from a saved prefix state
+  - secp256k1 batch signer recovery with shared inversions, a GLV scalar split and NAF tables; bn254 ECMUL by width-5 NAFs; KZG point evaluation with one Miller loop
+  - The interpreter keeps gas and bounds checks in 32 bits and fuses opcodes: PUSH1 with ADD, AND, NOT and SWAP1; PUSH2 with JUMP and JUMPI; comparisons with the conditional jump they decide; SAR and SIGNEXTEND with PUSH1
+  - EVM memory is kept in a big-endian word layout, JUMPDESTs are scanned on demand, and a lean code cache is used
+- State: a transaction's context is computed once instead of once per frame, the refund cap is computed without a division, and the state diff carries the hash of the code it sets
+- Fixes: the memory cost square is widened to 64 bits, MODEXP lengths are added in 64 bits, gas products of sizes use unsigned arithmetic, and CALLDATALOAD at the end of the input loads 0 first
+- Please check the upstream evmone changelog for the full list of changes
+
+#### Tests and CI
+
+- `Airbender EEST Blockchain Tests`: the pinned EEST blockchain tests (tests@v20.0.1) through the rv32 guest. 8595 of 8618 pass. The 23 that don't are known resource limits: the 5B-cycle execution cap, and the bump heap running out on multi-test fixture files. The job fails on any failure outside that list
+- `Airbender 200-block Bench`: exact guest cycles on the 200-block mainnet corpus
+- `Airbender Prover Image`: builds and pushes the GPU image; a PR that changes the image's build builds it without pushing
+- The rv32 paths are tested under ASan and UBSan (#108), and main's unit-test and EEST jobs were fixed (#110)
+- Release workflow: the release commit's Airbender image is tagged with the release tag, and its guest and verification key are attached and listed in `SHA256SUMS.txt`
+
+#115 brings alpha.4's ERE stateless-input work from `release/0.1.0-alpha.4` into main; see v0.1.0-alpha.4 below.
+
+### Contributors
+
+| Author | Commits |
+|---|---|
+| Somnath Banerjee @somnergy | 45 |
+| Paweł Bylica @chfast | 2 |
+| @canepat | 1 |
+
+### Commit Log by Category (48 non-merge commits since v0.1.0-alpha.4)
+
+#### Airbender: Guest, Prover & Service
+
+- `253e1b3` Airbender integration: rv32 guest, GPU prover and service (#28) (Somnath Banerjee @somnergy)
+- `56c1a7f` Airbender rv32 guest performance: −27.7% cycles on the 200-block corpus (#31) (Somnath Banerjee @somnergy)
+- `df31566` Airbender rv32 guest performance, round 4: −14.5% cycles on the 200-block corpus (#34) (Somnath Banerjee @somnergy)
+- `ba48a7b` Round 5: 35 more rv32 guest optimizations (34.10B -> 32.19B cycles) (#105) (Somnath Banerjee @somnergy)
+- `a015aff` Airbender v3: prover on the v3 stack, GPU image published to GHCR (#109) (Somnath Banerjee @somnergy)
+- `3dfc681` Airbender: report the prover's own proving time, preflight before proving (#111) (Somnath Banerjee @somnergy)
+- `6227575` guest_airbender: build with node-store account recovery (USE_HASH_KEY) by default (#112) (Somnath Banerjee @somnergy)
+- `cc2f0b3` Airbender perf: keccak_f1600, keccak prefix resumes, memos, BLOCKHASH cache (#113) (Somnath Banerjee @somnergy)
+- `3e4553a` guest_airbender: commit the last block's hash and check it on the host (#39) (Somnath Banerjee @somnergy)
+- `d24c2b9` guest_airbender: guard the gp window in the linker script, relink on its change (#41) (Somnath Banerjee @somnergy)
+- `e6f772e` prover: take CMake 3.31.6 from Kitware in the Airbender Docker image (#83) (Somnath Banerjee @somnergy)
+
+#### Witness Format, State & Pre-Trie Validation
+
+- `b81b96f` dev: check the storage walk of an unmodified account against its root (#37) (Somnath Banerjee @somnergy)
+- `b5f5ef5` state_zz: start every witness slot at its initial value (#38) (Somnath Banerjee @somnergy)
+- `ef0c726` dev: check the witness slots of an account the block wipes against its root (#51) (Somnath Banerjee @somnergy)
+- `2dc4c04` state_zz: decide create collisions by the storage root, not the witness slots (#53) (Somnath Banerjee @somnergy)
+- `a78a662` dev: require the witness of a multi-block bundle to hold the whole state (#63) (Somnath Banerjee @somnergy)
+- `d0e1932` dev: walk the reads of absent accounts and slots as claims of absence (#69) (Somnath Banerjee @somnergy)
+- `72cfeae` state_zz: require strictly ascending slot keys in witness records (#70) (Somnath Banerjee @somnergy)
+- `7a9ee65` state_zz: bind BLOCKHASH to the parent hashes back from the block (#71) (Somnath Banerjee @somnergy)
+- `6161d13` state_zz: reject witness blobs whose sections or records overlap (#77) (Somnath Banerjee @somnergy)
+
+#### Merkle Patricia Trie
+
+- `6d74e22` trie_zz: flag failed trie walks in release builds and reject them (#35) (Somnath Banerjee @somnergy)
+- `40df7e8` trie_zz: reject a claimed pre-value for a key absent from the trie (#36) (Somnath Banerjee @somnergy)
+- `d7fd184` trie_zz: fold a single-child branch's new extension into its parent at once (#59) (Somnath Banerjee @somnergy)
+- `55310d0` trie_zz: keep empty leaves out of the grid (#60) (Somnath Banerjee @somnergy)
+- `0e9c676` trie_zz: allocate the grid once, at the most lines a depth can name (#61) (Somnath Banerjee @somnergy)
+- `238fba1` trie_zz: mask the saved block count before indexing kHeadSlots (#62) (Somnath Banerjee @somnergy)
+
+#### Protocol & Core EVM
+
+- `17e0773` types: reuse the canonical tx RLP for the tx root and hash (#16) (Somnath Banerjee @somnergy)
+- `907ef60` types: thread_local RLP scratch for hash and sender pre-images (#17) (Somnath Banerjee @somnergy)
+- `b423c68` execution: pass tx.data to evmone as a view (#18) (Somnath Banerjee @somnergy)
+- `d002a33` execution: copy at most the 128 bytes that ecrecover reads (#67) (Somnath Banerjee @somnergy)
+- `09f25f9` execution: test bn254 multiplication; take evmone's width-5 NAF ECMUL (#87) (Somnath Banerjee @somnergy)
+- `622b65b` types: write each receipt's RLP in one pass (#88) (Somnath Banerjee @somnergy)
+- `24c59f7` execution: test comparison jump fusions; take evmone's fusions (#89) (Somnath Banerjee @somnergy)
+
+#### ZVM1/EVMone & Third Party
+
+- `0b03bb8` third_party: evmone with the upstream 0.25.0 Amsterdam (#114) (Paweł Bylica @chfast)
+- `c732b33` third_party: drop intx submodule, vendor intx inside evmone (#107) (Paweł Bylica @chfast)
+- `26f0791` third_party: evmone with the strict-alignment keccak test build linking again (#44) (Somnath Banerjee @somnergy)
+- `46f9226` third_party: evmone with word copies between word-layout buffers at any alignment (#58) (Somnath Banerjee @somnergy)
+- `3fe6854` third_party: evmone with its own suite running under the word layout (#65) (Somnath Banerjee @somnergy)
+- `9b53b67` third_party: evmone with the MODEXP lengths added in 64 bits (#66) (Somnath Banerjee @somnergy)
+- `7beea77` third_party: evmone and intx with word accesses through may_alias types (#85) (Somnath Banerjee @somnergy)
+- `435b7ed` third_party: evmone with shift_words through named word pointers (#90) (Somnath Banerjee @somnergy)
+
+#### Tests, CI/CD & Workflows
+
+- `34cbe75` dev/cli: keep jumpdest_map_test building with sanitizers (#42) (Somnath Banerjee @somnergy)
+- `edc7886` ci: build the Airbender guest with the pinned riscv-none-elf-gcc 15.2.0-1.1 (#43) (Somnath Banerjee @somnergy)
+- `0ea960f` cmake: build evmone's blst Airbender patch test with zilkworm.tests (#45) (Somnath Banerjee @somnergy)
+- `b307a6e` tests: compare logs and cover hashes, copies and precompiles in the word layout (#57) (Somnath Banerjee @somnergy)
+- `346afc4` Airbender follow-ups: fix main's unit tests, test the rv32 paths under sanitizers (#108) (Somnath Banerjee @somnergy)
+- `d8743c5` Fix main's unit-test and EEST jobs after round 5 (#110) (Somnath Banerjee @somnergy)
+
+#### Release
+
+- `c9b87d5` Bring release/0.1.0-alpha.4 ERE work into main (#115) (@canepat)
+
 ## v0.1.0-alpha.4 - ERE stateless input, stateless new-payload checks and Sepolia
 
 ### Highlights

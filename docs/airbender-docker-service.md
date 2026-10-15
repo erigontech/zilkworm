@@ -7,8 +7,8 @@ How to build, get and run the dockerized Airbender proving service (zksync-airbe
 
 | | |
 |---|---|
-| Image | `ghcr.io/erigontech/zilkworm-airbender:<commit sha>` (full or short sha), `:main` for the latest; built from `prover/Dockerfile` target `airbender` |
-| Published by | `.github/workflows/airbender-image.yml`, for every commit pushed to `main` (and on manual dispatch) |
+| Image | `ghcr.io/erigontech/zilkworm-airbender:<release tag>` (e.g. `:v0.1.0-alpha.5`), `:<commit sha>` (full or short sha), `:main` for the latest; built from `prover/Dockerfile` target `airbender` |
+| Published by | `.github/workflows/airbender-image.yml`, for every commit pushed to `main` (and on manual dispatch); `release.yml` adds the release tag |
 | Base | `nvidia/cuda:13.1.0-devel` (builder) / `nvidia/cuda:13.1.0-runtime` (runtime), Ubuntu 24.04 |
 | GPU code | CUDA kernels for compute capabilities 8.0, 8.9, 9.0 and 12.0 (A100, RTX 40xx/L40/L4, H100/H200, RTX 50xx/RTX PRO Blackwell; not B200, which is 10.0); build arg `CUDA_ARCHS` changes the list |
 | Runs as | root, workdir `/data` |
@@ -26,9 +26,11 @@ Environment baked into the image, which the verification key depends on or the p
 `RECURSION_UNROLLED_BLAKE`, `RECURSION_BRIDGE_BLAKE`, `RECURSION_FINAL_BLAKE` set to their default
 `blake2_with_compression` (the prover refuses other values). Don't override them.
 
-The package is private until it is made public once, by an org admin: GitHub → erigontech →
-Packages → `zilkworm-airbender` → Package settings → Change visibility → Public. Until then,
-`docker login ghcr.io` with a token that can read the org's packages before pulling.
+The package is public: pulling needs no credentials.
+
+Each GitHub release attaches the image's guest (`z6m_guest_airbender.bin`, `.text`) and its
+verification key (`z6m_guest_airbender.vk`), and its notes name the image digest and the key's
+sha256. That key is the one to register with Ethproofs for a cluster that runs the release image.
 
 ## Host requirements
 
@@ -149,8 +151,8 @@ docker run --rm -v "$PWD/out:/out" -v /path/to/block:/in:ro ghcr.io/erigontech/z
 ### vast.ai
 
 Pick an instance with ≥ 32 GB VRAM per GPU and ≥ 24 GB of RAM per GPU (more is better), and a
-disk of a few tens of GB. Use `ghcr.io/erigontech/zilkworm-airbender:<commit sha>` as the image
-(with registry credentials while the package is private).
+disk of a few tens of GB. Use `ghcr.io/erigontech/zilkworm-airbender:<release tag>` (or `:<commit sha>`)
+as the image.
 
 - **Entrypoint launch mode** ("Docker ENTRYPOINT"): the image's entrypoint runs the service. Pass
   the configuration as `-e` options in the docker options field, e.g.
