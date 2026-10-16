@@ -18,6 +18,9 @@
 #   PROVE_EVERY           prove the blocks whose number is a multiple of this (default 100)
 #   EXECUTE_EVERY         execute without proving every N-th block (default: none)
 #   START_BLOCK           first block (default: the chain's tip)
+#   FETCH_TIMEOUT         seconds one attempt at fetching a block and its witness may take (default 60)
+#   MAX_LAG               once at the tip, the most blocks the service may fall behind before it
+#                         skips ahead to the tip (default 10; 0 never skips)
 #   DATA_DIR              verification key, blocks, logs and proofs (default /data; mount a volume)
 #   ETHPROOFS_ENDPOINT, ETHPROOFS_TOKEN, ETHPROOFS_CLUSTER_ID
 #                         post to Ethproofs; with any of them unset nothing is posted (a dry run)
@@ -71,6 +74,8 @@ service_args() {
     [ -n "${WS_URL:-}" ] && args+=(--ws-url "$WS_URL")
     [ -n "${EXECUTE_EVERY:-}" ] && args+=(--execute-every "$EXECUTE_EVERY")
     [ -n "${START_BLOCK:-}" ] && args+=(--start-block "$START_BLOCK")
+    [ -n "${FETCH_TIMEOUT:-}" ] && args+=(--fetch-timeout "$FETCH_TIMEOUT")
+    [ -n "${MAX_LAG:-}" ] && args+=(--max-lag "$MAX_LAG")
     # shellcheck disable=SC2206
     [ -n "${PROVER_EXTRA_ARGS:-}" ] && args+=($PROVER_EXTRA_ARGS)
     return 0

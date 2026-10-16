@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{error, info, warn};
 use url::Url;
 use z6m_common::alloy_provider::{Provider, ProviderBuilder};
@@ -25,6 +25,11 @@ use z6m_common::{fetch_block_and_witness, FetchRequest};
 /// the GPU is the bottleneck; each in-flight item costs one MFBD flat-bundle
 /// file under `data_dir`.
 const PROVER_QUEUE_CAPACITY: usize = 4;
+
+/// The longest an `eth_blockNumber` call, and the newHeads subscription at startup, may take:
+/// the RPC clients have no timeout of their own, so a node that stops answering would hold the
+/// fetcher forever.
+const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct ServiceConfig {
@@ -46,6 +51,12 @@ pub struct ServiceConfig {
     pub replay_threads: Option<usize>,
     pub gpu: bool,
     pub ethproofs: Option<EthProofsConfig>,
+    /// The longest one attempt at fetching a block (the block, its RLP and its execution
+    /// witness) may take before it counts as failed.
+    pub fetch_timeout: Duration,
+    /// Once the fetcher has reached the chain tip, the most blocks it may fall behind before it
+    /// skips ahead to the tip; 0 never skips.
+    pub max_lag: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -209,21 +220,24 @@ impl AirbenderService {
         // Any failure falls back to the polling loop below.
         let mut new_heads = match &self.config.ws_url {
             Some(ws_url) => {
-                let connect = z6m_common::alloy_provider::WsConnect::new(ws_url.clone());
-                match ProviderBuilder::new().connect_ws(connect).await {
-                    Ok(ws_provider) => match ws_provider.subscribe_blocks().await {
-                        Ok(sub) => {
-                            info!("Subscribed to newHeads via {}", ws_url);
-                            // keep the provider alive alongside the subscription
-                            Some((ws_provider, sub))
-                        }
-                        Err(err) => {
-                            warn!(error = %err, "newHeads subscribe failed; falling back to polling");
-                            None
-                        }
-                    },
-                    Err(err) => {
-                        warn!(error = %err, "WS connect failed; falling back to polling");
+                let subscribe = async {
+                    let connect = z6m_common::alloy_provider::WsConnect::new(ws_url.clone());
+                    let ws_provider = ProviderBuilder::new().connect_ws(connect).await?;
+                    let sub = ws_provider.subscribe_blocks().await?;
+                    // keep the provider alive alongside the subscription
+                    Ok::<_, eyre::Report>((ws_provider, sub))
+                };
+                match timeout(RPC_TIMEOUT, subscribe).await {
+                    Ok(Ok(heads)) => {
+                        info!("Subscribed to newHeads via {}", ws_url);
+                        Some(heads)
+                    }
+                    Ok(Err(err)) => {
+                        warn!(error = %err, "newHeads subscription failed; falling back to polling");
+                        None
+                    }
+                    Err(_) => {
+                        warn!("newHeads subscription timed out; falling back to polling");
                         None
                     }
                 }
@@ -250,6 +264,9 @@ impl AirbenderService {
         let mut fetch_failures: u32 = 0;
         // The `queued` post of a block whose fetch failed and is retried: it is sent once.
         let mut retried_queued_post: Option<(u64, tokio::task::JoinHandle<()>)> = None;
+        // Whether the fetcher has reached the chain tip, from where it keeps within max_lag
+        // blocks of it. A run from --start-block works through its backlog first.
+        let mut caught_up = self.config.start_block.is_none();
 
         'outer: loop {
             let latest = if let Some(end) = self.config.end_block {
@@ -267,6 +284,29 @@ impl AirbenderService {
                     }
                 }
             };
+
+            // A block the chain has left behind is worth little to a real-time prover, and a
+            // node can take far longer over its witness than over the tip's (or never answer):
+            // working through such blocks one by one, the service can fall behind for good. So
+            // once at the tip, it skips ahead to the tip when it falls more than max_lag behind.
+            // A failed fetch comes back here before its retry, so a block whose witness doesn't
+            // come is given up once the tip has moved on.
+            let lag = latest.saturating_sub(next_block);
+            if caught_up
+                && self.config.end_block.is_none()
+                && self.config.max_lag > 0
+                && lag > self.config.max_lag
+            {
+                warn!(
+                    from = next_block,
+                    to = latest,
+                    "{lag} blocks behind the tip (more than {}); skipping ahead to it",
+                    self.config.max_lag
+                );
+                next_block = latest;
+                fetch_failures = 0;
+                retried_queued_post = None;
+            }
 
             for block_number in next_block..=latest {
                 let should_prove = matches_interval(self.config.prove_every, block_number);
@@ -300,16 +340,25 @@ impl AirbenderService {
                     };
                 }
 
-                let outcome = match fetch_block_and_witness(FetchRequest {
+                // Bounded: the RPC calls have no timeout of their own, and a node that never
+                // answers a witness request would otherwise hold the fetcher on this block.
+                let fetch = fetch_block_and_witness(FetchRequest {
                     rpc_url: &self.config.rpc_url,
                     block_number: Some(block_number),
                     data_dir: self.config.data_dir.clone(),
                     save_all_responses: self.config.save_all_responses,
                     geth: false,
                     force_rebuild: false,
-                })
-                .await
-                {
+                });
+                let fetched = timeout(self.config.fetch_timeout, fetch)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(eyre::eyre!(
+                            "no answer within {} s",
+                            self.config.fetch_timeout.as_secs()
+                        ))
+                    });
+                let outcome = match fetched {
                     Ok(o) => {
                         fetch_failures = 0;
                         o
@@ -364,6 +413,9 @@ impl AirbenderService {
                     return Ok(());
                 }
                 next_block = block_number + 1;
+            }
+            if next_block > latest {
+                caught_up = true;
             }
 
             // next_block only advances past blocks handled above: a lagging RPC that reports a
@@ -728,12 +780,19 @@ async fn get_block_number_with_retry<P: Provider>(
 ) -> Result<u64> {
     let mut attempts = 0;
     loop {
-        match provider.get_block_number().await {
+        let answer = match timeout(RPC_TIMEOUT, provider.get_block_number()).await {
+            Ok(answer) => answer.map_err(eyre::Report::from),
+            Err(_) => Err(eyre::eyre!(
+                "eth_blockNumber: no answer within {} s",
+                RPC_TIMEOUT.as_secs()
+            )),
+        };
+        match answer {
             Ok(n) => return Ok(n),
             Err(err) => {
                 attempts += 1;
                 if attempts >= max_retries {
-                    return Err(err.into());
+                    return Err(err);
                 }
                 let delay = Duration::from_secs(2u64.pow(attempts));
                 warn!(attempt = attempts, delay_secs = delay.as_secs(), "RPC retry");

@@ -97,6 +97,16 @@ struct Args {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     save_all_responses: bool,
 
+    /// Seconds one attempt at fetching a block (the block, its RLP and its execution witness)
+    /// may take before it counts as failed (service mode)
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    fetch_timeout: u64,
+
+    /// Once at the chain tip, the most blocks the service may fall behind before it skips
+    /// ahead to the tip; 0 never skips (service mode)
+    #[arg(long, default_value_t = 10)]
+    max_lag: u64,
+
     /// Ethproofs API endpoint URL
     #[arg(long, env = "ETHPROOFS_ENDPOINT")]
     ethproofs_endpoint: Option<String>,
@@ -557,6 +567,8 @@ async fn run() -> Result<()> {
             replay_threads: args.replay_threads,
             gpu: args.gpu,
             ethproofs,
+            fetch_timeout: std::time::Duration::from_secs(args.fetch_timeout),
+            max_lag: args.max_lag,
         };
 
         let svc = tokio::task::block_in_place(|| service::AirbenderService::new(svc_config))?;

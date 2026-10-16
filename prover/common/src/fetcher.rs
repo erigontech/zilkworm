@@ -314,7 +314,11 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
     }
     let bundle_bytes = z6m_witness_ffi::json_witness_to_flat_bundle(&witness_input)
         .wrap_err("witness JSON to flat-bundle conversion failed")?;
-    fs::write(&flat_bundle_path, &bundle_bytes)?;
+    // Written whole or not at all: an existing bundle is reused as is (above), so a write cut
+    // short by a crash must not leave one behind.
+    let partial_path = flat_bundle_path.with_extension("mfbd.partial");
+    fs::write(&partial_path, &bundle_bytes)?;
+    fs::rename(&partial_path, &flat_bundle_path)?;
     let witness_millis = conversion_started.elapsed().as_millis() as u64;
 
     debug!(
