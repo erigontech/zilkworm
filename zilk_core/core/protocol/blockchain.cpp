@@ -19,6 +19,15 @@ ValidationResult Blockchain::insert_block(Block& block, bool check_state_root) {
     if (err != ValidationResult::kOk) {
         return err;
     }
+#if defined(AIRBENDER) || defined(SP1)
+    // From Amsterdam the intrinsic gas reads the senders in pre_validate_block_body()
+    // (amsterdam_tx_gas_cost()), which would recover each one alone before
+    // ExecutionProcessor::execute_block() recovers them as a batch that shares inversions:
+    // recover them as that batch first.
+    if (config_.revision(block.header.number, block.header.timestamp) >= EVMC_AMSTERDAM) {
+        Transaction::recover_senders(block.transactions);
+    }
+#endif
     err = rule_set_->pre_validate_block_body(block, direct_);
     if (err != ValidationResult::kOk) {
         return err;
