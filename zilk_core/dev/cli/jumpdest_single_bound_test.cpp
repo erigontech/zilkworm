@@ -4,9 +4,11 @@
 // A taken jump on the rv32 dispatch paths tests one bound, the scanned prefix of the code, with the
 // JUMPDEST map and the code start held by the interpreter loop (CodeAnalysis::check_jumpdest_in()
 // and the landing address of the fused PUSH2 JUMP/JUMPI, compare, selector, SWAP1 JUMP and plain
-// JUMP handlers). This test covers it at two levels. The native build sets
+// JUMP handlers). This test covers it at two levels. The rv32 test build sets
 // -DEVMONE_RV32_DISPATCH_TEST, which compiles the byte map, the lazy scan and those handlers on the
-// host.
+// host. Every other build (EVMONE_JUMP_SKIPS_JUMPDEST) resumes a taken jump after the JUMPDEST it
+// lands on and runs PUSH2 JUMP, PUSH2 JUMPI and the comparisons before them as one step, which the
+// same forms cover.
 //
 // Analysis: check_jumpdest_in() against a reference scan, interleaved at random with
 // check_jumpdest() on one analysis (they share the scan bound, as the frames of one contract do),
@@ -21,8 +23,10 @@
 // over the whole code, then a warm check), with and without a PUSH cut off by the code end, and
 // with the jump back to position 0. The outcome (status, gas left, output) comes from a model of
 // the separate instructions: JUMP's check follows its charge, and the landing JUMPDEST's charge
-// follows the check. With the environment variable JUMPDEST_SINGLE_BOUND_DIGEST set, the
-// execution tests print a digest of every outcome, to compare two builds of the interpreter.
+// follows the check, except where a taken jump pays for the JUMPDEST it lands on itself
+// (EVMONE_JUMP_SKIPS_JUMPDEST: every build but the rv32 dispatch), which charges it before the check.
+// With the environment variable JUMPDEST_SINGLE_BOUND_DIGEST set, the execution tests print a digest
+// of every outcome, to compare two builds of the interpreter.
 
 #include <algorithm>
 #include <cstdint>
@@ -487,6 +491,10 @@ Outcome model(const Program& p, const uint256& dst, int64_t g) {
         } else if (p.last_jumpdest != 0 && dst == uint256{p.last_jumpdest}) {
             tail_cost = 1 + (p.tail.op != 0 ? 3 : 0);  // JUMPDEST, then the cut-off PUSH
         } else {
+#if EVMONE_JUMP_SKIPS_JUMPDEST
+            if (g < head + 1)  // The landing JUMPDEST's charge, made before the check.
+                return oog;
+#endif
             return {EVMC_BAD_JUMP_DESTINATION, 0, {}};
         }
     } else if (p.at_end) {

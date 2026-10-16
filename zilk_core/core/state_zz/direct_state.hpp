@@ -159,10 +159,10 @@ class DirectState : public BlockState {
     /// lengths and parts of the keys of the entries: code_store_map_ then serves code_for() only,
     /// and no lookup by hash. The region it registered with evmone is reset with this object.
     bool code_store_sealed_{false};
-#if USE_HASH_KEY
     /// The key, body offset and body size of every code-store entry, taken by sanitize() after it
-    /// bound each payload to its key and before the seal zeroes the lengths and keys: account
-    /// recovery looks the code of a recovered account up here once the map cannot.
+    /// bound each payload to its key and before the seal zeroes the lengths and keys: read_code()
+    /// for a record without a code length, and account recovery (USE_HASH_KEY), look code up here
+    /// once the map cannot.
     struct SealedCodeEntry {
         uint8_t key[32];
         uint32_t body_off;
@@ -170,6 +170,9 @@ class DirectState : public BlockState {
     };
     std::vector<SealedCodeEntry> sealed_code_index_;
 #endif
+#if USE_HASH_KEY || ZILK_SEAL_CODE_STORE
+    // The code-store entry body ([key][payload]) for a code hash, sealed or not.
+    std::optional<std::span<const uint8_t>> code_entry_by_hash_(const uint8_t (&hash)[32]) const noexcept;
 #endif
 
     std::span<const AddrHashEntry> addr_hashes_;
@@ -238,8 +241,6 @@ class DirectState : public BlockState {
     // Preimage-gap fallback; see USE_HASH_KEY option.
     mutable std::vector<std::unique_ptr<Account>> recovered_accounts_;
     const Account* recover_account_from_nodestore(const evmc::address& addr) const;
-    // The code-store entry body ([key][payload]) for a code hash, sealed or not.
-    std::optional<std::span<const uint8_t>> code_entry_by_hash_(const uint8_t (&hash)[32]) const noexcept;
     struct RecoveredSlot {
         evmc::bytes32 initial;
         evmc::bytes32 current;  // == initial until an SSTORE lands
@@ -665,12 +666,12 @@ DirectState::read_code(const Account& pa) const noexcept {
     // Code is content-addressed: the witness may omit a body that an earlier write in the
     // block already supplied (EIP-7928 code_writes satisfy the read), so look it up by hash
     // in the witness code store, then in the in-block created code. A sealed code store is
-    // searchable only through the index USE_HASH_KEY keeps, see code_entry_by_hash_().
+    // searchable only through the index sanitize() keeps, see code_entry_by_hash_().
     const auto& h = *reinterpret_cast<const evmc::bytes32*>(pa.code_hash);
-#if USE_HASH_KEY
+#if USE_HASH_KEY || ZILK_SEAL_CODE_STORE
     if (const auto e = code_entry_by_hash_(pa.code_hash))
         return ByteView{e->data() + FlatKv::kPayloadOffset, e->size() - FlatKv::kPayloadOffset};
-#elif !ZILK_SEAL_CODE_STORE
+#else
     if (auto b = code_store_map_.find<32, 0, &hash_key8>(h.bytes))
         return ByteView{b->data() + FlatKv::kPayloadOffset, b->size() - FlatKv::kPayloadOffset};
 #endif

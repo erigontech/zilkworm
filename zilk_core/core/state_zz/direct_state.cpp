@@ -402,9 +402,7 @@ DirectState::DirectState(DirectState&& other) noexcept
     }
 #if ZILK_SEAL_CODE_STORE
     code_store_sealed_ = std::exchange(other.code_store_sealed_, false);
-#if USE_HASH_KEY
     sealed_code_index_ = std::move(other.sealed_code_index_);
-#endif
 #endif
     node_store_map_ = other.node_store_map_;
     node_verified_ = std::move(other.node_verified_);
@@ -1186,9 +1184,10 @@ bool DirectState::sanitize() {
         code_keccak_ok &= bytes_equal<32>(
             silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
     });
-#if ZILK_SEAL_CODE_STORE && USE_HASH_KEY
+#if ZILK_SEAL_CODE_STORE
     // Every entry is bound to its key now (the reader's bits stood for the same bytes), and the
-    // seal below takes the lengths and keys; recover_account_from_nodestore() looks code up here.
+    // seal below takes the lengths and keys; read_code() and recover_account_from_nodestore()
+    // look code up here.
     sealed_code_index_.clear();
     if (code_keccak_ok) {
         sealed_code_index_.reserve(code_store_map_.n_keys());
@@ -1300,7 +1299,7 @@ bool DirectState::sanitize() {
     return true;
 }
 
-#if USE_HASH_KEY
+#if USE_HASH_KEY || ZILK_SEAL_CODE_STORE
 std::optional<std::span<const uint8_t>>
 DirectState::code_entry_by_hash_(const uint8_t (&hash)[32]) const noexcept {
 #if ZILK_SEAL_CODE_STORE
