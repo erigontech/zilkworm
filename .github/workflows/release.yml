@@ -141,10 +141,10 @@ jobs:
           fi
           {
             echo
-            echo "### Airbender prover image and verification key"
+            echo "### Airbender image and verification key"
             echo
-            echo "- Image: \`ghcr.io/erigontech/zilkworm-airbender:$TAG\` (\`$AIRBENDER_DIGEST\`)"
-            echo "- Guest: \`z6m_guest_airbender.bin\` and \`.text\`; verification key (EVKEY001): \`z6m_guest_airbender.vk\`, sha256 \`$AIRBENDER_VK_SHA256\`"
+            echo "- Image: \`ghcr.io/erigontech/zilkworm-airbender:$TAG\` (digest \`$AIRBENDER_DIGEST\`)"
+            echo "- Verification key for this release's guest: \`z6m_guest_airbender.vk\` (sha256 \`$AIRBENDER_VK_SHA256\`). Upload it to your Ethproofs cluster so its proofs show as verified"
           } >> RELEASE_NOTES.md
           printf '\n---\nReleased by @%s\n' "$GITHUB_ACTOR" >> RELEASE_NOTES.md
 
