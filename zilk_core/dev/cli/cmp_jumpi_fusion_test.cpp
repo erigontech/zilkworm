@@ -2,19 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The rv32 dispatch runs LT, GT, SLT and SGT followed by PUSH2 JUMPI, or by ISZERO PUSH2 JUMPI, as
-// one step. Each program here runs twice: as written, and with the jump destination pushed by
-// PUSH3, which no fusion takes, so that the separate instructions run. Status, gas left and output
-// must match at every gas limit from below the comparison to past the end of the group and at
-// seven large ones (where the low-word charge falls back or only just passes), on operands that
-// are equal, differ only in the low word, only in the high word or in the sign, or are random,
-// with a valid destination and four invalid ones (a PUSH1, a 0x5b byte in push data, the code end
-// and 0xffff), in 3 layouts (plain, a JUMPDEST at the fall-through, the group at the code end
-// jumping back), with the stack too short, and with 1024 items. Built with
-// -DEVMONE_RV32_DISPATCH_TEST (the rv32 test configuration), the native build compiles the fused
-// handlers on the host, where they compare words; the guest decides LT and GT by the BigInt SUB
-// delegation in the PUSH2 JUMPI shape only (the ISZERO shape compares words there too). Without
-// it, both runs take the separate instructions, which the checks against intx's comparisons still
-// cover.
+// one step, and so does every other build (EVMONE_JUMP_SKIPS_JUMPDEST, fused_cmp_push2_jumpi() and
+// fused_cmp_iszero_push2_jumpi() of the generic dispatch). Each program here runs twice: as
+// written, and with the jump destination pushed by PUSH3, which no fusion takes, so that the
+// separate instructions run. Status, gas left and output must match at every gas limit from below
+// the comparison to past the end of the group and at seven large ones (where the low-word charge
+// falls back or only just passes), on operands that are equal, differ only in the low word, only in
+// the high word or in the sign, or are random, with a valid destination and four invalid ones (a
+// PUSH1, a 0x5b byte in push data, the code end and 0xffff), in 3 layouts (plain, a JUMPDEST at the
+// fall-through, the group at the code end jumping back), with the stack too short, and with 1024
+// items. Built with -DEVMONE_RV32_DISPATCH_TEST (the rv32 test configuration), the native build
+// compiles the rv32 fused handlers on the host, where they compare words; the guest decides LT and
+// GT by the BigInt SUB delegation in the PUSH2 JUMPI shape only (the ISZERO shape compares words
+// there too). Without it, the native build runs the generic dispatch's fused handlers, which
+// compare with intx.
 
 #include <cstdint>
 #include <random>
