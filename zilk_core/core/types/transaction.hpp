@@ -162,7 +162,8 @@ class Transaction : public UnsignedTransaction {
 
     /// Recovers, as one batch, the senders of the transactions not recovered yet: afterwards
     /// sender() returns exactly what it would have computed on its own. On AIRBENDER this shares
-    /// the field inversions of all signatures (see secp256k1::ecrecover_batch()).
+    /// the field inversions of all signatures, on SP1 their scalar inversions r^-1 (see
+    /// secp256k1::ecrecover_batch()).
     static void recover_senders(std::span<const Transaction> txns);
 
     evmc::bytes32 hash() const;
