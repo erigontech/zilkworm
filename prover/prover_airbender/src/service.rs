@@ -265,7 +265,8 @@ impl AirbenderService {
         // The `queued` post of a block whose fetch failed and is retried: it is sent once.
         let mut retried_queued_post: Option<(u64, tokio::task::JoinHandle<()>)> = None;
         // Whether the fetcher has reached the chain tip, from where it keeps within max_lag
-        // blocks of it. A run from --start-block works through its backlog first.
+        // blocks of it. A run from --start-block works through its backlog first, until a
+        // backlog block cannot be fetched at all (a node may serve no witnesses that far back).
         let mut caught_up = self.config.start_block.is_none();
 
         'outer: loop {
@@ -374,6 +375,7 @@ impl AirbenderService {
                         error!(%block_number, attempts = fetch_failures, error = %err, "Failed to fetch block; skipping it");
                         fetch_failures = 0;
                         next_block = block_number + 1;
+                        caught_up = true;
                         continue;
                     }
                 };

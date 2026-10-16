@@ -184,12 +184,14 @@ as the image.
   saving about 0.5 s a block at the cost of that abort.
 - A prover panic fails that block (`FAILED` in the log); the prover is rebuilt and the service
   carries on with the next block.
-- A fetch of a block, its RLP and its witness that fails or takes longer than `FETCH_TIMEOUT`
-  is tried again, up to 5 times, and the block is then skipped. Once the service has reached
+- A block is fetched (the block, its RLP and its witness) up to 5 times, each attempt failing
+  if it takes longer than `FETCH_TIMEOUT`, and is then skipped. Once the service has reached
   the tip it stays within `MAX_LAG` blocks of it: when it falls further behind, for example
   because the node answers witness requests slowly or not at all, it skips ahead to the tip
   rather than working through blocks the chain has left behind. A run from `START_BLOCK` works
-  through its backlog before that applies.
+  through its backlog first, until a backlog block cannot be fetched at all: reth, for one,
+  serves no witness for a block more than about 12 blocks behind its tip (its database read
+  limit of 300 s cuts the request off).
 - Ethproofs receives `queued` when a block is picked, `proving` when its proving starts, and
   `proved` (`proving_time` in ms is the prover's time on the block, from handing it the input
   to the proof: the pipeline's simulation feeding the GPUs and their proving; fetching,
