@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // ADDMOD handler against (x + y) mod m computed in 512 bits and against intx::addmod (the code
-// the handler falls back to). The rv32 fast path takes x < m and y < m: it adds over 32-bit
-// words and subtracts m once into m's own stack slot, so the cases below aim at its edges: a
-// carry out of bit 256, x + y equal to m, m - 1 and 2m - 1, equal top words with random words
-// below, carry and borrow chains across every word boundary, m of one to 256 bits, and
-// operands at or above m (which it must decline, leaving m untouched). The native build sets
-// -DEVMONE_RV32_DISPATCH_TEST, which compiles that path on the host.
+// the handler falls back to on the host). The rv32 fast path takes x < m and y < m, the generic
+// one (SP1's) takes x and y whose top 64-bit words are below m's: each adds over its words and
+// subtracts m once into m's own stack slot, so the cases below aim at their edges: a carry out of
+// bit 256, x + y equal to m, m - 1 and 2m - 1, equal top words with random words below, carry and
+// borrow chains across every word boundary, m of one to 256 bits, and operands at or above m
+// (which they must decline, leaving m untouched). The default native build compiles the generic
+// path; -DEVMONE_RV32_DISPATCH_TEST (the rv32-paths CI job) compiles the rv32 one on the host.
 
 #include <array>
 #include <cstdint>
@@ -170,6 +171,18 @@ void check_reduced(const uint256& x, const uint256& y, const uint256& m) {
     REQUIRE(ys == y);
     REQUIRE(ms == (took ? ref_addmod(x, y, m) : m));
 }
+#else
+// The generic addmod_reduced on its own: true exactly for top words of x and y below m's (so
+// never for m == 0), then m holds the sum mod m; false leaves m, x and y untouched.
+void check_reduced(const uint256& x, const uint256& y, const uint256& m) {
+    alignas(32) uint256 ms = m, xs = x, ys = y;
+    const bool took = evmone::instr::core::addmod_reduced(ms, xs, ys);
+    INFO("x=" << intx::hex(x) << " y=" << intx::hex(y) << " m=" << intx::hex(m));
+    REQUIRE(took == (x[3] < m[3] && y[3] < m[3]));
+    REQUIRE(xs == x);
+    REQUIRE(ys == y);
+    REQUIRE(ms == (took ? ref_addmod(x, y, m) : m));
+}
 #endif
 
 }  // namespace
@@ -245,6 +258,34 @@ TEST_CASE("addmod_reduced takes exactly x < m and y < m, and leaves m alone othe
         const uint256 y = (rng() % 2) ? patterned(rng) : rnd256(rng);
         check_reduced(x, y, m);
         if (m != 0) check_reduced(x % m, y % m, m);  // the domain it is written for
+    }
+}
+#else
+TEST_CASE("addmod_reduced takes exactly top words below m's, and leaves m alone otherwise") {
+    std::mt19937_64 rng{104};
+    for (const auto& m : moduli(rng)) {
+        for (const auto& x : operands(m, rng)) {
+            for (const auto& y : operands(m, rng)) check_reduced(x, y, m);
+            for (const auto& y : partners(x, m, rng)) check_reduced(x, y, m);
+        }
+    }
+    for (int i = 0; i < 300000; ++i) {
+        const uint256 m = (rng() % 3) ? patterned(rng) : rnd_bits(rng, 1 + rng() % 256);
+        uint256 x = (rng() % 2) ? patterned(rng) : rnd256(rng);
+        uint256 y = (rng() % 2) ? patterned(rng) : rnd256(rng);
+        check_reduced(x, y, m);
+        if (m == 0) continue;
+        x %= m;
+        y %= m;
+        check_reduced(x, y, m);  // the domain it is written for
+        // Top words one below m's, so that the sum's top word is m's or above.
+        if (m[3] != 0) {
+            x[3] = m[3] - 1;
+            y[3] = m[3] - 1 - (rng() % 2) * (m[3] > 1);
+            check_reduced(x, y, m);
+            check_reduced(x, m - x, m);  // x + y == m
+            check_reduced(x, m - 1 - x, m);  // x + y == m - 1
+        }
     }
 }
 #endif
