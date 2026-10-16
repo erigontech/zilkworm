@@ -12,7 +12,9 @@
 // that ends at the point at infinity. Those are reached by choosing the scalars (u1, u2) and the
 // point R = (r, y) so that digits of G, phi(G), R and phi(R) land on the same multiples of G, and
 // deriving the signature (h, r, s) from them: u1 = -h/r, u2 = s/r. The reference does not depend on
-// the build, so the test holds without the macro too.
+// the build, so the test holds without the macro too. The macro also builds the guest's
+// ecrecover_batch(), which recovers the senders of a block with its inversions shared: the last case
+// checks it against ecrecover().
 
 #include <array>
 #include <cstdint>
@@ -551,5 +553,91 @@ TEST_CASE("secp256k1 recovery: rejected inputs") {
                     check(Sig{*h, *r, *s, parity}, "edge");
             }
         }
+    }
+}
+
+TEST_CASE("secp256k1 recovery: a batch recovers what each signature recovers alone") {
+    // ecrecover_batch() shares inversions across its signatures: on Airbender (compiled here with
+    // EVMONE_RV32_DISPATCH_TEST) r^-1 mod n, 1/(2y), the rounds of the odd-multiple tables and the
+    // final Z^-1; on SP1 r^-1. A signature that is rejected (r or s out of range, r not the x of a
+    // point, a sum at infinity) must neither take part nor disturb the others, and the batch must
+    // recover the others exactly as ecrecover() does. The exceptional-case families of the cases
+    // above, mixed with invalid inputs, in batches of every composition.
+    std::mt19937_64 rng{19};
+    std::vector<Sig> sigs;
+    for (const auto& row : CRAFTED) {
+        sigs.push_back(from_row(row));
+        auto flipped = from_row(row);
+        flipped.parity = !flipped.parity;
+        sigs.push_back(flipped);
+    }
+    for (int i = 0; i < 40; ++i) {
+        sigs.push_back(Sig{to_bytes(random_uint256(rng)), to_bytes(random_uint256(rng)),
+            to_bytes(random_uint256(rng)), (rng() & 1) != 0});
+    }
+    const auto pts = points(rng);
+    for (const auto& pt : pts) {
+        const auto R = with_parity(pt, (rng() & 1) != 0);
+        for (int i = 0; i < 4; ++i)
+            sigs.push_back(sig_for(random_uint256(rng) % Curve::ORDER, random_uint256(rng) % Curve::ORDER, R));
+        // Sums at infinity: u1 = -j u2 over R = j G (R = G here for the j = 1 point).
+        const auto u2 = random_uint256(rng) >> 4;
+        sigs.push_back(sig_for(neg_mod_n(u2), u2, with_parity(G, false)));
+    }
+    {
+        const auto good = sig_for(random_uint256(rng) % Curve::ORDER, random_uint256(rng) % Curve::ORDER,
+            with_parity(pts.back(), true));
+        for (const auto& r : {uint256{0}, Curve::ORDER, Curve::ORDER + 1, ~uint256{0}}) {
+            auto sig = good;
+            sig.r = to_bytes(r);
+            sigs.push_back(sig);
+        }
+        for (const auto& s : {uint256{0}, Curve::ORDER / 2, Curve::ORDER / 2 + 1, Curve::ORDER - 1, Curve::ORDER}) {
+            auto sig = good;
+            sig.s = to_bytes(s);
+            sigs.push_back(sig);
+        }
+    }
+
+    for (const auto mode : {RecoveryMode::malleable, RecoveryMode::strict}) {
+        std::vector<std::optional<evmc::address>> expected;
+        size_t none = 0;
+        for (const auto& sig : sigs) {
+            expected.push_back(secp256k1::ecrecover(sig.h, sig.r, sig.s, sig.parity, mode));
+            none += expected.back().has_value() ? size_t{0} : size_t{1};
+        }
+        REQUIRE(none > 20);
+        REQUIRE(none < sigs.size() - 20);
+
+        const auto run = [&](const std::vector<size_t>& idx, const std::string& what) {
+            std::vector<secp256k1::EcrecoverInput> in;
+            for (const auto i : idx)
+                in.push_back({sigs[i].h, sigs[i].r, sigs[i].s, sigs[i].parity});
+            std::vector<std::optional<evmc::address>> out(in.size(), evmc::address{0xbad});
+            secp256k1::ecrecover_batch(in, out, mode);
+            for (size_t k = 0; k < idx.size(); ++k) {
+                INFO(what << ": entry " << k << " (signature " << idx[k] << ")");
+                REQUIRE(out[k] == expected[idx[k]]);
+            }
+        };
+        std::vector<size_t> all(sigs.size());
+        for (size_t i = 0; i < all.size(); ++i)
+            all[i] = i;
+        run(all, "all");
+        run({}, "none");
+        for (size_t i = 0; i < sigs.size(); ++i)
+            run({i}, "one");
+        for (int t = 0; t < 150; ++t) {
+            std::vector<size_t> idx(rng() % 24);
+            for (auto& i : idx)
+                i = rng() % sigs.size();  // repeats included
+            run(idx, "random " + std::to_string(t));
+        }
+        std::vector<size_t> rejected;
+        for (size_t i = 0; i < sigs.size(); ++i) {
+            if (!expected[i].has_value())
+                rejected.push_back(i);
+        }
+        run(rejected, "all rejected");
     }
 }

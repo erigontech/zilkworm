@@ -134,6 +134,7 @@ if(BUILD_TESTING)
     zilk_core/core/rlp/significant_bytes_test.cpp
     zilk_core/core/types/receipt_test.cpp
     zilk_core/core/types/transaction_rlp_view_test.cpp
+    zilk_core/core/types/transaction_senders_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
     zilk_core/core/trie_zz/grid_mpt_absent_read_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
@@ -271,6 +272,29 @@ if(BUILD_TESTING)
   endif()
   include(Catch)
   catch_discover_tests(zilkworm.tests)
+  # evmone's SP1 secp256k1 recovery, built on the host with -DSP1 over a software stand-in for the
+  # SP1 syscalls that checks the preconditions of SP1's precompiles (tests/sp1_secp256k1). A
+  # separate executable, since SP1 changes what evmone's sources compile to; without the rv32
+  # paths' EVMONE_RV32_DISPATCH_TEST, which would build the Airbender ecrecover_batch() instead.
+  # keccak.c is C and stays without SP1, which would make it issue the keccak syscall.
+  if(NOT SP1 AND NOT SP1TURBO AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING
+     AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(SP1_SECP256K1_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/sp1_secp256k1")
+    set(SP1_SECP256K1_EVMONE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/lib/evmone_precompiles")
+    add_executable(sp1_secp256k1_test "${SP1_SECP256K1_DIR}/secp256k1_sp1_test.cpp"
+                                      "${SP1_SECP256K1_EVMONE}/secp256k1.cpp" "${SP1_SECP256K1_EVMONE}/keccak.c")
+    # evmone's own sources, not held to the project's warnings (as in its library target)
+    set_source_files_properties("${SP1_SECP256K1_EVMONE}/secp256k1.cpp" "${SP1_SECP256K1_EVMONE}/keccak.c"
+                                PROPERTIES COMPILE_OPTIONS -w)
+    target_compile_definitions(sp1_secp256k1_test PRIVATE $<$<COMPILE_LANGUAGE:CXX>:SP1>)
+    target_compile_options(sp1_secp256k1_test PRIVATE -UEVMONE_RV32_DISPATCH_TEST)
+    target_include_directories(sp1_secp256k1_test BEFORE PRIVATE "${SP1_SECP256K1_DIR}/include")
+    target_include_directories(sp1_secp256k1_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/lib")
+    target_link_libraries(sp1_secp256k1_test PRIVATE intx::intx evmc::evmc_cpp Catch2::Catch2WithMain)
+    catch_discover_tests(sp1_secp256k1_test)
+    # CI builds only zilkworm.tests before running ctest.
+    add_dependencies(zilkworm.tests sp1_secp256k1_test)
+  endif()
   # evmone's host test of the Airbender blst patch is registered with ctest too; CI builds only
   # this target before running ctest.
   if(TARGET blst_airbender_patch_test)
