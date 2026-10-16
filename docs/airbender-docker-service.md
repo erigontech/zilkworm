@@ -74,6 +74,8 @@ starts it again whenever it exits:
 | `PROVE_EVERY` | prove the blocks whose number is a multiple of this (default 100) |
 | `EXECUTE_EVERY` | execute without proving every N-th block (default: none) |
 | `START_BLOCK` | first block (default: the chain's tip) |
+| `FETCH_TIMEOUT` | seconds one attempt at fetching a block and its witness may take before it counts as failed (default 60) |
+| `MAX_LAG` | once at the tip, the most blocks the service may fall behind before it skips ahead to the tip (default 10; 0 never skips) |
 | `DATA_DIR` | verification key, blocks, logs and proofs (default `/data`; mount a volume) |
 | `ETHPROOFS_ENDPOINT`, `ETHPROOFS_TOKEN`, `ETHPROOFS_CLUSTER_ID` | post to Ethproofs; with any of them unset nothing is posted (a dry run) |
 | `RESTART_DELAY` | seconds before the service is started again (default 30) |
@@ -182,6 +184,14 @@ as the image.
   saving about 0.5 s a block at the cost of that abort.
 - A prover panic fails that block (`FAILED` in the log); the prover is rebuilt and the service
   carries on with the next block.
+- A block is fetched (the block, its RLP and its witness) up to 5 times, each attempt failing
+  if it takes longer than `FETCH_TIMEOUT`, and is then skipped. Once the service has reached
+  the tip it stays within `MAX_LAG` blocks of it: when it falls further behind, for example
+  because the node answers witness requests slowly or not at all, it skips ahead to the tip
+  rather than working through blocks the chain has left behind. A run from `START_BLOCK` works
+  through its backlog first, until a backlog block cannot be fetched at all: reth, for one,
+  serves no witness for a block more than about 12 blocks behind its tip (its database read
+  limit of 300 s cuts the request off).
 - Ethproofs receives `queued` when a block is picked, `proving` when its proving starts, and
   `proved` (`proving_time` in ms is the prover's time on the block, from handing it the input
   to the proof: the pipeline's simulation feeding the GPUs and their proving; fetching,
@@ -206,7 +216,8 @@ as the image.
    account from its trie path, checked against the parent's state root, for 1–1.5% more
    cycles. A block whose witness also lacks the account's trie path still fails the preflight
    and is skipped. The fix belongs in the witness provider.
-3. **Ethproofs flakes.** A failed `proved` upload is logged and not retried; the proof stays in
-   `/data/proofs`.
+3. **Ethproofs flakes.** A `proved` upload that is rate limited, gets a 5xx or gets no answer is
+   tried up to 4 times; one that still fails is logged, and the proof stays in `/data/proofs`.
+   `queued` and `proving` are sent once.
 4. The prover's pinned host memory is not configurable (zksync-airbender's `prover_pipeline` uses
    its defaults: 256 × 64 MB per job and 128 × 64 MB per GPU).
