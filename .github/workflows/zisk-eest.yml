@@ -96,12 +96,13 @@ jobs:
         shell: bash
         env:
           EEST_MFBD_DIR: ${{ steps.eest-mfbd.outputs.dir }}
-          # One thread; SDK emulator costs 20-30x CPU.
+          # ziskemu: one thread, well under 1GB per shard.
           Z6M_ZISK_EXECUTOR: ziskemu
         run: |
           python3 tools/scripts/eest_runner.py \
             --prover prover/prover_zisk/target/release/z6m_prover_zisk \
             --max-parallel "$(nproc)" \
+            --ram-per-instance 4 \
             --stagger 15 \
             --shard-timeout 5400 \
             --log-dir eest-logs \

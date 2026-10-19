@@ -180,7 +180,8 @@ def _stream_output(proc: subprocess.Popen, shard_name: str,
 def run_shards(prover: str, fixtures_dir: str, shards: List[str],
                log_dir: str, stagger: int, max_parallel: int,
                max_file_size_bytes: int = 0,
-               shard_timeout: int = 0) -> List[ShardResult]:
+               shard_timeout: int = 0,
+               ram_per_instance_gb: float = RAM_PER_INSTANCE_GB) -> List[ShardResult]:
     """Launch shard processes with staggered starts and memory-aware scheduling."""
     results: List[ShardResult] = []
     active: List[ShardProc] = []
@@ -198,7 +199,7 @@ def run_shards(prover: str, fixtures_dir: str, shards: List[str],
                       and time.time() >= next_launch)
         if can_launch:
             avail = get_available_memory_gb()
-            if avail >= RAM_PER_INSTANCE_GB:
+            if avail >= ram_per_instance_gb:
                 shard = pending.pop(0)
                 test_dir = os.path.join(fixtures_dir, shard)
                 shard_log = os.path.join(log_dir, shard.replace("/", "--") + ".log")
@@ -238,7 +239,7 @@ def run_shards(prover: str, fixtures_dir: str, shards: List[str],
             else:
                 # Stagger elapsed but not enough memory — wait and retry
                 print(f"    Waiting for memory: {avail:.1f}GB free, "
-                      f"need {RAM_PER_INSTANCE_GB}GB, "
+                      f"need {ram_per_instance_gb}GB, "
                       f"{len(active)} active, {len(pending)} pending",
                       flush=True)
 
@@ -392,6 +393,9 @@ def main() -> int:
                         help="Seconds between shard launches (default: 60)")
     parser.add_argument("--max-parallel", type=int, default=0,
                         help="Max parallel processes (0=auto, default: 0)")
+    parser.add_argument("--ram-per-instance", type=float, default=RAM_PER_INSTANCE_GB,
+                        help="Free RAM required to launch a shard in GB "
+                             f"(default: {RAM_PER_INSTANCE_GB})")
     parser.add_argument("--log-dir", default=None,
                         help="Directory for shard logs (default: temp/eest_logs)")
     parser.add_argument("--fail-threshold", type=int, default=5,
@@ -448,7 +452,7 @@ def main() -> int:
     # Parallelism
     if args.max_parallel <= 0:
         mem_gb = get_available_memory_gb()
-        max_par = max(1, int((mem_gb - 4) / RAM_PER_INSTANCE_GB))
+        max_par = max(1, int((mem_gb - 4) / args.ram_per_instance))
         print(f"  Memory: {mem_gb:.1f}GB -> auto max_parallel={max_par}")
     else:
         max_par = args.max_parallel
@@ -464,7 +468,8 @@ def main() -> int:
     results = run_shards(prover, fixtures, shards, log_dir,
                          stagger=args.stagger, max_parallel=max_par,
                          max_file_size_bytes=max_file_size_bytes,
-                         shard_timeout=args.shard_timeout)
+                         shard_timeout=args.shard_timeout,
+                         ram_per_instance_gb=args.ram_per_instance)
 
     # Report
     total, passed, failed = print_report(results)
