@@ -19,7 +19,7 @@ set(ZISK_MARCH "rv64im_zicsr_zba_zbb_zbs_zbkb" CACHE STRING "Guest -march")
 set(arch_flags   "-march=${ZISK_MARCH} -mabi=lp64 -mcmodel=medany")
 set(common_flags "${arch_flags} -ffunction-sections -fdata-sections -fno-PIC -fno-asynchronous-unwind-tables -fno-unwind-tables")
 # ZisK charges instructions, not cycles.
-set(opt_flags    "-O3 -mtune=size -DNDEBUG -fno-stack-protector")
+set(opt_flags    "-O3 -mtune=size -funroll-loops -DNDEBUG -fno-stack-protector")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
 set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags}" CACHE STRING "" FORCE)
