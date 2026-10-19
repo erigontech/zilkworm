@@ -138,6 +138,18 @@ def get_available_memory_gb() -> float:
     return 16.0
 
 
+def get_total_memory_gb() -> float:
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    # Unknown total: skip the check.
+    return float("inf")
+
+
 def compute_parallelism(total_blocks: int, ram_gb: int) -> int:
     mem_gb = get_available_memory_gb()
     mem_based = max(1, int((mem_gb - 4) / ram_gb))
@@ -386,6 +398,12 @@ def main() -> int:
     parser.add_argument("--ram-per-instance", type=int, default=RAM_PER_INSTANCE_GB,
                         help=f"GB reserved per prover instance (default: {RAM_PER_INSTANCE_GB})")
     args = parser.parse_args()
+
+    total_gb = get_total_memory_gb()
+    if args.ram_per_instance > total_gb:
+        print(f"ERROR: --ram-per-instance {args.ram_per_instance} GB exceeds "
+              f"total system RAM ({total_gb:.1f} GB).", file=sys.stderr)
+        return 1
 
     print("=" * 60)
     print("  SP1 Benchmark Tool")

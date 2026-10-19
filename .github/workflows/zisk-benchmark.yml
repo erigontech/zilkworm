@@ -126,13 +126,13 @@ jobs:
         shell: bash
         env:
           PYTHONUNBUFFERED: "1"
-          # zisk-sdk emulator, execute-only.
-          Z6M_ZISK_EXECUTOR: emulator
+          # ziskemu: one thread, 20-30x less CPU than the SDK emulator.
+          Z6M_ZISK_EXECUTOR: ziskemu
         run: |
           set +e
           python3 tools/scripts/sp1_benchmark.py \
             --prover prover/prover_zisk/target/release/z6m_prover_zisk \
-            --ram-per-instance 16 \
+            --ram-per-instance 4 \
             --dir /benchmark-blocks/200_benchmark_blocks_corpus 2>&1 | tee bench-output.log
           exit_code=${PIPESTATUS[0]}
 
