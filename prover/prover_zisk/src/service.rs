@@ -8,7 +8,9 @@ use crate::stdin_builders::{
 use alloy_primitives::B256;
 use alloy_provider::{Provider, ProviderBuilder};
 use eyre::{bail, eyre, Result, WrapErr};
+use futures::FutureExt;
 use std::env;
+use std::future::IntoFuture;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -331,48 +333,76 @@ pub struct ZiskProver {
     client: ZiskClient,
     program: GuestProgram,
     proof_kind: ProofKind,
+    // For the post-panic client rebuild.
+    opts: ProverOpts,
+}
+
+/// Assemble the ZisK client.
+async fn build_prover_client(program: &GuestProgram, opts: &ProverOpts) -> Result<ZiskClient> {
+    let client = if let Some(url) = &opts.remote {
+        ZiskClient::remote(url.clone()).build()?
+    } else {
+        let pk = resolve_proving_key(
+            opts.proving_key.as_deref(),
+            "provingKey",
+            // SDK reads this key file first.
+            Some("pilout.globalInfo.json"),
+        )?;
+        let mut builder = ZiskClient::embedded()
+            .executor(opts.executor)
+            .proving_key(pk);
+        if opts.executor == ExecutorKind::Assembly {
+            builder = builder.asm_options(AsmOptions::default().unlock_mapped_memory());
+        }
+        if opts.proof_kind == ProofKind::Plonk {
+            let pk_snark = resolve_proving_key(None, "provingKeySnark", None)?;
+            builder = builder.plonk().proving_key_plonk(pk_snark);
+        }
+        #[cfg(feature = "gpu")]
+        {
+            builder = builder.gpu();
+        }
+        builder.build()?
+    };
+    client.upload(program).run()?;
+    let start = Instant::now();
+    client.setup(program).run()?.await?;
+    info!("ZisK setup done in {:.1}s", start.elapsed().as_secs_f64());
+    Ok(client)
 }
 
 impl ZiskProver {
     pub async fn new(program: GuestProgram, opts: &ProverOpts) -> Result<Self> {
-        let client = if let Some(url) = &opts.remote {
-            ZiskClient::remote(url.clone()).build()?
-        } else {
-            let pk = resolve_proving_key(
-                opts.proving_key.as_deref(),
-                "provingKey",
-                // First file the SDK reads from the key.
-                Some("pilout.globalInfo.json"),
-            )?;
-            let mut builder = ZiskClient::embedded()
-                .executor(opts.executor)
-                .proving_key(pk);
-            if opts.executor == ExecutorKind::Assembly {
-                builder = builder.asm_options(AsmOptions::default().unlock_mapped_memory());
-            }
-            if opts.proof_kind == ProofKind::Plonk {
-                let pk_snark = resolve_proving_key(None, "provingKeySnark", None)?;
-                builder = builder.plonk().proving_key_plonk(pk_snark);
-            }
-            #[cfg(feature = "gpu")]
-            {
-                builder = builder.gpu();
-            }
-            builder.build()?
-        };
-        client.upload(&program).run()?;
-        let start = Instant::now();
-        client.setup(&program).run()?.await?;
-        info!("ZisK setup done in {:.1}s", start.elapsed().as_secs_f64());
+        let client = build_prover_client(&program, opts).await?;
         Ok(Self {
             client,
             program,
             proof_kind: opts.proof_kind,
+            opts: opts.clone(),
         })
     }
 
-    pub async fn execute(&self, stdin: ZiskStdin) -> Result<RunReport> {
-        let out = self.client.execute(&self.program, stdin).run()?.await?;
+    /// Rebuild the client after a guest panic.
+    pub async fn execute(&mut self, stdin: ZiskStdin) -> Result<RunReport> {
+        let run = catch_unwind(AssertUnwindSafe(|| {
+            self.client.execute(&self.program, stdin).run()
+        }));
+        let job = match run {
+            Ok(job) => job.map_err(|e| eyre!("ZisK execution failed: {e:#}"))?,
+            Err(payload) => {
+                self.rebuild_client().await?;
+                let msg = panic_message(payload.as_ref());
+                bail!("ZisK emulator panicked ({msg}); the guest most likely halted with error");
+            }
+        };
+        let out = match AssertUnwindSafe(job.into_future()).catch_unwind().await {
+            Ok(out) => out.map_err(|e| eyre!("ZisK execution failed: {e:#}"))?,
+            Err(payload) => {
+                self.rebuild_client().await?;
+                let msg = panic_message(payload.as_ref());
+                bail!("ZisK emulator panicked ({msg}); the guest most likely halted with error");
+            }
+        };
         let mut pv = [0u8; PV_LEN];
         out.get_public_values_slice(&mut pv);
         Ok(RunReport {
@@ -381,6 +411,12 @@ impl ZiskProver {
             pv,
             halted_with_error: false,
         })
+    }
+
+    async fn rebuild_client(&mut self) -> Result<()> {
+        warn!("ZisK client panicked; rebuilding it");
+        self.client = build_prover_client(&self.program, &self.opts).await?;
+        Ok(())
     }
 
     pub async fn prove(&self, stdin: ZiskStdin) -> Result<ProveResult> {

@@ -34,6 +34,8 @@ alloy-primitives = "1.0"
 alloy-provider = "1.0"
 clap = { version = "4.0", features = ["derive", "env"] }
 eyre = "0.6"
+# catch_unwind on the awaited execute job.
+futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 url = "2.5"
 tracing = "0.1"

@@ -7824,6 +7824,7 @@ dependencies = [
  "clap",
  "dotenv",
  "eyre",
+ "futures",
  "hex",
  "serde_json",
  "tokio",
