@@ -211,6 +211,16 @@ inline void blake2b_rounds(uint32_t rounds, uint64_t state[16], const uint64_t i
     }
 }
 
+// Size rides the trailing add to x0.
+[[gnu::always_inline]] inline void jump_dest(
+    uint64_t* bitmap, const uint8_t* bytecode, size_t size) noexcept
+{
+    asm volatile("csrs 0x81C, %0\n\tadd x0, %1, %2"
+                 :
+                 : "r"(bytecode), "r"(bitmap), "r"(size)
+                 : "memory");
+}
+
 /* ───────── intx helpers (outputs never alias inputs) ───────── */
 
 [[gnu::always_inline]] inline uint256 arith256_mod(
