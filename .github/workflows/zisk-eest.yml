@@ -47,6 +47,7 @@ jobs:
       options: --init -v /tmp/z6m-cargo-cache:/cargo-cache
     env:
       CARGO_HOME: /cargo-cache/cargo
+      CARGO_NET_RETRY: "10"
     steps:
       - name: Prepare local cargo cache
         run: |
