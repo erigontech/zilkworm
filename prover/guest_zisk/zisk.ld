@@ -1,5 +1,6 @@
-/* Vendored verbatim from 0xPolygonHermez/zisk v1.3.1-alpha (306a9c93),
+/* Vendored from 0xPolygonHermez/zisk v1.3.1-alpha (306a9c93),
    ziskbuild/zisk_linker_script.ld. MIT OR Apache-2.0. Re-diff on every ZisK bump.
+   Local: rom LENGTH trimmed to match zisk_postlink.py.
    Copyright (c) 2025 SilentSig Switzerland GmbH
    SPDX-License-Identifier: MIT OR Apache-2.0 */
 OUTPUT_FORMAT("elf64-littleriscv")
@@ -7,7 +8,7 @@ OUTPUT_ARCH("riscv")
 ENTRY(_start)
 
 MEMORY {
-  rom   (xa) : ORIGIN = 0x80000000, LENGTH = 0x08000000
+  rom   (xa) : ORIGIN = 0x80000000, LENGTH = 0x07F00000  /* postlink reserves 0x87F00000+ */
   ram   (wxa) : ORIGIN = 0xa0000000, LENGTH = 0x20000000
 }
 
