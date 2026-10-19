@@ -9,6 +9,7 @@
 
 #include "state_transition.hpp"
 
+#include <bit>
 #include <cstring>
 #include <format>
 #include <optional>
@@ -36,6 +37,7 @@
 // pulls in nothing from them).
 #include <zilk_core/core/state_zz/hash_state.hpp>      // HashState, HashStateView
 #include <zilk_core/core/state_zz/slib_input.hpp>      // run_slib, SlibRunResult
+#include <zilk_core/core/state_zz/slib_payload.hpp>    // decode_slib_payload, slib_payload_root, slib_payload_block
 #include <zilk_core/dev/check_root_hashstate.hpp>      // check_root_hashstate gather overload
 #endif
 
@@ -296,6 +298,7 @@ namespace {
         size_t passed{0};
         size_t failed{0};
         size_t skipped{0};
+        uint64_t gas{0};  // of the blocks the passed cases executed: the prover reports it per run
 
         constexpr RunResults() = default;
 
@@ -318,6 +321,7 @@ namespace {
             passed += rhs.passed;
             failed += rhs.failed;
             skipped += rhs.skipped;
+            gas += rhs.gas;
             return *this;
         }
     };
@@ -328,263 +332,254 @@ namespace {
     [[nodiscard]] bool is_stateless_witness_negative(std::string_view fixture_name) {
         if (fixture_name.find("eip8025_optional_proofs") == std::string_view::npos)
             return false;
-        // Exempt: this delegated-code "negative" is scored as an ordinary valid block.
-        // See docs/hashstate.md, "Delegated-code exemption".
-        if (fixture_name.find(
-                "::test_validation_codes_missing_delegated_code_on_insufficient_balance_call") !=
-            std::string_view::npos)
-            return false;
+        // test_witness_header_ssz_size_limit pads a witness header to the ByteList limit, or past
+        // it: the RLP decode or the SSZ decode rejects, as the spec does, for a valid block.
         return fixture_name.find("::test_validation_codes_missing_") != std::string_view::npos ||
                fixture_name.find("::test_validation_state_missing_") != std::string_view::npos ||
                fixture_name.find("::test_validation_headers_") != std::string_view::npos ||
                fixture_name.find("::test_invalid_stateless_input_bytes_are_rejected") !=
-                   std::string_view::npos;
+                   std::string_view::npos ||
+               fixture_name.find("::test_witness_header_ssz_size_limit") != std::string_view::npos;
     }
+
+    // What one block did on the HashState its statelessInputBytes built.
+    struct SibBlockOutcome {
+        enum Kind { kMalformed, kRejected, kRootMismatch, kAccepted } kind{kMalformed};
+        ValidationResult err{ValidationResult::kOk};
+        uint32_t unconfirmed_reads{0};
+    };
+
+    // Runs `block` on the state `blob` carries, anchored at `prev_root`, and folds its writes over that
+    // root. The witness headers must chain by parent hash and end at the block's parent, as
+    // validate_headers requires: BLOCKHASH walks back from the block through them.
+    // See docs/hashstate.md, "Slib arm".
+    SibBlockOutcome run_sib_block(ByteView blob, Block& block, const ChainConfig& config,
+                                  const evmc::bytes32& prev_root) {
+        ::zilkworm::HashState hs;
+        const auto slib = ::zilkworm::run_slib(blob, hs, prev_root);
+        if (!slib) {
+            sys_println("ERROR: malformed statelessInputBytes");
+            return {};
+        }
+        if (slib->status != ::zilkworm::HashState::BuildStatus::kOk) {
+            sys_println("ERROR: the witness lacks the pre-state root node");
+            return {};
+        }
+        std::vector<BlockHeader> ancestors;
+        ancestors.reserve(slib->input.headers.size());
+        for (const ByteView hdr_rlp : slib->input.headers) {
+            BlockHeader ancestor;
+            ByteView hv{hdr_rlp};
+            if (!rlp::decode(hv, ancestor)) {
+                sys_println("ERROR: witness header RLP decode failed");
+                return {};
+            }
+            ancestors.push_back(std::move(ancestor));
+        }
+        for (std::size_t i = 1; i < ancestors.size(); ++i) {
+            if (ancestors[i].parent_hash != ancestors[i - 1].hash()) {
+                sys_println("ERROR: witness headers are not contiguous");
+                return {};
+            }
+        }
+        if (ancestors.empty() || ancestors.back().hash() != block.header.parent_hash) {
+            sys_println("ERROR: parent header is not the last witness header");
+            return {};
+        }
+        for (const BlockHeader& ancestor : ancestors) hs.insert_header(ancestor);
+
+        // Blockchain inserts its "genesis" header: the parent, already held.
+        Block parent;
+        parent.header = ancestors.back();
+        Blockchain blockchain{hs, config, parent};
+        if (const ValidationResult err = blockchain.insert_block(block, /*check_state_root=*/false);
+            err != ValidationResult::kOk) {
+            return {SibBlockOutcome::kRejected, err, hs.unconfirmed_read_count()};
+        }
+        // The accept check folds the block's writes over prev_root and requires every read confirmed.
+        if (!::zilkworm::check_root_hashstate(hs, prev_root, block.header.state_root)) {
+            sys_println(std::format("ERROR: HashState accept failed: expected state_root {}, missing_count={} "
+                                    "unconfirmed_read_count={}",
+                                    to_hex(block.header.state_root), hs.missing_count(),
+                                    hs.unconfirmed_read_count()));
+            return {SibBlockOutcome::kRootMismatch, ValidationResult::kOk, hs.unconfirmed_read_count()};
+        }
+        return {SibBlockOutcome::kAccepted, ValidationResult::kOk, 0};
+    }
+
+    // The network a statelessInputBytes chain id selects, as the host adapter maps it; chain id 1 is the
+    // generated EEST corpus, Amsterdam from genesis.
+    const char* network_for_chain_id(uint64_t chain_id) {
+        switch (chain_id) {
+            case 1: return "Amsterdam";
+            case 0x1a62c8cb6: return "glamsterdam-devnet-7";
+            case 0x1a6a8cc6e: return "glamsterdam-devnet-8";
+            case 11155111: return "sepolia";
+            default: return nullptr;
+        }
+    }
+
 #endif  // Z6M_HASH_STATE
 
     // https://ethereum-tests.readthedocs.io/en/latest/test_types/blockchain_tests.html
     RunResults blockchain_test([[maybe_unused]] std::string_view fixture_name,
                                const nlohmann::json& json_test) {
 #ifdef Z6M_HASH_STATE
-        // slib arm: per-block statelessInputBytes -> HashState -> execute -> accept.
-        // See docs/hashstate.md, "Slib arm".
+        // slib arm: each block's statelessInputBytes builds a fresh HashState, the block runs on it and
+        // the accept check folds its writes over the parent root. See docs/hashstate.md, "Slib arm".
         const bool witness_negative = is_stateless_witness_negative(fixture_name);
+        uint64_t gas_used = 0;  // of the accepted blocks
         const auto run_slib_arm = [&]() -> Status {
-        const auto network{json_test["network"].get<std::string>()};
-        const auto config_it{test::kNetworkConfig.find(network)};
-        if (config_it == test::kNetworkConfig.end()) {
-            sys_println("ERROR: unknown network (slib arm)");
-            return Status::kSkipped;
-        }
-        const ChainConfig& config = config_it->second;
-
-        // Genesis block: the Blockchain ctor input (it insert_header's the genesis header,
-        // blockchain.cpp:105) and, for block 0, the prev-state root anchor
-        // (genesisBlockHeader.stateRoot the witness is built against).
-        auto genesis_rlp_opt = from_hex(json_test["genesisRLP"].get<std::string>());
-        if (!genesis_rlp_opt) {
-            sys_println("ERROR: bad genesisRLP hex (slib arm)");
-            return Status::kFailed;
-        }
-        Bytes genesis_rlp{std::move(*genesis_rlp_opt)};
-        ByteView genesis_view{genesis_rlp};
-        Block genesis_block;
-        if (!rlp::decode(genesis_view, genesis_block)) {
-            sys_println("Failure to decode genesisRLP");
-            return Status::kFailed;
-        }
-
-        // prev_root: block 0 anchors to the genesis state root; each accepted block advances it.
-        evmc::bytes32 prev_root = genesis_block.header.state_root;
-
-        size_t block_index = 0;
-        for (const auto& json_block : json_test["blocks"]) {
-            // 1. A block without statelessInputBytes cannot run the slib path -> ctest SKIP (2).
-            if (!json_block.contains("statelessInputBytes")) {
-                sys_println("SKIP: block lacks statelessInputBytes");
+            const auto network{json_test["network"].get<std::string>()};
+            const auto config_it{test::kNetworkConfig.find(network)};
+            if (config_it == test::kNetworkConfig.end()) {
+                sys_println("ERROR: unknown network (slib arm)");
                 return Status::kSkipped;
             }
+            const ChainConfig& config = config_it->second;
 
-            // 2. Decode the witness blob. Kept alive for the whole block iteration: run_slib's
-            //    decoded ByteViews (headers, public_keys, node/code spans) view INTO it.
-            auto blob_opt = from_hex(json_block["statelessInputBytes"].get<std::string>());
-            if (!blob_opt) {
-                sys_println("ERROR: bad statelessInputBytes hex");
+            auto genesis_rlp_opt = from_hex(json_test["genesisRLP"].get<std::string>());
+            if (!genesis_rlp_opt) {
+                sys_println("ERROR: bad genesisRLP hex (slib arm)");
                 return Status::kFailed;
             }
-            const Bytes blob{std::move(*blob_opt)};
-
-            // 3. Fresh HashState per block (each block carries its own witness). Parse the blob
-            //    (feeds add_node/add_code) + build the pre-state caches from the witness trie,
-            //    anchored at prev_root.
-            ::zilkworm::HashState hs;
-            const auto slib =
-                ::zilkworm::run_slib(ByteView{blob.data(), blob.size()}, hs, prev_root);
-            if (!slib) {
-                sys_println("ERROR: run_slib failed (malformed StatelessInputBytes)");
+            Bytes genesis_rlp{std::move(*genesis_rlp_opt)};
+            ByteView genesis_view{genesis_rlp};
+            Block genesis_block;
+            if (!rlp::decode(genesis_view, genesis_block)) {
+                sys_println("Failure to decode genesisRLP");
                 return Status::kFailed;
             }
-            if (slib->status != ::zilkworm::HashState::BuildStatus::kOk) {
-                // Absent seeding ACCOUNT root (B2) — the one gap that is never a legitimate
-                // witness omission. Fail-closed.
-                sys_println("ERROR: build_state_from_trie missing seeding root");
-                return Status::kFailed;
-            }
+            // Block 0 anchors at the genesis state root; each accepted block advances the anchor.
+            evmc::bytes32 prev_root = genesis_block.header.state_root;
 
-            // 4. Check the witness ancestor headers form one chain, then feed them for BLOCKHASH.
-            // See docs/hashstate.md, "Witness ancestor headers".
-            std::vector<BlockHeader> ancestors;
-            ancestors.reserve(slib->input.headers.size());
-            for (const ByteView hdr_rlp : slib->input.headers) {
-                BlockHeader ancestor;
-                ByteView hv{hdr_rlp};
-                if (!rlp::decode(hv, ancestor)) {
-                    sys_println("ERROR: witness header RLP decode failed");
+            size_t block_index = 0;
+            for (const auto& json_block : json_test["blocks"]) {
+                if (!json_block.contains("statelessInputBytes")) {
+                    sys_println("SKIP: block lacks statelessInputBytes");
+                    return Status::kSkipped;
+                }
+                auto blob_opt = from_hex(json_block["statelessInputBytes"].get<std::string>());
+                if (!blob_opt) {
+                    sys_println("ERROR: bad statelessInputBytes hex");
                     return Status::kFailed;
                 }
-                ancestors.push_back(std::move(ancestor));
-            }
-            for (std::size_t i = 1; i < ancestors.size(); ++i) {
-                if (ancestors[i].parent_hash != ancestors[i - 1].hash()) {
-                    sys_println(std::format(
-                                    "STRICT: witness ancestor headers are not a contiguous "
-                                    "parent-hash chain at index {} (number {})",
-                                    i, ancestors[i].number)
-                                    .c_str());
-                    return Status::kFailed;
-                }
-            }
-            for (const BlockHeader& ancestor : ancestors) {
-                hs.insert_header(ancestor);
-            }
+                const Bytes blob{std::move(*blob_opt)};
 
-            // 5. Blockchain over the HashState-backed ActiveState (ctor insert_header's genesis).
-            Blockchain blockchain{hs, config, genesis_block};
+                const bool invalid{json_block.contains("expectException")};
+                const std::string expectation =
+                    invalid ? json_block["expectException"].get<std::string>() : std::string{};
+                const auto check_strict = [&](std::optional<ValidationResult> got) -> bool {
+                    if (!got.has_value()) return strict_exception_match_pre_insert(expectation);
+                    return strict_exception_match(*got, expectation);
+                };
+                const auto fail_strict = [&](std::string_view rejection_mode) {
+                    sys_println(std::format("STRICT: rejected via {} but expected {}", rejection_mode, expectation));
+                };
 
-            // 6. Execute the block — the same RLP decode + size gates + expectException matching
-            //    run_json_block uses (st.cpp:179-233), but check_state_root=false: the HashState
-            //    accept is the S5 gather fold (step 7), not the Yellow-Paper state_root_hash().
-            const bool invalid{json_block.contains("expectException")};
-            const std::string expectation =
-                invalid ? json_block["expectException"].get<std::string>() : std::string{};
-            const auto check_strict = [&](std::optional<ValidationResult> got) -> bool {
-                if (!got.has_value()) return strict_exception_match_pre_insert(expectation);
-                return strict_exception_match(*got, expectation);
-            };
-            const auto fail_strict = [&](std::string_view rejection_mode) {
-                sys_println(std::format("STRICT: rejected via {} but expected {}",
-                                        rejection_mode, expectation).c_str());
-            };
-
-            std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
-            if (!rlp) {
-                if (invalid) {
-                    if (!check_strict(std::nullopt)) {
-                        fail_strict("bad-hex");
-                        return Status::kFailed;
-                    }
-                    ++block_index;
-                    continue;  // expected-invalid correctly rejected: chain does not advance.
-                }
-                sys_println("Failure to read hex");
-                return Status::kFailed;
-            }
-
-            Block block;
-            ByteView view{*rlp};
-
-            constexpr size_t MAX_BLOCK_SIZE = 10 * 1024 * 1024;   // EIP-7934 CL gossip cap.
-            constexpr size_t SAFETY_MARGIN = 2 * 1024 * 1024;     // EIP-7934 beacon margin.
-            constexpr size_t MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN;
-            if (view.size() > MAX_RLP_BLOCK_SIZE) {
-                if (invalid) {
-                    if (!check_strict(std::nullopt)) {
-                        fail_strict("oversize-block");
-                        return Status::kFailed;
-                    }
-                    ++block_index;
-                    continue;
-                }
-                return Status::kSkipped;
-            }
-
-            if (!rlp::decode(view, block)) {
-                if (invalid) {
-                    if (!check_strict(std::nullopt)) {
-                        fail_strict("rlp-decode");
-                        return Status::kFailed;
-                    }
-                    ++block_index;
-                    continue;
-                }
-                sys_println("Failure to decode RLP");
-                return Status::kFailed;
-            }
-            // Only after decode: the fork gate needs the block's number/timestamp.
-            if (rlp->size() > kMaxRlpBlockSize &&
-                config.revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
-                if (invalid) {
-                    ++block_index;
-                    continue;
-                }
-                sys_println("Block exceeded kMaxRlpBlockSize");
-                return Status::kFailed;
-            }
-
-            // The block's parent header must be in its own witness ancestor set (EIP-8025).
-            // See docs/hashstate.md, "Witness ancestor headers".
-            {
-                bool parent_in_witness = false;
-                for (const BlockHeader& ancestor : ancestors) {
-                    if (ancestor.hash() == block.header.parent_hash) {
-                        parent_in_witness = true;
-                        break;
-                    }
-                }
-                if (!parent_in_witness) {
-                    sys_println(std::format(
-                                    "STRICT: block {} parent header absent from witness "
-                                    "ancestor set (parent_hash {}) — mandatory parent "
-                                    "header missing",
-                                    block_index, to_hex(block.header.parent_hash))
-                                    .c_str());
-                    return Status::kFailed;
-                }
-            }
-
-            const ValidationResult err{blockchain.insert_block(block, /*check_state_root=*/false)};
-            if (err != ValidationResult::kOk) {
-                if (invalid) {
-                    if (!check_strict(err)) {
-                        // Wrong label: accept the rejection only if the witness was partial.
-                        // See docs/hashstate.md, "Expected-invalid label relaxation".
-                        if (hs.unconfirmed_read_count() > 0) {
-                            ++block_index;
-                            continue;  // rejected; reason unknowable from a partial witness.
+                // The block RLP gates of run_json_block.
+                std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
+                if (!rlp) {
+                    if (invalid) {
+                        if (!check_strict(std::nullopt)) {
+                            fail_strict("bad-hex");
+                            return Status::kFailed;
                         }
-                        fail_strict(magic_enum::enum_name<ValidationResult>(err));
-                        return Status::kFailed;
+                        ++block_index;
+                        continue;
                     }
-                    ++block_index;
-                    continue;  // expected-invalid correctly rejected.
+                    sys_println("Failure to read hex");
+                    return Status::kFailed;
                 }
-                sys_println(std::format("ERROR: validation error at block {}: {} ({})",
-                                        block_index, magic_enum::enum_name(err),
-                                        magic_enum::enum_integer(err))
-                                .c_str());
-                return Status::kFailed;
-            }
-            if (invalid) {
-                sys_println("Invalid block executed successfully");
-                sys_println("ERROR: expected exception");
-                return Status::kFailed;
-            }
+                Block block;
+                ByteView view{*rlp};
+                constexpr size_t MAX_BLOCK_SIZE = 10 * 1024 * 1024;  // EIP-7934 CL gossip cap.
+                constexpr size_t SAFETY_MARGIN = 2 * 1024 * 1024;    // EIP-7934 beacon margin.
+                constexpr size_t MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN;
+                if (view.size() > MAX_RLP_BLOCK_SIZE) {
+                    if (invalid) {
+                        if (!check_strict(std::nullopt)) {
+                            fail_strict("oversize-block");
+                            return Status::kFailed;
+                        }
+                        ++block_index;
+                        continue;
+                    }
+                    return Status::kSkipped;
+                }
+                if (!rlp::decode(view, block)) {
+                    if (invalid) {
+                        if (!check_strict(std::nullopt)) {
+                            fail_strict("rlp-decode");
+                            return Status::kFailed;
+                        }
+                        ++block_index;
+                        continue;
+                    }
+                    sys_println("Failure to decode RLP");
+                    return Status::kFailed;
+                }
+                if (rlp->size() > kMaxRlpBlockSize &&
+                    config.revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
+                    if (invalid) {
+                        if (!check_strict(std::nullopt)) {
+                            fail_strict("oversize-block");
+                            return Status::kFailed;
+                        }
+                        ++block_index;
+                        continue;
+                    }
+                    sys_println("Block exceeded kMaxRlpBlockSize");
+                    return Status::kFailed;
+                }
 
-            // 7. Accept via the S5 gather overload: gather this block's writes from the HashState
-            //    overlay, fold them over prev_root, require the recomputed root to match the
-            //    header AND both witness-completeness counters (missing / unconfirmed reads) to
-            //    be zero. (The overload prints the recomputed root itself.)
-            if (!::zilkworm::check_root_hashstate(hs, prev_root, block.header.state_root)) {
-                sys_println(std::format(
-                                "ERROR: HashState accept failed at block {}: expected state_root {}",
-                                block_index, to_hex(block.header.state_root))
-                                .c_str());
-                sys_println(std::format("  missing_count={} unconfirmed_read_count={}",
-                                        hs.missing_count(), hs.unconfirmed_read_count())
-                                .c_str());
-                return Status::kFailed;
+                const SibBlockOutcome o = run_sib_block(ByteView{blob}, block, config, prev_root);
+                switch (o.kind) {
+                    case SibBlockOutcome::kMalformed:
+                        return Status::kFailed;
+                    case SibBlockOutcome::kRejected:
+                        if (!invalid) {
+                            sys_println(std::format("ERROR: validation error at block {}: {} ({})", block_index,
+                                                    magic_enum::enum_name(o.err), magic_enum::enum_integer(o.err)));
+                            return Status::kFailed;
+                        }
+                        if (!check_strict(o.err)) {
+                            // A witness that prunes an account a validation gate reads rejects for another
+                            // reason; only then is the label waived, and the waiver is logged.
+                            // See docs/hashstate.md, "Expected-invalid label relaxation".
+                            if (o.unconfirmed_reads == 0) {
+                                fail_strict(magic_enum::enum_name<ValidationResult>(o.err));
+                                return Status::kFailed;
+                            }
+                            sys_println(std::format("STRICT: label waived at block {}: {} for {} ({} unconfirmed reads)",
+                                                    block_index, magic_enum::enum_name(o.err), expectation,
+                                                    o.unconfirmed_reads));
+                        }
+                        ++block_index;
+                        continue;
+                    case SibBlockOutcome::kRootMismatch:
+                        return Status::kFailed;
+                    case SibBlockOutcome::kAccepted:
+                        break;
+                }
+                if (invalid) {
+                    sys_println("Invalid block executed successfully");
+                    sys_println("ERROR: expected exception");
+                    return Status::kFailed;
+                }
+                gas_used += block.header.gas_used;
+                prev_root = block.header.state_root;
+                ++block_index;
             }
-
-            // 8. Accepted: advance the anchor to this block's post-state root for the next block.
-            prev_root = block.header.state_root;
-            ++block_index;
-        }
-        return Status::kPassed;
+            return Status::kPassed;
         };  // run_slib_arm
 
         const Status natural = run_slib_arm();
-        if (!witness_negative)
-            return natural;
+        if (!witness_negative) {
+            RunResults results{natural};
+            results.gas = gas_used;
+            return results;
+        }
         // Witness negative: PASS iff the slib arm rejected, FAIL iff it accepted every block.
         // See docs/hashstate.md, "Scoring witness-validation negatives".
         if (natural == Status::kPassed) {
@@ -668,6 +663,7 @@ uint64_t StateTransition::run_ejsn() {
 
     bool any_failed = false;
     bool any_skipped = false;
+    uint64_t gas = 0;
     const auto base_json = nlohmann::json::parse(json_str);
     for (const auto& [name, test] : base_json.items()) {
         const auto result = blockchain_test(name, test);
@@ -678,6 +674,7 @@ uint64_t StateTransition::run_ejsn() {
             sys_println("    SKIPPED");
             any_skipped = true;
         } else {
+            gas += result.gas;
             sys_println("    passed");
         }
     }
@@ -687,7 +684,69 @@ uint64_t StateTransition::run_ejsn() {
     }
     if (any_skipped)
         return kRunSkipped;
-    return 0;
+    return gas;
+}
+
+
+// A raw statelessInputBytes blob: the block comes out of its NewPayloadRequest, the pre-state root out
+// of the parent header the witness carries, and the result is the SSZ StatelessValidationResult. A
+// rejected block is a result with successful_validation false, not a failed run; only an input that
+// does not decode leaves the result zero.
+uint64_t StateTransition::run_sib() {
+#ifdef Z6M_HASH_STATE
+    sib_ = true;
+    const ByteView blob{envelope_.data(), envelope_.size()};
+    const auto dec = ::zilkworm::decode_stateless_input(blob);
+    const auto payload = dec ? ::zilkworm::decode_slib_payload(dec->new_payload_request) : std::nullopt;
+    if (!payload) {
+        sys_println("ERROR: malformed statelessInputBytes");
+        return 0;
+    }
+    chain_id_ = dec->chain_id;
+    schema_id_ = ::zilkworm::kSlibSchemaId;
+    new_payload_request_root_ = std::bit_cast<evmc::bytes32>(::zilkworm::slib_payload_root(*payload));
+    block_hash_ = payload->block_hash;
+
+    const char* network = network_for_chain_id(chain_id_);
+    const auto config_it = network ? test::kNetworkConfig.find(network) : test::kNetworkConfig.end();
+    if (config_it == test::kNetworkConfig.end()) {
+        sys_println(std::format("block rejected: unknown chain id {}", chain_id_));
+        return 0;
+    }
+    auto block = ::zilkworm::slib_payload_block(*payload);
+    if (!block) {
+        sys_println("block rejected: transaction decode");
+        return 0;
+    }
+    const ::zilkworm::BlockEngineRecord engine{
+        payload->block_hash,
+        std::span<const uint8_t>{payload->versioned_hashes.data(), payload->versioned_hashes.size()}};
+    if (const char* why = engine_mismatch(*block, engine)) {
+        sys_println(std::format("block rejected: {} mismatch", why));
+        return 0;
+    }
+    // The parent header, last of the witness headers, anchors the pre-state root.
+    BlockHeader parent;
+    if (dec->headers.empty()) {
+        sys_println("block rejected: witness carries no headers");
+        return 0;
+    }
+    if (ByteView hv{dec->headers.back()}; !rlp::decode(hv, parent) || parent.hash() != block->header.parent_hash) {
+        sys_println("block rejected: parent header is not the last witness header");
+        return 0;
+    }
+    pre_state_root_ = parent.state_root;
+
+    const SibBlockOutcome o = run_sib_block(blob, *block, config_it->second, parent.state_root);
+    if (o.kind != SibBlockOutcome::kAccepted) return 0;
+    successful_validation_ = true;
+    post_state_root_ = block->header.state_root;
+    return block->header.gas_used;
+#else
+    sys_println("ERROR: a statelessInputBytes input needs the HashState guest (Z6M_HASH_STATE)");
+    failed_ = true;
+    return kRunFailure;
+#endif
 }
 
 }  // namespace silkworm::cmd::state_transition

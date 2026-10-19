@@ -273,7 +273,7 @@ RunResult run_ops(const Bytes32Map& pre, std::vector<Op> ops, const std::functio
             post[op.key] = op.now;
         }
     }
-    GridMPT<Del> trie{direct, pre_root};
+    GridMPT<Del, DirectState> trie{direct, pre_root};
     RunResult r;
     r.got = trie.calc_root_from_updates({updates.data(), updates.size()});
     r.expected = hashbuilder_root(post, nullptr);
@@ -423,7 +423,7 @@ TEST_CASE("GridMPT roots match HashBuilder on random clustered batches", "[trie]
         for (auto& [k, op] : ops) v.push_back(op);
         INFO("iter=" << iter << " pre=" << pre.size() << " ops=" << v.size());
         CHECK_OPS(true, pre, v);
-        // GridMPT<false> takes no deletes: turn them into updates.
+        // GridMPT<false, DirectState> takes no deletes: turn them into updates.
         for (auto& op : v)
             if (op.now.empty()) op.now = value_rlp(rng);
         CHECK_OPS(false, pre, v);
@@ -440,7 +440,7 @@ bool unfolds_at(const uint8_t* node, size_t size, unsigned misalign) {
     static std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
     DirectState direct{std::span<uint8_t>{prestate}};
-    GridMPT<false> trie{direct, silkworm::kEmptyRoot};
+    GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
     Placed p{size, misalign};
     std::memcpy(p.at, node, size);
     return trie.unfold_node_from_rlp(ByteView{p.at, size}, /*parent_slot=*/0, /*parent_depth=*/0);

@@ -534,7 +534,7 @@ TEST_CASE("kprefix: GridMPT roots match HashBuilder", "[trie][gridmpt][kprefix]"
             batches.push_back(make_update(pre, rng, modes[i % 3], i % 2 ? 4 : 30, i % 3 == 0 ? 10 : 0));
         {
             Witness w{nodes};
-            GridMPT<true> reused{w.state, silkworm::kEmptyRoot};
+            GridMPT<true, DirectState> reused{w.state, silkworm::kEmptyRoot};
             for (const auto& u : batches) {
                 reused.reset(pre_root);
                 const bytes32 got = reused.calc_root_from_updates({u.updates.data(), u.updates.size()});
@@ -544,7 +544,7 @@ TEST_CASE("kprefix: GridMPT roots match HashBuilder", "[trie][gridmpt][kprefix]"
         }
         for (const auto& u : batches) {
             Witness w{nodes};  // unverified nodes: their states are saved
-            GridMPT<true> fresh{w.state, pre_root};
+            GridMPT<true, DirectState> fresh{w.state, pre_root};
             const bytes32 got = fresh.calc_root_from_updates({u.updates.data(), u.updates.size()});
             CHECK(got == hb_root(u.expected, nullptr));
             CHECK_FALSE(fresh.failed());
@@ -561,7 +561,7 @@ TEST_CASE("kprefix: the same node folded in two storage tries", "[trie][gridmpt]
     const Map pre = random_trie(rng, 1500);
     const bytes32 pre_root = hb_root(pre, &nodes);
     Witness w{nodes};
-    GridMPT<true> grid{w.state, silkworm::kEmptyRoot};
+    GridMPT<true, DirectState> grid{w.state, silkworm::kEmptyRoot};
     for (int i = 0; i < 8; ++i) {
         const Update u = make_update(pre, rng, Mode::kWritesOnly, 10, 0);
         grid.reset(pre_root);
@@ -653,7 +653,7 @@ TEST_CASE("kprefix: a branch read first is resumed when a later update writes it
             // The read, in a walk that writes: the branch keeps the state of its blocks before the slot the key
             // went through.
             Witness w{nodes};
-            GridMPT<true> grid{w.state, pre_root};
+            GridMPT<true, DirectState> grid{w.state, pre_root};
             const std::vector<TrieNodeFlat> ups{read_of(kp->k1, v1), write_of(kz, vz, vz)};
             CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
             CHECK_FALSE(grid.failed());
@@ -664,7 +664,7 @@ TEST_CASE("kprefix: a branch read first is resumed when a later update writes it
         {
             // A walk that only reads changes no node, and saves no state.
             Witness w{nodes};
-            GridMPT<true> grid{w.state, pre_root};
+            GridMPT<true, DirectState> grid{w.state, pre_root};
             const std::vector<TrieNodeFlat> ups{read_of(kp->k1, v1), read_of(kz, vz)};
             CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
             CHECK_FALSE(grid.failed());
@@ -673,7 +673,7 @@ TEST_CASE("kprefix: a branch read first is resumed when a later update writes it
         {
             // The read, then a write under the same branch: its fold resumes from the read's state.
             Witness w{nodes};
-            GridMPT<true> grid{w.state, pre_root};
+            GridMPT<true, DirectState> grid{w.state, pre_root};
             const Bytes nv = value_of(rng, 33);
             const std::vector<TrieNodeFlat> ups{read_of(kp->k1, v1), write_of(kp->k2, v2, nv)};
             Map post = pre;
@@ -709,7 +709,7 @@ TEST_CASE("kprefix: the root keeps the state of its blocks before the first slot
         ups.push_back(write_of(k, v, v));
         {
             Witness w{nodes};
-            GridMPT<true> grid{w.state, pre_root};
+            GridMPT<true, DirectState> grid{w.state, pre_root};
             CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
             CHECK_FALSE(grid.failed());
             const auto root = w.state.find_node_rlp(pre_root);
@@ -722,7 +722,7 @@ TEST_CASE("kprefix: the root keeps the state of its blocks before the first slot
         ups.back() = write_of(k, v, value_of(rng, 20));
         {
             Witness w{nodes};
-            GridMPT<true> grid{w.state, pre_root};
+            GridMPT<true, DirectState> grid{w.state, pre_root};
             Map post = pre;
             post[k] = Bytes{ups.back().current_value()};
             CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
@@ -760,7 +760,7 @@ TEST_CASE("kprefix: tags do not outlive a GridMPT", "[trie][gridmpt][kprefix]") 
     fill_full_branch(node, rng);
     save(node, 3, 1);
     Witness w{Map{}};
-    GridMPT<true> grid{w.state, silkworm::kEmptyRoot};
+    GridMPT<true, DirectState> grid{w.state, silkworm::kEmptyRoot};
     for (size_t i = 0; i < kprefix::kRows; ++i) CHECK(kprefix::tag_orig[i] == nullptr);
 }
 
@@ -806,7 +806,7 @@ TEST_CASE("kprefix: a branch that is not full, read first, resumes when a later 
     };
     {
         Witness w{nodes};
-        GridMPT<true> grid{w.state, pre_root};
+        GridMPT<true, DirectState> grid{w.state, pre_root};
         const std::vector<TrieNodeFlat> ups{read_of(t.key[12], t.pre.at(t.key[12])), write_of(kz, vz, vz)};
         CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == pre_root);
         CHECK_FALSE(grid.failed());
@@ -819,7 +819,7 @@ TEST_CASE("kprefix: a branch that is not full, read first, resumes when a later 
     for (const unsigned written : {12u, 14u}) {
         CAPTURE(written);
         Witness w{nodes};
-        GridMPT<true> grid{w.state, pre_root};
+        GridMPT<true, DirectState> grid{w.state, pre_root};
         const Bytes nv = value_of(rng, 30);
         // The write of slot 12 descends first itself; that of slot 14 after the read of slot 12.
         std::vector<TrieNodeFlat> ups;
@@ -835,7 +835,7 @@ TEST_CASE("kprefix: a branch that is not full, read first, resumes when a later 
         // A later walk of the same witness (check_root's storage tries share one GridMPT) that writes slot 3 of the
         // branch: the state of its first two blocks covers that slot's item, and is not used.
         Witness w{nodes};
-        GridMPT<true> grid{w.state, silkworm::kEmptyRoot};
+        GridMPT<true, DirectState> grid{w.state, silkworm::kEmptyRoot};
         grid.reset(pre_root);
         const std::vector<TrieNodeFlat> first{read_of(t.key[12], t.pre.at(t.key[12])), write_of(kz, vz, vz)};
         CHECK(grid.calc_root_from_updates({first.data(), first.size()}) == pre_root);
@@ -933,7 +933,7 @@ TEST_CASE("kprefix: a branch an SLOAD walk verified is resumed when check_root w
         const std::vector<TrieNodeFlat> ups{write_of(hk, slots.at(hk), nv)};
         Map post = slots;
         post[hk] = nv;
-        GridMPT<true> grid{sw.state, root};
+        GridMPT<true, DirectState> grid{sw.state, root};
         CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
         CHECK_FALSE(grid.failed());
         CHECK(sw.state.walk_state_blocks(branch.data()) == 0);  // consumed by the fold
@@ -972,7 +972,7 @@ TEST_CASE("kprefix: a write before the slot a walk saved for hashes the branch i
     const std::vector<TrieNodeFlat> ups{write_of(kp->k1, slots.at(kp->k1), nv)};
     Map post = slots;
     post[kp->k1] = nv;
-    GridMPT<true> grid{sw.state, root};
+    GridMPT<true, DirectState> grid{sw.state, root};
     CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
     CHECK_FALSE(grid.failed());
     CHECK(sw.state.walk_state_blocks(branch.data()) == 3);  // left where it was
@@ -1011,7 +1011,7 @@ TEST_CASE("kprefix: a branch that is not full, verified by an SLOAD walk, resume
     const std::vector<TrieNodeFlat> ups{write_of(t.key[14], t.pre.at(t.key[14]), nv)};
     Map post = t.pre;
     post[t.key[14]] = nv;
-    GridMPT<true> grid{sw.state, root};
+    GridMPT<true, DirectState> grid{sw.state, root};
     CHECK(grid.calc_root_from_updates({ups.data(), ups.size()}) == hb_root(post, nullptr));
     CHECK_FALSE(grid.failed());
     CHECK(sw.state.walk_state_blocks(branch.data()) == 0);  // consumed by the fold

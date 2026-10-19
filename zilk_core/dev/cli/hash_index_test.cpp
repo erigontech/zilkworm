@@ -182,6 +182,28 @@ TEST_CASE("HashIndex load-factor sizing", "[hash_index]") {
     }
 }
 
+// The constructor hint is only a hint: a table filled well past it grows by doubling, rehashes
+// every key, keeps the load factor at or below 0.5 and still resolves every key to its value.
+TEST_CASE("HashIndex grows past the size hint and keeps every entry", "[hash_index]") {
+    using Idx = HashIndex<32, &hash_key8>;
+    Idx idx{4};
+    const uint32_t initial = idx.capacity();
+    constexpr uint32_t kEntries = 1000;
+    for (uint32_t i = 0; i < kEntries; ++i) {
+        REQUIRE(idx.insert(ref32(make_key32(0x50000ULL + i, 0xAB)), i + 1u));
+        CHECK(2u * idx.size() <= idx.capacity());
+    }
+    CHECK(idx.size() == kEntries);
+    CHECK(idx.capacity() > initial);
+    CHECK(std::has_single_bit(idx.capacity()));
+    for (uint32_t i = 0; i < kEntries; ++i) {
+        const auto got = idx.find(ref32(make_key32(0x50000ULL + i, 0xAB)));
+        REQUIRE(got.has_value());
+        CHECK(*got == i + 1u);
+    }
+    CHECK_FALSE(idx.find(ref32(make_key32(0x50000ULL + kEntries, 0xAB))).has_value());
+}
+
 // The same table over 20-byte addresses via addr_key8: basic resolution plus a forced
 // collision (addresses sharing the addr_key8 low-7-bytes-and-byte-19 fingerprint).
 TEST_CASE("HashIndex 20-byte address keys", "[hash_index]") {

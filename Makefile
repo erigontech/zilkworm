@@ -153,11 +153,11 @@ tests-json: z6m_prover
 		--execution-log-dir $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
 
 # tests-zkevm StatelessInputBytes fixtures. These are ordinary blockchain_test
-# JSON cases except that blocks[0] carries a `statelessInputBytes` hex field —
-# the SSZ/slib stateless input the HashState read-side backend consumes. Sourced
-# from the ethereum/execution-specs release `tests-zkevm@v0.8.0` (asset
-# fixtures_zkevm.tar.gz, ~524 MiB), a sibling corpus to the pinned eest_stable one.
-ZKEVM_RELEASE_TAG  := tests-zkevm@v0.8.0
+# JSON cases except that each block carries a `statelessInputBytes` hex field,
+# the SSZ stateless input the HashState backend consumes. Sourced from the
+# ethereum/execution-specs release `tests-zkevm@v21.0.1` (asset
+# fixtures_zkevm.tar.gz, ~590 MiB), the release ere-guests tests against.
+ZKEVM_RELEASE_TAG  := tests-zkevm@v21.0.1
 ZKEVM_RELEASE_REPO := ethereum/execution-specs
 ZKEVM_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_stateless/fixtures
 ZKEVM_JSON_DIR ?= $(ZKEVM_FIXTURES_DIR)/blockchain_tests
@@ -176,7 +176,7 @@ zkevm-fixtures:
 	    echo "  zkevm fixtures present at $$dst; skipping download"; \
 	else \
 	    mkdir -p "$(FIXTURES_CACHE)"; \
-	    echo "  downloading $(ZKEVM_RELEASE_TAG) fixtures_zkevm.tar.gz (~524 MiB) from $(ZKEVM_RELEASE_REPO)"; \
+	    echo "  downloading $(ZKEVM_RELEASE_TAG) fixtures_zkevm.tar.gz (~590 MiB) from $(ZKEVM_RELEASE_REPO)"; \
 	    gh release download '$(ZKEVM_RELEASE_TAG)' --repo $(ZKEVM_RELEASE_REPO) \
 	        -p 'fixtures_zkevm.tar.gz' -D "$(FIXTURES_CACHE)" --clobber; \
 	    echo "  extracting fixtures/blockchain_tests"; \
@@ -249,11 +249,11 @@ release-artifacts:
 # See docs/hashstate.md, "SP1 cycle benchmark".
 
 # The curated compute benchmark corpus: single heavy Amsterdam blocks packed to
-# fixed 10M/30M/60M gas budgets. Same on-wire schema (0x1501 || SSZ) as the
-# eest-zkevm-tests corpus, only the content differs. Sourced from the
-# ethereum/execution-specs release tests-zkevm-benchmark@v0.8.2 (single asset
-# fixtures_zkevm-benchmark.tar.gz, ~495 MiB). Mirrors the zkevm-fixtures idiom.
-ZKEVM_BENCH_RELEASE_TAG  := tests-zkevm-benchmark@v0.8.2
+# a fixed gas budget, one tarball per budget (30M here). Same on-wire schema
+# (0x1501 || SSZ) as the eest-zkevm-tests corpus, only the content differs.
+# Sourced from the ethereum/execution-specs release tests-zkevm-benchmark@v21.0.5.
+ZKEVM_BENCH_RELEASE_TAG  := tests-zkevm-benchmark@v21.0.5
+ZKEVM_BENCH_ASSET        := fixtures_zkevm-benchmark_0030M.tar.gz
 ZKEVM_BENCH_RELEASE_REPO := ethereum/execution-specs
 ZKEVM_BENCH_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_benchmark/fixtures
 ZKEVM_BENCH_JSON_DIR ?= $(ZKEVM_BENCH_FIXTURES_DIR)/blockchain_tests
@@ -264,14 +264,14 @@ ZKEVM_BENCH_JSON_DIR ?= $(ZKEVM_BENCH_FIXTURES_DIR)/blockchain_tests
 # so it uses `gh release download` rather than the sha256-verified manifest.
 zkevm-benchmark-fixtures:
 	@dst="$(FIXTURES_CACHE)/zkevm_benchmark"; \
-	tarball="$(FIXTURES_CACHE)/fixtures_zkevm-benchmark.tar.gz"; \
+	tarball="$(FIXTURES_CACHE)/$(ZKEVM_BENCH_ASSET)"; \
 	if [ -d "$$dst/fixtures/blockchain_tests" ]; then \
 	    echo "  zkevm-benchmark fixtures present at $$dst; skipping download"; \
 	else \
 	    mkdir -p "$(FIXTURES_CACHE)"; \
-	    echo "  downloading $(ZKEVM_BENCH_RELEASE_TAG) fixtures_zkevm-benchmark.tar.gz (~495 MiB) from $(ZKEVM_BENCH_RELEASE_REPO)"; \
+	    echo "  downloading $(ZKEVM_BENCH_RELEASE_TAG) $(ZKEVM_BENCH_ASSET) from $(ZKEVM_BENCH_RELEASE_REPO)"; \
 	    gh release download '$(ZKEVM_BENCH_RELEASE_TAG)' --repo $(ZKEVM_BENCH_RELEASE_REPO) \
-	        -p 'fixtures_zkevm-benchmark.tar.gz' -D "$(FIXTURES_CACHE)" --clobber; \
+	        -p '$(ZKEVM_BENCH_ASSET)' -D "$(FIXTURES_CACHE)" --clobber; \
 	    echo "  extracting fixtures/blockchain_tests"; \
 	    rm -rf "$$dst.tmp" "$$dst"; mkdir -p "$$dst.tmp"; \
 	    tar --no-same-owner --no-same-permissions -xzf "$$tarball" -C "$$dst.tmp" fixtures/blockchain_tests; \

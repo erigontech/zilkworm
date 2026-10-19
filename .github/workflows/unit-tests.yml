@@ -57,6 +57,50 @@ jobs:
           path: build/Testing/Temporary/LastTest.log
           retention-days: 30
 
+  # The HashState backend (Z6M_HASH_STATE=ON): the same test binary with the suites that drive block
+  # execution over a DirectState witness left out, and the HashState, SSZ and statelessInputBytes
+  # suites over the backend the flag selects.
+  unit-tests-hashstate:
+    name: Run Unit Tests (HashState backend)
+    runs-on: ubuntu-latest
+    environment: ci
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/erigontech/zilkworm-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          submodules: false
+
+      - name: Init submodules
+        uses: ./.github/actions/init-submodules
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DZ6M_HASH_STATE=ON
+
+      - name: Build unit tests
+        run: cmake --build build --target zilkworm.tests
+
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure --parallel
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-hashstate-logs
+          path: build/Testing/Temporary/LastTest.log
+          retention-days: 30
+
   # The guest's rv32 paths (the word layout of EVM memory, the jump fusions, bn254's NAF
   # multiplication, the JUMPDEST byte map, the DIV/MOD front end) compile on the host only with
   # EVMONE_RV32_DISPATCH_TEST; the job above builds the byte-order paths. This one runs the same

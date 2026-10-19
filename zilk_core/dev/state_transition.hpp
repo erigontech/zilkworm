@@ -26,6 +26,11 @@ class StateTransition {
     evmc::bytes32 block_hash_{};
     uint64_t chain_id_{0};
     bool pre_root_set_{false};
+    // A statelessInputBytes run: the StatelessValidationResult it commits instead of the fields above.
+    bool sib_{false};
+    evmc::bytes32 new_payload_request_root_{};
+    bool successful_validation_{false};
+    uint16_t schema_id_{0};
 
   public:
     /// Sentinel values returned by the run entry points. Any other value is the gas_used.
@@ -44,6 +49,13 @@ class StateTransition {
         evmc::bytes32 post_state_root{};  // state root of the last proven block
         evmc::bytes32 block_hash{};       // hash of the last proven block
         uint64_t chain_id{0};
+        // Set for a statelessInputBytes input, whose public values are the 43-byte SSZ
+        // StatelessValidationResult {new_payload_request_root, successful_validation, chain_id,
+        // schema_id}; all zero when the input could not be decoded.
+        bool sib{false};
+        evmc::bytes32 new_payload_request_root{};
+        bool successful_validation{false};
+        uint16_t schema_id{0};
     };
 
     Result run();
@@ -57,7 +69,12 @@ class StateTransition {
   private:
     uint64_t run_ejsn();
     uint64_t run_mfbd();
+    uint64_t run_sib();
     std::pair<uint64_t, bool> run_one_bundle(::zilkworm::FlatBundle& bundle);
 };
+
+// Engine new-payload checks the block RLP cannot express: the claimed block hash and the versioned
+// hashes against the block. The mismatch's name, or nullptr.
+const char* engine_mismatch(const Block& block, const ::zilkworm::BlockEngineRecord& rec);
 
 }  // namespace silkworm::cmd::state_transition

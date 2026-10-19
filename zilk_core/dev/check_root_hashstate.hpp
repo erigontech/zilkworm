@@ -96,6 +96,11 @@ struct HashStateAccountWrite {
             }
             storage_trie.reset(storage_root);
             storage_root = storage_trie.calc_root_from_updates(w.storage_updates);
+            // A failed walk returns a zero root: a leaf the witness lacks, or a malformed node.
+            if (storage_trie.failed()) [[unlikely]] {
+                sys_println("ERROR: storage walk failed in the HashState accept check");
+                return false;
+            }
         }
 
         // Patch the account leaf with the (possibly new) storage_root
@@ -116,10 +121,11 @@ struct HashStateAccountWrite {
     sys_println(std::format("New Root (hashstate): {}",
                             silkworm::to_hex(ByteView{new_root.bytes, 32})));
 
-    // Accept iff the recomputed root matches the header AND the witness was complete AND
-    // every read was resolved. The pre-value / read-only check check_root runs inside the
-    // fold is compiled out for HashState; these two counters replace it.
-    return new_root == header_state_root
+    // Accept iff the account walk succeeded, the recomputed root matches the header, the
+    // witness was complete and every read was confirmed. The pre-value / read-only check
+    // check_root runs inside the fold is compiled out for HashState; the counters replace it.
+    return !acc_trie.failed()
+        && new_root == header_state_root
         && hash_state.missing_count() == 0
         && hash_state.unconfirmed_read_count() == 0;
 }

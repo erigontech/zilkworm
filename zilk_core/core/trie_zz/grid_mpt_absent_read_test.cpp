@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// GridMPT<true> regression tests: updates that read a key the trie does not have (no value to
+// GridMPT<true, DirectState> regression tests: updates that read a key the trie does not have (no value to
 // write; claimed as zero, 0x80, or as nothing), and lines that go away while the seek still
 // climbs through them.
 //
@@ -121,7 +121,7 @@ bytes32 walk(const Bytes32Map& pre, std::vector<Update> updates, bool valid = tr
         node.current_len = static_cast<uint8_t>(u.current.size());
         if (!u.current.empty()) std::memcpy(node.buf + 40, u.current.data(), u.current.size());
     }
-    GridMPT<true> trie{direct, pre_root};
+    GridMPT<true, DirectState> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({flat.data(), flat.size()});
     if (valid) {
         CHECK(trie.missing_count() == 0);
@@ -138,7 +138,7 @@ bytes32 walk(const Bytes32Map& pre, std::vector<Update> updates, bool valid = tr
 // empty leaf into an extension over a branch of the two, all of it empty. The next update's seek folded
 // both leaves, the cascade took the branch and the extension, and the seek went on to the popped
 // extension's line and descended from it, into std::unreachable() in fold_line.
-TEST_CASE("GridMPT<true> reads of absent keys that share a prefix", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> reads of absent keys that share a prefix", "[trie][gridmpt]") {
     const bytes32 k1 = key_from_hex("6d6c288fd01ac4893bdbcdc3b9717bba13a845056ba772398a7eaae0fffa47d9");
     const bytes32 a1 = key_from_hex("8600baa419999186f17a33e3b26008a6485f6a918223719d7d3a6f39092c4621");
     const bytes32 a2 = key_from_hex("8600baa43020cf1673e00210b7a2eccfc4fb8711dbda71bddfe0d69722b4aa79");
@@ -155,7 +155,7 @@ TEST_CASE("GridMPT<true> reads of absent keys that share a prefix", "[trie][grid
 // The read split the extension into a branch over its empty leaf and the extension's child; the write
 // folded that child into the branch with a new hash, and only then did the empty leaf fold away, leaving
 // the branch a single child to absorb whose hash the witness does not have.
-TEST_CASE("GridMPT<true> read of an absent key inside an extension before a write below it", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> read of an absent key inside an extension before a write below it", "[trie][gridmpt]") {
     // branch{2 -> ext(0,2) -> branch{0 -> K0, 1 -> ext(2) -> branch{0 -> K1, 1 -> K2}}, 7 -> R}; the absent
     // key goes 2,0,2,1 then 0, where the inner extension has 2.
     const bytes32 k0 = key_with_nibbles({2, 0, 2, 0}, 1);
@@ -179,7 +179,7 @@ TEST_CASE("GridMPT<true> read of an absent key inside an extension before a writ
 // with the empty leaves above, the next update's seek folded them, the cascade took the branch and the
 // extension too, and the seek descended from the popped extension's line, into std::unreachable(). No
 // trie has a leaf without a value: decode_node() rejects it, and the walk fails.
-TEST_CASE("GridMPT<true> rejects a witness leaf without a value", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> rejects a witness leaf without a value", "[trie][gridmpt]") {
     const bytes32 k1 = key_from_hex("6d6c288fd01ac4893bdbcdc3b9717bba13a845056ba772398a7eaae0fffa47d9");
     const bytes32 a1 = key_from_hex("8600baa419999186f17a33e3b26008a6485f6a918223719d7d3a6f39092c4621");
     const bytes32 a2 = key_from_hex("8600baa43020cf1673e00210b7a2eccfc4fb8711dbda71bddfe0d69722b4aa79");

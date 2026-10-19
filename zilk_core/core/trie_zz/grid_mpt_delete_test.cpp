@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// GridMPT<true> regression test: a sorted update batch whose deletes empty
+// GridMPT<true, DirectState> regression test: a sorted update batch whose deletes empty
 // the whole trie pops the last grid line, and the walker used to read
 // grid_[0] on the empty vector instead of re-seeding from the next insert.
 //
@@ -104,7 +104,7 @@ bytes32 key_with_prefix(std::initializer_list<uint8_t> nibs) {
     }
 }
 
-// Runs pre -> post through GridMPT<true> against a complete witness of the
+// Runs pre -> post through GridMPT<true, DirectState> against a complete witness of the
 // pre trie: deletes every pre leaf, inserts every post leaf (pre and post
 // keys must be disjoint), and REQUIREs the canonical post root.
 void check_delete_all_then_insert(const Bytes32Map& pre, const Bytes32Map& post) {
@@ -193,7 +193,7 @@ void check_partial_delete(const Bytes32Map& pre, const std::vector<bytes32>& del
     REQUIRE(got == expected);
 }
 
-// Runs a batch of {read-only | delete | upsert} updates through GridMPT<true>
+// Runs a batch of {read-only | delete | upsert} updates through GridMPT<true, DirectState>
 // against a complete witness of the pre trie and REQUIREs the canonical post
 // root. `ro` keys are visited read-only (current empty); `del` keys are
 // deleted; `post` keys are upserted.
@@ -237,7 +237,7 @@ void check_mixed_updates(const Bytes32Map& pre, const std::vector<bytes32>& ro,
         return std::memcmp(a.key.bytes, b.key.bytes, 32) < 0;
     });
 
-    GridMPT<true> trie{direct, pre_root};
+    GridMPT<true, DirectState> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
     const bytes32 expected = hashbuilder_root(expected_leaves, nullptr);
 
@@ -353,7 +353,7 @@ std::vector<TrieNodeFlat> build_updates(const Scenario& sc, const Forgery& forge
     return updates;
 }
 
-// The root a scenario's batch gives through GridMPT<true>, over a complete witness of its pre trie.
+// The root a scenario's batch gives through GridMPT<true, DirectState>, over a complete witness of its pre trie.
 bytes32 scenario_root(const Scenario& sc, const Forgery& forgery) {
     Bytes32Map nodes;
     const bytes32 pre_root = hashbuilder_root(sc.pre, &nodes);
@@ -364,7 +364,7 @@ bytes32 scenario_root(const Scenario& sc, const Forgery& forgery) {
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
     const std::vector<TrieNodeFlat> updates = build_updates(sc, forgery);
 
-    GridMPT<true> trie{direct, pre_root};
+    GridMPT<true, DirectState> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({updates.data(), updates.size()});
     if (forgery.node == nullptr && forgery.ro_value == nullptr && forgery.del_value == nullptr)
         CHECK(trie.missing_count() == 0);
@@ -399,7 +399,7 @@ NodeOutcome forged_node_outcome(const Scenario& sc, const bytes32& h, const byte
 // prefix. Keys here are not hashes: they come in clusters sharing 0 to 37 nibbles (both parities, so the first
 // difference is in 32-bit words 0 to 4 of the key), so consecutive updates diverge at every depth, through
 // deletes and folds.
-TEST_CASE("GridMPT<true> seeks between keys sharing long prefixes", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> seeks between keys sharing long prefixes", "[trie][gridmpt]") {
     std::mt19937 rng{20261008};
     for (int round = 0; round < 120; ++round) {
         bytes32 base{};
@@ -410,9 +410,9 @@ TEST_CASE("GridMPT<true> seeks between keys sharing long prefixes", "[trie][grid
     }
 }
 
-// check_root hoists one GridMPT<true> out of its per-account loop and reset()s it, which leaves the previous
+// check_root hoists one GridMPT<true, DirectState> out of its per-account loop and reset()s it, which leaves the previous
 // account's last key in search_nibbles_: the first seek of the next batch must not read it.
-TEST_CASE("GridMPT<true> after reset seeks from the batch's own keys", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> after reset seeks from the batch's own keys", "[trie][gridmpt]") {
     std::mt19937 rng{20261009};
     for (int round = 0; round < 30; ++round) {
         bytes32 base{};
@@ -433,7 +433,7 @@ TEST_CASE("GridMPT<true> after reset seeks from the batch's own keys", "[trie][g
         std::vector<std::vector<TrieNodeFlat>> updates;
         for (const auto& sc : scs) updates.push_back(build_updates(sc, {}));
 
-        GridMPT<true> trie{direct, pre_roots[0]};
+        GridMPT<true, DirectState> trie{direct, pre_roots[0]};
         for (unsigned i = 0; i < batches; ++i) {
             if (i > 0) trie.reset(pre_roots[i]);
             CAPTURE(round, i);
@@ -447,7 +447,7 @@ TEST_CASE("GridMPT<true> after reset seeks from the batch's own keys", "[trie][g
 // Forged witnesses: every claim the update batch makes about the pre trie, and every node of the witness, is
 // bound to the pre-state root. A changed claim or a changed node must not give the post root of the honest
 // batch. kRejected below only means "not the honest root"; it does not say the result was empty.
-TEST_CASE("GridMPT<true> rejects forged witnesses between keys sharing long prefixes", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> rejects forged witnesses between keys sharing long prefixes", "[trie][gridmpt]") {
     std::mt19937 rng{20261010};
     size_t forged_claims = 0;
     size_t forged_nodes = 0;
@@ -587,7 +587,7 @@ TEST_CASE("nibbles64::assign_bytes32 equals from_bytes32 over any previous conte
     }
 }
 
-TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> survives a batch that empties the trie", "[trie][gridmpt]") {
     // Two leaves diverging at the first nibble.
     const Bytes32Map pre{{key_with_prefix({0xa}), slot_value_rlp(1)},
                          {key_with_prefix({0xd}), slot_value_rlp(2)}};
@@ -604,7 +604,7 @@ TEST_CASE("GridMPT<true> survives a batch that empties the trie", "[trie][gridmp
 // empty ext stays on the active path); the next insert descending through it
 // used to resurrect the deleted child as a mask-set garbage ref and corrupt
 // the root silently.
-TEST_CASE("GridMPT<true> insert descending a delete-emptied extension", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> insert descending a delete-emptied extension", "[trie][gridmpt]") {
     // ext("8e") -> branch{1,7} -> two leaves; the insert splits the ext path.
     const Bytes32Map pre{{key_with_prefix({8, 0xe, 1}), slot_value_rlp(1)},
                          {key_with_prefix({8, 0xe, 7}), slot_value_rlp(2)}};
@@ -615,7 +615,7 @@ TEST_CASE("GridMPT<true> insert descending a delete-emptied extension", "[trie][
 // depth up, the cursor kept the child's consumed count and the following
 // descent read a shifted key nibble (silent wrong root or a bogus
 // missing-node report).
-TEST_CASE("GridMPT<true> seek cursor after folding a delete-emptied line", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> seek cursor after folding a delete-emptied line", "[trie][gridmpt]") {
     // An insert first splits ext("cf") into ext("c") -> branch; the deletes
     // then empty the inner branch and the last insert seeks across its fold.
     const Bytes32Map pre{{key_with_prefix({0xc, 0xf, 1}), slot_value_rlp(1)},
@@ -630,7 +630,7 @@ TEST_CASE("GridMPT<true> seek cursor after folding a delete-emptied line", "[tri
 // !modified path, which never installed a child ref on the fresh extension:
 // the extension stayed empty, cascade_delete collapsed it, and the walk
 // returned kEmptyRoot for a trie that still holds two leaves.
-TEST_CASE("GridMPT<true> single-child branch folds over an unmodified child", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> single-child branch folds over an unmodified child", "[trie][gridmpt]") {
     // ext("1") -> branch{0 -> branch{0,1} (the kept leaves), 1 -> leaf}; the
     // delete of the "11" leaf leaves that branch with only slot 0.
     const Bytes32Map pre{{key_with_prefix({1, 0, 0}), slot_value_rlp(1)},
@@ -646,7 +646,7 @@ TEST_CASE("GridMPT<true> single-child branch folds over an unmodified child", "[
 // early-return that never writes the child ref; the "empty" extension was
 // then cascade-deleted. Seen on mainnet block 25538720 (storage trie of
 // 0xf820fb4680712cd7263a0d3d024d5b5aea82fd70).
-TEST_CASE("GridMPT<true> read-only sibling visit then delete of the branch's other child",
+TEST_CASE("GridMPT<true, DirectState> read-only sibling visit then delete of the branch's other child",
           "[trie][gridmpt]") {
     // branch(610*) with children {6, c}; child 6 is itself a branch {a, e}.
     const bytes32 ro_key = key_with_prefix({6, 1, 0, 6, 0xa});
@@ -681,7 +681,7 @@ bytes32 key_with_nibbles(std::initializer_list<uint8_t> nibs, uint8_t fill) {
 // the single-child branch into an extension over the child's reference and returned without folding it:
 // the seek went on to fold the extension split off above it, with the reference it held before the delete,
 // and the new extension later merged into that line, already folded. The root missed the delete.
-TEST_CASE("GridMPT<true> single-child branch below an extension the same batch splits", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> single-child branch below an extension the same batch splits", "[trie][gridmpt]") {
     // ext(2,5,7) -> branch{3 -> D, a -> branch{5 -> E, 6 -> F}}. X leaves the extension after its first
     // nibble (9 > 5: after D), Y leaves it at its first.
     const bytes32 d = key_with_nibbles({2, 5, 7, 3}, 1);

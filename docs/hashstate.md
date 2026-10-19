@@ -521,22 +521,22 @@ ProtocolFork.Amsterdam) into a populated `HashState`.
 
 ### Scope of the decoder
 
-The decoder is a targeted, hand-written reader for this one container. It is
-deliberately not a general SSZ library. The wire layout below was confirmed
-against the tests-zkevm@v0.8.0 release source and a real sample.
+The decoder is a hand-written reader for this one container, not a general SSZ
+library. The wire layout below is the tests-zkevm v21.0.1 schema
+(execution-specs `amsterdam/stateless.py`), the one ere-guests
+`stateless-validator-common` decodes.
 
 ### Wire layout
 
 ```
-raw = schema_id (2 bytes, big-endian: 15 01) || SSZ encode(SszStatelessInput)
+raw = schema_id (2 bytes, big-endian: 15 01) || SSZ encode(StatelessInput)
 
-SszStatelessInput     fixed region 20 bytes
-  @0    off(new_payload_request)    (== 20)
+StatelessInput        fixed region 16 bytes
+  @0    off(new_payload_request)    (== 16)
   @4    off(witness)
   @8    chain_id: uint64            (inline)
-  @16   off(public_keys)
 
-SszExecutionWitness   fixed region 12 bytes
+ExecutionWitness      fixed region 12 bytes
   @0    off(state)                  (== 12)
   @4    off(codes)
   @8    off(headers)
@@ -544,8 +544,6 @@ SszExecutionWitness   fixed region 12 bytes
   state       : ProgressiveList[ByteList[1024]]    RLP MPT nodes      (no spec count cap)
   codes       : ProgressiveList[ByteList[65536]]   contract code      (no spec count cap)
   headers     : List[ByteList[1024], 256]          RLP block headers  (count cap 256)
-
-public_keys   : ProgressiveList[ByteVector[65]]    fixed 65-byte stride, no offset table
 ```
 
 - Every SSZ variable-field offset is a `u32` little-endian value, relative to
@@ -553,7 +551,11 @@ public_keys   : ProgressiveList[ByteVector[65]]    fixed 65-byte stride, no offs
 - A list of variable-size byte strings serializes as an offset table of `N`
   `u32` LE values followed by the concatenated elements, with
   `N = first_offset / 4`. `ProgressiveList` and `List` are byte-identical here,
-  so one routine decodes `state`, `codes` and `headers`.
+  so one routine (`ssz::decode_byte_lists`, `common_zz/ssz_read.hpp`) decodes
+  `state`, `codes`, `headers` and the payload's transactions.
+
+`new_payload_request` is decoded by `state_zz/slib_payload.hpp`, see
+[The payload](#the-payload).
 
 ### Validation and guest safety
 
@@ -565,6 +567,26 @@ public_keys   : ProgressiveList[ByteVector[65]]    fixed 65-byte stride, no offs
   are used.
 - It is additive and host-testable, and it is kept out of the DirectState
   rv64im guest, in the same way as `HashState` itself.
+
+### The payload
+
+`NewPayloadRequest` has the Gloas shape of the Amsterdam schema:
+`{execution_payload: ExecutionPayloadV4, versioned_hashes, parent_beacon_block_root,
+execution_requests: ExecutionRequestsGloas}`. `decode_slib_payload` cuts it into
+views with the same offset discipline (the fixed regions are 44, 540 and 20
+bytes; the withdrawals and the five request lists are fixed-size items back to
+back), and two functions consume the result:
+
+- `slib_payload_root` is `hash_tree_root(NewPayloadRequest)`, the root the
+  validation result commits to. The payload and the requests are EIP-7495
+  progressive containers, the lists EIP-7916 progressive lists; the
+  merkleization lives in `common_zz/ssz_merkle.hpp` and follows libssz-merkle,
+  whose reference roots `ssz_merkle_test.cpp` reproduces.
+- `slib_payload_block` is the block the request describes: the header fields
+  the payload does not carry are derived (empty ommers, zero difficulty and
+  nonce, the transactions and withdrawals roots, the EIP-7685 requests hash
+  from the typed request lists, the EIP-7928 block access list hash). The block
+  hash is left for the caller to check against the payload's `block_hash`.
 
 ## Accept check
 
@@ -705,17 +727,21 @@ is scored overall is summarized in
 ### Slib arm
 
 Under the `HashState` build, `Blockchain` binds `ActiveState == HashState`.
-Instead of building a `DirectState` from `pre`, the arm works per block:
+Instead of building a `DirectState` from `pre`, the arm works per block, through
+`run_sib_block`, which the raw-input runner shares:
 
 - Each block's own witness (`blocks[i].statelessInputBytes`, schema_id
   `0x1501`) reconstructs the pre-state trie into a fresh `HashState`
   (`run_slib`, which is `parse_stateless_input` followed by
   `build_state_from_trie`).
+- The witness headers are checked and inserted (next section).
 - The block runs over that `HashState`.
 - The gather overload of `check_root_hashstate` decides acceptance by folding
   the block's writes over `prev_root` (see [Accept check](#accept-check)).
 
-The `#else` branch keeps the `DirectState` path.
+The JSON arm keeps the block RLP gates and the `expectException` matching of
+`run_json_block` around that core; the `#else` branch keeps the `DirectState`
+path.
 
 A fixture identified as a stateless witness-validation negative must be
 rejected. `run_slib_arm` runs the ordinary slib flow and returns its natural
@@ -725,43 +751,19 @@ therefore the desired outcome for a negative.
 
 ### Witness ancestor headers
 
-The witness ancestor headers arrive as RLP and are fed to the `HashState` so
-`BLOCKHASH` resolves (the analog of `run_one_bundle`'s ancestor loop). They are
-unauthenticated bytes, keyed by number with no linkage, so two checks run
-before they are trusted.
+The witness ancestor headers arrive as RLP, unauthenticated. Before they are
+inserted, `run_sib_block` requires what execution-specs `validate_headers`
+requires: the headers form one contiguous parent-hash chain, oldest first, and
+the last of them is the block's parent (matched by the block's `parent_hash`).
+A reordered, broken or spliced set, or a witness without the parent, is a
+witness-integrity failure and rejects the block.
 
-**Contiguous chain.** The headers must form a single contiguous parent-hash
-chain. The witness ships them oldest-first (ascending by number), and each
-header's `parent_hash` must equal `keccak256(rlp(...))` of the header before
-it. A reordered, broken or spliced set is a witness-integrity failure and is
-rejected fail-closed (the non-contiguous-chain negative).
-
-Completeness of the chain is enforced separately and lazily by
-`HashState::get_block_hash`, which fails closed on any in-range ancestor whose
-header is absent (the missing-oldest-ancestor negative). The contiguity check
-therefore requires no particular anchor or length. That keeps legitimate
-partial witnesses working unchanged: they ship exactly the ascending run of
-ancestors they reference, sometimes with one extra unused older header.
-
-**Mandatory parent (EIP-8025 witness-integrity anchor).** The block's parent
-header must be present in this block's witness ancestor set, matched by the
-block's own `parent_hash`. This is strictly stronger than both checks above:
-the contiguity check proves the shipped headers form one chain but fixes no
-anchor or length, and `get_block_hash`'s lazy completeness only fires for an
-ancestor that an executed `BLOCKHASH` actually reaches.
-
-Without this anchor, a block whose witness ships zero ancestor headers still
-resolves its parent from the genesis header the `Blockchain` constructor
-inserts, and is wrongly accepted. That is the
-`validation_headers_empty_block_missing_mandatory_parent` witness negative
-(empty block #1, zero witness headers). The constructor's genesis header is a
-block-lookup convenience, never a substitute for the mandatory witness parent.
-
-Verified across the whole fixtures corpus (27,184 witnessed blocks): the only
-blocks that omit their parent are the three `witness_validation_headers`
-negatives. Every legitimate block, including empty block #1 and blocks whose
-parent is genesis, ships its parent header, so this check rejects only
-negatives.
+Soundness does not rest on these checks: BLOCKHASH walks the parent hashes back
+from the block (see [Block headers and BLOCKHASH](#block-headers-and-blockhash)),
+so a header the walk does not reach is never used, and an ancestor the walk
+needs but the witness omits rejects the block at accept time. The checks make a
+malformed witness fail early and keep the parent, whose state root anchors the
+pre-state, explicit.
 
 ### Expected-invalid label relaxation
 
@@ -782,9 +784,10 @@ the validation gates read.
 
 So when that counter is non-zero, the exact reason cannot be derived from this
 witness, while the block is still correctly rejected (the full-state reference
-marks it invalid), and the runner accepts the rejection. A complete witness
-(counter zero) still demands the exact label, so a genuine reconstruction or
-validation bug is never masked.
+marks it invalid), and the runner accepts the rejection and logs the waived
+label (`STRICT: label waived ...`), so the waivers of a corpus run can be
+counted. A complete witness (counter zero) still demands the exact label, so a
+genuine reconstruction or validation bug is never masked.
 
 ### Scoring witness-validation negatives
 
@@ -822,11 +825,13 @@ families. The matched names are:
 | `test_validation_state_missing_*` | 6 |
 | `test_validation_headers_*` | 5 (all negatives) |
 | `test_invalid_stateless_input_bytes_are_rejected` | 1 (8 parametrized cases) |
+| `test_witness_header_ssz_size_limit` | 1 (a witness header padded to the `ByteList[1024]` limit, and past it) |
 
-That is 21 fixture files, verified across the whole fixtures tree to match zero
-valid-block fixtures. A false match there would mask a real slib bug by scoring
-a wrong rejection as a pass. One fixture in the first family is exempted; see
-[Delegated-code exemption](#delegated-code-exemption).
+That is 22 fixture files, verified across the whole fixtures tree to match no
+fixture whose `statelessOutputBytes` reports a successful validation. A false
+match there would mask a real slib bug by scoring a wrong rejection as a pass. No fixture is exempted: evmone reads an EIP-7702
+delegate's code while resolving the call target, as execution-specs does, so a
+witness that omits it is rejected like any other omitted code.
 
 **The scoring rule.** The rule is applied uniformly to every selected fixture,
 not only to the ones that already reject: pass if the slib path rejected, fail
@@ -843,43 +848,31 @@ if it accepted every block.
 This deliberately surfaces witness-strictness leniencies: a broken witness
 that slib wrongly accepts is scored as a failure instead of a pass.
 
-### Delegated-code exemption
-
-`validation_codes_missing_delegated_code_on_insufficient_balance_call` is
-classified by EEST as a negative, but it is not a witness-integrity failure for
-a fail-closed stateless verifier. It is scored as an ordinary valid block
-instead of a must-reject.
-
-- The block CALLs an EIP-7702 delegated target with insufficient balance. The
-  CALL reverts on the balance check before the delegated code is ever loaded,
-  so that code never executes, and pruning it from the witness is legitimate
-  EIP-8025 optional-proofs behavior.
-- `HashState::read_code` is already fail-closed: any code the execution
-  actually needs but the witness omits leaves the read unresolvable and rejects
-  the block.
-- Here nothing needs the pruned code. `DirectState` accepts, and the slib path
-  recomputes the correct post-state root, so slib correctly accepts.
-
-The fixture encodes a stricter reading ("the witness must carry every
-delegated-target code even when unreachable") than EIP-8025 requires. The match
-is exact (this one full test-function name, not a prefix), so it excludes only
-this fixture and never swallows the other `::test_validation_codes_missing_*`
-negatives. The fixture then passes through the normal valid-block path.
-
 ### Raw StatelessInput dispatch
 
-`StateTransition::run` dispatches on the input magic (`EJSN` or `MFBD`). The
-"default path" input is a raw StatelessInput blob (schema_id `0x1501`, on-wire
-big-endian prefix `15 01`), and it is not wired in yet. The intended design is
-to detect it in the `default` case of that switch
-(`envelope_[0] == 0x15 && envelope_[1] == 0x01`) and dispatch to a runner that
-parses it into a `HashState` (`parse_stateless_input` followed by
-`build_state_from_trie`, from `slib_input.hpp`) and then executes the block.
+`StateTransition::run` dispatches on the input's first bytes: the `EJSN` and
+`MFBD` magics, or the big-endian schema prefix `15 01` of a raw
+statelessInputBytes blob (`kInputMagicSIB`, reserved next to the magics in
+`flat_bundle.hpp`; no other magic starts with `0x15`). The latter goes to
+`StateTransition::run_sib`, the entry point the ERE harness uses: ere-hosts
+hands the guest the fixture's `statelessInputBytes` unchanged on stdin and
+compares the public values with its `statelessOutputBytes`.
 
-The parser and build front-end already exist and are unit-tested; full block
-execution over `HashState` on this entry path is what remains. Until then the
-path still rejects the input as an unsupported magic, so the `MFBD` and `EJSN`
-guests behave as before.
+`run_sib` decodes the input and the payload, takes the payload's hash tree root,
+and selects the chain config by `chain_id` the way the host adapter does (1 is
+the generated EEST corpus, Amsterdam from genesis; 11155111 is Sepolia; the
+devnets by their ids). The block comes out of `slib_payload_block`, its hash
+and the versioned hashes are checked against the request (`engine_mismatch`,
+as the MFBD path does), the parent is the last witness header and its state
+root anchors the pre-state, and `run_sib_block` runs and accepts the block.
+
+The public values are the 43-byte SSZ `StatelessValidationResult`
+`{new_payload_request_root, successful_validation, chain_id, schema_id}`: a
+rejected block is a result with `successful_validation` false, not a failed
+run, and only an input that does not decode leaves the result all zero
+(`schema_id` 0). The guest writes those 43 bytes and nothing else
+(`prover/guest_hypercube/src/main.cpp`). The DirectState guest reports the
+input as unsupported.
 
 ## Build flag and benchmark targets
 
@@ -896,11 +889,11 @@ makes it `HashState` (see "Backend selection").
 - **Host build.** The top-level `CMakeLists.txt` defines the `Z6M_HASH_STATE`
   macro for every target created after the option (`zilk_core`,
   `zilkworm.tests`, ...). With the flag on, `zilkworm.tests` leaves out the
-  suites that execute blocks over a DirectState witness
-  (`addr_hash_orphan_test`, `account_read_spoof_test`,
-  `account_read_honest_test`, `delegation_clearing_storage_test`,
-  `code_store_collision_len_test`), because the flag-on processor takes
-  HashState.
+  suites that execute blocks over a DirectState witness (the `if(NOT
+  Z6M_HASH_STATE)` list in `CMakeLists.txt`), because the flag-on processor
+  takes HashState; the trie suites name `GridMPT<*, DirectState>` and run under
+  both. The `unit-tests-hashstate` job of `unit-tests.yml` builds and runs the
+  flag-on binary on every PR.
 - **Guest build.** `prover/guest_hypercube` is a separate CMake project, so the
   top-level option never reaches it. It declares its own `Z6M_HASH_STATE`
   option. The option must stay before the guest's `add_subdirectory()` calls so
@@ -916,14 +909,15 @@ makes it `HashState` (see "Backend selection").
   - It builds with `-DZ6M_HASH_STATE=ON` in its own `build/zkevm` tree, since
     the flag differs from the shared `build` tree the other targets use.
 
-  `make zkevm-fixtures` downloads the corpus (`tests-zkevm@v0.8.0`). The
-  harness runs end to end; current results are in
+  `make zkevm-fixtures` downloads the corpus (`tests-zkevm@v21.0.1`, the
+  release ere-guests tests against). Results are in
   [slib_corpus_validation.md](slib_corpus_validation.md).
 
 ### SP1 cycle benchmark
 
 `make slib-benchmark` measures the HashState guest's SP1 cycles on the
-`tests-zkevm-benchmark@v0.8.2` blocks; results are in
+`tests-zkevm-benchmark@v21.0.5` blocks (the 30M-gas tarball); the results, and
+the same corpus through ERE's cost estimator, are in
 [slib_benchmark.md](slib_benchmark.md).
 
 - **Amsterdam support.** The benchmark fixtures are Amsterdam

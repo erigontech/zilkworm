@@ -56,7 +56,7 @@ namespace {
     // Witness headers decode exactly. A stateless new-payload input (one carrying engine records) also
     // has them chain contiguously up to the parent, as validate_headers requires; elsewhere they only
     // feed the BLOCKHASH walk, which ignores a header no child names (get_block_hash).
-    bool witness_headers_valid(const ::zilkworm::FlatBundle& bundle) {
+    [[maybe_unused]] bool witness_headers_valid(const ::zilkworm::FlatBundle& bundle) {
         if (!bundle.ancestors_well_formed) {
             sys_println("ERROR: malformed witness header");
             return false;
@@ -78,22 +78,22 @@ namespace {
         return true;
     }
 
-    // Engine new-payload checks the block RLP cannot express: claimed block hash and versioned hashes.
-    const char* engine_mismatch(const Block& block, const ::zilkworm::BlockEngineRecord& rec) {
-        if (block.header.hash() != rec.block_hash) return "block hash";
-        size_t off = 0;
-        for (const auto& txn : block.transactions) {
-            if (txn.type != TransactionType::kBlob) continue;
-            for (const auto& vh : txn.blob_versioned_hashes) {
-                if (off + 32 > rec.versioned_hashes.size() ||
-                    std::memcmp(vh.bytes, rec.versioned_hashes.data() + off, 32) != 0)
-                    return "versioned hashes";
-                off += 32;
-            }
-        }
-        return off == rec.versioned_hashes.size() ? nullptr : "versioned hashes";
-    }
 }  // namespace
+
+const char* engine_mismatch(const Block& block, const ::zilkworm::BlockEngineRecord& rec) {
+    if (block.header.hash() != rec.block_hash) return "block hash";
+    size_t off = 0;
+    for (const auto& txn : block.transactions) {
+        if (txn.type != TransactionType::kBlob) continue;
+        for (const auto& vh : txn.blob_versioned_hashes) {
+            if (off + 32 > rec.versioned_hashes.size() ||
+                std::memcmp(vh.bytes, rec.versioned_hashes.data() + off, 32) != 0)
+                return "versioned hashes";
+            off += 32;
+        }
+    }
+    return off == rec.versioned_hashes.size() ? nullptr : "versioned hashes";
+}
 
 std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle& bundle) {
 #ifdef Z6M_HASH_STATE
@@ -308,7 +308,7 @@ namespace {
     // the walk cost its merge loop 2.1M cycles over the 200-block corpus.
     [[gnu::noinline]] bool wiped_storage_bound(const zilkworm::WipedStorage& wiped,
                                                std::span<const zilkworm::AbsentRead> absent_reads,
-                                               mpt::GridMPT<true>& storage_trie,
+                                               zilkworm::GridMPT<true, DirectState>& storage_trie,
                                                std::vector<mpt::TrieNodeFlat>& storage_spill,
                                                std::vector<uint64_t>& order, std::vector<bytes32>& absent_keys) {
         absent_read_keys(absent_reads, wiped.absent_reads, nullptr, order, absent_keys);
@@ -753,26 +753,34 @@ bool StateTransition::check_root_new_block(DirectState& direct_state, BlockHeade
 
 StateTransition::Result StateTransition::run() {
     uint64_t gas = kRunFailure;
-    if (envelope_.size() < 4) [[unlikely]] {
-        sys_println("ERROR: input envelope too small for magic");
-        failed_ = true;
-    } else {
-        uint32_t magic = 0;
+    uint32_t magic = 0;
+    if (envelope_.size() >= sizeof(uint32_t)) {
         std::memcpy(&magic, envelope_.data(), sizeof(uint32_t));
-        switch (magic) {
-            case ::zilkworm::kInputMagicEJSN:
-                gas = run_ejsn();
-                break;
-            case ::zilkworm::kInputMagicMFBD:
-                gas = run_mfbd();
-                break;
-            default:
-                // TODO: detect and dispatch a raw StatelessInput blob (schema_id 0x1501) here.
-                // See docs/hashstate.md, "Raw StatelessInput dispatch".
-                sys_println("ERROR: unsupported input magic");
-                failed_ = true;
-                break;
-        }
+    }
+    if (envelope_.size() >= 2 && envelope_[0] == (::zilkworm::kInputMagicSIB >> 8) &&
+        envelope_[1] == (::zilkworm::kInputMagicSIB & 0xff)) {
+        magic = ::zilkworm::kInputMagicSIB;
+    }
+    switch (magic) {
+        case ::zilkworm::kInputMagicSIB:
+            gas = run_sib();
+            break;
+        case ::zilkworm::kInputMagicEJSN:
+            gas = run_ejsn();
+            break;
+        case ::zilkworm::kInputMagicMFBD:
+            gas = run_mfbd();
+            break;
+        default:
+#ifdef Z6M_HASH_STATE
+            // The HashState guest answers any other input, too short or of another schema, as an
+            // undecodable stateless input: the all-zero StatelessValidationResult, not a failed run.
+            gas = run_sib();
+#else
+            sys_println("ERROR: unsupported input magic");
+            failed_ = true;
+#endif
+            break;
     }
     return Result{
         .gas_used = gas,
@@ -780,6 +788,10 @@ StateTransition::Result StateTransition::run() {
         .post_state_root = post_state_root_,
         .block_hash = block_hash_,
         .chain_id = chain_id_,
+        .sib = sib_,
+        .new_payload_request_root = new_payload_request_root_,
+        .successful_validation = successful_validation_,
+        .schema_id = schema_id_,
     };
 }
 

@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// GridMPT<true> regression tests: references into the walk's storage must survive it growing.
+// GridMPT<true, DirectState> regression tests: references into the walk's storage must survive it growing.
 //
 // The grid was a vector reserved for 66 lines, with references to its lines held across the appends of
 // unfolds and insertions, and the copies of embedded nodes a vector that leaves view into. Either one
@@ -102,7 +102,7 @@ bytes32 walk(const Bytes32Map& pre, const std::map<bytes32, Bytes, Bytes32Less>&
         }
     }
     want = hashbuilder_root(post, nullptr);
-    GridMPT<true> trie{direct, pre_root};
+    GridMPT<true, DirectState> trie{direct, pre_root};
     const bytes32 got = trie.calc_root_from_updates({flat.data(), flat.size()});
     CHECK(trie.missing_count() == 0);
     if (failed) *failed = trie.failed();
@@ -115,7 +115,7 @@ bytes32 walk(const Bytes32Map& pre, const std::map<bytes32, Bytes, Bytes32Less>&
 // copy of its bytes. Reading one, then deleting the other, takes two copies, and the second can move the
 // first: the read leaf, which becomes the branch's only child and merges into the extension above it,
 // was then encoded with a value viewing freed memory.
-TEST_CASE("GridMPT<true> embedded leaves keep their bytes as more are unfolded", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> embedded leaves keep their bytes as more are unfolded", "[trie][gridmpt]") {
     const std::vector<uint8_t> prefix(40, 3);
     std::vector<uint8_t> pa = prefix, pb = prefix;
     pa.push_back(1);
@@ -133,7 +133,7 @@ TEST_CASE("GridMPT<true> embedded leaves keep their bytes as more are unfolded",
 // l = 0..D-1, give each of the path's D branches 15 such children: 16 D + 1 lines. Keys ground from slot
 // numbers get there (the last 15 need a prefix of D - 1 nibbles, 16^(D-1) tries each). 66 lines were
 // reserved, and past 127 the descent's bound on the line index dropped the update; the grid now holds 255.
-TEST_CASE("GridMPT<true> grid of 16 lines per branch level", "[trie][gridmpt]") {
+TEST_CASE("GridMPT<true, DirectState> grid of 16 lines per branch level", "[trie][gridmpt]") {
     for (const unsigned levels : {4u, 5u, 8u, 9u, 15u, 16u}) {
         CAPTURE(levels);
         Bytes32Map pre;

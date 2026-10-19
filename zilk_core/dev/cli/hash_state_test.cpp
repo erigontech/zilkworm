@@ -27,12 +27,13 @@
 #include <zilk_core/core/common_zz/mphf_map.hpp>  // mix64_body (public)
 #include <zilk_core/core/state_zz/hash_state.hpp>
 #include <zilk_core/core/state_zz/slib_input.hpp>  // decode/parse/run_slib (the SSZ front-end)
+#include <zilk_core/core/state_zz/slib_payload.hpp>  // decode_slib_payload, slib_payload_root, slib_payload_block
 #include <zilk_core/core/trie_zz/mpt.hpp>        // GridMPT<DeletionEnabled, StateT>, TrieNodeFlat
 #include <zilk_core/core/trie_zz/rlp_sw.hpp>     // encode_leaf/branch/ext + node types
 #include <zilk_core/core/types_zz/account.hpp>   // Account (leaf-value encode/decode target)
 #include <zilk_core/dev/check_root_hashstate.hpp>  // check_root_hashstate + HashStateAccountWrite
 
-#include "slib_sample_fixture.hpp"  // real tests-zkevm@v0.8.0 statelessInputBytes sample
+#include "slib_sample_fixture.hpp"  // a tests-zkevm v21.0.1 statelessInputBytes sample
 
 using zilkworm::Account;
 using zilkworm::BranchNode;
@@ -1331,12 +1332,6 @@ using zilkworm::Bytes;
     return out;
 }
 
-[[nodiscard]] evmc::bytes32 to_bytes32(const std::uint8_t (&b)[32]) noexcept {
-    evmc::bytes32 out{};
-    std::memcpy(out.bytes, b, 32);
-    return out;
-}
-
 // --- minimal SSZ encoders mirroring slib_input.cpp's decoders (test-only) ---
 void put_u32(Bytes& b, std::uint32_t v) {
     for (int i = 0; i < 4; ++i) b.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
@@ -1361,7 +1356,7 @@ void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
     return out;
 }
 
-// schema_id||SSZ StatelessInput with empty new_payload_request/headers/public_keys.
+// schema_id||SSZ StatelessInput with an empty new_payload_request and no headers.
 [[nodiscard]] Bytes encode_stateless_input(const std::vector<Bytes>& state,
                                            const std::vector<Bytes>& codes,
                                            std::uint64_t chain_id) {
@@ -1377,15 +1372,13 @@ void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
     put_u32(wit, off_headers);  // headers empty -> off_headers == wit end
     wit.insert(wit.end(), state_blob.begin(), state_blob.end());
     wit.insert(wit.end(), codes_blob.begin(), codes_blob.end());
-    // SszStatelessInput: [off_npr=20][off_wit=20][chain_id u64][off_pk] + wit (npr/pk empty).
+    // StatelessInput: [off_npr=16][off_wit=16][chain_id u64] + wit (npr empty).
     Bytes body;
-    const std::uint32_t off_npr = 20u;
-    const std::uint32_t off_wit = 20u;
-    const std::uint32_t off_pk = off_wit + static_cast<std::uint32_t>(wit.size());
+    const std::uint32_t off_npr = 16u;
+    const std::uint32_t off_wit = 16u;
     put_u32(body, off_npr);
     put_u32(body, off_wit);
     put_u64(body, chain_id);
-    put_u32(body, off_pk);
     body.insert(body.end(), wit.begin(), wit.end());
     Bytes blob;
     blob.push_back(0x15);
@@ -1396,68 +1389,60 @@ void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
 
 }  // namespace
 
-// The load-bearing cross-check: parse the REAL statelessInputBytes blob, then build the
-// pre-state from its genesis-anchored witness trie and confirm every account the witness
-// carries reconstructs exactly (nonce/balance/code_hash), its code is retrievable, and the
-// intentionally-pruned untouched accounts read absent. This exercises the whole default
-// front-end path on real wire bytes.
-TEST_CASE("slib parses the real StatelessInputBytes sample and rebuilds pre-state",
+// The cross-check on real wire bytes: a tests-zkevm v21.0.1 statelessInputBytes decodes, its
+// NewPayloadRequest hashes to the root the fixture's statelessOutputBytes commits to, the block it
+// describes hashes to the payload's block_hash, and the witness builds against the parent's state root.
+TEST_CASE("slib decodes the real StatelessInputBytes sample: request root, block hash, pre-state",
           "[hash_state][slib]") {
     const Bytes blob = hex_to_bytes(slib_sample::kBlobHex);
     REQUIRE(blob.size() == slib_sample::kBlobBytes);
+    const Bytes expected_output = hex_to_bytes(slib_sample::kExpectedOutputHex);
+    REQUIRE(expected_output.size() == 43);
+
+    const auto dec = zilkworm::decode_stateless_input(ByteView{blob});
+    REQUIRE(dec.has_value());
+    CHECK(dec->chain_id == slib_sample::kChainId);
+    CHECK(dec->state.size() == slib_sample::kExpectedNodes);
+    CHECK(dec->codes.size() == slib_sample::kExpectedCodes);
+    REQUIRE(dec->headers.size() == slib_sample::kExpectedHeaders);
+
+    const auto payload = zilkworm::decode_slib_payload(dec->new_payload_request);
+    REQUIRE(payload.has_value());
+    CHECK(payload->block_number == slib_sample::kBlockNumber);
+    CHECK(payload->transactions.size() == slib_sample::kTransactions);
+    CHECK(payload->withdrawals.size() == slib_sample::kWithdrawals);
+    CHECK(eq32(payload->block_hash, to_bytes32(ByteView{hex_to_bytes(slib_sample::kBlockHashHex)})));
+
+    // statelessOutputBytes: root, successful_validation (1: a valid block), chain_id, schema_id.
+    const auto root = zilkworm::slib_payload_root(*payload);
+    CHECK(std::memcmp(root.data(), expected_output.data(), 32) == 0);
+    CHECK(expected_output[32] == 1);
+    uint64_t chain_id = 0;
+    std::memcpy(&chain_id, expected_output.data() + 33, 8);
+    CHECK(chain_id == slib_sample::kChainId);
+    CHECK(expected_output[41] == (zilkworm::kSlibSchemaId & 0xff));
+    CHECK(expected_output[42] == (zilkworm::kSlibSchemaId >> 8));
+
+    const auto block = zilkworm::slib_payload_block(*payload);
+    REQUIRE(block.has_value());
+    CHECK(eq32(block->header.hash(), payload->block_hash));
+
+    // The parent header, last of the witness headers, carries the root the witness is anchored to.
+    silkworm::BlockHeader parent;
+    ByteView hv{dec->headers.back()};
+    REQUIRE(silkworm::rlp::decode(hv, parent));
+    CHECK(eq32(parent.hash(), block->header.parent_hash));
 
     HashState hs;
-    // run_slib = parse_stateless_input + build_state_from_trie against the anchoring root.
-    const evmc::bytes32 prev_root = to_bytes32(slib_sample::kGenesisRoot);
-    auto res = zilkworm::run_slib(ByteView{blob}, hs, prev_root);
+    const auto res = zilkworm::run_slib(ByteView{blob}, hs, parent.state_root);
     REQUIRE(res.has_value());
-
-    // Decoder output matches the confirmed wire contents exactly.
-    CHECK(res->input.chain_id == slib_sample::kChainId);
-    CHECK(res->input.node_count == slib_sample::kExpectedNodes);
-    CHECK(res->input.code_count == slib_sample::kExpectedCodes);
-    CHECK(res->input.headers.size() == slib_sample::kExpectedHeaders);
-    CHECK(res->input.public_keys.size() == slib_sample::kExpectedPublicKeys);
-    for (const ByteView pk : res->input.public_keys) CHECK(pk.size() == 65u);
-    CHECK(hs.node_count() == slib_sample::kExpectedNodes);
-    CHECK(hs.code_count() == slib_sample::kExpectedCodes);
-
-    // This is an EIP-8025 "optional proofs" partial witness: 2 untouched system accounts are
-    // pruned to bare hash refs. Those pruned children are legitimate BOUNDARIES, not missing
-    // nodes, so the build is CLEAN — missing_count() now flags only a broken seeding root,
-    // and this witness's genesis root is present. The 9 touched accounts still materialize.
     CHECK(res->status == HashState::BuildStatus::kOk);
     CHECK(hs.missing_count() == 0u);
-    CHECK(hs.account_count() == slib_sample::kPresentCount);
-
-    // Every account the witness DOES carry reconstructs exactly, and its code is present.
-    // Each hits the account cache, so none of these reads is left unconfirmed.
-    for (std::size_t i = 0; i < slib_sample::kPresentCount; ++i) {
-        const auto& want = slib_sample::kPresent[i];
-        INFO("present account index " << i);
-        const auto addr_hash = keccak32(ByteView{want.addr, 20});
-        const Account* got = hs.get_account(addr_hash);
-        REQUIRE(got != nullptr);
-        CHECK(got->nonce == want.nonce);
-        CHECK(std::memcmp(got->balance, want.balance_le, 32) == 0);
-        CHECK(std::memcmp(got->code_hash, want.code_hash, 32) == 0);
-        // The witness `codes` list must carry this account's bytecode (empty for the EOA).
-        const ByteView code = hs.find_code(to_bytes32(want.code_hash));
-        CHECK(code.size() == want.code_len);
-    }
-    CHECK(hs.unconfirmed_read_count() == 0u);  // every touched-account read hit the cache
-
-    // The pruned untouched accounts read absent (blank) for the caller — but each read must
-    // descend into a pruned boundary, which confirm_absent cannot prove empty, so each is
-    // recorded as an unconfirmed read. Completeness for the pruned parts is enforced HERE,
-    // at read time (the accept gate would reject on a non-zero unconfirmed count), not at
-    // build time.
-    for (std::size_t i = 0; i < slib_sample::kPrunedCount; ++i) {
-        const auto addr_hash = keccak32(ByteView{slib_sample::kPrunedAddrs[i], 20});
-        CHECK(hs.get_account(addr_hash) == nullptr);
-    }
-    CHECK(hs.unconfirmed_read_count() > 0u);  // a read into a pruned boundary is unconfirmed
+    CHECK(hs.node_count() == slib_sample::kExpectedNodes);
+    CHECK(hs.code_count() == slib_sample::kExpectedCodes);
+    CHECK(hs.account_count() > 0u);
 }
+
 
 // A COMPLETE synthetic witness encoded into the exact wire format: the clean
 // missing_count()==0 path, with an account carrying a real storage trie so get_storage
@@ -1557,40 +1542,35 @@ TEST_CASE("slib rejects malformed StatelessInputBytes blobs", "[hash_state][slib
         b[1] ^= 0xFF;  // 0x1501 -> not the schema id
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
-    SECTION("truncated below the 20-byte top-level fixed region") {
+    SECTION("truncated below the 16-byte top-level fixed region") {
         Bytes b{good.substr(0, 2 + 10)};  // marker + 10 body bytes
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
     SECTION("first offset != fixed-region size") {
         Bytes b = good;
-        put_u32_at(b, 2 + 0, 21u);  // off(new_payload_request) must be 20
+        put_u32_at(b, 2 + 0, 17u);  // off(new_payload_request) must be 16
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
     SECTION("out-of-order top-level offset") {
         Bytes b = good;
-        put_u32_at(b, 2 + 16, 0u);  // off(public_keys) = 0 < off(witness) = 20
+        put_u32_at(b, 2 + 4, 0u);  // off(witness) = 0 < off(new_payload_request) = 16
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
     SECTION("offset past end of blob") {
         Bytes b = good;
-        put_u32_at(b, 2 + 16, 0xFFFFFFFFu);  // off(public_keys) beyond the body
+        put_u32_at(b, 2 + 4, 0xFFFFFFFFu);  // off(witness) beyond the body
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
     SECTION("witness first offset != 12") {
         Bytes b = good;
-        put_u32_at(b, 2 + 20, 13u);  // witness off(state) must be 12
+        put_u32_at(b, 2 + 16, 13u);  // witness off(state) must be 12
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
     SECTION("out-of-order state-list offset") {
         Bytes b = good;
-        // state list begins at body(20) + witness fixed(12) = blob offset 2+20+12 = 34;
+        // state list begins at body(16) + witness fixed(12) = blob offset 2+16+12 = 30;
         // its second u32 offset lives at +4. Force it below the first offset (non-monotone).
-        put_u32_at(b, 2 + 20 + 12 + 4, 0u);
-        CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
-    }
-    SECTION("public_keys not a multiple of the 65-byte stride") {
-        Bytes b = good;
-        b.push_back(0x00);  // one stray trailing byte -> pk region size % 65 != 0
+        put_u32_at(b, 2 + 16 + 12 + 4, 0u);
         CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
     }
 }
