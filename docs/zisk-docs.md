@@ -19,7 +19,7 @@ reproduces the reference results, and running the proofs.
 | | |
 |---|---|
 | zilkworm branch | `som/zisk-impl` on `erigontech/zilkworm` |
-| evmone branch | `som/zisk-impl` on `erigontech/zvm1` (submodule `third_party/evmone` @ `6f35e0a0`, 9 commits on top of `oss` @ `b10a25a4`) |
+| evmone branch | `som/zisk-impl-on-main` on `erigontech/zvm1` (submodule `third_party/evmone` @ `fefd44b6`, 9 commits on top of `main` @ `85f66c8e`) |
 | ZisK pin | v1.3.1-alpha (`306a9c934`): guest linker script, `ziskemu`, `zisk-sdk` crates, proving key |
 | Guest compiler | xPack `riscv-none-elf-gcc` 15.2.0-1.1, the only version to have installed (§3.2) |
 
@@ -82,8 +82,8 @@ MUL/EXP/DIV/MOD opcodes, and blst's 256-bit Fr arithmetic and curve formulas.
 - **GPU proving** (2026-10-08, one RTX 5090): 200/200 corpus blocks proved with the default
   `compressed` proof type and verified; every proof's step count equals the `ziskemu` run. Numbers in §5.1.
 
-Latest step totals (`ziskemu`, raw; the corpus row is the GCC 15.2 ELF after the intx bump in
-`e97f0823`, the EEST row the earlier `4fa5aa2b…` ELF):
+Latest step totals (`ziskemu`, raw; the corpus row is the GCC 15.2 ELF, the EEST row the earlier
+`4fa5aa2b…` ELF):
 
 | Set | total | min | median | max |
 |---|---|---|---|---|
@@ -94,7 +94,6 @@ Latest step totals (`ziskemu`, raw; the corpus row is the GCC 15.2 ELF after the
 
 - `--proof-type minimal` and `plonk`; multi-GPU / `mpirun`.
 - The `assembly` executor, `--remote` with a coordinator, and `--service` against a live RPC.
-- The CI image `zilkworm-ci-zisk` has not been built, so no ZisK workflow has run yet.
 
 ## 2. Layout
 
@@ -122,7 +121,8 @@ requires Ubuntu 22.04 or newer. The native build needs CMake ≥ 3.28 and a C++2
 `/usr/bin/g++` (validated with GCC 15.2). Older compilers are unverified.
 
 The ziskup, GPU-build and proving commands (§3.6, §3.7, §5) were run once, on the machine in §5.1
-(Ubuntu 25.10, no sudo). The CI-image commands (§6) have never been run; treat them as unverified.
+(Ubuntu 25.10, no sudo). The CI-image commands (§6) have also run: both ZisK workflows pulled the
+image at PR head 62430d056 (2026-10-08).
 
 ### 3.1 Clone
 
@@ -130,14 +130,14 @@ The ziskup, GPU-build and proving commands (§3.6, §3.7, §5) were run once, on
 git clone https://github.com/erigontech/zilkworm.git && cd zilkworm
 git checkout som/zisk-impl
 git submodule update --init --recursive
-git submodule status --recursive   # evmone 6f35e0a0…, intx 0306b495… (v0.15.0); no '+' or '-'
+git submodule status --recursive   # evmone fefd44b6…; no '+' or '-'
 ```
 
-The evmone pin exists only on `erigontech/zvm1` branch `som/zisk-impl`, not yet on `oss`.
+The evmone pin exists only on `erigontech/zvm1` branch `som/zisk-impl-on-main`, not yet pushed.
 `.gitmodules` already points at zvm1, so the plain update works. If the update fails with
 `not our ref`, a local `submodule.evmone.url` override is pointing somewhere else. Fix it with
-`git -C third_party/evmone fetch https://github.com/erigontech/zvm1.git som/zisk-impl` and run
-the update again.
+`git -C third_party/evmone fetch https://github.com/erigontech/zvm1.git som/zisk-impl-on-main` and
+run the update again.
 
 ### 3.2 Packages and toolchains
 
@@ -496,17 +496,17 @@ word (`wait_for_input_ready`).
    - Job `build-and-push-zisk` then builds `ghcr.io/erigontech/zilkworm-ci-zisk:latest` from
      `zisk-ci.Dockerfile`: the base image plus the ZisK apt deps, Rust 1.93.1 and
      `cargo install --git … --tag v1.3.1-alpha ziskemu`.
-   - This image has never been built. If the ZisK workflows later cannot pull it, check the
-     package's Actions access settings on GHCR (unverified).
+   - Built on 2026-10-08; both ZisK workflows pulled it successfully at PR head 62430d056. If a
+     pull later fails, check the package's Actions access settings on GHCR.
 2. **Run the ZisK workflows.** They trigger on push and pull requests to `master`, `main` and
    `release/*` (path-filtered), and on `workflow_dispatch` once they exist on the default branch.
    The simplest first run is a (draft) PR from `som/zisk-impl` to `master`. The branch is based on
-   `dev`, so that PR also carries `dev`'s commits. Both workflows fail until `zilkworm-ci-zisk` exists.
+   `dev`, so that PR also carries `dev`'s commits.
 
 | Workflow | What it does |
 |---|---|
 | `zisk-eest.yml` | `make z6m_prover_zisk`; prepares **`eest_devnet`** MFBD fixtures (same corpus as `hypercube-eest.yml`); runs `eest_runner.py --prover … --stagger 15 --fail-threshold 5` with `Z6M_ZISK_EXECUTOR=ziskemu`. Only `eest_stable` has been validated locally, so the devnet failure count is unknown. |
-| `zisk-benchmark.yml` | `make z6m_prover_zisk`; downloads the raw 200 blocks from `zilkworm-testdata`, regenerates the corpus, and runs `sp1_benchmark.py --prover … --ram-per-instance 16` through the SDK emulator. It fails on any FAILED or SKIPPED block or a short count. |
+| `zisk-benchmark.yml` | `make z6m_prover_zisk`; downloads the raw 200 blocks from `zilkworm-testdata`, regenerates the corpus, and runs `sp1_benchmark.py --prover … --ram-per-instance 4` on the `ziskemu` executor. It fails on any FAILED or SKIPPED block or a short count. |
 
 Both workflows are **execute-only**: they download no proving key, use no GPU and generate no proofs.
 The CI image has GCC 15.2.0-1.1, the same compiler as the local reference build, so CI's ZisK
@@ -569,8 +569,8 @@ ELF matches a local one built from the same tree.
    - Make the stack paint an in-tree option.
 5. **EF zkvm-standards C API.** Later, consider moving from raw CSR shims to ZisK's
    `libziskos_staticlib.a` (`zkvm_io.h` / `zkvm_accelerators.h`).
-6. **Upstreaming.** Upstream the 9 evmone ZisK commits (`b10a25a4..6f35e0a0`) from zvm1
-   `som/zisk-impl` to `oss`, then repoint the submodule.
+6. **Upstreaming.** Upstream the 9 evmone ZisK commits (`85f66c8e..fefd44b6`) from zvm1
+   `som/zisk-impl-on-main` to `main`, then repoint the submodule.
 7. **Smaller items.**
    - Service mode against a live RPC.
    - ethproofs posting (deferred, because `verifier_id` is SP1-specific).
@@ -598,7 +598,7 @@ python3 tools/scripts/sp1_benchmark.py --dir temp/200_benchmark_blocks_mfbd_v2
   `ZISK` gates, so the SP1 ELF must not change.
 - **Leg 3 totals at `e97f0823`:** cycles 26,132,211,190; prover gas 50,180,244,468;
   gas_used 6,036,444,409. Earlier references (`e8e7201c…`, 26,617,248,718 cycles through
-  `93bcdac28`) were GCC 14.2.0-3.1 builds before the intx bump and no longer apply.
+  `93bcdac28`) were GCC 14.2.0-3.1 builds and no longer apply.
 - **Commits that touch the ZisK guest, shims or evmone ZisK code** must also pass `make zisk-emu-check`
   (200/200) and the full EEST `zisk_execute.py` run from §4 (8613 PASS, the 2 known OOMs). Report
   the raw step totals.
