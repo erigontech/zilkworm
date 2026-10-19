@@ -10,7 +10,7 @@
         .p2align        4
         .type   memcpy,@function
 memcpy:
-        csrs    0x813, a1                  # Marker: Write count (a2) to CSR 0x813
+        csrs    0x813, a1                  # Marker: write a1 (src) to CSR 0x813
         add	x0,a0,a2
         ret
 
