@@ -44,7 +44,7 @@ extern "C" void *_sbrk(ptrdiff_t incr) noexcept {
 
 /* ───────── Halt / exit ───────── */
 
-/* All-ones word decodes to CHalt: unprovable halt. */
+/* All-ones word: CHalt, halt with error. */
 extern "C" [[noreturn]] void zisk_abort() {
     asm volatile(".4byte 0xffffffff" : : : "memory");
     __builtin_unreachable();
