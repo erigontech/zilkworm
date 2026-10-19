@@ -191,7 +191,10 @@ def run_zisk(args, inp: Input, res: Result, env: Dict[str, str]) -> str:
         return f".out is {len(data)} bytes, expected {OUT_LEN}"
     res.pv = data[:PV_LEN]
     res.gas = int.from_bytes(res.pv[:8], "little")
-    # CHalt ends the run with rc 0
+    # FAIL/SKIP blocks commit a sentinel, then halt.
+    if classify(res.gas) in ("FAIL", "SKIP"):
+        return ""
+    # CHalt exits 0; only non-sentinel halts error.
     halt = HALT_ERROR_RE.search(text)
     if halt:
         return f"halted with error at step={halt.group(1)} pc={halt.group(2)}"
