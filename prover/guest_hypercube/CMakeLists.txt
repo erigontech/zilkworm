@@ -17,6 +17,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_definitions(SP1)
 
+# Read-side state backend for the guest; set here because the top-level option does not reach
+# this separate project. See docs/hashstate.md, "Build flag and test targets".
+option(Z6M_HASH_STATE "Build the guest with the HashState/slib (StatelessInputBytes) backend" OFF)
+if(Z6M_HASH_STATE)
+    add_compile_definitions(Z6M_HASH_STATE)
+endif()
+
 include(GNUInstallDirs)
 
 set(SILKWORM_MAIN_DIR "${Z6M_ROOT}")

@@ -16,6 +16,9 @@ namespace zilkworm {
 
 inline constexpr uint32_t kInputMagicMFBD = 0x4442464Du;  // "MFBD"
 inline constexpr uint32_t kInputMagicEJSN = 0x4E534A45u;  // "EJSN"
+// A raw statelessInputBytes blob (EIP-8025): its 2-byte schema id, big-endian on the wire, so the first
+// byte is 0x15. No other input magic may start with it.
+inline constexpr uint16_t kInputMagicSIB = 0x1501u;
 
 inline constexpr uint32_t kInputVersionMFBD = 1u;
 inline constexpr uint32_t kInputVersionEJSN = 1u;

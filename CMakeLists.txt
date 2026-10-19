@@ -50,6 +50,15 @@ option(SILKWORM_FUZZER_SANITIZERS "CLang sanitizer options for fuzzers" OFF)
 option(SILKWORM_USE_MIMALLOC "Enable using mimalloc for dynamic memory management" ON)
 option(SILKWORM_ALLOW_UNUSED_VAR_WARNINGS "Turn unused variable errors into warnings" OFF)
 
+# Compile-time selection of the trie fold's read-side state backend. OFF (default) =>
+# ActiveState is DirectState and the build is byte/behaviour-identical to today. ON =>
+# ActiveState is HashState (the SSZ/slib input path). Defines the Z6M_HASH_STATE macro
+# for all targets created below (zilk_core, zilkworm.tests, ...); see active_state.hpp.
+option(Z6M_HASH_STATE "Use the HashState (SSZ/slib) read-side state backend instead of DirectState" OFF)
+if(Z6M_HASH_STATE)
+  add_compile_definitions(Z6M_HASH_STATE)
+endif()
+
 get_filename_component(SILKWORM_MAIN_DIR . ABSOLUTE)
 set(SILKWORM_MAIN_SRC_DIR "${SILKWORM_MAIN_DIR}/zilk_core")
 
@@ -150,12 +159,6 @@ if(BUILD_TESTING)
     zilk_core/core/state_zz/block_hash_cache_test.cpp
     zilk_core/core/trie_zz/unfold_hash_copy_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
-    zilk_core/dev/cli/addr_hash_orphan_test.cpp
-    zilk_core/dev/cli/account_read_spoof_test.cpp
-    zilk_core/dev/cli/account_read_honest_test.cpp
-    zilk_core/dev/cli/delegation_clearing_storage_test.cpp
-    zilk_core/dev/cli/direct_state_handle_test.cpp
-    zilk_core/dev/cli/code_store_collision_len_test.cpp
     zilk_core/dev/cli/storage_host_path_test.cpp
     zilk_core/dev/cli/call_frame_result_test.cpp
     zilk_core/dev/cli/word_layout_test.cpp
@@ -172,22 +175,36 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/sar_words_test.cpp
     zilk_core/dev/cli/shift_stack_words_test.cpp
     zilk_core/dev/cli/signextend_fusion_test.cpp
-    zilk_core/dev/cli/code_store_stream_test.cpp
-    zilk_core/dev/cli/code_store_verified_test.cpp
-    zilk_core/dev/cli/witness_binding_test.cpp
-    zilk_core/dev/cli/witness_layout_test.cpp
-    zilk_core/dev/cli/state_transition_chain_test.cpp
     zilk_core/dev/cli/env_push_log_test.cpp
     zilk_core/dev/cli/mem_builtins_test.cpp
     zilk_core/dev/cli/mem_builtins_host.cpp
     prover/guest_common/src/mem_builtins_test.cpp
-    zilk_core/dev/cli/code_store_seal_test.cpp
     zilk_core/dev/cli/in_place_code_test.cpp
-    zilk_core/dev/cli/strict_diag_test.cpp
-    zilk_core/dev/cli/omitted_code_from_create_test.cpp
     zilk_core/dev/cli/flat_bundle_engine_test.cpp
     zilk_core/dev/cli/evmone_delegate_code_read_test.cpp
+    zilk_core/dev/cli/hash_index_test.cpp
+    zilk_core/core/common_zz/ssz_merkle_test.cpp
+    zilk_core/dev/cli/hash_state_test.cpp
   )
+  # These drive block execution over a DirectState witness; the flag-ON processor takes HashState.
+  if(NOT Z6M_HASH_STATE)
+    target_sources(zilkworm.tests PRIVATE
+      zilk_core/dev/cli/code_store_seal_test.cpp
+      zilk_core/dev/cli/code_store_stream_test.cpp
+      zilk_core/dev/cli/code_store_verified_test.cpp
+      zilk_core/dev/cli/direct_state_handle_test.cpp
+      zilk_core/dev/cli/omitted_code_from_create_test.cpp
+      zilk_core/dev/cli/state_transition_chain_test.cpp
+      zilk_core/dev/cli/witness_binding_test.cpp
+      zilk_core/dev/cli/witness_layout_test.cpp
+      zilk_core/dev/cli/strict_diag_test.cpp
+      zilk_core/dev/cli/addr_hash_orphan_test.cpp
+      zilk_core/dev/cli/account_read_spoof_test.cpp
+      zilk_core/dev/cli/account_read_honest_test.cpp
+      zilk_core/dev/cli/delegation_clearing_storage_test.cpp
+      zilk_core/dev/cli/code_store_collision_len_test.cpp
+    )
+  endif()
   # The guests' memcpy and friends (prover/guest_common/src/mem_builtins.cpp), built for the host with
   # the guests' code-generation flags: the loops must not be turned into the libc calls the file
   # replaces. The guests are built with -mstrict-align, where a misaligned word access traps but x86

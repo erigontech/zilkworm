@@ -375,7 +375,7 @@ class PreValueTrie {
         node.current_off = 0;
         node.current_len = static_cast<uint8_t>(next.size());
         std::memcpy(node.buf, next.data(), next.size());
-        GridMPT<true> trie{direct_, pre_root_};
+        GridMPT<true, DirectState> trie{direct_, pre_root_};
         return trie.calc_root_from_updates({&node, 1});
     }
 

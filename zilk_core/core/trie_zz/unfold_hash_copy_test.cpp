@@ -217,7 +217,7 @@ UnfoldResult unfold_slot_of(const Witness& witness, const Bytes& rlp, size_t off
                             unsigned* missing = nullptr) {
     alignas(64) uint8_t buf[640] = {};
     std::memcpy(buf + offset, rlp.data(), rlp.size());
-    GridMPT<false> trie{witness.state, silkworm::kEmptyRoot};
+    GridMPT<false, DirectState> trie{witness.state, silkworm::kEmptyRoot};
     REQUIRE(trie.unfold_node_from_rlp(ByteView{buf + offset, rlp.size()}, /*parent_slot=*/0, /*parent_depth=*/0));
     const UnfoldResult r = trie.unfold_slot(slot);
     if (missing) *missing = trie.missing_count();

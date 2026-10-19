@@ -33,6 +33,19 @@ extern "C" int main()
         syscall_write(SP1_FD_PUBLIC_VALUES, le_bytes8, 8);
     };
 
+    if (r.sib) {
+        // SSZ StatelessValidationResult: the harness compares these 43 bytes with statelessOutputBytes.
+        syscall_write(SP1_FD_PUBLIC_VALUES, r.new_payload_request_root.bytes, 32);
+        const uint8_t ok = r.successful_validation ? 1 : 0;
+        syscall_write(SP1_FD_PUBLIC_VALUES, &ok, 1);
+        syscall_write_u64_le(r.chain_id);
+        const uint8_t schema_le[2] = {static_cast<uint8_t>(r.schema_id), static_cast<uint8_t>(r.schema_id >> 8)};
+        syscall_write(SP1_FD_PUBLIC_VALUES, schema_le, 2);
+        sys_println(std::format("[state_transition] stateless input: valid={}, gas used: {}, block hash: {}",
+                                r.successful_validation, r.gas_used, to_hex(r.block_hash)));
+        return 0;
+    }
+
     syscall_write_u64_le(r.gas_used);
     syscall_write(SP1_FD_PUBLIC_VALUES, r.pre_state_root.bytes, 32);
     syscall_write(SP1_FD_PUBLIC_VALUES, r.post_state_root.bytes, 32);

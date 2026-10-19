@@ -88,7 +88,7 @@ bool unfolds_as_root(const Bytes& node) {
     std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
     DirectState direct{std::span<uint8_t>{prestate}};
-    GridMPT<false> trie{direct, silkworm::kEmptyRoot};
+    GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
     const bool ok = trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0);
     CHECK(trie.failed() == !ok);
     return ok;
@@ -103,7 +103,7 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized extension child", "[trie][g
     std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
     DirectState direct{std::span<uint8_t>{prestate}};
-    GridMPT<false> trie{direct, silkworm::kEmptyRoot};
+    GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
 
     const Bytes node = ext_node(/*child_len=*/60000);
     CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
@@ -142,7 +142,7 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized leaf value", "[trie][gridmp
     std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
     DirectState direct{std::span<uint8_t>{prestate}};
-    GridMPT<false> trie{direct, silkworm::kEmptyRoot};
+    GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
 
     const Bytes node = leaf_node(/*value_len=*/4096);
     CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
@@ -154,7 +154,7 @@ TEST_CASE("unfold_node_from_rlp rejects a node with 4 or more length bytes", "[t
     std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
     DirectState direct{std::span<uint8_t>{prestate}};
-    GridMPT<false> trie{direct, silkworm::kEmptyRoot};
+    GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
 
     for (const uint8_t first : {uint8_t{0xFB}, uint8_t{0xFF}}) {
         Bytes node{first};
@@ -168,7 +168,7 @@ TEST_CASE("unfold_node_from_rlp rejects a branch with a value", "[trie][gridmpt]
     std::vector<uint8_t> prestate =
         DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
     DirectState direct{std::span<uint8_t>{prestate}};
-    GridMPT<false> trie{direct, silkworm::kEmptyRoot};
+    GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
 
     Bytes inner;
     inner.push_back(0xC2);  // child 0: an embedded node, so the branch is not all empty
