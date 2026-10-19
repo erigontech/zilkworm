@@ -179,7 +179,8 @@ def _stream_output(proc: subprocess.Popen, shard_name: str,
 
 def run_shards(prover: str, fixtures_dir: str, shards: List[str],
                log_dir: str, stagger: int, max_parallel: int,
-               max_file_size_bytes: int = 0) -> List[ShardResult]:
+               max_file_size_bytes: int = 0,
+               shard_timeout: int = 0) -> List[ShardResult]:
     """Launch shard processes with staggered starts and memory-aware scheduling."""
     results: List[ShardResult] = []
     active: List[ShardProc] = []
@@ -245,6 +246,13 @@ def run_shards(prover: str, fixtures_dir: str, shards: List[str],
         still_active = []
         for sp in active:
             ret = sp.proc.poll()
+            if ret is None and shard_timeout > 0 and \
+                    time.time() - sp.start_time > shard_timeout:
+                print(f"    TIMEOUT: {sp.result.shard} exceeded {shard_timeout}s, killing",
+                      flush=True)
+                sp.result.error = f"shard timeout after {shard_timeout}s"
+                sp.proc.kill()
+                ret = sp.proc.poll()
             if ret is not None:
                 # Wait for reader thread to finish draining stdout
                 if sp.reader_thread:
@@ -390,6 +398,8 @@ def main() -> int:
                         help="Max allowed failures before exit 1 (default: 5)")
     parser.add_argument("--max-file-size", type=int, default=20,
                         help="Max test file size in MB (0=no limit, default: 20)")
+    parser.add_argument("--shard-timeout", type=int, default=0,
+                        help="Kill a shard after this many seconds (0=off, default: 0)")
     parser.add_argument("--filter", default=None,
                         help="Only run shards matching this substring")
     parser.add_argument("--prover", default=None,
@@ -453,13 +463,18 @@ def main() -> int:
     max_file_size_bytes = args.max_file_size * 1024 * 1024  # MB to bytes
     results = run_shards(prover, fixtures, shards, log_dir,
                          stagger=args.stagger, max_parallel=max_par,
-                         max_file_size_bytes=max_file_size_bytes)
+                         max_file_size_bytes=max_file_size_bytes,
+                         shard_timeout=args.shard_timeout)
 
     # Report
     total, passed, failed = print_report(results)
 
     if total == 0:
         print("\nERROR: no tests executed", file=sys.stderr)
+        return 1
+    if any(r.error or r.exit_code != 0 for r in results):
+        # A killed or crashed shard leaves its fixtures untested.
+        print("\nFAIL: a shard crashed or timed out (see above)", file=sys.stderr)
         return 1
     if failed > args.fail_threshold:
         print(f"\nFAIL: {failed} failures exceed threshold ({args.fail_threshold})",

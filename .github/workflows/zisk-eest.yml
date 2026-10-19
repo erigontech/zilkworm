@@ -35,6 +35,8 @@ jobs:
   eest:
     name: ZisK EEST
     runs-on: ubuntu-latest
+    # Bounded: a hung ziskemu must not burn the 6h default.
+    timeout-minutes: 180
     environment: ci
     permissions:
       contents: read
@@ -101,6 +103,7 @@ jobs:
             --prover prover/prover_zisk/target/release/z6m_prover_zisk \
             --max-parallel "$(nproc)" \
             --stagger 15 \
+            --shard-timeout 5400 \
             --log-dir eest-logs \
             --fail-threshold 5
 
