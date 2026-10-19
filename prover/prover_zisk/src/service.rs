@@ -355,7 +355,11 @@ async fn build_prover_client(program: &GuestProgram, opts: &ProverOpts) -> Resul
             builder = builder.asm_options(AsmOptions::default().unlock_mapped_memory());
         }
         if opts.proof_kind == ProofKind::Plonk {
-            let pk_snark = resolve_proving_key(None, "provingKeySnark", None)?;
+            let pk_snark = resolve_proving_key(
+                opts.proving_key.as_deref(),
+                "provingKeySnark",
+                None,
+            )?;
             builder = builder.plonk().proving_key_plonk(pk_snark);
         }
         #[cfg(feature = "gpu")]
