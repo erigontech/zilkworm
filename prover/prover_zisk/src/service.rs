@@ -294,7 +294,14 @@ impl ZiskExecutor {
 fn run_ziskemu(rom: &ZiskRom, framed: Vec<u8>) -> Result<RunReport> {
     let options = EmuOptions::default();
     let mut emu = Emu::new(rom);
-    emu.run(framed, &options, None::<fn(EmuTrace)>);
+    // A guest abort panics inside Emu::run.
+    let run = catch_unwind(AssertUnwindSafe(|| {
+        emu.run(framed, &options, None::<fn(EmuTrace)>)
+    }));
+    if let Err(payload) = run {
+        let msg = panic_message(payload.as_ref());
+        bail!("ZisK emulator panicked ({msg}); the guest most likely halted with error");
+    }
     if !emu.terminated() {
         bail!(
             "ZisK emulation did not finish within {} steps",
@@ -894,6 +901,7 @@ pub async fn run_test_service(
             Ok(r) => r,
             Err(e) => {
                 warn!("block {} execution failed: {}, skipping", block_number, e);
+                println!("FAILED block {} ({e:#})", block_number);
                 continue;
             }
         };
