@@ -89,8 +89,7 @@ jobs:
         uses: ./.github/actions/prepare-eest-mfbd
         with:
           token: ${{ secrets.PAT_TOKEN || github.token }}
-          # Same corpus as hypercube-eest.yml (Glamsterdam devnet).
-          manifest-key: eest_devnet
+          # Same corpus as hypercube-eest.yml.
 
       - name: Run EEST tests
         shell: bash

@@ -506,7 +506,7 @@ word (`wait_for_input_ready`).
 
 | Workflow | What it does |
 |---|---|
-| `zisk-eest.yml` | `make z6m_prover_zisk`; prepares **`eest_devnet`** MFBD fixtures (same corpus as `hypercube-eest.yml`; validated locally: 11880 fixtures, 11866 pass, 4 failures — 2 known-OOM, 2 that also fail natively — 10 skipped over the 20 MB size cap); runs `eest_runner.py --prover … --max-parallel $(nproc) --ram-per-instance 4 --shard-timeout 5400 --fail-threshold 5` with `Z6M_ZISK_EXECUTOR=ziskemu`. |
+| `zisk-eest.yml` | `make z6m_prover_zisk`; prepares **`eest_stable`** MFBD fixtures (same corpus as `hypercube-eest.yml`; validated locally: 12266 fixtures, 12253 pass, 3 known failures, 10 skipped over the 20 MB size cap); runs `eest_runner.py --prover … --max-parallel $(nproc) --ram-per-instance 4 --shard-timeout 5400 --fail-threshold 5` with `Z6M_ZISK_EXECUTOR=ziskemu`. |
 | `zisk-benchmark.yml` | `make z6m_prover_zisk`; downloads the raw 200 blocks from `zilkworm-testdata`, regenerates the corpus, and runs `sp1_benchmark.py --prover … --ram-per-instance 4` on the `ziskemu` executor. It fails on any FAILED or SKIPPED block or a short count. |
 
 Both workflows are **execute-only**: they download no proving key, use no GPU and generate no proofs.
