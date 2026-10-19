@@ -135,8 +135,7 @@ bool GridMPT<DeletionEnabled, StateT>::unfold_node_from_rlp(ByteView payload, un
     // path); decode_node writes no branch field for those.
     Kind kind = decode_node(list, line.branch, is_leaf, line.leaf.path.nib, plen, second);
     if (kind == kBranch) {
-        // emplace_line initializes no union member and decode_node writes only the pre-existing BranchNode fields:
-        // reset the origin fields explicitly.
+        // Union: reset the origin fields explicitly.
         line.branch.orig = nullptr;
         line.branch.dirty = 0;
         const auto node_size = static_cast<size_t>(list.data() + list.size() - node_begin);

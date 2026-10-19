@@ -94,15 +94,13 @@ struct BranchNode {
     alignas(8) std::array<uint8_t, 16> child_len{};
     uint16_t mask{};
     ByteView value{};
-    // Original witness RLP this branch was unfolded from (null for branches built in-grid).
-    // encode_branch copy-and-patches it, rewriting only `dirty` slots while no slot changed length class.
+    // Orig witness RLP; null when built in-grid.
     const uint8_t* orig{nullptr};
     uint16_t orig_size{0};
     uint16_t dirty{0};
     alignas(8) std::array<uint8_t, 16> orig_child_len{};
 
-    // Layout of the witness encoding is unchanged iff no slot changed length class.
-    // Both child_len and orig_child_len arrays must stay 8-aligned.
+    // Unchanged iff no slot changed length class.
     inline bool same_layout_as_orig() const noexcept {
         // Through data() the 8-byte alignment is lost, and a strict-alignment target then
         // copies both arrays byte-wise (two memcpy calls per encode); read them as words.

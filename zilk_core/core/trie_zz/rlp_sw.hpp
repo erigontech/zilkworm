@@ -257,10 +257,7 @@ template <unsigned Off>
     if (b.mask == 0) {
         return empty;
     }
-    // Same length class in every slot means the witness encoding's layout is unchanged:
-    // copy it into the scratch buffer and rewrite only the dirty slots there. Clean slots
-    // still read (hash) or were copied (embedded) from that encoding, so this matches
-    // the full re-encode byte for byte. The original witness bytes are never written.
+    // Copy orig encoding; rewrite only dirty slots.
     if (b.orig != nullptr && b.same_layout_as_orig()) {
         // At the witness node's phase modulo 32, see static_buffer.
         uint8_t* const out = static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31);

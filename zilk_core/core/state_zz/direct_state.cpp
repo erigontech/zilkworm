@@ -998,9 +998,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     }
     if (recovery_ended_) return nullptr;  // a later block: the address is absent, see end_recovery()
 
-    // Account-trie pre-root = parent block's state_root. get_account has no
-    // header context here; the highest-numbered header in headers_ is the
-    // pre-state parent (ancestors are inserted before execution).
+    // Pre-root: highest header = pre-state parent.
     const BlockHeader* parent = nullptr;
     for (const auto& [h, hdr] : headers_) {
         if (!parent || hdr.number > parent->number) parent = &hdr;
@@ -1046,10 +1044,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     sys_println("USE_HASH_KEY: recovered account " +
                 to_hex(ByteView{addr.bytes, sizeof(addr.bytes)}, true) +
                 " from node-store (preimage missing from keys)");
-    // The leaf is already in prev_root; this account is treated as a
-    // read-only prestate account (not in addr_hashes / created), so it is
-    // intentionally excluded from the state-root recompute updates. Cache
-    // the owned copy so the returned pointer outlives the call.
+    // Read-only prestate account; excluded from recompute.
     const Account* ret = acc.get();
     recovered_accounts_.push_back(std::move(acc));
     return ret;
