@@ -303,40 +303,37 @@ It cannot prove absence (returns `false`) when:
 ### Block headers and BLOCKHASH
 
 `HashState` implements the block-header side of the state interface: the three
-`silkworm::BlockState` virtuals (`read_header`, `read_body`,
-`total_difficulty`) plus a header and BLOCKHASH store (`insert_header`,
-`get_block_hash`). These mirror `DirectState` with identical signatures, so
-retyping the execution surface from `DirectState&` to `ActiveState&` (which is
-`HashState` under `-DZ6M_HASH_STATE`) is a drop-in.
+`silkworm::BlockState` virtuals (`read_header`, `read_body`, `total_difficulty`)
+plus `insert_header` and `get_block_hash`, with the signatures `DirectState`
+has, so the execution surface retypes from `DirectState&` to `ActiveState&`
+unchanged.
 
-`HashState` holds the witness ancestor headers here. They come from the parsed
-witness headers (`StatelessInputView::headers`, `slib_input.hpp`) plus the
-genesis header: the runner (`zilk_core/dev/blockchain_test_runner.cpp`) decodes the
-witness headers and calls `insert_header` for each one, and the `Blockchain`
-constructor inserts the genesis header.
+`insert_header` keeps a header under its own hash. The headers come from the
+witness (`StatelessInputView::headers`): the runner decodes them, checks that
+they chain by parent hash and end at the block's parent, and inserts them.
 
-`get_block_hash` fails closed on a miss. evmone calls `get_block_hash` only for
-an in-range ancestor: the `blockhash` instruction (evmone
-`lib/evmone/instructions.hpp`) clamps `n` to `[max(N-256, 0), N-1]` and returns
-zero itself for anything out of range, without calling the host. The real chain
-always has the hash of an in-range ancestor. A miss therefore means the witness
-omitted a required ancestor header (or the runner's ancestor-contiguity gate
-rejected it), so the BLOCKHASH value is not authenticated by the header chain.
+`get_block_hash(header, n)` walks the parent hashes back from the executing
+block's own header: block N-1 is `header.parent_hash`, block N-2 the parent
+hash of the header found under it, and so on, so every hash it returns is bound
+to the block. A header is never found by its number: one chained after the
+parent and numbered like an ancestor is never BLOCKHASH of that number. Block
+n's own header must be held as well, as stateless validation derives BLOCKHASH
+from the witness headers. The walk is memoized per block, as
+`DirectState::get_block_hash` does: the first call records the contiguous run
+of held headers below the block, parent first, and every call after it is one
+index. A block that calls `BLOCKHASH(N-256)` a million times otherwise walks
+255 lookups each time (the `test_blockhash[block_1]` benchmark case went from
+4.1 T to the cost of the other BLOCKHASH cases).
 
-Returning a silent zero here would be unsound. In the missing-oldest-ancestor
-attack, the block persists `BLOCKHASH(k)` for an omitted header `k` (for example
-with `SSTORE(slot, BLOCKHASH(k))`). Execution stores the wrong value, the
-attacker sets `header.state_root` to the resulting root, and the accept gate
-passes: the root matches, and both completeness counters are zero because a
-header or BLOCKHASH miss touches no state.
-
-So a miss is recorded as an unconfirmed read, through the same fail-closed
-channel that `get_account` and `get_storage` misses use
-(`unconfirmed_read_count_`, which is `mutable` and reset by each
-`build_state_from_trie`). The accept gate
-(`missing_count() == 0 && unconfirmed_read_count() == 0`) then rejects the
-block. `get_block_hash` still returns zero so the value-returning EVM caller
-proceeds; the rejection is decided at accept time.
+evmone calls `get_block_hash` only for an ancestor in `[max(N-256, 0), N-1]`
+and returns zero itself outside that range. A walk that does not reach block n
+means the witness omitted a header the block needs, and a silent zero would be
+unsound: a block that stores `BLOCKHASH(k)` for an omitted `k` would execute
+with the wrong value and the attacker's `header.state_root` would match it. So
+the miss sets `ancestor_missing()` and counts as an unconfirmed read, through
+the channel `get_account` and `get_storage` misses use, and the accept gate
+rejects the block; `get_block_hash` still returns zero so execution proceeds to
+that decision.
 
 ### Write overlay
 
@@ -1081,57 +1078,42 @@ in-range ancestor whose header the witness omitted must be rejected, even when t
 post-state root matches `header.state_root`.
 
 evmone's `blockhash` instruction (`instructions.hpp`) clamps k to `[max(N-256, 0), N-1]` and only
-then calls `host.get_block_hash(k)`, which reaches `HashState::get_block_hash(k)`. The real chain
-always has that ancestor's hash, so a store miss means the witness omitted a required header.
+then calls `host.get_block_hash(k)`, which reaches `HashState::get_block_hash(header, k)`: the walk
+from the block's parent hash down to k. The real chain always has that ancestor's hash, so a walk
+that stops at a header the store does not hold means the witness omitted a required header.
 
 Before the fix, `get_block_hash` returned a silent zero and left both completeness counters at
 zero. A block that persisted `BLOCKHASH(k)` (`SSTORE(slot, BLOCKHASH(k))`) with header k omitted,
 and with `header.state_root` set to that forged execution's root, was accepted. With the fix, the
 omitted-ancestor read fails closed: it increments `unconfirmed_read_count_`, and the accept gate
-rejects.
+rejects. `HashState BLOCKHASH takes an ancestor's hash from its child, not from a header of its
+number` covers the other half: a witness header numbered like an ancestor but not on the parent
+chain is never BLOCKHASH of that number.
 
 A read of an ancestor that is present still costs nothing, so legitimate partial witnesses, which
 ship every ancestor they reference, keep validating.
 
 ### Stateless input front end
 
-The slib front-end tests decode a StatelessInputBytes blob (schema_id `0x1501`) into a HashState,
+The slib front-end tests decode a statelessInputBytes blob (schema_id `0x1501`) into a HashState,
 then run `build_state_from_trie`. There are two kinds of input:
 
-1. The real tests-zkevm@v0.8.0 sample in `slib_sample_fixture.hpp`. It shows that the hand-written
-   SSZ reader parses the exact wire format, and that parse plus build reconstruct the committed
-   pre-state accounts.
+1. The tests-zkevm v21.0.1 sample in `slib_sample_fixture.hpp`. The test decodes it, takes the
+   payload's hash tree root and checks it against the root the fixture's `statelessOutputBytes`
+   commits to, rebuilds the block and checks its hash against the payload's `block_hash`, and
+   builds the pre-state against the parent header's state root.
 2. A synthetic blob that the test encodes into the exact wire layout from a small complete trie.
-   It covers the clean `missing_count() == 0` path and a storage cross-check. The real sample is an
-   "optional proofs" partial witness with no touched storage, so it cannot exercise either of
-   those on its own.
+   It covers the clean `missing_count() == 0` path and a storage cross-check.
 
 Malformed-input tests must also fail cleanly: they return `std::nullopt` with no out-of-bounds read
-and no crash.
+and no crash. `ssz_merkle_test.cpp` reproduces the roots ere-guests asserts for its synthetic
+payloads and request containers, field by field, and checks the padding and progressive shapes.
 
-`slib_sample_fixture.hpp` is generated; do not edit it by hand. Its source is the tests-zkevm@v0.8.0
-release tarball `fixtures_zkevm.tar.gz`, streamed with the command below, followed by
-`tar --occurrence=1 -xzf` to extract the one case:
-
-```
-gh release download tests-zkevm@v0.8.0 --repo ethereum/execution-specs -p fixtures_zkevm.tar.gz
-```
-
-The case is
-`blockchain_tests/for_amsterdam/amsterdam/eip8025_optional_proofs/witness_bytecodes_call_variants/witness_codes_call_existing_contract.json`
-(`test_witness_codes_call_existing_contract ... -call`).
-
-- `kBlobHex` is that case's `blocks[0].statelessInputBytes`: schema_id `0x1501` followed by the SSZ
-  body.
-- The witness is an EIP-8025 "optional proofs" partial trie. It carries the 9 pre accounts the
-  block touches and prunes 2 untouched system accounts (the beacon deposit contract and the CREATE2
-  deployer) to bare hash refs.
-- `kPresent` holds the 9 recovered accounts, with every field cross-checked against `pre`.
-  `kPrunedAddrs` holds the 2 pruned addresses.
-- The fixture defines `kExpectedMissing = 2` for the two pruned accounts, but nothing reads it.
-  `build_state_from_trie` treats a pruned child as a boundary rather than a missing node, so the
-  real-sample test expects status `kOk` and `missing_count() == 0`. Reading a pruned account
-  returns blank and records an unconfirmed read.
+`slib_sample_fixture.hpp` is generated; do not edit it by hand. Its source is the tests-zkevm
+v21.0.1 corpus as ere-guests ships it (`crates/stateless-validator-test/fixtures`), case
+`shanghai/eip4895_withdrawals/withdrawals/newly_created_contract.json`, the smallest
+single-payload valid block with a transaction and a withdrawal. The constants are the fixture's
+`statelessInputBytes`, `statelessOutputBytes` and `blockHash`, and the counts the SSZ framing gives.
 
 ### Write overlay and mutators
 

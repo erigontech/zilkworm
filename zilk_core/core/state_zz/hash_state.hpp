@@ -154,17 +154,17 @@ class HashState : public BlockState {
     // --- silkworm::BlockState interface + BLOCKHASH store ------------------------------
     // See docs/hashstate.md, "Block headers and BLOCKHASH".
 
-    // Record a header under its keccak hash and keep created_block_hashes_ sorted ascending
-    // by block number for the log-n BLOCKHASH lookup. Verbatim DirectState::insert_header
-    // (direct_state.cpp:703-722).
+    // Record a header under its keccak hash, for read_header() and the BLOCKHASH walk.
     void insert_header(const BlockHeader& header);
 
-    // BLOCKHASH(n): sorted lookup in created_block_hashes_ (the inserted witness / genesis
-    // ancestors), all-zero bytes32 on a miss. Mirrors DirectState::get_block_hash
-    // (direct_state.cpp:818-840) MINUS the witness block_hashes_ span branch (:819-828):
-    // HashState has no such span — the slib witness supplies ancestor headers as RLP that
-    // the runner decodes and insert_header's, so created_block_hashes_ alone covers it.
-    evmc::bytes32 get_block_hash(BlockNum n) const noexcept;
+    // SOUNDNESS-CRITICAL: an ancestor's hash is the parent hash of its child, walked back from `header`
+    // through the headers held, each keyed by its own hash, so every hash returned is bound to the
+    // block. A header the walk does not reach is never returned, whatever its number. A walk that does
+    // not reach block n's own header sets ancestor_missing() and records an unconfirmed read: the
+    // witness does not hold the ancestor the block read. The walk is memoized per block.
+    static constexpr std::size_t kBlockHashDepth = 256;  // the ancestors BLOCKHASH reaches
+    evmc::bytes32 get_block_hash(const BlockHeader& header, BlockNum n) const noexcept;
+    bool ancestor_missing() const noexcept { return ancestor_missing_; }
 
     // read_header: the header cached under `block_hash`, else nullopt (block_num is unused,
     // exactly as in DirectState). read_body / total_difficulty are the DirectState stubs:
@@ -359,12 +359,16 @@ class HashState : public BlockState {
     std::vector<std::uint8_t> storage_arena_;
     HashIndex<64, &storage_key8> storage_index_;
 
-    // Block-header store (the BlockState side), mirroring DirectState (direct_state.hpp:87-88):
-    // headers_ answers read_header keyed by the header's keccak hash; created_block_hashes_ is
-    // kept sorted ascending by block number for the BLOCKHASH lookup in get_block_hash. Both
-    // are populated by insert_header (the runner glue feeds it the witness ancestor headers).
+    // The headers the witness carries and the chain's genesis, keyed by their hash: read_header()
+    // and the BLOCKHASH walk resolve through it.
     FlatHashMap<evmc::bytes32, BlockHeader> headers_;
-    std::vector<BlockHashEntry> created_block_hashes_;
+    // Set once a block asked for the hash of an ancestor the headers held do not lead to.
+    mutable bool ancestor_missing_{false};
+    // The BLOCKHASH walk of the block ancestors_number_/ancestors_anchor_ identify, memoized: the
+    // hashes of the contiguous run of held headers below it, the parent's first (get_block_hash).
+    mutable std::vector<evmc::bytes32> ancestors_;
+    mutable BlockNum ancestors_number_{0};
+    mutable evmc::bytes32 ancestors_anchor_{};
 
     // The account-trie root the last build_state_from_trie ran from, stored so a read miss can
     // seed a confirm_absent walk down the account trie (the storage passes confirm against each
@@ -392,7 +396,6 @@ class HashState : public BlockState {
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;                                  // in-block created code (fills the old TODO)
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;              // key8-collision spill
     FlatHashSet<evmc::address> touched_;                                                    // EIP-158 touch set
-    FlatHashSet<evmc::address> delegated_designations_;                                     // EIP-7702 wipe-exemption set
     // DIVERGENCE (b): per-account storage-wiped marker replacing DirectState's in-place
     // inline-slot wipe (direct_state.cpp:410-412, :568). A wiped account reads all pre-state
     // (built-cache) slots as zero and its storage fold seeds from kEmptyRoot.

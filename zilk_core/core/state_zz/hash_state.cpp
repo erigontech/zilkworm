@@ -3,7 +3,7 @@
 
 #include "hash_state.hpp"
 
-#include <algorithm>  // std::lower_bound (insert_header / get_block_hash)
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstring>
@@ -255,6 +255,7 @@ HashState::BuildStatus HashState::build_state_from_trie(const evmc::bytes32& pre
     // can seed confirm_absent. The reads that a caller runs after this build accumulate into
     // unconfirmed_read_count_ until the next build clears it again.
     unconfirmed_read_count_ = 0;
+    ancestor_missing_ = false;
     prev_root_ = prev_root;
 
     // (addr_hash, storage_root) for every derived account carrying a non-empty storage
@@ -451,23 +452,7 @@ std::optional<BlockHeader> HashState::read_header(BlockNum,
 
 void HashState::insert_header(const BlockHeader& header) {
     headers_[header.hash()] = header;
-
-    // created_block_hashes_ kept sorted ascending for log-n BLOCKHASH lookup.
-    const uint64_t block_num = header.number;
-    const auto h = header.hash();
-    auto it = std::lower_bound(created_block_hashes_.begin(),
-                               created_block_hashes_.end(), block_num,
-                               [](const BlockHashEntry& e, uint64_t n) {
-                                   return e.block_number < n;
-                               });
-    if (it != created_block_hashes_.end() && it->block_number == block_num) {
-        std::memcpy(it->block_hash, h.bytes, 32);
-    } else {
-        BlockHashEntry e{};
-        e.block_number = block_num;
-        std::memcpy(e.block_hash, h.bytes, 32);
-        created_block_hashes_.insert(it, e);
-    }
+    ancestors_.clear();  // rewalked on the next BLOCKHASH
 }
 
 bool HashState::read_body(BlockNum, const evmc::bytes32&, BlockBody&) const noexcept {
@@ -479,23 +464,31 @@ std::optional<intx::uint256> HashState::total_difficulty(uint64_t,
     return std::nullopt;
 }
 
-evmc::bytes32 HashState::get_block_hash(BlockNum n) const noexcept {
-    // No witness block_hashes_ span here (see hash_state.hpp): created_block_hashes_ alone.
-    if (!created_block_hashes_.empty()) {
-        const auto it = std::lower_bound(created_block_hashes_.begin(),
-                                         created_block_hashes_.end(), n,
-                                         [](const BlockHashEntry& e, BlockNum k) {
-                                             return e.block_number < k;
-                                         });
-        if (it != created_block_hashes_.end() && it->block_number == n) {
-            return std::bit_cast<evmc::bytes32>(it->block_hash);
+evmc::bytes32 HashState::get_block_hash(const BlockHeader& header, BlockNum n) const noexcept {
+    if (n >= header.number) [[unlikely]]
+        return {};
+    // The walk is memoized per block (DirectState::get_block_hash): ancestors_ holds the hashes of
+    // the contiguous run of headers below `header`, the parent's first, each one's header held, so
+    // a BLOCKHASH costs one index after the first. Stateless validation derives BLOCKHASH from the
+    // witness headers, so block n's own must be in that run.
+    if (ancestors_number_ != header.number || ancestors_anchor_ != header.parent_hash) {
+        ancestors_.clear();
+        ancestors_number_ = header.number;
+        ancestors_anchor_ = header.parent_hash;
+        evmc::bytes32 hash = header.parent_hash;
+        for (auto it = headers_.find(hash); it != headers_.end() && ancestors_.size() < kBlockHashDepth;
+             it = headers_.find(hash)) {
+            ancestors_.push_back(hash);
+            hash = it->second.parent_hash;
         }
     }
-
-    // Fail-closed BLOCKHASH miss: record an unconfirmed read, still return zero.
-    // See docs/hashstate.md, "Block headers and BLOCKHASH".
-    ++unconfirmed_read_count_;
-    return {};
+    const BlockNum depth = header.number - 1 - n;
+    if (depth >= ancestors_.size()) [[unlikely]] {
+        ancestor_missing_ = true;
+        ++unconfirmed_read_count_;
+        return {};
+    }
+    return ancestors_[static_cast<size_t>(depth)];
 }
 
 // --- Write overlay + mutators + address-keyed readers (S2) ----------------------------
@@ -730,18 +723,23 @@ void HashState::set_storage_slot(const evmc::address& addr, Account& pa,
 void HashState::apply_code_diff(const evmc::address& addr, Account& pa,
                                 const evmc::bytes& code) {
     const ByteView code_view{code.data(), code.size()};
-    const bool is_delegated = eip7702::is_code_delegated(code_view);
+    if (code.empty()) [[unlikely]] {
+        // Empty = a cleared EIP-7702 delegation; the authority's storage survives it.
+        copy32(pa.code_hash, kEmptyHash);
+        pa.code_store_len = 0;
+        pa.code_store_offset = 0;
+        pa.modified = true;
+        pa.acc_rlp_sroot_off = 0;
+        return;
+    }
 
-    // Wipe storage on contract creation unless the new code is a delegation or the address
-    // was already a delegation target (mirrors direct_state.cpp:406-415). DIVERGENCE (b):
-    // set the storage_wiped_ flag + drop overlay slots instead of the in-place inline-slot
-    // wipe (the built cache is immutable).
-    if (!is_delegated && !delegated_designations_.contains(addr)) {
+    // Creation is the only transition that wipes storage, and post-London EIP-3541 keeps
+    // deployed code off the 0xef prefix, so it can never look like a designation
+    // (DirectState::apply_code_diff). DIVERGENCE (b): the storage_wiped_ flag + dropped
+    // overlay slots stand in for the in-place wipe (the built cache is immutable).
+    if (!eip7702::is_code_delegated(code_view)) {
         overflow_slots_.erase(addr);
         storage_wiped_.insert(addr);
-    }
-    if (is_delegated) {
-        delegated_designations_.insert(addr);
     }
 
     const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(code_view));
@@ -843,9 +841,6 @@ void HashState::set_code(const evmc::address& addr, ByteView code) {
     auto* pa = find_or_create_account(addr);
     revive_if_deleted(addr, *pa);
 
-    if (eip7702::is_code_delegated(code)) {
-        delegated_designations_.insert(addr);
-    }
     const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(code));
     bool changed = false;
     if (std::memcmp(pa->code_hash, h.bytes, 32) != 0) {

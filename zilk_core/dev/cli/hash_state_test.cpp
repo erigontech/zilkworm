@@ -271,89 +271,91 @@ void expect_account(const Account* got, const TestAccount& want, const char* who
 
 }  // namespace
 
-// S1: HashState provides the block-header side of the state interface (the silkworm::
-// BlockState base) mirroring DirectState. insert_header records a header under its keccak
-// hash (read_header) and in a block-number-sorted table (get_block_hash / BLOCKHASH);
-// read_body and total_difficulty are the DirectState stubs. Headers are inserted out of
-// order to exercise insert_header's sorted-insertion into created_block_hashes_, and one
-// header is the genesis (number 0).
-TEST_CASE("HashState header store: read_header / get_block_hash round-trip", "[hash_state]") {
-    HashState hs;
+// The block-header side of the state interface: insert_header records a header under its hash for
+// read_header; get_block_hash walks the parent hashes back from the executing block's header, so it
+// returns only hashes that chain to the block. read_body and total_difficulty are stubs.
+namespace {
 
-    auto make_header = [](uint64_t number, uint8_t tag) {
+// Headers 0..n-1 chained by parent hash, and a block header numbered n on top of them.
+struct HeaderChain {
+    std::vector<silkworm::BlockHeader> headers;
+    silkworm::BlockHeader block;
+};
+
+HeaderChain header_chain(uint64_t n) {
+    HeaderChain c;
+    for (uint64_t i = 0; i < n; ++i) {
         silkworm::BlockHeader h;
-        h.number = number;
+        h.number = i;
         h.gas_limit = 30'000'000;
-        h.parent_hash.bytes[0] = tag;  // perturb content so each header's RLP hash is unique
-        return h;
-    };
-
-    const silkworm::BlockHeader genesis = make_header(0, 0x00);  // genesis insert
-    const silkworm::BlockHeader h10 = make_header(10, 0xAA);
-    const silkworm::BlockHeader h3 = make_header(3, 0xBB);
-    const silkworm::BlockHeader h7 = make_header(7, 0xCC);
-
-    // Out-of-order insertion; created_block_hashes_ must stay sorted internally.
-    hs.insert_header(h10);
-    hs.insert_header(genesis);
-    hs.insert_header(h7);
-    hs.insert_header(h3);
-
-    // read_header: keyed by the header's keccak hash; the passed block_num is ignored (as in
-    // DirectState), so it resolves purely from the hash.
-    for (const auto* h : {&genesis, &h3, &h7, &h10}) {
-        auto got = hs.read_header(h->number, h->hash());
-        REQUIRE(got.has_value());
-        CHECK(got->number == h->number);
-        CHECK(eq32(got->hash(), h->hash()));
+        h.timestamp = 1000 + i;
+        h.parent_hash = i == 0 ? evmc::bytes32{} : c.headers.back().hash();
+        c.headers.push_back(h);
     }
+    c.block.number = n;
+    c.block.parent_hash = c.headers.back().hash();
+    return c;
+}
 
-    // read_header on a hash that was never inserted misses (keccak never yields 0x99||0..0).
+}  // namespace
+
+TEST_CASE("HashState header store: read_header and the BLOCKHASH walk", "[hash_state]") {
+    HashState hs;
+    const HeaderChain c = header_chain(6);
+    for (const auto& h : c.headers) hs.insert_header(h);
+
+    for (const auto& h : c.headers) {
+        auto got = hs.read_header(h.number, h.hash());
+        REQUIRE(got.has_value());
+        CHECK(got->number == h.number);
+        CHECK(eq32(got->hash(), h.hash()));
+    }
     evmc::bytes32 unknown{};
     unknown.bytes[0] = 0x99;
     CHECK_FALSE(hs.read_header(999, unknown).has_value());
 
-    // get_block_hash: the BLOCKHASH lookup returns each inserted header's hash by number.
-    CHECK(eq32(hs.get_block_hash(0), genesis.hash()));
-    CHECK(eq32(hs.get_block_hash(3), h3.hash()));
-    CHECK(eq32(hs.get_block_hash(7), h7.hash()));
-    CHECK(eq32(hs.get_block_hash(10), h10.hash()));
+    // Every ancestor the chain leads to, from the parent back to block 0.
+    for (uint64_t n = 0; n < 6; ++n) CHECK(eq32(hs.get_block_hash(c.block, n), c.headers[n].hash()));
+    CHECK(hs.unconfirmed_read_count() == 0u);
+    CHECK_FALSE(hs.ancestor_missing());
+    // The block itself and later blocks are out of range: zero, and no read to confirm.
+    CHECK(eq32(hs.get_block_hash(c.block, 6), evmc::bytes32{}));
+    CHECK(eq32(hs.get_block_hash(c.block, 7), evmc::bytes32{}));
+    CHECK(hs.unconfirmed_read_count() == 0u);
 
-    // Numbers that were never inserted return the all-zero sentinel (below, between, above).
-    CHECK(eq32(hs.get_block_hash(5), evmc::bytes32{}));
-    CHECK(eq32(hs.get_block_hash(11), evmc::bytes32{}));
-
-    // read_body and total_difficulty are the DirectState stubs (unused by the slib path).
     silkworm::BlockBody body{};
-    CHECK_FALSE(hs.read_body(3, h3.hash(), body));
-    CHECK_FALSE(hs.total_difficulty(3, h3.hash()).has_value());
+    CHECK_FALSE(hs.read_body(3, c.headers[3].hash(), body));
+    CHECK_FALSE(hs.total_difficulty(3, c.headers[3].hash()).has_value());
 }
 
-// insert_header on an existing block number overwrites the BLOCKHASH entry in place (last
-// write wins) while read_header retains BOTH headers under their distinct hashes — the
-// DirectState in-place-update branch (direct_state.cpp:714-715).
-TEST_CASE("HashState header store: same-number reinsert updates blockhash in place",
+// A header is only ever reached through the parent hash of its child, never by its number: a header
+// chained after the parent but numbered like an ancestor is not BLOCKHASH of that number, and with
+// the real ancestor omitted the read is unconfirmed.
+TEST_CASE("HashState BLOCKHASH takes an ancestor's hash from its child, not from a header of its number",
           "[hash_state]") {
-    HashState hs;
+    const HeaderChain c = header_chain(6);
+    silkworm::BlockHeader forged = c.headers[3];
+    forged.parent_hash = c.headers[5].hash();  // chains after the parent, numbered 3
+    REQUIRE_FALSE(eq32(forged.hash(), c.headers[3].hash()));
 
-    silkworm::BlockHeader a;
-    a.number = 5;
-    a.parent_hash.bytes[0] = 0x11;
-    silkworm::BlockHeader b;
-    b.number = 5;  // same number, different content -> different hash
-    b.parent_hash.bytes[0] = 0x22;
-    REQUIRE_FALSE(eq32(a.hash(), b.hash()));
+    HashState complete;
+    for (const auto& h : c.headers) complete.insert_header(h);
+    complete.insert_header(forged);
+    CHECK(eq32(complete.get_block_hash(c.block, 3), c.headers[3].hash()));
+    CHECK(complete.unconfirmed_read_count() == 0u);
 
-    hs.insert_header(a);
-    CHECK(eq32(hs.get_block_hash(5), a.hash()));
-
-    hs.insert_header(b);
-    CHECK(eq32(hs.get_block_hash(5), b.hash()));  // in-place overwrite, no duplicate entry
-
-    // headers_ is keyed by hash, so BOTH headers remain resolvable via read_header.
-    CHECK(hs.read_header(5, a.hash()).has_value());
-    CHECK(hs.read_header(5, b.hash()).has_value());
+    HashState omitted;
+    for (const auto& h : c.headers) {
+        if (h.number != 3) omitted.insert_header(h);
+    }
+    omitted.insert_header(forged);
+    CHECK(eq32(omitted.get_block_hash(c.block, 3), evmc::bytes32{}));
+    CHECK(omitted.ancestor_missing());
+    CHECK(omitted.unconfirmed_read_count() == 1u);
+    // The blocks the walk reaches before the gap still resolve.
+    CHECK(eq32(omitted.get_block_hash(c.block, 4), c.headers[4].hash()));
 }
+
 
 // The full sweep: a root branch with two direct account leaves, one account behind an
 // extension, and one embedded (<32-byte) inline non-account leaf behind a long
@@ -1192,17 +1194,12 @@ TEST_CASE("check_root_hashstate rejects a BLOCKHASH read of an omitted in-range 
     REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
     REQUIRE(hs.unconfirmed_read_count() == 0u);
 
-    // Witness ancestor headers: genesis (0) and one older ancestor (number 5) are shipped, but
-    // the in-range ancestor number 3 is DELIBERATELY OMITTED (the missing-oldest-ancestor shape).
-    auto make_header = [](uint64_t number, uint8_t tag) {
-        silkworm::BlockHeader h;
-        h.number = number;
-        h.gas_limit = 30'000'000;
-        h.parent_hash.bytes[0] = tag;  // unique content -> unique keccak hash
-        return h;
-    };
-    hs.insert_header(make_header(0, 0x00));
-    hs.insert_header(make_header(5, 0x55));
+    // Witness ancestor headers: the chain up to the parent with the in-range ancestor number 3
+    // deliberately omitted (the missing-oldest-ancestor shape).
+    const HeaderChain c = header_chain(6);
+    for (const auto& h : c.headers) {
+        if (h.number != 3) hs.insert_header(h);
+    }
 
     // The block's write set: bump W's nonce (a real, root-changing write). The block ALSO runs
     // SSTORE(slot, BLOCKHASH(3)); with header 3 omitted BLOCKHASH yields 0, and a zero write to
@@ -1221,12 +1218,12 @@ TEST_CASE("check_root_hashstate rejects a BLOCKHASH read of an omitted in-range 
 
     // SAFETY: a PRESENT ancestor read costs nothing — a legitimate BLOCKHASH of a shipped
     // ancestor (number 5) hits, the counter stays zero, and acceptance still holds.
-    (void)hs.get_block_hash(5);
+    (void)hs.get_block_hash(c.block, 5);
     CHECK(hs.unconfirmed_read_count() == 0u);
     CHECK(zilkworm::check_root_hashstate(hs, prev_root, writes, forged_root));
 
     // EXPLOIT: the block reads BLOCKHASH(3) — an in-range ancestor whose header was omitted.
-    (void)hs.get_block_hash(3);
+    (void)hs.get_block_hash(c.block, 3);
 
     // POST-FIX the omitted-ancestor read is recorded, so the SAME forged root is now REJECTED.
     // PRE-FIX both assertions FAIL: the counter stayed zero and acceptance still returned true.
@@ -1911,6 +1908,37 @@ TEST_CASE("HashState apply_code_diff exempts an EIP-7702 delegation from the sto
 
     CHECK_FALSE(hs.storage_wiped(addr));                     // delegation exempt from wipe
     CHECK(eq32(hs.read_storage(addr, slot_key), slot_val));  // storage preserved
+}
+
+// Clearing an EIP-7702 delegation sets empty code; the authority's storage survives it, as
+// DirectState::apply_code_diff keeps it. The wipe belongs to contract creation alone.
+TEST_CASE("HashState apply_code_diff keeps the storage of a cleared EIP-7702 delegation",
+          "[hash_state]") {
+    HashState hs;
+    const evmc::address addr = s2_addr(0xC1);
+
+    evmc::bytes32 slot_key{};
+    slot_key.bytes[31] = 0x01;
+    evmc::bytes32 slot_val{};
+    slot_val.bytes[31] = 0x2a;
+    const Bytes ev = encode_storage_value(slot_val);
+    const auto spath = nibbles_of(keccak_slot(slot_key));
+    const LeafNode sleaf = make_leaf(spath.data(), 64, ByteView{ev});
+    const evmc::bytes32 sroot = hs.add_node(ByteView{zilkworm::encode_leaf(sleaf)});
+    const Bytes accv = account_leaf_value(1, sroot);
+    const auto apath = nibbles_of(keccak_addr(addr));
+    const LeafNode aleaf = make_leaf(apath.data(), 64, ByteView{accv});
+    const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_leaf(aleaf)});
+    REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+
+    Account* pa = hs.find_or_create_account(addr);
+    hs.apply_code_diff(addr, *pa, evmc::bytes{});
+
+    CHECK(std::memcmp(pa->code_hash, silkworm::kEmptyHash.bytes, 32) == 0);
+    CHECK(pa->code_store_len == 0);
+    CHECK_FALSE(hs.storage_wiped(addr));
+    CHECK(hs.has_storage(addr));
+    CHECK(eq32(hs.read_storage(addr, slot_key), slot_val));
 }
 
 // apply_state_diff drives the whole mutation surface: modified account (nonce/balance/storage)
