@@ -16,7 +16,7 @@ submodule.
 ## Running locally
 
 ```bash
-# 1. Download + extract the benchmark fixtures (~495 MiB, idempotent).
+# 1. Download + extract the 30M-gas benchmark fixtures (~150 MiB, idempotent).
 #    Needs the `gh` CLI authenticated (GH_TOKEN / `gh auth login`).
 make zkevm-benchmark-fixtures
 
@@ -27,8 +27,9 @@ make slib-benchmark
 
 What `make slib-benchmark` does:
 
-1. `zkevm-benchmark-fixtures` — `gh release download tests-zkevm-benchmark@v0.8.2`
-   (asset `fixtures_zkevm-benchmark.tar.gz`), extracted under
+1. `zkevm-benchmark-fixtures` — `gh release download tests-zkevm-benchmark@v21.0.5`
+   (asset `fixtures_zkevm-benchmark_0030M.tar.gz`; the release ships one tarball
+   per gas budget, `ZKEVM_BENCH_ASSET` selects it), extracted under
    `test-fixtures-cache/zkevm_benchmark/`.
 2. `z6m_guest_slib` — configures/builds the guest with `-DZ6M_HASH_STATE=ON` in a
    **dedicated** build tree (`prover/guest_hypercube/build-slib`) so the normal
@@ -53,7 +54,65 @@ What `make slib-benchmark` does:
 - `temp/slib_benchmark/execution.log` — `cycle_stats.py`-format log.
 - `temp/slib_benchmark/cycle_stats.png` — summary plots.
 
-## Results — full run, tests-zkevm-benchmark@v0.8.2
+## Results — tests-zkevm-benchmark@v21.0.5, 30M budget
+
+The 30M tarball holds 122 fixture files, 1203 cases (one block each). The run
+is `make slib-benchmark`'s per-case command (`z6m_prover execute --is-test`)
+over `slib_split_fixtures.py`'s cases; the loop was run 8-wide with `xargs -P`
+instead of sequentially (the per-case cycle count is deterministic, the
+sequential loop takes ~1 min per 30M case). Guest: HashState, the
+`statelessInputBytes` path of this tree.
+
+**1200 of 1203 cases report cycles.** The other three are zero-gas blocks
+(`test_empty_block`, and the two `test_contract_creation[contract_size_max-*]`
+cases, whose block carries no transaction), which the prover reports as
+`FAILED (gas_used=0)` by its success criterion; the guest accepts them.
+
+Cycle distribution (per case = per block, raw SP1 cycles):
+
+| n | min | median | mean | max |
+|---|-----|--------|------|-----|
+| 1200 | 4.9M | 259.6M | 334.1M | 8.00B |
+
+Grand total: **400,868,140,263 cycles (~0.40T)** over 49.4G gas (8.1
+cycles/gas; the gas sums every block of a case, setup blocks included).
+
+- **Heaviest families:** `p256verify` (median 6.09B, no SP1 acceleration, pure
+  software), `blake2f` (median 4.23B; its 8.00B case is the largest single
+  block), `selfbalance` (1.76B), `block_context_ops` and
+  `call_frame_context_ops` (1.53B).
+- **Lightest families:** `create` (median 10.3M), `selfdestruct_initcode`
+  (9.0M), `nested_frame_state_access` (8.9M).
+- Against the v0.8.2 30M budget (median 319.4M): the corpus content changed,
+  so the figures are indicative only.
+
+### The same corpus through ERE's cost estimator
+
+`ere-hosts --action estimate-cost` runs the guest on the raw
+`statelessInputBytes` (the production path, no JSON in the guest) under SP1's
+gas-estimating executor; its unit is SP1's prover-cost model (trace-area
+weighted charges, split into `opcode`, `syscall` and `system`), about 160× the
+raw cycle count of the same case. All 1203 cases ran and every output matched
+`statelessOutputBytes`; 1109 reports survive, as the harness truncates long
+case names and the rest collide.
+
+| n | min | median | mean | max |
+|---|-----|--------|------|-----|
+| 1109 | 349.5M | 36.06B | 59.26B | 1441.2B |
+
+Total **65.72T** (opcode 54.37T, syscall 10.09T, system 1.26T) over 32.6G gas
+(2013 units/gas); peak guest heap 35.3 MB. Heaviest families by median:
+`p256verify` 980B, `point_evaluation` 237B, `keccak` 235B, `tx_context` 202B,
+`blake2f` 155B (max 1441B), `bls12_381` 126B; lightest: `log` 2.65B, `system`
+5.4B, `mix_operations` 16.5B, `storage` 17.0B.
+
+This run found `test_blockhash[block_1]` at **4.12T**, 75× the next
+`BLOCKHASH` case: the ancestor walk ran its 255 lookups on every call, and a
+header-map lookup costs ~15k units under the estimator. `HashState::get_block_hash`
+now memoizes the run of ancestors per block, as `DirectState` does; the case is
+47.0B (`block_256`: 47.5B), and the corpus total went from 69.81T to 65.72T.
+
+## Previous results — tests-zkevm-benchmark@v0.8.2
 
 Completed full run against **tests-zkevm-benchmark@v0.8.2** (the latest release;
 v0.8.3+ do not exist): **3464 cases** (339 fixture files × the 10M/30M/60M
@@ -89,6 +148,8 @@ distinct files.
 
 ### Knobs (Makefile variables)
 
+- `ZKEVM_BENCH_ASSET` — the release tarball to fetch, one per gas budget
+  (default `fixtures_zkevm-benchmark_0030M.tar.gz`).
 - `ZKEVM_BENCH_JSON_DIR` — override the fixtures dir (default under
   `test-fixtures-cache/zkevm_benchmark/fixtures/blockchain_tests`).
 - `SLIB_BENCH_WORK` — output/work dir (default `temp/slib_benchmark`).
