@@ -17,7 +17,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use url::Url;
 use z6m_common::{fetch_block_and_witness, FetchRequest};
 use zisk_common::io::ZiskStdin as RawStdin;
@@ -893,7 +893,7 @@ pub async fn run_test_service(
         }
         let input_path = resolve_input_path(block_number, None, false, &data_dir)?;
         if !input_path.exists() {
-            debug!(
+            warn!(
                 "block {} not found at {}, skipping",
                 block_number,
                 input_path.display()
