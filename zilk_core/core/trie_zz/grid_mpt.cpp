@@ -310,13 +310,18 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 continue;
             } else if (grid_line.kind == kExt) {
                 // go down till the first divergence point
+                const unsigned cur{static_cast<unsigned>(search_nib_cursor_)};
+                const unsigned len{grid_line.ext.path.len};
+                const unsigned lim{len < 64u - cur ? len : 64u - cur};
+                const uint8_t* const ep{grid_line.ext.path.nib.data()};
+                const uint8_t* const sn{search_nibbles_.nib.data() + cur};
                 unsigned m = 0;
-                while (m < grid_line.ext.path.len && (search_nib_cursor_ + m) < 64 && grid_line.ext.path[m] == search_nibbles_[search_nib_cursor_ + m]) ++m;
-                search_nib_cursor_ += m;
-                unsigned last_nib = grid_line.ext.path[grid_line.ext.path.len - 1];
+                while (m < lim && ep[m] == sn[m]) ++m;  // locals keep spills out of the loop
+                search_nib_cursor_ = cur + m;
+                unsigned last_nib = grid_line.ext.path[len - 1];
                 unsigned old_child_depth{grid_line.child_depth[last_nib]};
 
-                if (m == grid_line.ext.path.len) {
+                if (m == len) {
                     // Full match -> unfold child
                     if (old_child_depth == 0) {
                         ByteView rlp;
