@@ -16,7 +16,6 @@ for dir in cmd examples silkworm
 do
 	find "$project_dir/$dir" \( -name '*.cpp' -or -name '*.hpp' \) \
 		-not -path '*/zilk_core/core/chain/genesis_*.cpp' \
-		-not -path '*/zilk_core/core/common/lru_cache*' \
 		-not -path '*/zilk_core/core/crypto/kzg.cpp' \
 		-not -path '*/silkworm/interfaces/*' \
 		-not -path '*/silkworm/db/datastore/snapshots/config/chains/*' \
