@@ -1110,6 +1110,155 @@ std::optional<intx::uint256> DirectState::total_difficulty(uint64_t, const evmc:
     return std::nullopt;
 }
 
+#if defined(ZISK)
+namespace {
+constexpr uint32_t kCpGMaxM = 256;  // chain capped at 256 blocks
+constexpr uint32_t kCpGMaxEnt = 4096;
+constexpr uint32_t kCpGTabBits = 13;
+constexpr uint32_t kCpGTabSize = 1u << kCpGTabBits;
+constexpr uint32_t kCpGNil = 0xFFFFFFFFu;
+struct CpGEnt {
+    const uint8_t* p;
+    uint32_t L;
+    uint32_t m;
+    uint32_t kstar;
+    uint64_t hb1;
+    uint32_t next;
+};
+CpGEnt cp_g_ents[kCpGMaxEnt];
+uint32_t cp_g_tab[kCpGTabSize];  // head index + 1; 0 empty
+uint32_t cp_g_used[kCpGMaxEnt];  // slots holding heads, so reset costs no table clear
+uint32_t cp_g_nused = 0;
+uint32_t cp_g_n = 0;
+alignas(8) uint64_t cp_g_state[size_t{kCpGMaxM} * 25];
+uint32_t cp_g_epoch[kCpGMaxM];
+uint32_t cp_g_list[kCpGMaxEnt];
+
+constexpr uint64_t kCpGHbMul[5] = {0x9E3779B97F4A7C15ull, 0xBF58476D1CE4E5B9ull,
+                                   0x94D049BB133111EBull, 0xD6E8FEB86659FD93ull,
+                                   0xA0761D6478BD642Full};
+
+bool cp_g_blk_eq136(const uint8_t* a, const uint8_t* b) {
+    const uint64_t* wa = reinterpret_cast<const uint64_t*>(a);
+    const uint64_t* wb = reinterpret_cast<const uint64_t*>(b);
+    for (uint32_t w = 0; w < 17; ++w)
+        if (wa[w] != wb[w])
+            return false;
+    return true;
+}
+
+void cp_g_reset() {
+    cp_g_n = 0;
+    cp_g_nused = 0;
+}
+
+/// Defer whole-block 8-aligned entries; others hash now.
+[[gnu::noinline]] bool cp_g_collect(const uint8_t* body, size_t body_len) {
+    if (body_len < 168 || cp_g_n >= kCpGMaxEnt)
+        return false;
+    const uint8_t* const p = body + 32;
+    if (((reinterpret_cast<uintptr_t>(p)) & 7) != 0)
+        return false;
+    const uint32_t L = static_cast<uint32_t>(body_len - 32);
+    // exact uint32; wrap only bounds reuse
+    const uint32_t m = static_cast<uint32_t>((uint64_t{L} * 2069668946402ull) >> 48);  // L/136
+    if (m > kCpGMaxM)
+        return false;
+    const uint64_t* const w = reinterpret_cast<const uint64_t*>(p);
+    const uint64_t hb = w[0] * kCpGHbMul[0] ^ w[4] * kCpGHbMul[1] ^ w[8] * kCpGHbMul[2] ^
+                        w[12] * kCpGHbMul[3] ^ w[16] * kCpGHbMul[4];
+    CpGEnt& e = cp_g_ents[cp_g_n];
+    e.p = p;
+    e.L = L;
+    e.m = m;
+    e.kstar = 0;
+    e.hb1 = hb;
+    const uint64_t x = (hb ^ (hb >> 32)) * kCpGHbMul[1];
+    uint32_t s = static_cast<uint32_t>(x >> (64 - kCpGTabBits));
+    for (uint32_t probe = 0; probe < kCpGTabSize; ++probe) {
+        const uint32_t h = cp_g_tab[s];
+        if (h == 0) {
+            e.next = kCpGNil;
+            cp_g_tab[s] = cp_g_n + 1;
+            cp_g_used[cp_g_nused++] = s;
+            ++cp_g_n;
+            return true;
+        }
+        if (cp_g_ents[h - 1].hb1 == hb) {
+            e.next = h - 1;
+            cp_g_tab[s] = cp_g_n + 1;
+            ++cp_g_n;
+            return true;
+        }
+        s = (s + 1) & (kCpGTabSize - 1);
+    }
+    return false;  // probe run full: hash now
+}
+
+// Reuse needs adjacent full-byte compare chains.
+[[gnu::noinline]] bool cp_g_run() {
+    bool ok = true;
+    for (uint32_t u = 0; u < cp_g_nused; ++u) {
+        const uint32_t s = cp_g_used[u];
+        const uint32_t head = cp_g_tab[s];
+        cp_g_tab[s] = 0;
+        if (head == 0)
+            continue;
+        uint32_t len = 0;
+        for (uint32_t c = head - 1; c != kCpGNil; c = cp_g_ents[c].next)
+            cp_g_list[len++] = c;
+        for (uint32_t j = 1; j < len; ++j) {
+            CpGEnt& e = cp_g_ents[cp_g_list[j]];
+            const CpGEnt& q = cp_g_ents[cp_g_list[j - 1]];
+            if (!cp_g_blk_eq136(e.p, q.p))
+                continue;
+            uint32_t k = 1;
+            const uint32_t mm = e.m < q.m ? e.m : q.m;
+            while (k < mm && cp_g_blk_eq136(e.p + size_t{k} * 136, q.p + size_t{k} * 136))
+                ++k;
+            e.kstar = k;
+        }
+        if (len == 1) {
+            const CpGEnt& e = cp_g_ents[cp_g_list[0]];
+            const auto h =
+                silkworm::keccak256(FlatKv::payload(ByteView{e.p - 32, e.L + 32}));
+            ok &= bytes_equal<32>(h.bytes, e.p - 32);
+            continue;
+        }
+        std::memset(cp_g_epoch, 0, sizeof cp_g_epoch);
+        for (uint32_t j = 0; j < len; ++j) {
+            CpGEnt& e = cp_g_ents[cp_g_list[j]];
+            const uint8_t* const key = e.p - 32;
+            uint32_t d = e.kstar;
+            if (d != 0) {
+                const uint32_t u1 = cp_g_epoch[d - 1];
+                for (uint32_t r = u1; r < j; ++r)
+                    if (cp_g_ents[cp_g_list[r]].kstar < d) {
+                        d = 0;
+                        break;
+                    }
+            }
+            uint32_t capture_at = 0;
+            if (j + 1 < len && cp_g_ents[cp_g_list[j + 1]].kstar > d) {
+                capture_at = cp_g_ents[cp_g_list[j + 1]].kstar;
+                cp_g_epoch[capture_at - 1] = j + 1;
+            }
+            if (d == 0 && capture_at == 0) {
+                const auto h = silkworm::keccak256(FlatKv::payload(ByteView{key, e.L + 32}));
+                ok &= bytes_equal<32>(h.bytes, key);
+                continue;
+            }
+            const ethash::hash256 h = ethash::keccak256_cap(
+                e.p, e.L, d != 0 ? cp_g_state + size_t{d - 1} * 25 : nullptr, d, capture_at,
+                capture_at != 0 ? cp_g_state + size_t{capture_at - 1} * 25 : nullptr);
+            ok &= bytes_equal<32>(h.bytes, key);
+        }
+    }
+    return ok;
+}
+}  // namespace
+#endif
+
 bool DirectState::sanitize() {
     // SOUNDNESS-CRITICAL: the pre-state blob's sections lie in builder order and do not overlap —
     // meta | prestate MphfMap | addr_hashes | block_hashes | code store — each ending at or before
@@ -1165,6 +1314,9 @@ bool DirectState::sanitize() {
 #endif
     bool code_keccak_ok = true;
     const uint8_t* const code_data = code_store_map_.data();
+#if defined(ZISK)
+    cp_g_reset();
+#endif
     code_store_map_.for_each_offset([&](uint64_t off) {
 #if ZILK_SEAL_CODE_STORE
         entries_in_layout = entries_in_layout && layout.is_entry(off);
@@ -1176,9 +1328,18 @@ bool DirectState::sanitize() {
             return;
         const uint8_t* const body = code_data + off + 8u;
         const auto body_len = static_cast<size_t>(load_u64_le(code_data + off));
+#if defined(ZISK)
+        if (!cp_g_collect(body, body_len))
+            code_keccak_ok &= bytes_equal<32>(
+                silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
+#else
         code_keccak_ok &= bytes_equal<32>(
             silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
+#endif
     });
+#if defined(ZISK)
+    code_keccak_ok &= cp_g_run();
+#endif
 #if ZILK_SEAL_CODE_STORE
     // Every entry is bound to its key now (the reader's bits stood for the same bytes), and the
     // seal below takes the lengths and keys; read_code() and recover_account_from_nodestore()
