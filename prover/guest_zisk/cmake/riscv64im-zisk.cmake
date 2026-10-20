@@ -20,7 +20,7 @@ set(arch_flags   "-march=${ZISK_MARCH} -mabi=lp64 -mcmodel=medany")
 set(common_flags "${arch_flags} -ffunction-sections -fdata-sections -fno-PIC -fno-asynchronous-unwind-tables -fno-unwind-tables")
 # ZisK charges instructions, not cycles.
 # Aggressive inlining; ZisK calls are costly.
-set(opt_flags    "-O3 -mtune=size -funroll-loops -DNDEBUG -fno-stack-protector --param=max-inline-insns-single=1600 --param=max-inline-insns-auto=533 --param=inline-unit-growth=266 --param=max-inline-recursive-depth=6 --param=max-completely-peeled-insns=400 --param=large-function-growth=280 --param=large-unit-insns=30000")
+set(opt_flags    "-O3 -mtune=size -funroll-loops -DNDEBUG -fno-stack-protector --param=max-inline-insns-single=1600 --param=max-inline-insns-auto=533 --param=inline-unit-growth=266 --param=max-inline-recursive-depth=6 --param=max-completely-peeled-insns=400 --param=large-function-growth=280 --param=large-unit-insns=30000 -flto-partition=one")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
 set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags}" CACHE STRING "" FORCE)
@@ -30,6 +30,9 @@ set(CMAKE_ASM_FLAGS "${arch_flags}" CACHE STRING "" FORCE)
 # Make opt_flags the sole optimization source.
 set(CMAKE_C_FLAGS_RELEASE   "" CACHE STRING "" FORCE)
 set(CMAKE_CXX_FLAGS_RELEASE "" CACHE STRING "" FORCE)
+
+# Whole-program inlining across guest objects.
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 
 # Disable features not available on bare-metal
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
