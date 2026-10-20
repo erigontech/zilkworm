@@ -939,13 +939,14 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
         std::array<uint8_t, 64> ext_path{};
         uint8_t plen = 0;
         ByteView second{};
-        const Kind kind = decode_node(nbody, br, is_leaf, ext_path, plen, second);
+        unsigned mask = 0;
+        const Kind kind = decode_node(nbody, br, is_leaf, ext_path, plen, second, mask);
         if (kind == ::zilkworm::kInvalid) return std::unexpected{WalkMiss::kInvalid};
 
         if (kind == kBranch) {
             if (depth >= 64) return std::unexpected{WalkMiss::kInvalid};
             const uint8_t nib = want[depth];
-            if ((br.mask & (1u << nib)) == 0) return std::unexpected{WalkMiss::kAbsent};  // 0x80 child
+            if ((mask & (1u << nib)) == 0) return std::unexpected{WalkMiss::kAbsent};  // 0x80 child
             const uint8_t clen = br.child_len[nib];
             ++depth;
             if (clen == 32) {

@@ -114,11 +114,19 @@ struct BranchNode {
     std::array<bytes32, 16> child;
     std::array<const uint8_t*, 16> child_ptr;
     alignas(8) std::array<uint8_t, 16> child_len{};
-    // one word beats three narrow fields
-    uint64_t mask : 16 = 0;
-    uint64_t orig_size : 16 = 0;
-    uint64_t dirty : 16 = 0;
-    uint64_t spare : 16 = 0;
+    // Aliased so one sd sets all four.
+    union {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+        struct {
+            uint64_t mask : 16;
+            uint64_t orig_size : 16;
+            uint64_t dirty : 16;
+            uint64_t spare : 16;
+        };
+#pragma GCC diagnostic pop
+        uint64_t mask_word;
+    };
     ByteView value{};
     // Orig witness RLP; null when built in-grid.
     const uint8_t* orig{nullptr};
@@ -146,7 +154,7 @@ struct BranchNode {
         return std::has_single_bit(mask);
     }
 
-    BranchNode() : child_len{}, mask{}, value{} {}
+    BranchNode() : child_len{}, mask_word{0}, value{} {}
 
     inline void set_child(unsigned slot, ByteView b) noexcept {
         [[assume(slot < 16)]];

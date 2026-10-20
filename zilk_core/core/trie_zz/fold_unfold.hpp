@@ -133,15 +133,17 @@ bool GridMPT<DeletionEnabled, StateT>::unfold_node_from_rlp(ByteView payload, un
 
     // A leaf or extension path is decoded straight into the line (both nodes start with their nibbles64
     // path); decode_node writes no branch field for those.
-    Kind kind = decode_node(list, line.branch, is_leaf, line.leaf.path.nib, plen, second);
+    unsigned mask = 0;
+    Kind kind = decode_node(list, line.branch, is_leaf, line.leaf.path.nib, plen, second, mask);
     if (kind == kBranch) {
-        // Union: reset the origin fields explicitly.
-        line.branch.orig = nullptr;
-        line.branch.dirty = 0;
+        // One sd: mask plus origin fields.
         const auto node_size = static_cast<size_t>(list.data() + list.size() - node_begin);
-        if (node_size >= 32 && node_size <= UINT16_MAX) {
-            line.branch.orig = node_begin;
-            line.branch.orig_size = static_cast<uint16_t>(node_size);
+        const bool keep = node_size >= 32 && node_size <= UINT16_MAX;
+        *std::assume_aligned<8>(&line.branch.mask_word) =
+            static_cast<uint64_t>(static_cast<uint16_t>(mask)) |
+            (keep ? static_cast<uint64_t>(static_cast<uint16_t>(node_size)) << 16 : 0);
+        line.branch.orig = keep ? node_begin : nullptr;
+        if (keep) {
             line.branch.orig_child_len = line.branch.child_len;
         }
         return true;

@@ -491,7 +491,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
 // start_byte is the child's RLP start byte; data/len is its decoded payload.
 [[gnu::always_inline]] inline bool fill_branch_child(BranchNode& out, size_t i,
                                                      uint8_t start_byte,
-                                                     const uint8_t* data, size_t len) {
+                                                     const uint8_t* data, size_t len, unsigned& mask) {
     if (len == 0) {
         out.child_len[i] = 0;  // empty child (RLP empty string 0x80)
         out.child_ptr[i] = nullptr;
@@ -507,7 +507,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
         out.child_len[i] = 32;  // 0xa0 hashref is always 32 bytes
         out.child_ptr[i] = data;  // reference witness blob; no copy
     }
-    out.mask |= (1 << i);
+    mask |= 1u << i;
     return true;
 }
 
@@ -515,7 +515,8 @@ inline ByteView encode_leaf(const LeafNode& l) {
 // A branch child is only: 0x80 (empty) | 0xa0+32 (hash ref) | short embedded
 // list (0xc0..0xf7, <32B). Skips the general decode_header (no single-byte /
 // long-string / long-list handling a branch child never hits).
-[[gnu::always_inline]] inline bool fill_branch_child_rlp(BranchNode& out, size_t i, ByteView& remaining) {
+[[gnu::always_inline]] inline bool fill_branch_child_rlp(BranchNode& out, size_t i, ByteView& remaining,
+                                                         unsigned& mask) {
     if (remaining.empty()) return false;
     const uint8_t b0 = remaining[0];
     if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty
@@ -528,7 +529,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
         if (remaining.size() < 33) return false;  // input-too-short (matches decode_header)
         out.child_ptr[i] = remaining.data() + 1;
         out.child_len[i] = 32;
-        out.mask |= (1u << i);
+        mask |= 1u << i;
         remaining.remove_prefix(33);
         return true;
     }
@@ -540,7 +541,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
         std::copy_n(remaining.data() + 1, payload, &out.child[i].bytes[1]);
         out.child_len[i] = static_cast<uint8_t>(payload + 1);
         out.child_ptr[i] = nullptr;
-        out.mask |= (1u << i);
+        mask |= 1u << i;
         remaining.remove_prefix(1 + payload);
         return true;
     }
@@ -548,14 +549,15 @@ inline ByteView encode_leaf(const LeafNode& l) {
 }
 
 inline bool decode_branch(ByteView payload, BranchNode& out) {
-    out.mask = 0;
+    unsigned mask = 0;
 
     ByteView remaining = payload;
 
     // Decode 16 children
     for (size_t i = 0; i < 16; ++i) {
-        if (!fill_branch_child_rlp(out, i, remaining)) return false;
+        if (!fill_branch_child_rlp(out, i, remaining, mask)) return false;
     }
+    out.mask = static_cast<uint16_t>(mask);
 
     // Decode value - usually empty
     if (remaining.size() == 1 && remaining[0] == rlp::kEmptyStringCode) {
@@ -614,10 +616,10 @@ inline bool decode_ext_or_leaf(ByteView payload, bool& is_leaf,
     return remaining.empty();
 }
 
-// Single-pass node decode
+// Single-pass node decode; caller stores mask_out.
 inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                             bool& is_leaf, std::array<uint8_t, 64>& path,
-                            uint8_t& plen, ByteView& second) {
+                            uint8_t& plen, ByteView& second, unsigned& mask_out) {
     // A full branch: 16 hash children and an empty value, 16 * 33 + 1 payload bytes. That is
     // most witness branch nodes on mainnet (65% of those re-encoded). Once each child is seen
     // to be a 33-byte string (length byte 0xa0), the layout fixes every pointer and length and
@@ -640,7 +642,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
             typedef uint32_t __attribute__((may_alias)) w32;
             w32* const cl = reinterpret_cast<w32*>(std::assume_aligned<8>(out_branch.child_len.data()));
             cl[0] = cl[1] = cl[2] = cl[3] = 0x20202020u;
-            out_branch.mask = 0xffff;
+            mask_out = 0xffff;
             out_branch.value = {};
             return kBranch;
         }
@@ -688,9 +690,9 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
     }
 
     // Elements 0 and 1 are already decoded; fill them, then decode slots 2..15.
-    out_branch.mask = 0;
-    if (!fill_branch_child(out_branch, 0, e0_start, e0_payload.data(), h0->payload_length)) return kInvalid;
-    if (!fill_branch_child(out_branch, 1, e1_start, e1_payload.data(), h1->payload_length)) return kInvalid;
+    unsigned mask = 0;
+    if (!fill_branch_child(out_branch, 0, e0_start, e0_payload.data(), h0->payload_length, mask)) return kInvalid;
+    if (!fill_branch_child(out_branch, 1, e1_start, e1_payload.data(), h1->payload_length, mask)) return kInvalid;
 
     // Slots 2..15: fill_branch_child_rlp() with the position in local pointers and the mask in a
     // local. `remaining` escapes into decode_header() below, so each of its updates was a stack
@@ -698,7 +700,6 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
     {
         const uint8_t* p = remaining.data();
         const uint8_t* const end = p + remaining.size();
-        unsigned mask = out_branch.mask;
         for (size_t i = 2; i < 16; ++i) {
             if (p == end) return kInvalid;
             const uint8_t b0 = *p;
@@ -726,7 +727,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                 return kInvalid;  // not a valid branch child
             }
         }
-        out_branch.mask = static_cast<uint16_t>(mask);
+        mask_out = mask;
         remaining = ByteView{p, static_cast<size_t>(end - p)};
     }
 
@@ -738,6 +739,16 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
         return kBranch;
     }
     return kInvalid;
+}
+
+// Also stores the mask into out_branch.
+inline Kind decode_node(ByteView payload, BranchNode& out_branch,
+                            bool& is_leaf, std::array<uint8_t, 64>& path,
+                            uint8_t& plen, ByteView& second) {
+    unsigned mask = 0;
+    const Kind kind = decode_node(payload, out_branch, is_leaf, path, plen, second, mask);
+    if (kind == kBranch) out_branch.mask = static_cast<uint16_t>(mask);
+    return kind;
 }
 
 inline bool is_empty(const GridLine& line) {
