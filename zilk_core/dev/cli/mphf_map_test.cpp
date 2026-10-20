@@ -479,7 +479,7 @@ const uint8_t* evm_read_path_find(MphfMapHeader* m, const std::vector<CollEntry>
 TEST_CASE("EVM read path finds a spilled singleton", "[mphf]") {
     // Two addresses (distinct fingerprints) that collide into one bucket and
     // spill under a 1-seed / 1-displacement CHD budget.
-    std::vector<AddrBody> entries{make_addr_body(0x516000, 0), make_addr_body(0x516001, 0)};
+    std::vector<AddrBody> entries{make_addr_body(0x516007, 0), make_addr_body(0x516008, 0)};
 
     MphfBuilder<20> b{kTestMphfMagic, kMphfMapVersion};
     b.set_max_retries_for_test(1);
