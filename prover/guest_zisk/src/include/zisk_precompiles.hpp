@@ -534,6 +534,22 @@ inline intx::div_result<uint256> udivrem(const uint256& a, const uint256& b) noe
     return {q, r};
 }
 
+// m != 0 (H8); constrained precompile.
+[[gnu::always_inline]] inline uint256 umod256(const uint256& x, const uint256& m) noexcept
+{
+    return arith256_mod(x, kOne256, kZero256, m);
+}
+
+// EVM SDIV/SMOD; remainder follows u.
+inline intx::div_result<uint256> sdivrem256(const uint256& u, const uint256& v) noexcept
+{
+    const bool u_is_neg = u[3] >> 63;
+    const bool v_is_neg = v[3] >> 63;
+    const auto res = udivrem(u_is_neg ? -u : u, v_is_neg ? -v : v);
+    const bool q_is_neg = u_is_neg ^ v_is_neg;
+    return {q_is_neg ? -res.quot : res.quot, u_is_neg ? -res.rem : res.rem};
+}
+
 }  // namespace zisk
 
 /* ───────── SP1-compatible names for shared evmone sites ───────── */
