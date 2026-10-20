@@ -155,11 +155,13 @@ tests-json: z6m_prover
 # tests-zkevm StatelessInputBytes fixtures. These are ordinary blockchain_test
 # JSON cases except that each block carries a `statelessInputBytes` hex field,
 # the SSZ stateless input the HashState backend consumes. Sourced from the
-# ethereum/execution-specs release `tests-zkevm@v21.0.1` (asset
-# fixtures_zkevm.tar.gz, ~590 MiB), the release ere-guests tests against.
-ZKEVM_RELEASE_TAG  := tests-zkevm@v21.0.1
+# ethereum/execution-specs release `tests-zkevm@$(ZKEVM_RELEASE_VERSION)` (asset
+# fixtures_zkevm.tar.gz, ~595 MiB), the release ere-guests tests against. The
+# cache directory carries the version, so a bump never runs on a stale corpus.
+ZKEVM_RELEASE_VERSION := v21.0.6
+ZKEVM_RELEASE_TAG  := tests-zkevm@$(ZKEVM_RELEASE_VERSION)
 ZKEVM_RELEASE_REPO := ethereum/execution-specs
-ZKEVM_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_stateless/fixtures
+ZKEVM_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_stateless-$(ZKEVM_RELEASE_VERSION)/fixtures
 ZKEVM_JSON_DIR ?= $(ZKEVM_FIXTURES_DIR)/blockchain_tests
 
 # Download + extract the tests-zkevm fixtures. Mirrors eest-mfbd-build's
@@ -170,15 +172,15 @@ ZKEVM_JSON_DIR ?= $(ZKEVM_FIXTURES_DIR)/blockchain_tests
 # would break `make test-fixtures`, which verifies every manifest key. Once the
 # tarball is pinned this can move to the manifest idiom like eest_stable.
 zkevm-fixtures:
-	@dst="$(FIXTURES_CACHE)/zkevm_stateless"; \
-	tarball="$(FIXTURES_CACHE)/fixtures_zkevm.tar.gz"; \
+	@dst="$(FIXTURES_CACHE)/zkevm_stateless-$(ZKEVM_RELEASE_VERSION)"; \
+	tarball="$(FIXTURES_CACHE)/fixtures_zkevm-$(ZKEVM_RELEASE_VERSION).tar.gz"; \
 	if [ -d "$$dst/fixtures/blockchain_tests" ]; then \
 	    echo "  zkevm fixtures present at $$dst; skipping download"; \
 	else \
 	    mkdir -p "$(FIXTURES_CACHE)"; \
-	    echo "  downloading $(ZKEVM_RELEASE_TAG) fixtures_zkevm.tar.gz (~590 MiB) from $(ZKEVM_RELEASE_REPO)"; \
+	    echo "  downloading $(ZKEVM_RELEASE_TAG) fixtures_zkevm.tar.gz (~595 MiB) from $(ZKEVM_RELEASE_REPO)"; \
 	    gh release download '$(ZKEVM_RELEASE_TAG)' --repo $(ZKEVM_RELEASE_REPO) \
-	        -p 'fixtures_zkevm.tar.gz' -D "$(FIXTURES_CACHE)" --clobber; \
+	        -p 'fixtures_zkevm.tar.gz' -O "$$tarball" --clobber; \
 	    echo "  extracting fixtures/blockchain_tests"; \
 	    rm -rf "$$dst.tmp" "$$dst"; mkdir -p "$$dst.tmp"; \
 	    tar --no-same-owner --no-same-permissions -xzf "$$tarball" -C "$$dst.tmp" fixtures/blockchain_tests; \
@@ -223,8 +225,10 @@ sp1-benchmark: z6m_prover sp1-benchmark-corpus
 RELEASE_DIR := temp
 # Recursive: $(ERE_VK) is defined below.
 RELEASE_BINS = \
-	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
-	$(ERE_VK):z6m_guest_hypercube.vk \
+	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube_mfbd.elf \
+	prover/guest_hypercube/build/z6m_guest.vk:z6m_guest_hypercube_mfbd.vk \
+	$(GUEST_SLIB_BUILD)/z6m_guest.elf:z6m_guest_hypercube_slib.elf \
+	$(ERE_VK):z6m_guest_hypercube_slib.vk \
 	prover/target/release/z6m_prover:z6m_prover_hypercube \
 	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
 
@@ -252,10 +256,11 @@ release-artifacts:
 # a fixed gas budget, one tarball per budget (30M here). Same on-wire schema
 # (0x1501 || SSZ) as the eest-zkevm-tests corpus, only the content differs.
 # Sourced from the ethereum/execution-specs release tests-zkevm-benchmark@v21.0.5.
-ZKEVM_BENCH_RELEASE_TAG  := tests-zkevm-benchmark@v21.0.5
+ZKEVM_BENCH_RELEASE_VERSION := v21.0.5
+ZKEVM_BENCH_RELEASE_TAG  := tests-zkevm-benchmark@$(ZKEVM_BENCH_RELEASE_VERSION)
 ZKEVM_BENCH_ASSET        := fixtures_zkevm-benchmark_0030M.tar.gz
 ZKEVM_BENCH_RELEASE_REPO := ethereum/execution-specs
-ZKEVM_BENCH_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_benchmark/fixtures
+ZKEVM_BENCH_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_benchmark-$(ZKEVM_BENCH_RELEASE_VERSION)/fixtures
 ZKEVM_BENCH_JSON_DIR ?= $(ZKEVM_BENCH_FIXTURES_DIR)/blockchain_tests
 
 # Download + extract the benchmark fixtures. Idempotent: skips when already
@@ -263,7 +268,7 @@ ZKEVM_BENCH_JSON_DIR ?= $(ZKEVM_BENCH_FIXTURES_DIR)/blockchain_tests
 # shape as zkevm-fixtures; the tarball is not yet pinned in test-fixtures.json,
 # so it uses `gh release download` rather than the sha256-verified manifest.
 zkevm-benchmark-fixtures:
-	@dst="$(FIXTURES_CACHE)/zkevm_benchmark"; \
+	@dst="$(FIXTURES_CACHE)/zkevm_benchmark-$(ZKEVM_BENCH_RELEASE_VERSION)"; \
 	tarball="$(FIXTURES_CACHE)/$(ZKEVM_BENCH_ASSET)"; \
 	if [ -d "$$dst/fixtures/blockchain_tests" ]; then \
 	    echo "  zkevm-benchmark fixtures present at $$dst; skipping download"; \
@@ -282,9 +287,8 @@ zkevm-benchmark-fixtures:
 # The prover embeds a fixed ELF path (prover_hypercube/build.rs -> include_elf!
 # ".../guest_hypercube/build/z6m_guest.elf"), so the slib guest ELF must land
 # there. We build the flag-ON guest in a DEDICATED tree ($(GUEST_SLIB_BUILD)) so
-# the normal OFF build cache is never contaminated with Z6M_HASH_STATE=ON, then
-# stage the ELF at the embed path. (A fresh tree also re-applies the blst SP1
-# patch via its PATCH_COMMAND.)
+# the normal OFF build cache is never contaminated with Z6M_HASH_STATE=ON. (A
+# fresh tree also re-applies the blst SP1 patch via its PATCH_COMMAND.)
 GUEST_SLIB_BUILD := prover/guest_hypercube/build-slib
 GUEST_EMBED_ELF  := prover/guest_hypercube/build/z6m_guest.elf
 
@@ -295,13 +299,13 @@ z6m_guest_slib:
 		-DSP1=ON \
 		-DZ6M_HASH_STATE=ON
 	cmake --build $(GUEST_SLIB_BUILD) -j$$(nproc)
+
+# Build the prover embedding the slib guest ELF, staged at the embed path first. Uses
+# cargo directly rather than the z6m_prover target, because z6m_prover depends on
+# z6m_guest, which would rebuild the OFF (DirectState) ELF over the staged slib one.
+z6m_prover_slib: z6m_guest_slib
 	@mkdir -p $(dir $(GUEST_EMBED_ELF))
 	cp $(GUEST_SLIB_BUILD)/z6m_guest.elf $(GUEST_EMBED_ELF)
-
-# Build the prover embedding the slib guest ELF. Uses cargo directly rather than
-# the z6m_prover target, because z6m_prover depends on z6m_guest, which would
-# rebuild the OFF (DirectState) ELF over the staged slib one before embedding.
-z6m_prover_slib: z6m_guest_slib
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
 
 # slib benchmark run knobs. (Comments kept on their own lines: a trailing inline
@@ -355,9 +359,14 @@ DERIVE_VK_BIN := prover/target/release/derive_vk
 derive_vk:
 	cargo build --release -p z6m_stateless_validator --bin derive_vk --features vk-derive
 
-ere-bin: z6m_guest derive_vk
+z6m_guest_vk: z6m_guest derive_vk
+	SP1_PROVER=mock $(DERIVE_VK_BIN) prover/guest_hypercube/build/z6m_guest.elf prover/guest_hypercube/build/z6m_guest.vk
+
+# The ERE guest is the HashState build: ere-hosts feeds it the fixtures' statelessInputBytes
+# unchanged. The DirectState guest (MFBD input) is z6m_guest; z6m_guest_vk derives its VK.
+ere-bin: z6m_guest_slib derive_vk
 	@mkdir -p $(ERE_BIN_DIR)
-	cp prover/guest_hypercube/build/z6m_guest.elf $(ERE_ELF)
+	cp $(GUEST_SLIB_BUILD)/z6m_guest.elf $(ERE_ELF)
 	SP1_PROVER=mock $(DERIVE_VK_BIN) $(ERE_ELF) $(ERE_VK)
 	@echo "ere-bin staged at $(ERE_BIN_DIR):"
 	@ls -la $(ERE_BIN_DIR)

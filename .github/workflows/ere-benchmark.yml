@@ -4,8 +4,9 @@
 name: ERE Benchmark
 
 # Runs the Zilkworm guest through zkevm-benchmark-workload (ere-hosts, SP1) on the latest batches of
-# a public R2 stateless-input catalog. The host adapter (statelessInputBytes -> MFBD) and the guest
-# come from the same z6m revision: the run's ref, or release_tag for guest_source=release.
+# a public R2 stateless-input catalog. The guest is the HashState build (make ere-bin), which
+# consumes the fixtures' statelessInputBytes unchanged; it comes from the run's ref, or from the
+# z6m_guest_hypercube_slib release assets of release_tag for guest_source=release.
 on:
   push:
     branches: ['release/*']
@@ -17,7 +18,7 @@ on:
         options: [build, release]
         default: build
       release_tag:
-        description: Release whose guest and host adapter to run (guest_source=release)
+        description: Release whose guest to run (guest_source=release)
         type: string
       catalog_url:
         description: Public R2 catalog root, index.html URL, or manifest.json URL
@@ -129,14 +130,14 @@ jobs:
         run: |
           [ -n "$RELEASE_TAG" ] || { echo "release_tag is required for guest_source=release" >&2; exit 1; }
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -D release \
-            -p z6m_guest_hypercube.elf -p z6m_guest_hypercube.vk -p SHA256SUMS.txt
+            -p z6m_guest_hypercube_slib.elf -p z6m_guest_hypercube_slib.vk -p SHA256SUMS.txt
           cd release
-          grep -E ' z6m_guest_hypercube\.(elf|vk)$' SHA256SUMS.txt > guest.sha256
+          grep -E ' z6m_guest_hypercube_slib\.(elf|vk)$' SHA256SUMS.txt > guest.sha256
           [ "$(wc -l < guest.sha256)" -eq 2 ] || { echo "SHA256SUMS.txt lacks the guest ELF or VK" >&2; exit 1; }
           sha256sum -c --strict guest.sha256
           mkdir -p ../ere-bin
-          cp z6m_guest_hypercube.elf ../ere-bin/stateless-validator-zilkworm-sp1.elf
-          cp z6m_guest_hypercube.vk ../ere-bin/stateless-validator-zilkworm-sp1.vk
+          cp z6m_guest_hypercube_slib.elf ../ere-bin/stateless-validator-zilkworm-sp1.elf
+          cp z6m_guest_hypercube_slib.vk ../ere-bin/stateless-validator-zilkworm-sp1.vk
 
       - name: Upload guest
         uses: actions/upload-artifact@v4

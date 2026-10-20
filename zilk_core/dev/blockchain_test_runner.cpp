@@ -332,14 +332,19 @@ namespace {
     [[nodiscard]] bool is_stateless_witness_negative(std::string_view fixture_name) {
         if (fixture_name.find("eip8025_optional_proofs") == std::string_view::npos)
             return false;
-        // test_witness_header_ssz_size_limit pads a witness header to the ByteList limit, or past
-        // it: the RLP decode or the SSZ decode rejects, as the spec does, for a valid block.
+        // test_witness_header_ssz_*: a witness header padded to the ByteList limit or past it, 256
+        // headers that fail the chain check, 257 that fail to decode: rejected, as the spec does,
+        // for a valid block. test_validation_state_unchanged_*: only the `missing_*` variants drop
+        // a proof the block reads; the `complete_witness` ones must be accepted.
         return fixture_name.find("::test_validation_codes_missing_") != std::string_view::npos ||
                fixture_name.find("::test_validation_state_missing_") != std::string_view::npos ||
+               (fixture_name.find("::test_validation_state_unchanged_") != std::string_view::npos &&
+                fixture_name.find("-missing_") != std::string_view::npos) ||
                fixture_name.find("::test_validation_headers_") != std::string_view::npos ||
                fixture_name.find("::test_invalid_stateless_input_bytes_are_rejected") !=
                    std::string_view::npos ||
-               fixture_name.find("::test_witness_header_ssz_size_limit") != std::string_view::npos;
+               fixture_name.find("::test_witness_header_ssz_") != std::string_view::npos ||
+               fixture_name.find("::test_witness_state_rejects_") != std::string_view::npos;
     }
 
     // What one block did on the HashState its statelessInputBytes built.
@@ -359,6 +364,10 @@ namespace {
         const auto slib = ::zilkworm::run_slib(blob, hs, prev_root);
         if (!slib) {
             sys_println("ERROR: malformed statelessInputBytes");
+            return {};
+        }
+        if (slib->status == ::zilkworm::HashState::BuildStatus::kMalformed) {
+            sys_println("ERROR: malformed witness: a trie path longer than its key");
             return {};
         }
         if (slib->status != ::zilkworm::HashState::BuildStatus::kOk) {
@@ -723,6 +732,13 @@ uint64_t StateTransition::run_sib() {
         std::span<const uint8_t>{payload->versioned_hashes.data(), payload->versioned_hashes.size()}};
     if (const char* why = engine_mismatch(*block, engine)) {
         sys_println(std::format("block rejected: {} mismatch", why));
+        return 0;
+    }
+    // EIP-7934 caps the block RLP from Osaka. The payload carries no RLP: the rebuilt block's
+    // canonical encoding is what the cap applies to.
+    if (rlp::length(*block) > kMaxRlpBlockSize &&
+        config_it->second.revision(block->header.number, block->header.timestamp) >= EVMC_OSAKA) {
+        sys_println("block rejected: exceeds kMaxRlpBlockSize");
         return 0;
     }
     // The parent header, last of the witness headers, anchors the pre-state root.

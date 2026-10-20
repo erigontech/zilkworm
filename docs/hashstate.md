@@ -825,10 +825,12 @@ families. The matched names are:
 | `test_validation_state_missing_*` | 6 |
 | `test_validation_headers_*` | 5 (all negatives) |
 | `test_invalid_stateless_input_bytes_are_rejected` | 1 (8 parametrized cases) |
-| `test_witness_header_ssz_size_limit` | 1 (a witness header padded to the `ByteList[1024]` limit, and past it) |
+| `test_witness_header_ssz_*` | 1 (a witness header padded to the `ByteList[1024]` limit and past it; 256 headers that fail the chain check, 257 that fail to decode) |
+| `test_witness_state_rejects_*` | 1 (a trie path longer than the 64-nibble key) |
+| `test_validation_state_unchanged_*`, `missing_*` variants only | 3 (a proof dropped for an account, slot or request queue the block reads but leaves unchanged; the `complete_witness` variants must be accepted) |
 
-That is 22 fixture files, verified across the whole fixtures tree to match no
-fixture whose `statelessOutputBytes` reports a successful validation. A false
+Verified across the whole fixtures tree to match no fixture whose
+`statelessOutputBytes` reports a successful validation. A false
 match there would mask a real slib bug by scoring a wrong rejection as a pass. No fixture is exempted: evmone reads an EIP-7702
 delegate's code while resolving the call target, as execution-specs does, so a
 witness that omits it is rejected like any other omitted code.
@@ -909,7 +911,7 @@ makes it `HashState` (see "Backend selection").
   - It builds with `-DZ6M_HASH_STATE=ON` in its own `build/zkevm` tree, since
     the flag differs from the shared `build` tree the other targets use.
 
-  `make zkevm-fixtures` downloads the corpus (`tests-zkevm@v21.0.1`, the
+  `make zkevm-fixtures` downloads the corpus (`tests-zkevm@v21.0.6`, the
   release ere-guests tests against). Results are in
   [slib_corpus_validation.md](slib_corpus_validation.md).
 

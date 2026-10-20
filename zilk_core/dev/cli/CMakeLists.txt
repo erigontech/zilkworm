@@ -76,7 +76,9 @@ function(_register_eest_tests label ext fixtures_dir)
         # The list names fixtures by their JSON path under blockchain_tests/.
         string(REGEX REPLACE "^blockchain_tests/" "" fixture "${rel}")
         string(REGEX REPLACE "\\.${ext}$" ".json" fixture "${fixture}")
-        if(fixture IN_LIST EEST_KNOWN_FAILURES)
+        # The list describes the DirectState runner, which runs a test's blocks on one witness in
+        # place; the HashState arm rebuilds the state from each block's own witness.
+        if(fixture IN_LIST EEST_KNOWN_FAILURES AND NOT Z6M_HASH_STATE)
             set_tests_properties("${test_name}" PROPERTIES WILL_FAIL TRUE)
         endif()
     endforeach()

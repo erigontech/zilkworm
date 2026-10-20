@@ -349,6 +349,8 @@ class DirectState : public BlockState {
     std::optional<intx::uint256> total_difficulty(uint64_t block_num,
                                                   const evmc::bytes32& block_hash) const noexcept override;
     void insert_header(const BlockHeader& header);
+    // The MFBD witness carries every code the block reads (sanitize): nothing to keep.
+    void note_created_code(ByteView) noexcept {}
 
     /// Binds the witness: false if it does not hold. Once per blob: on the Airbender guest (and
     /// the rv32 test build) it then zeroes bytes of the code store's entry headers, which a second

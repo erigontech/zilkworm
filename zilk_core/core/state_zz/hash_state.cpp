@@ -149,7 +149,10 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             // because the sweep must also decode <8-byte embedded nodes, which the >=8-byte
             // fast path mis-reads.
             auto oh = rlp::decode_header(node_rlp);
-            if (!oh || !oh->list) return;  // malformed node — not a list
+            if (!oh || !oh->list) {  // a referenced node that is not a list: malformed witness
+                malformed_witness_ = true;
+                return;
+            }
             const ByteView list = node_rlp.substr(0, oh->payload_length);
 
             BranchNode branch;
@@ -158,19 +161,28 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             std::uint8_t plen = 0;
             ByteView second{};
             const Kind kind = decode_node(list, branch, is_leaf, np, plen, second);
-            if (kind == kInvalid) return;
+            if (kind == kInvalid) {  // undecodable, e.g. a path segment past the 64-nibble key
+                malformed_witness_ = true;
+                return;
+            }
             if (kind == kBranch) {
                 // A branch consumes one nibble per child, so a well-formed branch sits at
-                // path.len <= 63 (its children land at <= 64). Reject a malformed deeper
-                // branch: it has no room for a child nibble (would overflow nibbles64).
-                if (path.len >= 64) return;
+                // path.len <= 63 (its children land at <= 64). A deeper branch has no room for
+                // a child nibble (would overflow nibbles64): the witness is malformed.
+                if (path.len >= 64) {
+                    malformed_witness_ = true;
+                    return;
+                }
                 stack.push_back(WalkFrame{std::move(branch), path, 0});
                 return;
             }
 
-            // kExtOrLeaf: append this node's own path nibbles, guarding the 64 bound so a
-            // malformed over-long path can never overflow nibbles64 (its append assumes it).
-            if (static_cast<unsigned>(path.len) + plen > 64) return;
+            // kExtOrLeaf: append this node's own path nibbles. A path past the 64-nibble key
+            // makes the witness malformed (and would overflow nibbles64, whose append assumes it).
+            if (static_cast<unsigned>(path.len) + plen > 64) {
+                malformed_witness_ = true;
+                return;
+            }
             path.append(nibbles64{plen, np});
 
             if (is_leaf) {
@@ -256,6 +268,7 @@ HashState::BuildStatus HashState::build_state_from_trie(const evmc::bytes32& pre
     // unconfirmed_read_count_ until the next build clears it again.
     unconfirmed_read_count_ = 0;
     ancestor_missing_ = false;
+    malformed_witness_ = false;
     prev_root_ = prev_root;
 
     // (addr_hash, storage_root) for every derived account carrying a non-empty storage
@@ -290,6 +303,7 @@ HashState::BuildStatus HashState::build_state_from_trie(const evmc::bytes32& pre
         });
     }
 
+    if (malformed_witness_) return BuildStatus::kMalformed;
     return missing_count_ > 0 ? BuildStatus::kMissingNode : BuildStatus::kOk;
 }
 
@@ -754,17 +768,7 @@ void HashState::apply_code_diff(const evmc::address& addr, Account& pa,
         pa.code_store_offset = 0;  // resolvable via find_code(code_hash) in read_code
     } else {
         pa.code_store_offset = kCreatedCodeOffset;
-        const uint64_t k8 = hash_key8(h);
-        if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
-            it->second.full_hash = h;
-            it->second.bytes.assign(code.begin(), code.end());
-        } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
-            // Exact dedup hit (same hash, possibly different addr). Skip insert.
-        } else {
-            if (auto [cit, cins] = created_code_collisions_.try_emplace(h); cins) {
-                cit->second.assign(code.begin(), code.end());
-            }
-        }
+        stash_created_code_(h, code_view);
     }
 
     pa.modified = true;
@@ -853,17 +857,7 @@ void HashState::set_code(const evmc::address& addr, ByteView code) {
         pa->code_store_offset = 0;  // resolvable via find_code(code_hash) in read_code
     } else {
         pa->code_store_offset = kCreatedCodeOffset;
-        const uint64_t k8 = hash_key8(h);
-        if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
-            it->second.full_hash = h;
-            it->second.bytes.assign(code.begin(), code.end());
-        } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
-            // Exact dedup hit. Skip.
-        } else {
-            if (auto [cit, cins] = created_code_collisions_.try_emplace(h); cins) {
-                cit->second.assign(code.begin(), code.end());
-            }
-        }
+        stash_created_code_(h, code);
     }
 
     if (changed) {
@@ -872,6 +866,26 @@ void HashState::set_code(const evmc::address& addr, ByteView code) {
         journal_address_changed(addr);
     }
     touched_.insert(addr);
+}
+
+// In-block code by its keccak: created_code_ keyed by key8(hash), key8 collisions spilled into
+// created_code_collisions_ (verbatim direct_state.cpp:428-440).
+void HashState::stash_created_code_(const evmc::bytes32& h, ByteView code) {
+    const uint64_t k8 = hash_key8(h);
+    if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
+        it->second.full_hash = h;
+        it->second.bytes.assign(code.begin(), code.end());
+    } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) != 0) {
+        if (auto [cit, cins] = created_code_collisions_.try_emplace(h); cins) {
+            cit->second.assign(code.begin(), code.end());
+        }
+    }
+}
+
+void HashState::note_created_code(ByteView code) {
+    if (code.empty()) return;
+    const auto h = std::bit_cast<evmc::bytes32>(silkworm::keccak256(code));
+    if (find_code(h).empty()) stash_created_code_(h, code);
 }
 
 void HashState::destruct(const evmc::address& addr) {
