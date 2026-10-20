@@ -116,12 +116,15 @@ extern void (*__init_array_end[])(void);
 
 extern "C" int main();
 
+extern "C" void zisk_alloc_init() noexcept;
+
 extern "C" [[noreturn]] void __start() {
     heap_ptr = align_up(&_heap_bottom, 64);
     heap_end = &_heap_top;
 #ifdef Z6M_ZISK_HEAP_STATS
     heap_peak = heap_ptr;
 #endif
+    zisk_alloc_init();
 
     for (auto p = __init_array_start; p != __init_array_end; ++p)
         (*p)();

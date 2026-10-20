@@ -33,6 +33,7 @@ add_subdirectory("${Z6M_ROOT}/zilk_core"   "${SW_BIN}/zilk_core")
 add_executable(z6m_guest
     src/zisk_entrypoint.S
     src/zisk_runtime.cpp
+    src/zisk_alloc.cpp
     src/main.cpp
     src/runtime_stubs.c
     src/dma/memcpy.s
