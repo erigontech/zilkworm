@@ -25,6 +25,33 @@ constexpr std::size_t kArenaSz = std::size_t{1} << kArenaShift;
 void *g_state[3 * kNClass];
 std::uintptr_t g_small_base;
 
+[[gnu::always_inline]] inline void *class_alloc(std::size_t n) noexcept {
+    unsigned idx = (unsigned)((n - 1) >> 4);
+    if (idx < kNClass) [[likely]] {
+        void *p = g_state[idx];
+        if (p) [[likely]] {
+            g_state[idx] = *static_cast<void **>(p);
+            return p;
+        }
+        auto *b = static_cast<char *>(g_state[kNClass + idx]);
+        if (b <= static_cast<char *>(g_state[2 * kNClass + idx])) [[likely]] {
+            g_state[kNClass + idx] = b + ((idx + 1) << 4);
+            return b;
+        }
+    }
+    return nullptr;
+}
+
+[[gnu::always_inline]] inline bool class_free(void *p) noexcept {
+    unsigned idx = (unsigned)((reinterpret_cast<std::uintptr_t>(p) - g_small_base) >> kArenaShift);
+    if (idx < kNClass) [[likely]] {
+        *static_cast<void **>(p) = g_state[idx];
+        g_state[idx] = p;
+        return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 /* Before dlmalloc's first sbrk; enables range free. */
@@ -41,29 +68,14 @@ extern "C" void zisk_alloc_init() noexcept {
 }
 
 extern "C" void *malloc(std::size_t n) noexcept {
-    unsigned idx = (unsigned)((n - 1) >> 4);
-    if (idx < kNClass) [[likely]] {
-        void *p = g_state[idx];
-        if (p) [[likely]] {
-            g_state[idx] = *static_cast<void **>(p);
-            return p;
-        }
-        auto *b = static_cast<char *>(g_state[kNClass + idx]);
-        if (b <= static_cast<char *>(g_state[2 * kNClass + idx])) [[likely]] {
-            g_state[kNClass + idx] = b + ((idx + 1) << 4);
-            return b;
-        }
-    }
+    if (void *p = class_alloc(n)) [[likely]]
+        return p;
     return _malloc_r(_impure_ptr, n);
 }
 
 extern "C" void free(void *p) noexcept {
-    unsigned idx = (unsigned)((reinterpret_cast<std::uintptr_t>(p) - g_small_base) >> kArenaShift);
-    if (idx < kNClass) [[likely]] {
-        *static_cast<void **>(p) = g_state[idx];
-        g_state[idx] = p;
+    if (class_free(p)) [[likely]]
         return;
-    }
     if (p) [[unlikely]]
         _free_r(_impure_ptr, p);
 }
@@ -101,3 +113,34 @@ extern "C" void *realloc(void *p, std::size_t n) noexcept {
     free(p);
     return q;
 }
+
+#if defined(ZISK)
+
+// Inlinable replacements for libstdc++ archive ops.
+extern "C" [[noreturn]] void _ZSt17__throw_bad_allocv();
+
+[[gnu::always_inline]] inline void *zisk_new(std::size_t n) {
+    if (n == 0) [[unlikely]]
+        n = 1;
+    if (void *p = class_alloc(n)) [[likely]]
+        return p;
+    void *p = _malloc_r(_impure_ptr, n);
+    if (!p) [[unlikely]]
+        _ZSt17__throw_bad_allocv();
+    return p;
+}
+
+[[gnu::always_inline]] inline void zisk_delete(void *p) noexcept {
+    if (!class_free(p) && p) [[unlikely]]
+        _free_r(_impure_ptr, p);
+}
+
+// Strong defs; weak ones lose to new_op.o.
+[[gnu::always_inline]] void *operator new(std::size_t n) { return zisk_new(n); }
+[[gnu::always_inline]] void *operator new[](std::size_t n) { return zisk_new(n); }
+[[gnu::always_inline]] void operator delete(void *p) noexcept { zisk_delete(p); }
+[[gnu::always_inline]] void operator delete(void *p, std::size_t) noexcept { zisk_delete(p); }
+[[gnu::always_inline]] void operator delete[](void *p) noexcept { zisk_delete(p); }
+[[gnu::always_inline]] void operator delete[](void *p, std::size_t) noexcept { zisk_delete(p); }
+
+#endif  // ZISK

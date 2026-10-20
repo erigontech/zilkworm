@@ -150,6 +150,9 @@ static_assert([] {
     return true;
 }());
 
+#if defined(ZISK)
+[[gnu::always_inline]]
+#endif
 inline ethash::hash256 keccak256(ByteView view) {
     // size 0 excluded: slot.size==0 is the memo's vacancy sentinel and would false-hit
     if (view.size() != 0 && view.size() <= 32) [[likely]] {

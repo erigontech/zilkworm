@@ -66,6 +66,9 @@ namespace {
 
 }  // namespace
 
+#if defined(ZISK)
+[[gnu::always_inline]]
+#endif
 ethash::hash256 keccak256_memo(const uint8_t* data, size_t size) noexcept {
     uint64_t w0, w1, w2, w3;
     const auto pa{reinterpret_cast<uintptr_t>(data)};
