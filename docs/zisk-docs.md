@@ -19,7 +19,7 @@ reproduces the reference results, and running the proofs.
 | | |
 |---|---|
 | zilkworm branch | `som/zisk-impl` on `erigontech/zilkworm` |
-| evmone branch | `som/zisk-impl-on-main` on `erigontech/zvm1` (submodule `third_party/evmone` @ `fefd44b6`, 9 commits on top of `main` @ `85f66c8e`) |
+| evmone branch | `som/zisk-impl-on-main` on `erigontech/zvm1` (submodule `third_party/evmone` @ `1e8b8ad2`, 12 commits on top of `main` @ `85f66c8e`) |
 | ZisK pin | v1.3.1-alpha (`306a9c934`): guest linker script, `ziskemu`, `zisk-sdk` crates, proving key |
 | Guest compiler | xPack `riscv-none-elf-gcc` 15.2.0-1.1, the only version to have installed (§3.2) |
 
@@ -132,10 +132,10 @@ image at PR head 62430d056 (2026-10-08).
 git clone https://github.com/erigontech/zilkworm.git && cd zilkworm
 git checkout som/zisk-impl
 git submodule update --init --recursive
-git submodule status --recursive   # evmone fefd44b6…; no '+' or '-'
+git submodule status --recursive   # evmone 1e8b8ad2…; no '+' or '-'
 ```
 
-The evmone pin exists only on `erigontech/zvm1` branch `som/zisk-impl-on-main`, not yet pushed.
+The evmone pin exists only on `erigontech/zvm1` branch `som/zisk-impl-on-main`.
 `.gitmodules` already points at zvm1, so the plain update works. If the update fails with
 `not our ref`, a local `submodule.evmone.url` override is pointing somewhere else. Fix it with
 `git -C third_party/evmone fetch https://github.com/erigontech/zvm1.git som/zisk-impl-on-main` and
@@ -570,7 +570,7 @@ ELF matches a local one built from the same tree.
    - Make the stack paint an in-tree option.
 5. **EF zkvm-standards C API.** Later, consider moving from raw CSR shims to ZisK's
    `libziskos_staticlib.a` (`zkvm_io.h` / `zkvm_accelerators.h`).
-6. **Upstreaming.** Upstream the 9 evmone ZisK commits (`85f66c8e..fefd44b6`) from zvm1
+6. **Upstreaming.** Upstream the 12 evmone ZisK commits (`85f66c8e..1e8b8ad2`) from zvm1
    `som/zisk-impl-on-main` to `main`, then repoint the submodule.
 7. **Smaller items.**
    - Service mode against a live RPC.
