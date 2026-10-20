@@ -98,8 +98,8 @@ jobs:
           token: ${{ secrets.PAT_TOKEN || github.token }}
           sparse-eest-fixtures: "skip"
 
-      - name: Build guest ELF, guest VK and prover
-        run: make z6m_prover ere-bin
+      - name: Build the guests, their VKs and the prover
+        run: make z6m_prover z6m_guest_vk ere-bin
 
       - name: Build state_transition CLI
         run: |
@@ -141,6 +141,10 @@ jobs:
           fi
           {
             echo
+            echo "### Hypercube guests"
+            echo
+            echo "- \`z6m_guest_hypercube_mfbd.{elf,vk}\`: DirectState, takes MFBD bundles; \`z6m_guest_hypercube_slib.{elf,vk}\`: HashState, takes statelessInputBytes (the ERE guest)"
+            echo
             echo "### Airbender image and verification key"
             echo
             echo "- Image: \`ghcr.io/erigontech/zilkworm-airbender:$TAG\` (digest \`$AIRBENDER_DIGEST\`)"
@@ -157,8 +161,10 @@ jobs:
           prerelease: ${{ needs.version.outputs.prerelease }}
           fail_on_unmatched_files: true
           files: |
-            temp/z6m_guest_hypercube.elf
-            temp/z6m_guest_hypercube.vk
+            temp/z6m_guest_hypercube_mfbd.elf
+            temp/z6m_guest_hypercube_mfbd.vk
+            temp/z6m_guest_hypercube_slib.elf
+            temp/z6m_guest_hypercube_slib.vk
             temp/z6m_prover_hypercube
             temp/state_transition_linux_x86_64
             temp/z6m_guest_airbender.bin

@@ -223,8 +223,10 @@ sp1-benchmark: z6m_prover sp1-benchmark-corpus
 RELEASE_DIR := temp
 # Recursive: $(ERE_VK) is defined below.
 RELEASE_BINS = \
-	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube.elf \
-	$(ERE_VK):z6m_guest_hypercube.vk \
+	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube_mfbd.elf \
+	prover/guest_hypercube/build/z6m_guest.vk:z6m_guest_hypercube_mfbd.vk \
+	$(GUEST_SLIB_BUILD)/z6m_guest.elf:z6m_guest_hypercube_slib.elf \
+	$(ERE_VK):z6m_guest_hypercube_slib.vk \
 	prover/target/release/z6m_prover:z6m_prover_hypercube \
 	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
 
@@ -282,9 +284,8 @@ zkevm-benchmark-fixtures:
 # The prover embeds a fixed ELF path (prover_hypercube/build.rs -> include_elf!
 # ".../guest_hypercube/build/z6m_guest.elf"), so the slib guest ELF must land
 # there. We build the flag-ON guest in a DEDICATED tree ($(GUEST_SLIB_BUILD)) so
-# the normal OFF build cache is never contaminated with Z6M_HASH_STATE=ON, then
-# stage the ELF at the embed path. (A fresh tree also re-applies the blst SP1
-# patch via its PATCH_COMMAND.)
+# the normal OFF build cache is never contaminated with Z6M_HASH_STATE=ON. (A
+# fresh tree also re-applies the blst SP1 patch via its PATCH_COMMAND.)
 GUEST_SLIB_BUILD := prover/guest_hypercube/build-slib
 GUEST_EMBED_ELF  := prover/guest_hypercube/build/z6m_guest.elf
 
@@ -295,13 +296,13 @@ z6m_guest_slib:
 		-DSP1=ON \
 		-DZ6M_HASH_STATE=ON
 	cmake --build $(GUEST_SLIB_BUILD) -j$$(nproc)
+
+# Build the prover embedding the slib guest ELF, staged at the embed path first. Uses
+# cargo directly rather than the z6m_prover target, because z6m_prover depends on
+# z6m_guest, which would rebuild the OFF (DirectState) ELF over the staged slib one.
+z6m_prover_slib: z6m_guest_slib
 	@mkdir -p $(dir $(GUEST_EMBED_ELF))
 	cp $(GUEST_SLIB_BUILD)/z6m_guest.elf $(GUEST_EMBED_ELF)
-
-# Build the prover embedding the slib guest ELF. Uses cargo directly rather than
-# the z6m_prover target, because z6m_prover depends on z6m_guest, which would
-# rebuild the OFF (DirectState) ELF over the staged slib one before embedding.
-z6m_prover_slib: z6m_guest_slib
 	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
 
 # slib benchmark run knobs. (Comments kept on their own lines: a trailing inline
@@ -355,9 +356,14 @@ DERIVE_VK_BIN := prover/target/release/derive_vk
 derive_vk:
 	cargo build --release -p z6m_stateless_validator --bin derive_vk --features vk-derive
 
-ere-bin: z6m_guest derive_vk
+z6m_guest_vk: z6m_guest derive_vk
+	SP1_PROVER=mock $(DERIVE_VK_BIN) prover/guest_hypercube/build/z6m_guest.elf prover/guest_hypercube/build/z6m_guest.vk
+
+# The ERE guest is the HashState build: ere-hosts feeds it the fixtures' statelessInputBytes
+# unchanged. The DirectState guest (MFBD input) is z6m_guest; z6m_guest_vk derives its VK.
+ere-bin: z6m_guest_slib derive_vk
 	@mkdir -p $(ERE_BIN_DIR)
-	cp prover/guest_hypercube/build/z6m_guest.elf $(ERE_ELF)
+	cp $(GUEST_SLIB_BUILD)/z6m_guest.elf $(ERE_ELF)
 	SP1_PROVER=mock $(DERIVE_VK_BIN) $(ERE_ELF) $(ERE_VK)
 	@echo "ere-bin staged at $(ERE_BIN_DIR):"
 	@ls -la $(ERE_BIN_DIR)

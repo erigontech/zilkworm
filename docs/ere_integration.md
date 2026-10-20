@@ -8,9 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 Zilkworm is integrated as a stateless-validation execution client in the [ERE benchmark](https://github.com/eth-act/zkevm-benchmark-workload). The same canonical EEST benchmark fixtures are executed inside SP1 using the Zilkworm guest, validated against their expected public values, and (optionally) compared with Reth by SP1 estimated prover cost.
 
 The current integration targets **Amsterdam / Sepolia** with the
-**tests-zkevm v21.0.1** stateless schema, on **ere v0.18.1 / ere-guests v0.18.0**. The host adapter decodes the canonical
-EEST `statelessInputBytes` into the Zilkworm MFBD envelope; see
-[`prover/stateless_validator`](../prover/stateless_validator).
+**tests-zkevm v21.0.1** stateless schema, on **ere v0.18.1 / ere-guests v0.18.0**. The ERE guest is the HashState
+build of the hypercube guest (`make ere-bin`), which takes the canonical EEST `statelessInputBytes` unchanged; see
+[hashstate.md](hashstate.md). The MFBD host adapter in [`prover/stateless_validator`](../prover/stateless_validator)
+serves the DirectState guest and is no longer on the ERE path.
 
 ## Branches and repository layout
 
@@ -21,7 +22,7 @@ benchmark fork's `[patch]` and path deps use relative paths (`../ere-guests_fork
 
 ```
 <workspace>/
-├── z6m/                            # clone of erigontech/zilkworm (guest + host adapter)
+├── z6m/                            # clone of erigontech/zilkworm (guest)
 ├── ere-guests_fork/                # clone of erigontech/ere-guests
 └── zkevm-benchmark-workload_fork/  # clone of erigontech/zkevm-benchmark-workload
 ```
@@ -29,13 +30,12 @@ benchmark fork's `[patch]` and path deps use relative paths (`../ere-guests_fork
 | Repo | Branch | Based on | Carries |
 |---|---|---|---|
 | `erigontech/zilkworm` | `release/0.1.0-alpha.4` | `v0.1.0-alpha.3` | Guest (`zilk_core` + ZVM1 submodule `34cc5a71`, zvm1 `release/0.1.0-alpha.4`) with the stateless new-payload and witness checks, and the host adapter `prover/stateless_validator` (SIOB→MFBD): tests-zkevm v21.0.1 schema, EIP-8282 builder-requests fix, chain id 1 → Amsterdam, Sepolia network config, ERE make targets/docs/fetch script, `eest_runner` cycle metrics, the `ERE Benchmark` workflow and its release hookup. |
-| `erigontech/ere-guests` | `canepat/zilkworm_mfbd` | `main` (`d31055c`, v0.18.0) | One commit mirroring the Nimbus addition (upstream PR #88): `StatelessValidatorKind::Zilkworm` (catalog ID 4), the `zilkworm` entry in `artifact-registry.json` (sp1, `zkvm_version` v6.6.0), the catalog/downloader/test-crate tests, and the README. `elf_url` is a `local-dev` placeholder until a Zilkworm release is published; the registry and README are updated with that release before upstreaming. |
-| `erigontech/zkevm-benchmark-workload` | `canepat/zilkworm_mfbd` | `master` (`274070c`, ere-guests v0.18.0) | The `zilkworm` execution client (`ExecutionClient::Zilkworm`, host transform via `from_ere_eest`), the `[patch]` redirecting ere-guests deps to `../ere-guests_fork`, the Zilkworm host-adapter path dep (`stateless-validator-zilkworm = ../z6m/prover/stateless_validator`), and the cross-file EEST fixture-name dedup with its regression test. |
+| `erigontech/ere-guests` | `canepat/zilkworm_mfbd` | `main` (`d31055c`, v0.18.0) | One commit mirroring the Nimbus addition (upstream PR #88): `StatelessValidatorKind::Zilkworm` (catalog ID 4), the `zilkworm` entry in `artifact-registry.json` (sp1, `zkvm_version` v6.6.0), the catalog/downloader/test-crate tests, and the README. The guest runs on the fixtures' `statelessInputBytes` like every other guest; `elf_url` names the `z6m_guest_hypercube_slib` assets of a Zilkworm release. |
+| `erigontech/zkevm-benchmark-workload` | `canepat/zilkworm_mfbd` | `master` (`274070c`, ere-guests v0.18.0) | The `zilkworm` execution client (`ExecutionClient::Zilkworm`, on the raw `statelessInputBytes` path), the `[patch]` taking the ere-guests catalog from the erigontech fork, and the cross-file EEST fixture-name dedup with its regression test. |
 
-The host adapter pins `stateless-validator-common` at ere-guests tag
-`v0.18.0` (tests-zkevm v21.0.1), and the benchmark's workspace `[patch]` overrides
-all ere-guests deps to `../ere-guests_fork`, so the actual crates used are the
-fork's (v0.18.0 plus the Zilkworm entry).
+The benchmark's workspace `[patch]` takes `stateless-validator-catalog` from the
+erigontech ere-guests fork (the Zilkworm kind); the other ere-guests crates stay
+on the upstream tag.
 
 ## Reference environment
 
@@ -93,8 +93,9 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
 - **`ERE_BIN_PATH`** (optional): a relative value is resolved against z6m via
   `$(abspath …)` (the recipe `cd`s into the workload dir first). Empty => the
   target downloads the published guest ELF named in `artifact-registry.json`.
-  Build/stage the local guest with `make ere-bin` (outputs
-  `build/ere-bin/stateless-validator-zilkworm-sp1.{elf,vk}`). ere-hosts loads
+  Build/stage the local guest with `make ere-bin`: the HashState build
+  (`z6m_guest_slib`), which takes the fixtures' `statelessInputBytes` unchanged
+  (outputs `build/ere-bin/stateless-validator-zilkworm-sp1.{elf,vk}`). ere-hosts loads
   `<bin-path>/stateless-validator-zilkworm-sp1-<SP1 SDK version>.{elf,vk}`, so
   both targets first run `ere-bin-link`, which symlinks the unversioned files
   under the version the workload's ere resolves (`tools/ere_workload.py
@@ -205,9 +206,9 @@ Zilkworm guest in place of the EEST spec guest.
   [`release.yml`](../.github/workflows/release.yml) after a `v*` release is
   published (a release created with `GITHUB_TOKEN` emits no `release` event).
 - **Guest source:** `build` runs `make ere-bin` at the run's ref; `release`
-  downloads `z6m_guest_hypercube.{elf,vk}` of `release_tag`, verified against the
-  release `SHA256SUMS.txt`. The host adapter is compiled from the same z6m ref
-  (the release tag in `release` mode), so adapter and guest always match.
+  downloads `z6m_guest_hypercube_slib.{elf,vk}` of `release_tag`, verified against
+  the release `SHA256SUMS.txt`. A release publishes both hypercube guests:
+  `_mfbd` (DirectState, MFBD bundles) and `_slib` (HashState, the ERE guest).
 - **Inputs:** `guest_source`, `release_tag`, `catalog_url` (default Sepolia),
   `batch_count` (default 1), `compare` (default off; on for releases),
   `workload_ref` / `ere_guests_ref` (default `canepat/zilkworm_mfbd` on the
@@ -220,8 +221,7 @@ Zilkworm guest in place of the EEST spec guest.
   the block range and the `ere_compare.py` report; `zkevm-metrics/` is uploaded.
 
 Once the zilkworm client and registry entry are upstreamed, the ere-guests
-checkout goes away and the host adapter git dependency is redirected to the z6m
-checkout with `cargo --config 'patch."<zilkworm git url>".z6m_stateless_validator.path=…'`.
+checkout and the workload `[patch]` go away.
 
 ## Results
 
