@@ -31,6 +31,18 @@ namespace {
 using intx::uint256;
 using bytes = std::vector<uint8_t>;
 
+#if defined(EVMONE_DEFER_OOG)
+// Deferred OOG may swap which halt fires.
+inline bool st_eq(evmc_status_code a, evmc_status_code b) noexcept {
+    const auto cls = [](evmc_status_code s) noexcept {
+        return s == EVMC_SUCCESS ? 0 : s == EVMC_REVERT ? 1 : 2;
+    };
+    return cls(a) == cls(b);
+}
+#else
+inline bool st_eq(evmc_status_code a, evmc_status_code b) noexcept { return a == b; }
+#endif
+
 enum : uint8_t {
     SAR = 0x1d, POP = 0x50, MSTORE = 0x52, JUMPDEST = 0x5b, PUSH1 = 0x60, PUSH2 = 0x61,
     PUSH32 = 0x7f, DUP1 = 0x80, SWAP1 = 0x90, RETURN = 0xf3
@@ -231,7 +243,7 @@ void check_gas(Runner& r, Shape shape, const uint256& x, const uint256& s) {
                 want = EVMC_OUT_OF_GAS;
             if (r.advanced && want != EVMC_SUCCESS)
                 want = out.status == EVMC_SUCCESS ? EVMC_SUCCESS : out.status;  // Any failure.
-            if (out.status != want || out.gas_left != (want == EVMC_SUCCESS ? gas - total : 0)) {
+            if (!st_eq(out.status, want) || out.gas_left != (want == EVMC_SUCCESS ? gas - total : 0)) {
                 FAIL(describe(shape, x, s, gas, rev) << ": status " << out.status << " (want "
                                                      << want << ") gas_left " << out.gas_left);
             }
@@ -242,6 +254,8 @@ void check_gas(Runner& r, Shape shape, const uint256& x, const uint256& s) {
 }
 
 }  // namespace
+
+
 
 TEST_CASE("SAR by an immediate or a stack shift below 256 matches a bitwise SAR", "[sar_words]") {
     const auto vals = values();
@@ -302,7 +316,7 @@ TEST_CASE("SAR with the stack too short or full", "[sar_words]") {
                     if (r.advanced)
                         REQUIRE(out.status != EVMC_SUCCESS);
                     else
-                        REQUIRE(out.status == want);
+                        REQUIRE(st_eq(out.status, want));
                     REQUIRE(out.gas_left == 0);
                 }
             }

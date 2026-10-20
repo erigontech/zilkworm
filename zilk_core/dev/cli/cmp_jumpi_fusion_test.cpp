@@ -147,6 +147,26 @@ struct Outcome {
     bool operator==(const Outcome&) const = default;
 };
 
+#if defined(EVMONE_DEFER_OOG)
+// Deferred OOG may swap which halt fires.
+inline bool st_eq(evmc_status_code a, evmc_status_code b) noexcept {
+    const auto cls = [](evmc_status_code s) noexcept {
+        return s == EVMC_SUCCESS ? 0 : s == EVMC_REVERT ? 1 : 2;
+    };
+    return cls(a) == cls(b);
+}
+#else
+inline bool st_eq(evmc_status_code a, evmc_status_code b) noexcept { return a == b; }
+#endif
+
+#if defined(EVMONE_DEFER_OOG)
+inline bool outcome_eq(const Outcome& a, const Outcome& b) noexcept {
+    return st_eq(a.status, b.status) && a.gas_left == b.gas_left && a.output == b.output;
+}
+#else
+inline bool outcome_eq(const Outcome& a, const Outcome& b) noexcept { return a == b; }
+#endif
+
 struct Runner {
     evmc::VM vm{evmc_create_evmone()};
     evmc::MockedHost host;
@@ -233,7 +253,7 @@ size_t check_case(Runner& r, const Case& c) {
         for (const auto gas : limits) {
             const auto f = r.run(code, gas, rev);
             const auto e = r.run(ref, gas, rev);
-            if (!(f == e)) {
+            if (!outcome_eq(f, e)) {
                 FAIL(describe(c, gas, rev) << ": fused status " << f.status << " gas_left "
                                            << f.gas_left << ", separate status " << e.status
                                            << " gas_left " << e.gas_left);
