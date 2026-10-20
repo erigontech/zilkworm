@@ -84,7 +84,7 @@ extern "C" __attribute__((weak)) void __cxa_pure_virtual() { zisk_abort(); }
 
 /* ───────── Input / public output ───────── */
 
-/* Input region is read-only; envelope is mutated. */
+/* In-place decode; DirectState copies its writable section. */
 extern "C" ZiskInput zisk_read_input() noexcept {
     constexpr uintptr_t kLenAddr = zisk::kInputAddr + 8;
     zisk::fcall_input_ready(kLenAddr + 7);
@@ -92,11 +92,7 @@ extern "C" ZiskInput zisk_read_input() noexcept {
     if (len == 0)
         return {nullptr, 0};
     zisk::fcall_input_ready(kLenAddr + 8 + len - 1);
-
-    heap_ptr = align_up(heap_ptr, 64);
-    auto *dst = static_cast<uint8_t *>(_sbrk(static_cast<ptrdiff_t>((len + 63) & ~uint64_t{63})));
-    std::memcpy(dst, reinterpret_cast<const void *>(kLenAddr + 8), len);
-    return {dst, len};
+    return {const_cast<uint8_t *>(reinterpret_cast<const uint8_t *>(kLenAddr + 8)), len};
 }
 
 extern "C" void zisk_commit_public(const uint8_t *bytes, size_t len) noexcept {
