@@ -6,12 +6,15 @@ it.
 
 ## Status
 
-The corpus is tests-zkevm v21.0.1, the release ere-guests tests against.
-`make eest-zkevm-tests` runs its 3417 fixture files through the HashState
-runner: **3293 pass, 124 skipped, 0 fail**. A skipped file is one whose blocks
+The corpus is tests-zkevm v21.0.6, the release ere-guests tests against.
+`make eest-zkevm-tests` runs its 3450 fixture files through the HashState
+runner: **3326 pass, 124 skipped, 0 fail**. A skipped file is one whose blocks
 carry no `statelessInputBytes` (the pre-fork blocks of fork-transition tests);
 every witnessed block passes. 31 expected-invalid labels are waived under the
-relaxation below, each logged.
+relaxation below, each logged. Under the flag the `eest-known-failures.txt`
+entries are not registered `WILL_FAIL`: they describe the DirectState runner,
+which runs a test's blocks on one witness in place, while this arm rebuilds the
+state from each block's own witness.
 
 On the guest, the `eip8025_optional_proofs` engine fixtures of the same release
 (182 cases, every witness-validation negative among them) run through
@@ -32,9 +35,10 @@ not witness integrity), and the `_info` prose is too imprecise to match on. The
 slib runner therefore identifies them by the EEST **pytest node-id convention**
 (the fixture's top-level JSON key: the `test_validation_codes_missing_*`,
 `test_validation_state_missing_*`, `test_validation_headers_*`,
-`test_invalid_stateless_input_bytes_are_rejected` and
-`test_witness_header_ssz_size_limit` names inside `eip8025_optional_proofs`)
-and scores them **pass iff the slib path rejects**.
+`test_invalid_stateless_input_bytes_are_rejected`, `test_witness_header_ssz_*`,
+`test_witness_state_rejects_*` and the `missing_*` variants of
+`test_validation_state_unchanged_*` inside `eip8025_optional_proofs`) and
+scores them **pass iff the slib path rejects**.
 Any rejection signal counts — a malformed witness, a missing node, a non-zero
 completeness counter, a root mismatch, or a validation error. A broken witness
 the verifier wrongly accepts is scored as a failure, so leniency bugs surface

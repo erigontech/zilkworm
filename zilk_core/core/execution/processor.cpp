@@ -103,6 +103,16 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
                                                .y_parity = authorization.y_parity,
                                                .r = authorization.r,
                                                .s = authorization.s});
+        // The authorization's delegation marker, kept by its hash before the transaction runs:
+        // evmone sets it on the authority inside the transaction, and a same-marker read there may
+        // find the bytes omitted from the witness (EIP-8025 optional proofs). Address zero clears
+        // and writes no marker.
+        if (!evmc::is_zero(authorization.address)) {
+            uint8_t marker[23];
+            std::memcpy(marker, eip7702::kDelegationBytes, 3);
+            std::memcpy(marker + 3, authorization.address.bytes, 20);
+            direct_.note_created_code(ByteView{marker, sizeof(marker)});
+        }
     }
 
     const auto rev = revision();

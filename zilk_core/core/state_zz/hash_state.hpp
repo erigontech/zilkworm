@@ -36,7 +36,8 @@ class HashState : public BlockState {
   public:
     // Outcome of build_state_from_trie: kMissingNode iff the seeding account root was absent.
     // See docs/hashstate.md, "Fail-closed policy".
-    enum class BuildStatus : std::uint8_t { kOk, kMissingNode };
+    // kMalformed: a trie path longer than the 64-nibble key; the witness is rejected (tests-zkevm v21.0.6).
+    enum class BuildStatus : std::uint8_t { kOk, kMissingNode, kMalformed };
 
     // Sizes are best-effort hints for the open-addressed tables (~2x -> load factor
     // <= 0.5). HashIndex has no default ctor, so all four are initialized in the .cpp; the
@@ -205,6 +206,12 @@ class HashState : public BlockState {
     void subtract_from_balance(const evmc::address& addr, const intx::uint256& subtrahend);
     void set_nonce(const evmc::address& addr, uint64_t nonce);
     void set_code(const evmc::address& addr, ByteView code);
+    // Keeps `code` by its keccak for read_code: a read of an account whose code the witness omits is
+    // served when the block derives those bytes elsewhere (EIP-8025 optional proofs). The
+    // authorizations' delegation markers go in before their transaction runs: evmone sets them
+    // inside it, and a same-marker read there never reaches the diff. Sound by the hash binding:
+    // the bytes returned hash to the account's code_hash.
+    void note_created_code(ByteView code);
     void destruct(const evmc::address& addr);
 
     bool is_dead(const evmc::address& addr) const noexcept;
@@ -379,6 +386,7 @@ class HashState : public BlockState {
     // homonym (mpt.hpp:235): every referenced node absent from an included trie is counted,
     // so an incomplete witness is observable rather than silently skipped.
     std::uint32_t missing_count_{0};
+    bool malformed_witness_{false};  // a sweep met a trie path longer than the key
     std::uint32_t leaf_count_{0};
     std::uint32_t storage_slot_count_{0};
     // Read-miss confirmations that could not prove absence (a needed node was missing).
@@ -404,6 +412,7 @@ class HashState : public BlockState {
     // In-block created-code lookup by code_hash (created_code_ + collision spill); miss -> empty.
     // See docs/hashstate.md, "Created code lookup".
     ByteView find_created_code_(const evmc::bytes32& code_hash) const noexcept;
+    void stash_created_code_(const evmc::bytes32& code_hash, ByteView code);
 
     // Non-recording overlay-or-built lookup (the DirectState lookup_account_ analog): NO
     // materialize, NO confirm. Returns nullptr when the address is in neither store.

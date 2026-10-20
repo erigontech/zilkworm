@@ -229,37 +229,61 @@ Full per-fixture metrics live under `$(ERE_WORKLOAD_DIR)/zkevm-metrics/`.
 
 ### Sepolia (current)
 
-`ERE Benchmark` CI on `release/0.1.0-alpha.4` (`14e1df3`), latest batch (blocks
-11899400..11899499): Zilkworm 100/100 `output_matched`.
-
-Estimated cost on blocks 11871300..11871399 (100 blocks), `--action estimate-cost`, SP1 v6.6.0,
-ere v0.18.1. Zilkworm guest built during the Sepolia port, before the stateless new-payload and
-witness checks, ELF sha256 `f1b4e19fccf436edd73e01f3d7720a4f4ec99a74729a404c488ccb5498ef229b`;
-Reth guest `0.1.0-rc.4`.
+Local run of `make ere-validate` and `make ere-compare` through the forks on
+`canepat/zilkworm_mfbd` (raw `statelessInputBytes` path), latest batch (blocks
+11905100..11905199), `--action estimate-cost`, SP1 v6.6.0, ere v0.18.1. Zilkworm
+guest: the HashState build (`make ere-bin`), ELF sha256
+`267cd6486004e386a736fc8f205ad9974051fcf820f3141c264ef2189d667d84`; Reth guest `0.1.0-rc.4`.
 
 | Client | Completed | output_matched | Mismatches |
 |---|---|---|---|
 | Zilkworm | 100/100 | 100 | 0 |
-| Reth | 100/100 | 96 | 4 (blocks 11871306, 11871309, 11871361, 11871370) |
+| Reth | 100/100 | 98 | 2 (blocks 11905160, 11905186) |
 
 | Metric | Value |
 |---|---|
-| Total estimated cost — Reth | 16,183,162,526,338 |
-| Total estimated cost — Zilkworm | 8,094,901,972,322 |
-| Ratio Z/R (total) | **0.500** (Reth = 2.00× Zilkworm) |
-| Per-fixture Z/R | median 0.493, mean 0.528, min 0.468, max 2.259 |
+| Total estimated cost — Reth | 15,498,357,778,963 |
+| Total estimated cost — Zilkworm | 7,397,962,138,984 |
+| Ratio Z/R (total) | **0.477** (Reth = 2.09× Zilkworm) |
+| Per-fixture Z/R | median 0.473, mean 0.503, min 0.403, max 2.186 |
 | Zilkworm cheaper | 98 / 100 |
 
-Components (Reth / Zilkworm): `opcode` 13,623,390,030,884 / 6,328,434,732,279,
-`syscall` 1,732,971,348,982 / 1,455,165,080,240, `system` 826,801,146,472 / 311,302,159,803.
-The two blocks where Reth is cheaper (11871306, 11871361) are among Reth's mismatches.
+Components (Reth / Zilkworm): `opcode` 12,983,896,897,645 / 5,501,284,818,016,
+`syscall` 1,679,793,866,158 / 1,524,988,700,636, `system` 834,667,015,160 / 371,688,620,332.
+The two blocks where Reth is cheaper are its two mismatches: it stops early on a
+block it gets wrong. On the 98 blocks both validate, Z/R stays within 0.403..0.484.
 
-### tests-zkevm v21.0.1
+The alpha.4 DirectState guest with the MFBD host adapter measured Z/R 0.488 on this
+batch (ERE Benchmark CI of the `v0.1.0-alpha.4` release); the HashState guest on the
+raw input is 3.4% cheaper on the same blocks.
 
-The ere-guests `stateless-validator-test` crate (`executes_registered_guest`, SP1), with the
-Zilkworm host adapter translating each input, runs 33,637 fixtures: 33,635 succeed. Both
-failures are `test_bal_withdrawals_and_dequeues_net_balance_at_last_index` variants
-(`forward_all`, `forward_half`), which ere-guests also lists as expected failures for Reth.
+### tests-zkevm v21.0.6
+
+The ere-guests `stateless-validator-test` crate (`executes_registered_guest`, SP1) feeds
+the HashState guest each fixture's `statelessInputBytes` unchanged: **33,854 of 33,854
+fixtures succeed**, no expected failures (every case the other guests list as expected
+failures passes, Reth's three `eip7928` BAL cases included). Three gaps were found and
+closed on the way:
+
+- the raw path lacked the EIP-7934 block-RLP cap, so
+  `test_block_at_rlp_size_limit_boundary[max_rlp_size_plus_1_byte]` was accepted; `run_sib`
+  now rejects a block whose canonical RLP exceeds `kMaxRlpBlockSize` from Osaka, as the
+  JSON and MFBD paths do on the RLP they receive;
+- the trie sweep skipped a node whose path runs past the 64-nibble key instead of failing
+  the build (`test_witness_state_rejects_overlength_secured_trie_path`, a v21.0.6 rule);
+  such a witness is now `BuildStatus::kMalformed` and the block is rejected;
+- an EIP-7702 marker written inside a transaction lives in evmone's state until the diff,
+  so a same-transaction read of another account holding that marker, with the bytes omitted
+  from the witness, was a fail-closed miss (`test_witness_codes_delegation_same_marker_*`);
+  the processor now keeps each authorization's marker by hash before the transaction runs
+  (`note_created_code`), which is sound by the hash binding.
+
+The test resolves the guest through `artifact-registry.json`, so until a release
+publishes `z6m_guest_hypercube_slib.{elf,vk}` it runs with the registry pointed at a
+local copy (an `http://127.0.0.1` URL served from `build/ere-bin`, the HTTPS check in
+`registry.rs` relaxed locally; neither edit is committed). Run it alone: it and
+`make ere-validate`/`ere-compare` both drive an ere-server on port 4175, and a
+concurrent run answers with the other guest's results.
 
 ### Previous stack (tests-zkevm v0.8.4 layout, ere v0.17.0, SP1 v6.4.0)
 

@@ -1921,6 +1921,19 @@ TEST_CASE("HashState apply_code_diff keeps the storage of a cleared EIP-7702 del
     CHECK(eq32(hs.read_storage(addr, slot_key), slot_val));
 }
 
+// A secured trie path is the 64-nibble hashed key: a leaf whose path runs past it makes the
+// witness malformed, and tests-zkevm v21.0.6 rejects the block (test_witness_state_rejects_overlength_
+// secured_trie_path). The sweep used to skip such a node silently.
+TEST_CASE("HashState build_state_from_trie rejects a trie path longer than the key", "[hash_state]") {
+    HashState hs;
+    std::array<uint8_t, 66> nib{};
+    nib.fill(0x3);
+    const Bytes accv = account_leaf_value(1, silkworm::kEmptyRoot);
+    const LeafNode leaf = make_leaf(nib.data(), 65, ByteView{accv});
+    const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_leaf(leaf)});
+    CHECK(hs.build_state_from_trie(root) == HashState::BuildStatus::kMalformed);
+}
+
 // apply_state_diff drives the whole mutation surface: modified account (nonce/balance/storage)
 // then a deleted account.
 TEST_CASE("HashState apply_state_diff applies modified and deleted accounts", "[hash_state]") {
@@ -1998,6 +2011,34 @@ namespace {
 }
 
 }  // namespace
+
+// A read of code the witness omits is served when the block derives the same bytes: the
+// authorizations' EIP-7702 markers are kept by hash before their transaction runs (processor.cpp),
+// as evmone sets them inside it and a same-marker read there never reaches the state diff.
+TEST_CASE("HashState note_created_code serves an omitted code by its hash", "[hash_state]") {
+    Bytes marker = {0xef, 0x01, 0x00};
+    for (int i = 0; i < 20; ++i) marker.push_back(0x42);
+    const auto code_hash = std::bit_cast<evmc::bytes32>(silkworm::keccak256(ByteView{marker}));
+    const evmc::address addr = s2_addr(0xC2);
+    const auto build = [&](HashState& hs) {
+        const Bytes accv = account_leaf_full(1, 0, silkworm::kEmptyRoot, code_hash);
+        const auto apath = nibbles_of(keccak_addr(addr));
+        const LeafNode aleaf = make_leaf(apath.data(), 64, ByteView{accv});
+        const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_leaf(aleaf)});
+        REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
+    };
+
+    HashState omitted;
+    build(omitted);
+    CHECK(omitted.read_code(addr).empty());  // the witness has no such code: a gap
+    CHECK(omitted.unconfirmed_read_count() == 1);
+
+    HashState derived;
+    derived.note_created_code(ByteView{marker});
+    build(derived);
+    CHECK(derived.read_code(addr) == ByteView{marker});
+    CHECK(derived.unconfirmed_read_count() == 0);
+}
 
 // A present account reachable through the built cache: the view surfaces its nonce / balance /
 // code_hash / has_storage, forwards get_account_code to the real witness code, forwards
