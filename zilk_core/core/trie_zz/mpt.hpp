@@ -48,11 +48,20 @@ using ::zilkworm::keccak_bytes32;
 }  // namespace silkworm
 
 namespace zilkworm {
+// 4 key bytes -> 8 interleaved hi/lo nibble bytes
+[[gnu::always_inline]] inline uint64_t nib_expand32(uint64_t x) noexcept {
+    const auto spread = [](uint64_t t) noexcept {
+        t = (t | (t << 16)) & 0x0000FFFF0000FFFFULL;
+        return (t | (t << 8)) & 0x00FF00FF00FF00FFULL;
+    };
+    return spread((x >> 4) & 0x0F0F0F0FULL) | (spread(x & 0x0F0F0F0FULL) << 8);
+}
+
 struct nibbles64 {
     uint8_t len{};
-    // Max trie path is 64 nibbles. Word-aligned so a strict-alignment target (rv32 Airbender)
-    // can zero and copy it with word stores; at offset 1 each was a byte-wise library call.
-    alignas(4) std::array<uint8_t, 64> nib{};
+    // Max trie path is 64 nibbles. 8-aligned so a strict-alignment target expands a key with word
+    // stores; len stays first so the path leads both nodes of the ext/leaf union.
+    alignas(8) std::array<uint8_t, 64> nib{};
 
     uint8_t& operator[](size_t index) { return nib[index]; }
     const uint8_t& operator[](size_t index) const { return nib[index]; }
@@ -71,6 +80,19 @@ struct nibbles64 {
     // from_bytes32 in place: that one value-initializes its result (a 68-byte memset) for the caller to copy.
     void assign_bytes32(const bytes32& k) noexcept {
         len = 64;
+        if (alignof(void*) == 8 && (reinterpret_cast<uintptr_t>(k.bytes) & 7) == 0) [[likely]] {
+            // 8 nibbles per word, no byte traffic
+            typedef uint64_t __attribute__((may_alias)) w64;
+            const w64* const s = reinterpret_cast<const w64*>(std::assume_aligned<8>(k.bytes));
+            w64* const t = reinterpret_cast<w64*>(std::assume_aligned<8>(nib.data()));
+#pragma GCC unroll 4
+            for (unsigned w = 0; w < 4; ++w) {
+                const uint64_t v = s[w];
+                t[2 * w]     = nib_expand32(v);
+                t[2 * w + 1] = nib_expand32(v >> 32);
+            }
+            return;
+        }
         for (size_t i = 0; i < 32; ++i) {
             uint8_t b = k.bytes[i];
             nib[2 * i] = (b >> 4) & 0x0F;
@@ -92,22 +114,24 @@ struct BranchNode {
     std::array<bytes32, 16> child;
     std::array<const uint8_t*, 16> child_ptr;
     alignas(8) std::array<uint8_t, 16> child_len{};
-    uint16_t mask{};
+    // one word beats three narrow fields
+    uint64_t mask : 16 = 0;
+    uint64_t orig_size : 16 = 0;
+    uint64_t dirty : 16 = 0;
+    uint64_t spare : 16 = 0;
     ByteView value{};
     // Orig witness RLP; null when built in-grid.
     const uint8_t* orig{nullptr};
-    uint16_t orig_size{0};
-    uint16_t dirty{0};
     alignas(8) std::array<uint8_t, 16> orig_child_len{};
 
     // Unchanged iff no slot changed length class.
     inline bool same_layout_as_orig() const noexcept {
         // Through data() the 8-byte alignment is lost, and a strict-alignment target then
         // copies both arrays byte-wise (two memcpy calls per encode); read them as words.
-        typedef uint32_t __attribute__((may_alias)) w32;
-        const w32* a = reinterpret_cast<const w32*>(std::assume_aligned<8>(child_len.data()));
-        const w32* b = reinterpret_cast<const w32*>(std::assume_aligned<8>(orig_child_len.data()));
-        return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3])) == 0;
+        typedef uint64_t __attribute__((may_alias)) w64;
+        const w64* a = reinterpret_cast<const w64*>(std::assume_aligned<8>(child_len.data()));
+        const w64* b = reinterpret_cast<const w64*>(std::assume_aligned<8>(orig_child_len.data()));
+        return ((a[0] ^ b[0]) | (a[1] ^ b[1])) == 0;
     }
 
     inline uint8_t child_count() const noexcept {
@@ -190,7 +214,7 @@ struct BranchNode {
         dirty |= static_cast<uint16_t>(1u << slot);
         child_len[slot] = 0;
         child_ptr[slot] = nullptr;
-        mask &= ~(1 << slot);
+        mask &= ~(uint64_t{1} << slot);
     }
 };
 
@@ -207,10 +231,10 @@ struct ExtensionNode {
     // set_child() for a hash reference: the keccak of `rlp`, a child's encoding of 32 bytes or more.
     inline void set_child_hash(ByteView rlp) noexcept {
         const ethash::hash256 h = silkworm::keccak256(rlp);
-        // child follows the 68-byte path, so it is only 4-aligned: too little to hold a hash256.
-        typedef uint32_t __attribute__((may_alias)) w32;
-        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
-        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        // the 8-aligned nibbles64 leaves child 8-aligned
+        typedef uint64_t __attribute__((may_alias)) w64;
+        w64* const d = reinterpret_cast<w64*>(std::assume_aligned<8>(child.bytes));
+        for (size_t i = 0; i < 4; ++i) d[i] = h.word64s[i];
         child_len = 32;
     }
 
@@ -221,18 +245,18 @@ struct ExtensionNode {
             return;
         }
         const ethash::hash256 h = ethash_keccak256_resume(r.state, r.blocks, rlp.data(), rlp.size());
-        typedef uint32_t __attribute__((may_alias)) w32;
-        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
-        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        typedef uint64_t __attribute__((may_alias)) w64;
+        w64* const d = reinterpret_cast<w64*>(std::assume_aligned<8>(child.bytes));
+        for (size_t i = 0; i < 4; ++i) d[i] = h.word64s[i];
         child_len = 32;
     }
 
     // set_child_hash() for the full branch `node`, as BranchNode::set_child_hash_of().
     inline void set_child_hash_of(const BranchNode& node, uint64_t* state, unsigned blocks) noexcept {
         const ethash::hash256 h = node.full_branch_hash(state, blocks);
-        typedef uint32_t __attribute__((may_alias)) w32;
-        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
-        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        typedef uint64_t __attribute__((may_alias)) w64;
+        w64* const d = reinterpret_cast<w64*>(std::assume_aligned<8>(child.bytes));
+        for (size_t i = 0; i < 4; ++i) d[i] = h.word64s[i];
         child_len = 32;
     }
 
@@ -244,7 +268,9 @@ struct ExtensionNode {
 // BranchNode::set_child_hash places an ethash::hash256 into child[slot].bytes; ExtensionNode::set_child_hash
 // stores whole words into child.
 static_assert(offsetof(BranchNode, child) == 0 && alignof(BranchNode) >= 8);
-static_assert(offsetof(ExtensionNode, child) % 4 == 0);
+static_assert(offsetof(nibbles64, nib) == 8 && alignof(nibbles64) == 8);
+static_assert(offsetof(ExtensionNode, child) % 8 == 0);
+static_assert(sizeof(BranchNode) == 704);
 
 struct LeafNode {
     nibbles64 path;
@@ -298,8 +324,22 @@ struct GridLine {
     };
 
     GridLine() : kind(kBranch), parent_slot(0), parent_depth(0), consumed(0), modified(false), branch{} {}
-    GridLine(Kind k, unsigned pslot, unsigned pdepth, unsigned c) : kind{k}, parent_slot{static_cast<uint8_t>(pslot)}, parent_depth{static_cast<uint8_t>(pdepth)}, consumed{static_cast<uint8_t>(c)}, modified{false}, child_depth{} {}
+    GridLine(Kind k, unsigned pslot, unsigned pdepth, unsigned c) {
+        // header+child_depth as three word stores
+        typedef uint64_t __attribute__((may_alias)) w64;
+        *reinterpret_cast<w64*>(std::assume_aligned<8>(this)) =
+            static_cast<uint64_t>(static_cast<uint8_t>(k)) |
+            (static_cast<uint64_t>(static_cast<uint8_t>(pslot)) << 8) |
+            (static_cast<uint64_t>(static_cast<uint8_t>(pdepth)) << 16) |
+            (static_cast<uint64_t>(static_cast<uint8_t>(c)) << 24);
+        w64* const cd = reinterpret_cast<w64*>(std::assume_aligned<8>(child_depth.data()));
+        cd[0] = 0;
+        cd[1] = 0;
+    }
 };
+
+static_assert(offsetof(GridLine, child_depth) == 8);
+static_assert(offsetof(GridLine, branch) == 24);
 
 struct TrieNodeFlat {
     bytes32 key;
@@ -423,7 +463,7 @@ inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
 template <bool DeletionEnabled = false, class StateT = ActiveState>
 class GridMPT {
     unsigned depth_{0};              // The current depth we are visiting
-    unsigned search_nib_cursor_{0};  // The position in the current search key
+    uint64_t search_nib_cursor_{0};  // The position in the current search key
     // Previous root of the trie
     bytes32 prev_root_;
     // A stack of grid-lines consisting of TrieNodes. Lines name each other by uint8_t depth, 0xFF marking a

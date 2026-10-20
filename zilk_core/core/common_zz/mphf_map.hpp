@@ -148,6 +148,11 @@ inline constexpr uint32_t kMphfMapVersion = 3u;
     return static_cast<uint32_t>((static_cast<uint64_t>(x) * n) >> 32);
 }
 
+// n < 2^32; the caller keeps it zero-extended.
+[[gnu::always_inline]] inline uint32_t fast_mod_w64(uint32_t x, uint64_t n) noexcept {
+    return static_cast<uint32_t>((static_cast<uint64_t>(x) * n) >> 32);
+}
+
 [[gnu::always_inline]] inline constexpr uint32_t mphf_align8(uint32_t v) noexcept {
     return (v + 7u) & ~uint32_t{7u};
 }
@@ -206,7 +211,7 @@ class MphfMap {
         h_ = h;
         if (h == nullptr) {
             slot_offsets_ = nullptr; data_ = nullptr; collisions_ = nullptr; displacement_ = nullptr;
-            n_keys_ = n_buckets_ = n_collisions_ = 0; seed_factor_ = 0;
+            n_keys_ = n_buckets_ = 0; n_collisions_ = 0; seed_factor_ = 0;
             return;
         }
         const auto* base = reinterpret_cast<const uint8_t*>(h);
@@ -221,7 +226,7 @@ class MphfMap {
     }
 
     bool valid() const noexcept { return h_ != nullptr; }
-    uint32_t n_keys() const noexcept { return n_keys_; }
+    uint32_t n_keys() const noexcept { return static_cast<uint32_t>(n_keys_); }
     /// The data section: every entry's body lies at an 8-aligned offset from here.
     const uint8_t* data_base() const noexcept { return data_; }
     uint32_t data_size() const noexcept { return h_ != nullptr ? h_->data_size : 0u; }
@@ -231,10 +236,10 @@ class MphfMap {
     [[gnu::always_inline]] uint32_t index_lookup(uint64_t key) const noexcept {
         const uint64_t z1 = key + seed_factor_;
         const uint64_t h1 = mix64_body(z1);
-        const uint32_t b  = fast_mod_u32(static_cast<uint32_t>(h1), n_buckets_);
+        const uint32_t b  = fast_mod_w64(static_cast<uint32_t>(h1), n_buckets_);
         const uint64_t df = displacement_[b];
         const uint64_t h2 = mix64_body(z1 + df);
-        return fast_mod_u32(static_cast<uint32_t>(h2), n_keys_);
+        return fast_mod_w64(static_cast<uint32_t>(h2), n_keys_);
     }
 
     template <std::size_t KeySize, std::size_t KeyOffset,
@@ -263,7 +268,7 @@ class MphfMap {
     template <typename Cb>
     void for_each_offset(Cb&& cb) const noexcept {
         if (h_ == nullptr || n_keys_ == 0) return;
-        for (uint32_t i = 0; i < n_keys_; ++i) {
+        for (uint32_t i = 0, e = static_cast<uint32_t>(n_keys_); i < e; ++i) {
             const uint32_t off = slot_offsets_[i];
             if (off != 0) cb(uint64_t{off});
         }
@@ -303,8 +308,9 @@ class MphfMap {
     uint8_t*                  data_{nullptr};
     const MphfCollisionEntry* collisions_{nullptr};
     const uint64_t*           displacement_{nullptr};
-    uint32_t n_keys_{0}, n_buckets_{0}, n_collisions_{0};
     uint64_t seed_factor_{0};
+    uint64_t n_keys_{0}, n_buckets_{0};  // < 2^32: wide loads, no narrow-field extend
+    uint32_t n_collisions_{0};
 };
 
 // The one layout check for an MphfMap region. Every map passes it before an MphfMap
