@@ -334,12 +334,16 @@ inline constexpr auto kBls12381P = intx::from_string<uint384>(
 
 // First quadratic non-residue mod secp256k1 p.
 inline constexpr uint256 kSecp256k1Nqr{3};
+// [λ]P = φ(P)
+inline constexpr auto kSecp256k1Lambda = intx::from_string<uint256>(
+    "0x5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72");
 
 /* ───────── Free-input calls (untrusted hints, H1) ───────── */
 
 inline constexpr unsigned kFcallSecp256k1FpInv = 1;
 inline constexpr unsigned kFcallSecp256k1FnInv = 2;
 inline constexpr unsigned kFcallSecp256k1FpSqrt = 3;
+inline constexpr unsigned kFcallSecp256k1GlvDecompose = 4;
 inline constexpr unsigned kFcallSecp256r1FnInv = 5;
 inline constexpr unsigned kFcallBn254FpInv = 6;
 inline constexpr unsigned kFcallBls12381FpInv = 10;
@@ -425,6 +429,30 @@ template <unsigned Id>
         : "memory");
 }
 
+// 10 results: k1, k2, sigma1, sigma2.
+[[gnu::always_inline]] inline void fcall_secp256k1_glv_decompose(
+    const uint256& k, uint64_t h[10]) noexcept
+{
+    asm volatile(
+        "csrs 0x8F2, %10\n\t"
+        "csrwi 0x8C0, %11\n\t"
+        "csrr %0, 0xFFE\n\t"
+        "csrr %1, 0xFFE\n\t"
+        "csrr %2, 0xFFE\n\t"
+        "csrr %3, 0xFFE\n\t"
+        "csrr %4, 0xFFE\n\t"
+        "csrr %5, 0xFFE\n\t"
+        "csrr %6, 0xFFE\n\t"
+        "csrr %7, 0xFFE\n\t"
+        "csrr %8, 0xFFE\n\t"
+        "csrr %9, 0xFFE"
+        : "=r"(h[0]), "=r"(h[1]), "=r"(h[2]), "=r"(h[3]),
+          "=r"(h[4]), "=r"(h[5]), "=r"(h[6]), "=r"(h[7]),
+          "=r"(h[8]), "=r"(h[9])
+        : "r"(&k[0]), "i"(kFcallSecp256k1GlvDecompose)
+        : "memory");
+}
+
 // Hint checks; any mismatch aborts (H1).
 [[gnu::always_inline]] inline void verify_inv256(
     const uint256& x, const uint256& inv, const uint256& m) noexcept
@@ -464,6 +492,18 @@ template <unsigned Id>
     arith256(&q[0], &b[0], &r[0], &dl[0], &dh[0]);
     if (r >= b || dl != a || dh != 0) [[unlikely]]
         zisk_abort();
+}
+
+// Bounds match the 128-bit digit loop.
+[[gnu::always_inline]] inline bool verify_secp256k1_glv(const uint256& k, const uint64_t h[10]) noexcept
+{
+    if ((h[2] | h[3] | h[6] | h[7]) != 0 || h[8] > 1 || h[9] > 1) [[unlikely]]
+        return false;
+    const uint256 k1{h[0], h[1], 0, 0};
+    const uint256 k2{h[4], h[5], 0, 0};
+    const uint256 s1 = (h[8] != 0 && k1 != 0) ? kSecp256k1N - k1 : k1;
+    const uint256 s2 = (h[9] != 0 && k2 != 0) ? kSecp256k1N - k2 : k2;
+    return arith256_mod(kSecp256k1Lambda, s2, s1, kSecp256k1N) == k;
 }
 
 // Precondition x < m; zero skips oracle.
@@ -521,6 +561,13 @@ inline bool secp256k1_fp_sqrt(const uint256& x, bool odd, uint256& y) noexcept
     }
     const uint64_t is_qr = detail::fcall_secp256k1_fp_sqrt(x, odd, y);
     return detail::verify_secp256k1_fp_sqrt(x, odd, is_qr, y);
+}
+
+// False ⇒ software split.
+inline bool secp256k1_glv_decompose(const uint256& k, uint64_t h[10]) noexcept
+{
+    detail::fcall_secp256k1_glv_decompose(k, h);
+    return detail::verify_secp256k1_glv(k, h);
 }
 
 // b == 0 gives EVM's {0, 0}.
