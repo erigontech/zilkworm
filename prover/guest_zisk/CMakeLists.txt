@@ -34,6 +34,7 @@ add_executable(z6m_guest
     src/zisk_entrypoint.S
     src/zisk_runtime.cpp
     src/zisk_alloc.cpp
+    src/hashtable_policy.cpp
     src/main.cpp
     src/runtime_stubs.c
     src/dma/memcpy.s
@@ -52,6 +53,9 @@ if(Z6M_ZISK_HEAP_STATS)
     target_compile_definitions(z6m_guest PRIVATE Z6M_ZISK_HEAP_STATS)
 endif()
 
+# LTO would drop the --wrap target.
+set_source_files_properties(src/hashtable_policy.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
+
 target_link_options(z6m_guest PRIVATE
     -nostdlib
     -nostartfiles
@@ -62,6 +66,8 @@ target_link_options(z6m_guest PRIVATE
     # Keep PROVIDEd map symbols for postlink checks.
     -Wl,--require-defined=_general_registers_data_start
     -Wl,--require-defined=_output_data_start
+    # Integer rehash check replaces libstdc++ soft float.
+    -Wl,--wrap=_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEmmm
 )
 set_target_properties(z6m_guest PROPERTIES LINK_DEPENDS ${LINKER_SCRIPT})
 
