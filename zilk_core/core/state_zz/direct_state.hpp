@@ -314,7 +314,7 @@ class DirectState : public BlockState {
 
     void apply_state_diff(const evmone::state::StateDiff& diff);
 
-#if !defined(AIRBENDER)
+#if !defined(AIRBENDER) && !defined(ZISK)
     /// Host builds check every account handle against the lookup it replaces, so the whole test
     /// suite exercises the invariant that the handle is the record of `addr`.
     void check_account_handle(const evmc::address& addr, const void* handle) const noexcept {
@@ -756,7 +756,7 @@ class DirectStateView final : public evmone::state::StateView {
     /// A null handle (access-list placeholder, account made by CREATE) takes the lookup.
     evmc::bytes_view get_account_code_at(const void* handle, const evmc::address& addr) const noexcept override {
         if (handle == nullptr) return get_account_code(addr);
-#if !defined(AIRBENDER)
+#if !defined(AIRBENDER) && !defined(ZISK)
         state_.check_account_handle(addr, handle);
 #endif
         return state_.read_code(*static_cast<const zilkworm::Account*>(handle));
@@ -765,7 +765,7 @@ class DirectStateView final : public evmone::state::StateView {
     evmc::bytes32 get_storage_at(const void* handle, const evmc::address& addr,
                                  const evmc::bytes32& key) const noexcept override {
         if (handle == nullptr) return get_storage(addr, key);
-#if !defined(AIRBENDER)
+#if !defined(AIRBENDER) && !defined(ZISK)
         state_.check_account_handle(addr, handle);
 #endif
         return state_.read_storage(*static_cast<const zilkworm::Account*>(handle), addr, key);

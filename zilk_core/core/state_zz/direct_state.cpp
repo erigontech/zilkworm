@@ -873,7 +873,7 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
 void DirectState::apply_state_diff(const evmone::state::StateDiff& diff) {
     for (const auto& m : diff.modified_accounts) {
         // The handle is the record of get_account(), which find_or_create_account() would return.
-#if !defined(AIRBENDER)
+#if !defined(AIRBENDER) && !defined(ZISK)
         check_account_handle(m.addr, m.view_handle);
 #endif
         auto* pa = m.view_handle ? const_cast<Account*>(static_cast<const Account*>(m.view_handle))
