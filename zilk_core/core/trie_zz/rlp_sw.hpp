@@ -100,6 +100,26 @@ inline uint8_t* encode_hp_path(uint8_t* out, const uint8_t* nib, size_t n, bool 
         }
         if (bytes != 0) *out++ = static_cast<uint8_t>(((x << 4) | (x >> 8)) >> 8);
     }
+#elif defined(ZISK) && defined(__riscv) && __riscv_xlen == 64
+    // ZisK: 8B stores; odd = even at nib+1
+    typedef uint64_t __attribute__((may_alias)) w64;
+    const uint8_t* const p = odd ? nib + 1 : nib;
+    const size_t pairs = (n - (odd ? 1 : 0)) / 2;
+    constexpr uint64_t M = 0x0F0F0F0F0F0F0F0Full;
+    size_t i = 0;
+    for (; i + 8 <= pairs; i += 8) {
+        const w64* const w = reinterpret_cast<const w64*>(p + 2 * i);
+        const uint64_t x0 = *w & M;
+        const uint64_t x1 = w[1] & M;
+        const uint64_t t0 = (x0 << 4) | (x0 >> 8);
+        const uint64_t t1 = (x1 << 4) | (x1 >> 8);
+        const uint64_t g0 = (t0 & 0xFF) | ((t0 >> 8) & 0xFF00) | ((t0 >> 16) & 0xFF0000) | ((t0 >> 24) & 0xFF000000);
+        const uint64_t g1 = (t1 & 0xFF) | ((t1 >> 8) & 0xFF00) | ((t1 >> 16) & 0xFF0000) | ((t1 >> 24) & 0xFF000000);
+        const uint64_t r = g0 | (g1 << 32);
+        std::memcpy(out + i, &r, 8);
+    }
+    for (; i < pairs; ++i) out[i] = static_cast<uint8_t>((p[2 * i] << 4) | (p[2 * i + 1] & 0x0F));
+    out += pairs;
 #else
     size_t i = odd ? 1 : 0;
     for (; i + 1 < n; i += 2) *out++ = static_cast<uint8_t>((nib[i] << 4) | (nib[i + 1] & 0x0F));

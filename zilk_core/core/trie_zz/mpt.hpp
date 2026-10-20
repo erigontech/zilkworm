@@ -474,6 +474,7 @@ class GridMPT {
     // holds 16 D + 1 lines (76 keys ground to share prefixes of up to 4 nibbles make 81).
     static constexpr size_t kMaxLines = 255;
     std::vector<GridLine> grid_;
+    size_t grid_n_ = 0;  // cached count; kills size()'s div-by-728 in loops
     nibbles64 search_nibbles_;  // The current key being searched for/inserted
 
     bool last_was_delete_{false};
@@ -555,7 +556,8 @@ class GridMPT {
         missing_count_ = 0;
         failed_ = false;
         prev_root_ = new_prev_root;
-        grid_.clear();                  
+        grid_.clear();
+        grid_n_ = 0;
         embedded_rlp_copies_.clear();   // keeps capacity
         // search_nibbles_ is overwritten on each insert by the main algorithm
         // (calc_root_from_updates seeds it from the first update); no need to

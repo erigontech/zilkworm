@@ -103,9 +103,10 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     // Tip: When we are searching for the next nibble, we don't need more than
     // the first level of children from the common branch, ever again
     //================================================
-    if (grid_.size() <= 1 || depth_ == 0) {
-        if (grid_.size() > 0 && is_empty(grid_[0])) {
-            grid_.clear();  // with every deleted line above the root, as cascade_delete() does
+    if (grid_n_ <= 1 || depth_ == 0) {
+        if (grid_n_ > 0 && is_empty(grid_[0])) {
+            grid_.clear();
+            grid_n_ = 0;  // with every deleted line above the root, as cascade_delete() does
         }
         return;
     }
@@ -154,9 +155,10 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     } else if (cur_parent_depth > 0) {
         unsigned next_parent_depth = grid_[cur_parent_depth].parent_depth;
         parent_consumed = grid_[next_parent_depth].consumed;  // For the next parent
+        GridLine* const lines = grid_.data();  // reserved at construction; appends never reallocate
         while (parent_consumed > lcp && cur_parent_depth > 0) {
-            for (auto i = grid_.size() - 1; i > cur_parent_depth; --i) {
-                if (grid_[i].parent_depth >= cur_parent_depth) {
+            for (auto i = grid_n_ - 1; i > cur_parent_depth; --i) {
+                if (lines[i].parent_depth >= cur_parent_depth) {
                     // Deletes line i alone: only an empty line takes more lines with it (cascade_delete deletes
                     // the ancestors it leaves empty), which would leave i and the lines this loop climbs to
                     // stale, and none gets here. A deletion's empty lines go in the cascade above, before any
@@ -235,7 +237,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
 
         search_nib_cursor_ = 0;
 
-        if (!grid_.empty() && search_nibbles_.len > 0) {
+        if (grid_n_ != 0 && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
             // and it's in a branch, or just a leaf, or nothing (can't be ext -> leaf)
             seek_with_last_insert(trie_upd, prev);
@@ -243,7 +245,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
         search_nibbles_.assign_bytes32(trie_upd.key);
         prev = &trie_upd;
 
-        if (grid_.empty()) {
+        if (grid_n_ == 0) {
             // Either the very first update, or the preceding deletes emptied
             // the whole trie (seek pops the last line then). Descending the
             // main loop would read grid_[0] out of bounds; this key simply
@@ -360,11 +362,11 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
                 if (m > 0 || new_ext_len > 0) {
                     d1 = depth_ + 1;
-                    while (d1 < grid_.size() && grid_[d1].parent_depth != 0xFF) ++d1;
+                    while (d1 < grid_n_ && grid_[d1].parent_depth != 0xFF) ++d1;
                 }
                 if (new_ext_len > 0 && m > 0) {
                     d2 = d1 + 1;
-                    while (d2 < grid_.size() && grid_[d2].parent_depth != 0xFF) ++d2;
+                    while (d2 < grid_n_ && grid_[d2].parent_depth != 0xFF) ++d2;
                 }
 
                 if (old_child_depth != 0) {
@@ -467,7 +469,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             delete_leaf(depth_);
                             last_was_delete_ = true;
                             depth_ = parent_depth;
-                            if (!grid_.empty()) {  // deleting a root leaf empties the grid
+                            if (grid_n_ != 0) {  // deleting a root leaf empties the grid
                                 grid_[depth_].modified = true;
                             }
                             break;  // delete complete
@@ -527,15 +529,15 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
         }
     }
 
-    while (grid_.size() > 1) {
-        fold_line(grid_.size() - 1);
+    while (grid_n_ > 1) {
+        fold_line(grid_n_ - 1);
     }
 
-    if (grid_.size() == 0) {
+    if (grid_n_ == 0) {
         return kEmptyRoot;
     }
     fold_line(0);
-    if (grid_.empty()) {
+    if (grid_n_ == 0) {
         return kEmptyRoot;
     }
     // An unmodified root is the node verified to hash to prev_root_.

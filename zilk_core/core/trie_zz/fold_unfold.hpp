@@ -196,10 +196,10 @@ void GridMPT<DeletionEnabled, StateT>::delete_leaf(unsigned depth) {
         parent.child_depth[parent_slot] = 0;  // clear
 
         // Compact easily if it's in the middle and shares parent with the last one
-        if (depth != grid_.size() - 1 && grid_.back().parent_depth == grid_line.parent_depth) {
+        if (depth != grid_n_ - 1 && grid_.back().parent_depth == grid_line.parent_depth) {
             grid_line = grid_.back();  // TODO: Use smaller copy for leaf
             parent.child_depth[grid_line.parent_slot] = depth;
-            depth = grid_.size() - 1;
+            depth = grid_n_ - 1;
         }
     }
     delete_line(depth);
@@ -208,14 +208,16 @@ void GridMPT<DeletionEnabled, StateT>::delete_leaf(unsigned depth) {
 template <bool DeletionEnabled, class StateT>
 void GridMPT<DeletionEnabled, StateT>::pop_back() {
     grid_.pop_back();
-    depth_ = grid_.size() - 1;
+    --grid_n_;
+    depth_ = grid_n_ - 1;
 }
 
 // Soft delete a line in the middle, hard-delete from the end
 template <bool DeletionEnabled, class StateT>
 inline void GridMPT<DeletionEnabled, StateT>::delete_line(unsigned depth) {
-    if (depth == grid_.size() - 1) {
+    if (depth == grid_n_ - 1) {
         grid_.pop_back();
+        --grid_n_;
     } else {
         grid_[depth].parent_depth = 0xff;
     }
@@ -224,7 +226,7 @@ template <bool DeletionEnabled, class StateT>
 inline unsigned GridMPT<DeletionEnabled, StateT>::cascade_delete(unsigned depth) {
     while (is_empty(grid_[depth])) {
         auto& grid_line = grid_[depth];
-        if (grid_.size() > 1 && depth > 0) {
+        if (grid_n_ > 1 && depth > 0) {
             auto parent_depth = grid_line.parent_depth;
             auto& parent = grid_[parent_depth];
             switch (parent.kind) {
@@ -247,6 +249,7 @@ inline unsigned GridMPT<DeletionEnabled, StateT>::cascade_delete(unsigned depth)
             // An empty root has no line left below it: drop the deleted ones above it too, or the walk would go
             // on from a root marked deleted.
             grid_.clear();
+            grid_n_ = 0;
             return 0;
         }
     }
@@ -260,8 +263,9 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
     if (grid_line.parent_depth == 0xFF) {  // Phantom line
         // Popped once it is the last line (see delete_line); one in the middle stays until then, as popping
         // here would take a live line from the end.
-        if (depth == grid_.size() - 1) {
+        if (depth == grid_n_ - 1) {
             grid_.pop_back();
+            --grid_n_;
         }
         return;
     }
@@ -290,6 +294,7 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
                 grid_line.modified = true;
                 grid_line.child_depth[non_empty_nib] = 0;
                 grid_.pop_back();
+                --grid_n_;
                 // The extension folds into the parent below, in this call. A seek pass folds the parent right after
                 // this line, and an extension left behind merged into it only once the parent had gone with the
                 // reference it held before (a delete in this branch, then an insert splitting the extension above).
@@ -299,13 +304,13 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
                 fold_line(grid_line.child_depth[non_empty_nib]);  // The extension would get absorbed, if needed, in the next recursion
                 // An empty child (a witness leaf without a value) goes with every line it leaves empty, this
                 // extension included, as it has no child reference of its own yet.
-                if (depth >= grid_.size() || grid_line.parent_depth == 0xFF) {
+                if (depth >= grid_n_ || grid_line.parent_depth == 0xFF) {
                     return;
                 }
             }
         }
 
-        if (grid_.size() > 1) {
+        if (grid_n_ > 1) {
             GridLine& parent = grid_[grid_line.parent_depth];
 
             // Note: the following isn't code duplication
@@ -349,7 +354,7 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
     }
 
     if (!grid_line.modified) {
-        if (grid_.size() > 1) {
+        if (grid_n_ > 1) {
             // Clear parent's pointer; otherwise restructures follow a dangling depth.
             grid_[grid_line.parent_depth].child_depth[grid_line.parent_slot] = 0;
             delete_line(depth);
@@ -357,7 +362,7 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
         return;
     }
     // The root has no parent to take its reference: calc_root_from_updates() encodes and hashes it.
-    if (grid_.size() <= 1) {
+    if (grid_n_ <= 1) {
         return;
     }
 
@@ -516,7 +521,8 @@ unsigned GridMPT<DeletionEnabled, StateT>::move_line(unsigned from_depth) {
             prev_slot = child_slot;
         } else {
             grid_.push_back(cache);
-            auto pushed = static_cast<unsigned>(grid_.size() - 1);
+            ++grid_n_;
+            auto pushed = static_cast<unsigned>(grid_n_ - 1);
 
             if (first) {
                 result_depth = pushed;
@@ -580,20 +586,21 @@ inline GridLine* GridMPT<DeletionEnabled, StateT>::emplace_line(Kind kind, unsig
         return nullptr;
     }
     // The grid never outgrows its allocation, which is kMaxLines (see grid_).
-    if (grid_.size() >= kMaxLines) [[unlikely]] {
+    if (grid_n_ >= kMaxLines) [[unlikely]] {
         failed_ = true;
         sys_println("{\"err\":\"grid full\"}");
         return nullptr;
     }
     grid_.emplace_back(kind, parent_slot, parent_depth, consumed_init);
-    depth_ = grid_.size() - 1;
+    ++grid_n_;
+    depth_ = grid_n_ - 1;
     if (depth_ > 0) link_to_parent(grid_.back(), depth_, parent_slot, parent_depth);
     return &grid_.back();
 }
 
 template <bool DeletionEnabled, class StateT>
 inline bool GridMPT<DeletionEnabled, StateT>::has_room(unsigned lines) {
-    if (grid_.size() + lines <= kMaxLines) [[likely]] {
+    if (grid_n_ + lines <= kMaxLines) [[likely]] {
         return true;
     }
     failed_ = true;
@@ -610,7 +617,7 @@ inline bool GridMPT<DeletionEnabled, StateT>::insert_line_at(unsigned target_dep
         return false;
     }
 
-    if (target_depth == grid_.size()) {
+    if (target_depth == grid_n_) {
         // Same as insert_line — append to back
         return insert_line(parent_slot, parent_depth, std::forward<NodeType>(node));
     }
@@ -692,7 +699,7 @@ inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot)
         sys_println("{\"err\":\"slot > 15\"}");
         return UnfoldResult::kUndefined;
     }
-    if (depth_ >= grid_.size()) [[unlikely]] {
+    if (depth_ >= grid_n_) [[unlikely]] {
         failed_ = true;
         sys_println("{\"err\":\"depth >= grid_size\"}");
         return UnfoldResult::kUndefined;
@@ -705,7 +712,7 @@ inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot)
 
     auto& grid_line = grid_[depth_];
     if (auto s = grid_line.child_depth[slot]; s) {  // Unfolded child exists
-        if (s >= grid_.size()) [[unlikely]] {
+        if (s >= grid_n_) [[unlikely]] {
             failed_ = true;
             sys_println("{\"err\":\"child_depth past the grid\"}");
             return UnfoldResult::kUndefined;
@@ -737,7 +744,7 @@ inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot)
         auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
             return kprefix::SnapRequest{snap_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
                                                                          : kprefix::kNoSlot,
-                                        grid_.size() & (kprefix::kRows - 1)};
+                                        grid_n_ & (kprefix::kRows - 1)};
         });
         if (!rlp_opt) [[unlikely]] {
             ++missing_count_;
