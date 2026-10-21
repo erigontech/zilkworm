@@ -576,7 +576,7 @@ TEST_CASE("GridMPT light read-only descent agrees on embedded nodes, the 17th va
         std::vector<Bytes> kids;
         std::vector<Update> reads;
         std::vector<Bytes> claims;
-        claims.reserve(16);
+        claims.reserve(17);  // +1 for the bad[3] override
         for (uint8_t i = 0; i < 16; ++i) {
             const Bytes leaf = node_leaf(std::vector<uint8_t>(63, i), value(i + 1));
             kids.push_back(child_hash_ref(put(nodes, leaf)));
@@ -595,7 +595,7 @@ TEST_CASE("GridMPT light read-only descent agrees on embedded nodes, the 17th va
 
     {
         Bytes32Map nodes;
-        const bytes32 root = put(nodes, node_leaf(std::vector<uint8_t>(64, 1), {}));
+        const bytes32 root = put(nodes, node_leaf(std::vector<uint8_t>(64, 1), Bytes{}));
         expect_agree(nodes, root, {{key_with_nibbles({1}, 1), z, {}}}, {});
 
         Bytes32Map nodes2;

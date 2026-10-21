@@ -29,12 +29,28 @@ template <size_t N, bool Lanes>
         return std::memcmp(a, b, N) == 0;
     } else {
         typedef uint64_t __attribute__((may_alias)) w64;
+#if defined(__riscv)
+        // misaligned loads OK on target
         for (size_t i = 0; i + 8 <= N; i += 8)
             if (*reinterpret_cast<const w64*>(a + i) != *reinterpret_cast<const w64*>(b + i))
                 return false;
         if constexpr (N % 8 != 0)
             if (*reinterpret_cast<const w64*>(a + N - 8) != *reinterpret_cast<const w64*>(b + N - 8))
                 return false;
+#else
+        for (size_t i = 0; i + 8 <= N; i += 8) {
+            w64 x, y;
+            std::memcpy(&x, a + i, 8);
+            std::memcpy(&y, b + i, 8);
+            if (x != y) return false;
+        }
+        if constexpr (N % 8 != 0) {
+            w64 x, y;
+            std::memcpy(&x, a + N - 8, 8);
+            std::memcpy(&y, b + N - 8, 8);
+            if (x != y) return false;
+        }
+#endif
         return true;
     }
 }

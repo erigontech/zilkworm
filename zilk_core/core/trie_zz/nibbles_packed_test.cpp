@@ -69,7 +69,7 @@ TEST_CASE("nibbles64 packs bytes32 like the byte arrays did", "[trie][packed]") 
         const bytes32 k = rand_key(rng);
         std::memcpy(buf + shift, k.bytes, 32);
         nibbles64 p;
-        p.assign_bytes32(*reinterpret_cast<const bytes32*>(buf + shift));
+        p.assign_bytes32_unaligned(buf + shift);
         const nibbles64 q = nibbles64::from_bytes32(k);
         REQUIRE(p.w == q.w);
     }

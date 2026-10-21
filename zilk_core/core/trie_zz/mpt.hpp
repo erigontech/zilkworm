@@ -129,6 +129,16 @@ struct nibbles64 {
         }
     }
 
+    // assign_bytes32 for a source that may be misaligned
+    void assign_bytes32_unaligned(const uint8_t* bytes) noexcept {
+        len = 64;
+        for (unsigned i = 0; i < 4; ++i) {
+            uint64_t x = 0;
+            for (unsigned j = 0; j < 8; ++j) x |= uint64_t{bytes[8 * i + j]} << (8 * j);
+            w[i] = nib_swap64(x);
+        }
+    }
+
     // Requires off + n <= 64.
     nibbles64 slice(size_t off, size_t n) const noexcept {
         [[assume(off + n <= 64)]];
