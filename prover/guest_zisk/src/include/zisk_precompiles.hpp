@@ -63,10 +63,18 @@ static_assert(sizeof(InOutParams) == 16 && alignof(InOutParams) == 8);
 static_assert(sizeof(Blake2bRoundParams) == 24 && offsetof(Blake2bRoundParams, state) == 8);
 static_assert(alignof(uint256) == 8 && alignof(uint384) == 8);
 
+#if !defined(__riscv)
+void zisk_csr_model(uint16_t csr, const void* p) noexcept;  // Host differential tests link a model.
+#endif
+
 template <uint16_t Csr>
 [[gnu::always_inline]] inline void csrs(const void* p) noexcept
 {
+#if defined(__riscv)
     asm volatile("csrs %0, %1" : : "i"(Csr), "r"(p) : "memory");
+#else
+    zisk_csr_model(Csr, p);
+#endif
 }
 
 /* ───────── Raw precompiles (LE u64 limbs) ───────── */
@@ -603,6 +611,24 @@ inline intx::div_result<uint256> sdivrem256(const uint256& u, const uint256& v) 
     return {q_is_neg ? -res.quot : res.quot, u_is_neg ? -res.rem : res.rem};
 }
 
+// Asserted against evmone Curve::ORDER.
+inline constexpr uint256 kBn254N{0x43e1f593f0000001, 0x2833e84879b97091, 0xb85045b68181585d,
+    0x30644e72e131a029};
+
+// Same accept set as evmone validate.
+[[gnu::always_inline]] inline bool bn254_point_valid(const uint64_t w[8]) noexcept
+{
+    const uint256 x{w[0], w[1], w[2], w[3]};
+    const uint256 y{w[4], w[5], w[6], w[7]};
+    if (x >= kBn254P || y >= kBn254P) [[unlikely]]
+        return false;
+    if ((x | y) == 0) [[unlikely]]
+        return true;
+    const auto x2 = mulmod256(x, x, kBn254P);
+    static constexpr uint256 kThree{3};
+    return mulmod256(y, y, kBn254P) == arith256_mod(x2, x, kThree, kBn254P);
+}
+
 }  // namespace zisk
 
 /* ───────── SP1-compatible names for shared evmone sites ───────── */
@@ -679,3 +705,93 @@ using sp1_AffinePoint = uint64_t[8];
 {
     zisk::bn254_complex_mul(p, q);
 }
+
+/* ───────── bn254 affine loops (host-modelable) ───────── */
+
+namespace zisk {
+
+[[gnu::always_inline]] inline bool sp1_point_zero(const uint64_t* p) noexcept
+{
+    uint64_t fold = 0;
+    for (size_t i = 0; i < 8; ++i)
+        fold |= p[i];
+    return fold == 0;
+}
+
+inline constexpr size_t kSp1BnPointSize = 64 / sizeof(uint64_t);
+
+[[gnu::always_inline]] inline void sp1_bn_add(uint64_t* r, const uint64_t* p) noexcept
+{
+    if (sp1_point_zero(p)) [[unlikely]]
+        return;
+    if (sp1_point_zero(r)) [[unlikely]]
+    {
+        std::memcpy(r, p, 64);
+        return;
+    }
+
+    const auto& rx = *reinterpret_cast<const intx::uint256*>(&r[0]);
+    const auto& ry = *reinterpret_cast<const intx::uint256*>(&r[kSp1BnPointSize / 2]);
+    const auto& px = *reinterpret_cast<const intx::uint256*>(&p[0]);
+    const auto& py = *reinterpret_cast<const intx::uint256*>(&p[kSp1BnPointSize / 2]);
+
+    if (rx == px) [[unlikely]]
+    {
+        if (ry == py)
+        {
+            bn254_curve_dbl(r);
+            return;
+        }
+        if (ry == kBn254P - py)
+        {
+            std::memset(r, 0, 64);
+            return;
+        }
+    }
+
+    bn254_curve_add(r, p);
+}
+
+[[gnu::always_inline]] inline void sp1_bn_mul(uint64_t* r, const uint64_t* p, intx::uint256 c) noexcept
+{
+    while (true)
+    {
+        const auto [reduced_c, less_than] = intx::subc(c, kBn254N);
+        if (less_than) [[likely]]
+            break;
+        c = reduced_c;
+    }
+
+    std::memset(r, 0, 64);
+    const auto bit_width = sizeof(c) * 8 - intx::clz(c);
+
+    if (bit_width == 0) [[unlikely]]
+        return;
+
+    if (sp1_point_zero(p)) [[unlikely]]
+        return;
+
+    std::memcpy(r, p, 64);
+    const uint64_t* const cl = &c[0];
+    auto i = bit_width - 1;
+    if (i != 0)
+    {
+        unsigned wi = (i - 1) >> 6;
+        uint64_t mask = uint64_t{1} << ((i - 1) & 63);
+        do
+        {
+            bn254_curve_dbl(r);
+            if ((cl[wi] & mask) != 0)
+                bn254_curve_add(r, p);
+            mask >>= 1;
+            if (mask == 0) [[unlikely]]
+            {
+                mask = uint64_t{1} << 63;
+                wi -= (wi != 0);
+            }
+            --i;
+        } while (i != 0);
+    }
+}
+
+}  // namespace zisk

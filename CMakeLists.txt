@@ -132,6 +132,7 @@ if(BUILD_TESTING)
     zilk_core/core/execution/div_mod_frontend_test.cpp
     zilk_core/core/execution/precompile_ecrec_test.cpp
     zilk_core/core/execution/precompile_lookup_test.cpp
+    zilk_core/core/execution/precompile_zisk_model_test.cpp
     zilk_core/core/execution/exp_pow2_base_test.cpp
     zilk_core/core/execution/kzg_pairing_test.cpp
     zilk_core/core/execution/mulmod_sparse_test.cpp
@@ -238,6 +239,8 @@ if(BUILD_TESTING)
     set(ZILK_TEST_LIBS -Wl,--start-group silkworm_dev silkworm_core silkworm_types_zz -Wl,--end-group)
   endif()
   # kzg_pairing_test builds proofs and its reference pairing with blst.
+  # precompile_zisk_model_test compiles the guest's CSR-header paths against a host model.
+  target_include_directories(zilkworm.tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/prover/guest_zisk/src/include)
   target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} blst::blst Catch2::Catch2WithMain)
   # The Airbender guest's blst cyclotomic squaring only exists inside evmone's patch script. The
   # test extracts the script's text with Python and runs it on a host emulation of the BigInt
