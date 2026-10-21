@@ -27,6 +27,21 @@ equal `PROJECT_VERSION`; any `-` suffix marks the release as a pre-release.
 The workflow then builds the release binaries, generates `SHA256SUMS.txt`, and publishes them
 to the `vX.Y.Z` GitHub release with the CHANGELOG section as the body.
 
+## Hypercube guests
+
+The release builds the SP1 Hypercube guest twice and publishes both:
+- `z6m_guest_hypercube_mfbd.{elf,vk}`: the DirectState guest (`make z6m_guest`), which takes
+  MFBD bundles; the `z6m_prover_hypercube` binary embeds it.
+- `z6m_guest_hypercube_slib.{elf,vk}`: the HashState guest (`make z6m_guest_slib`, staged by
+  `make ere-bin`), which takes the fixtures' `statelessInputBytes` unchanged; the ERE benchmark
+  runs it, both the `release/*` runs and the one `release.yml` triggers after publishing.
+
+After the release, point the `zilkworm` entry of `artifact-registry.json` in the ere-guests fork
+(`canepat/zilkworm_mfbd`) at the `_slib` assets, with their sha256 from `SHA256SUMS.txt`, and bump
+the fork's version strings; the fork's corpus test and the upstream ere-guests PR resolve the
+guest through that entry. The zkevm-benchmark-workload fork then pins its `[patch]` to the new
+ere-guests fork commit.
+
 ## Airbender image and assets
 
 After checking the tag, and before building anything, the workflow calls

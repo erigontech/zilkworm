@@ -1,5 +1,121 @@
 # Changelog
 
+## v0.1.0-alpha.6 - Native statelessInputBytes with the HashState backend
+
+### Highlights
+
+This release makes the SP1 Hypercube guest consume the canonical EEST stateless input directly. A second read-side state backend, **HashState** (Somnath Banerjee @somnergy, with @canepat), takes the EIP-8025 `statelessInputBytes` the ERE zkEVM benchmark feeds every guest: it decodes the SSZ `StatelessInput` (tests-zkevm v21 schema), rebuilds the pre-state from the witness trie nodes keyed by their keccak, runs the block fail-closed on it, and commits the 43-byte `StatelessValidationResult`. The MFBD host adapter of alpha.4 is no longer on the ERE path.
+
+Releases now publish two Hypercube guests: `z6m_guest_hypercube_mfbd` (DirectState, MFBD bundles, the one `z6m_prover_hypercube` embeds) and `z6m_guest_hypercube_slib` (HashState, `statelessInputBytes`, the ERE guest). On the Sepolia batch the ERE benchmark runs, the HashState guest validates 100/100 blocks and costs 3.3% fewer SP1 cost units than the alpha.4 guest with its adapter; against Reth 0.1.0-rc.4 it is at Z/R 0.477. On the ere-guests corpus for tests-zkevm v21.0.6 it passes 33,854 of 33,854 fixtures.
+
+ZVM1/evmone got Paweł Bylica's SP1 series: shared word-wise memory builtins, the size cost table, reviewed byte-order conversions, the jump and JUMPDEST analysis, and the batched ecrecover with GLV on the SP1 syscalls. Hypercube guest cycles on the 200-block mainnet corpus went from 23.21B at alpha.5 to 17.44B (-24.9%); the Airbender guest from 27.86B to 27.65B (-0.8%).
+
+### HashState backend and statelessInputBytes
+
+#### Reading the witness
+
+`HashState` (`zilk_core/core/state_zz/hash_state.*`, built with `-DZ6M_HASH_STATE=ON`; `ActiveState` names the backend the execution surface runs on) holds the witness's trie nodes and codes in open-addressed stores keyed by keccak. `build_state_from_trie` sweeps the account trie from the parent's state root, then each account's storage trie from its root, and caches every leaf it reaches. A read the sweep cannot settle is walked as a claim of absence down the trie; a read neither cached nor proven absent counts as unconfirmed, and the accept gate rejects the block. Code is resolved by hash from the witness or from code the block itself derives (contract creations, EIP-7702 markers), so a witness may omit any code the block reproduces.
+
+A trie path longer than the 64-nibble key, or a referenced node that does not decode, makes the witness malformed and rejects the block (a tests-zkevm v21.0.6 rule). Clearing an EIP-7702 delegation keeps the authority's storage, as on DirectState. BLOCKHASH walks the parent hashes back from the block's own header through the witness headers, memoized per block: an ancestor is never found by its number, and a header the walk does not reach is an unconfirmed read.
+
+#### Executing and accepting a block
+
+`run_sib` decodes the `NewPayloadRequest` (Gloas shape: `ExecutionPayloadV4`, versioned hashes, parent beacon block root, EIP-7685 request lists), takes its hash tree root, rebuilds the block (transactions and withdrawals roots, requests hash with EIP-8282 builder requests, block access list hash) and checks its hash and versioned hashes against the request, as the MFBD path does. The witness headers must chain by parent hash and end at the block's parent, whose state root anchors the pre-state. From Osaka a block whose canonical RLP exceeds `MAX_RLP_BLOCK_SIZE` (EIP-7934) is rejected. After execution, `check_root_hashstate` folds the block's writes over the parent root with `GridMPT` and accepts only a block whose root matches with every read confirmed.
+
+The guest dispatches on the input's first bytes: `MFBD`, `EJSN`, or the `0x1501` schema prefix of a raw stateless input (`kInputMagicSIB`). An input that does not decode yields the all-zero result, as the spec requires. The public values are `{new_payload_request_root, successful_validation, chain_id, schema_id}`, compared by ere-hosts with the fixture's `statelessOutputBytes`.
+
+#### Corpus results
+
+- ere-guests `executes_registered_guest` on tests-zkevm v21.0.6 (SP1): 33,854/33,854, no expected failures; the cases the other guests list as expected failures pass.
+- `make eest-zkevm-tests` (the JSON corpus through the HashState runner): 3450/3450 files, 124 skipped for lacking a witness. The witness-validation negatives (deliberately broken witnesses on valid blocks) are scored pass iff rejected; an expected-invalid label is waived only when the witness pruned an account a validation gate reads.
+- SSZ merkleization is checked against the ere-guests reference roots; the sample fixture test rebuilds a v21 block from its payload and matches its `statelessOutputBytes`.
+
+Documentation: `docs/hashstate.md` (design), `docs/slib_corpus_validation.md`, `docs/slib_benchmark.md`.
+
+### ERE integration
+
+- `make ere-bin` stages the HashState guest under the name ere-hosts loads; `z6m_guest_vk` derives the MFBD guest's key; `release-artifacts` publishes both guests. The `ERE Benchmark` workflow runs the SLIB guest, from the ref or from a release's `z6m_guest_hypercube_slib` assets.
+- The erigontech forks of `zkevm-benchmark-workload` and `ere-guests` (`canepat/zilkworm_mfbd`) feed Zilkworm the raw `statelessInputBytes` like every other guest; the adapter crate and its dependencies are gone from them.
+- Sepolia, blocks 11905100..11905199, `estimate-cost` (SP1 v6.6.0, ere v0.18.1):
+
+| Client | output_matched | Total estimated cost | Z/R |
+|---|---|---|---|
+| Zilkworm (HashState guest) | 100/100 | 7,397,962,138,984 | **0.477** (median 0.473; cheaper on 98/100) |
+| Reth 0.1.0-rc.4 | 98/100 | 15,498,357,778,963 | |
+| Zilkworm v0.1.0-alpha.4 (DirectState guest + adapter) | 100/100 | 7,653,392,292,202 | 0.494 |
+
+  Reth's two mismatched blocks are the only ones where it is cheaper: it stops early on them.
+- tests-zkevm-benchmark v21.0.5, 30M-gas blocks, through ERE's cost estimator: 1109 cases, median 36.06B, total 65.72T; the `make slib-benchmark` route (raw SP1 cycles) covers 1200 of its 1203 cases, median 259.6M. The run found the unmemoized BLOCKHASH walk (`test_blockhash[block_1]`, 4.12T → 47B).
+
+### Fixes and improvements
+
+#### ZVM1/EVMone and the guests
+
+- Calldata non-zero bytes counted per aligned word on both guests (#119)
+- SP1 built with `-mtune=size` (and `-mstrict-align`), Airbender with `-mbranch-cost=1`: GCC's default cost table prices branches, multiplies and divides as the rocket core does, while both zkVMs charge one cycle per instruction (#120)
+- One set of memcpy, memmove, memset and memcmp for both guests, working in aligned machine words (#121)
+- evmone (erigontech/zvm1) with reviewed byte-order conversions: MLOAD/MSTORE word loads, PUSH data and CALLDATALOAD assembled big-endian in place, SP1 converting byte order as Airbender does (#122); the jump and JUMPDEST analysis: code run in place on SP1 with a lazy JUMPDEST byte map, fused PUSH2 JUMP/JUMPI and comparison jumps (#123, #125); the SP1 ecrecover with the batch's shared inversion, the GLV split and scalar arithmetic on the `uint256_mulmod` syscall (#124)
+
+Guest cycles on the 200-block mainnet corpus (`Hypercube 200-block Bench`, `Airbender 200-block Bench`), exact cycle counts and gas parity on all 200 blocks:
+
+| After | Hypercube cycles | Change | Airbender cycles | Change |
+|---|---|---|---|---|
+| v0.1.0-alpha.5 (`ba41c7c`; evmone v0.25.0, #114) | 23.21B |  | 27.86B |  |
+| Calldata non-zero bytes per aligned word (#119) | 23.16B | -0.2% | 27.85B | ±0.0% |
+| SP1 `-mtune=size`, Airbender `-mbranch-cost=1` (#120) | 23.06B | -0.4% | 27.80B | -0.2% |
+| Shared word-wise memcpy/memmove/memset/memcmp (#121) | 22.16B | -3.9% | 27.71B | -0.3% |
+| evmone: reviewed byte-order conversions (#122) | 20.12B | -9.2% | 27.69B | -0.1% |
+| evmone: jump and JUMPDEST analysis (#123, #125) | 18.61B | -7.5% | 27.65B | -0.2% |
+| evmone: SP1 ecrecover batch, GLV, syscall arithmetic (#124) | 17.44B | -6.3% | 27.65B | ±0.0% |
+| HashState backend and statelessInputBytes path (#32) | 17.44B | ±0.0% | 27.65B | ±0.0% |
+| Two Hypercube guests, ERE on SLIB (#130) | 17.44B | ±0.0% | 27.65B | ±0.0% |
+
+Over the release: Hypercube 23.21B → 17.44B (-24.9%), Airbender 27.86B → 27.65B (-0.8%). The HashState backend and the release plumbing leave the DirectState guests these benches run cycle-neutral.
+
+#### Airbender service
+
+- Every fetch is bounded (`--fetch-timeout`, default 60 s; 10 s for `eth_blockNumber` and the newHeads subscription), so a witness request past reth's 300 s read-transaction limit no longer stalls the service for 75 minutes per block; the service stays near the chain tip instead of working through a backlog (#127)
+
+#### Tests and CI
+
+- EEST fixtures pinned to tests@v21.0.1 for every job (#116); `tx_invalid_first_in_block` is a known failure of the DirectState runner, which runs a test's blocks on one witness in place, and passes on the HashState arm
+- `Unit Tests` builds and runs the HashState backend (`unit-tests-hashstate`); `make eest-zkevm-tests` runs the tests-zkevm corpus (v21.0.6, version-keyed cache) through it, `make slib-benchmark` the benchmark corpus
+- The release workflow builds the guest twice and publishes both; the ERE benchmark takes the SLIB one
+
+### Contributors
+
+| Author | Commits |
+|---|---|
+| Paweł Bylica @chfast | 8 |
+| Somnath Banerjee @somnergy | 3 |
+| @canepat | 1 |
+
+### Commit Log by Category (12 non-merge commits since v0.1.0-alpha.5)
+
+#### HashState & ERE
+
+- `25b9ee2` Add HashState backend and direct StatelessInputBytes input path (#32) (Somnath Banerjee @somnergy, with @canepat)
+- `ceafbf8` ci: publish the MFBD and SLIB hypercube guests, ERE on SLIB (#130) (@canepat)
+
+#### ZVM1/EVMone & Guests
+
+- `8bcc9b8` common_zz: count calldata non-zero bytes per aligned word on both guests (#119) (Paweł Bylica @chfast)
+- `6ce7618` guest: build SP1 with -mtune=size, Airbender with -mbranch-cost=1 (#120) (Paweł Bylica @chfast)
+- `d5deb51` guest: one set of memcpy, memmove, memset and memcmp for both guests (#121) (Paweł Bylica @chfast)
+- `a78cbcc` third_party: evmone with reviewed byte-order conversions for both guests (#122) (Paweł Bylica @chfast)
+- `9c4327a` third_party: evmone with the jump and JUMPDEST analysis changes (#123) (Paweł Bylica @chfast)
+- `d6152d0` third_party: evmone with the jump destination kept whole on 32-bit builds (#125) (Paweł Bylica @chfast)
+- `a6ed4df` third_party: evmone with the SP1 ecrecover batch, GLV and syscall arithmetic (#124) (Paweł Bylica @chfast)
+
+#### Airbender Service
+
+- `46caa9f` Airbender service: bound block fetches and stay near the chain tip (#127) (Somnath Banerjee @somnergy)
+
+#### Tests, CI/CD & Release
+
+- `19fc573` eest: bump fixtures to tests@v21.0.1 (#116) (Paweł Bylica @chfast)
+- `2b4bd5f` Bring the v0.1.0-alpha.5 release notes into main (#128) (Somnath Banerjee @somnergy)
+
 ## v0.1.0-alpha.5 - Real-time proving with Airbender v3
 
 ### Highlights
