@@ -370,7 +370,7 @@ TEST_CASE("zisk model: modexp 4-bit window matches host reference")
             b = static_cast<uint8_t>(rng());
         if (i % 8 == 0)  // small moduli, some powers of two
         {
-            std::fill(&mod_b[1], &mod_b[32], 0);
+            std::fill(mod_b.begin() + 1, mod_b.end(), 0);
             mod_b[0] = static_cast<uint8_t>(1 + (rng() & 0xff));
             if (i % 16 == 0)
                 mod_b[0] = 0x80;

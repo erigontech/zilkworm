@@ -326,7 +326,7 @@ struct ExtensionNode {
 static_assert(offsetof(BranchNode, child) == 0 && alignof(BranchNode) >= 8);
 static_assert(offsetof(nibbles64, w) == 8 && alignof(nibbles64) == 8);
 static_assert(offsetof(ExtensionNode, child) % 8 == 0);
-static_assert(sizeof(BranchNode) == 704);
+static_assert(sizeof(BranchNode) == (sizeof(void*) == 4 ? 632 : 704));  // 4-byte ptrs/ByteView on ilp32
 
 struct LeafNode {
     nibbles64 path;
@@ -400,7 +400,7 @@ struct GridLine {
 static_assert(offsetof(GridLine, child_depth) == 8);
 static_assert(offsetof(GridLine, parent) == 24);
 static_assert(offsetof(GridLine, branch) == 32);
-static_assert(sizeof(GridLine) == 736 && alignof(GridLine) == 8);
+static_assert(sizeof(GridLine) == (sizeof(void*) == 4 ? 664 : 736) && alignof(GridLine) == 8);  // ilp32 child shrink
 
 struct TrieNodeFlat {
     bytes32 key;
