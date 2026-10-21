@@ -48,62 +48,115 @@ using ::zilkworm::keccak_bytes32;
 }  // namespace silkworm
 
 namespace zilkworm {
-// 4 key bytes -> 8 interleaved hi/lo nibble bytes
-[[gnu::always_inline]] inline uint64_t nib_expand32(uint64_t x) noexcept {
-    const auto spread = [](uint64_t t) noexcept {
-        t = (t | (t << 16)) & 0x0000FFFF0000FFFFULL;
-        return (t | (t << 8)) & 0x00FF00FF00FF00FFULL;
-    };
-    return spread((x >> 4) & 0x0F0F0F0FULL) | (spread(x & 0x0F0F0F0FULL) << 8);
+// Nibble i: bits 4*(i%16) of word i/16.
+[[gnu::always_inline]] inline uint64_t nib_swap64(uint64_t x) noexcept {
+    constexpr uint64_t M = 0x0F0F0F0F0F0F0F0Full;
+    return ((x & M) << 4) | ((x >> 4) & M);
+}
+
+// Reads past nibble 63 yield zero.
+[[gnu::always_inline]] inline uint64_t nib_word(const uint64_t* s, size_t off) noexcept {
+    const uint64_t lo = s[off >> 4];
+    const unsigned sh = 4u * static_cast<unsigned>(off & 15u);
+    if (sh == 0) return lo;
+    const uint64_t hi = (off >> 4) + 1 < 4 ? s[(off >> 4) + 1] : 0;
+    return (lo >> sh) | (hi << (64 - sh));
+}
+
+// Requires off + max <= 64.
+[[gnu::always_inline]] inline size_t lcp_packed(const uint64_t* a, const uint64_t* s, size_t off,
+                                                size_t max) noexcept {
+    size_t k = 0;
+    for (; k + 16 <= max; k += 16) {
+        const uint64_t diff = a[k >> 4] ^ nib_word(s, off + k);
+        if (diff != 0) return k + (static_cast<size_t>(__builtin_ctzll(diff)) >> 2);
+    }
+    if (k != max) {
+        const uint64_t diff = a[k >> 4] ^ nib_word(s, off + k);
+        const size_t rem = max - k;
+        const size_t t = diff != 0 ? static_cast<size_t>(__builtin_ctzll(diff)) >> 2 : rem;
+        return k + (t < rem ? t : rem);
+    }
+    return k;
 }
 
 struct nibbles64 {
     uint8_t len{};
-    // Max trie path is 64 nibbles. 8-aligned so a strict-alignment target expands a key with word
-    // stores; len stays first so the path leads both nodes of the ext/leaf union.
-    alignas(8) std::array<uint8_t, 64> nib{};
+    // len leads the ext/leaf union; zero past len.
+    alignas(8) std::array<uint64_t, 4> w{};
 
-    uint8_t& operator[](size_t index) { return nib[index]; }
-    const uint8_t& operator[](size_t index) const { return nib[index]; }
+    uint8_t at(size_t i) const noexcept { return static_cast<uint8_t>((w[i >> 4] >> (4u * (i & 15u))) & 0xFu); }
+
+    void set(size_t i, uint8_t v) noexcept {
+        uint64_t& x = w[i >> 4];
+        const unsigned sh = 4u * static_cast<unsigned>(i & 15u);
+        x = (x & ~(uint64_t{0xF} << sh)) | (uint64_t{v} << sh);
+    }
+
+    void push(unsigned nib) noexcept {  // the host trie walks only
+        set(len, static_cast<uint8_t>(nib & 0xF));
+        ++len;
+    }
+
+    static nibbles64 single(unsigned nib) noexcept {
+        nibbles64 out;
+        out.len = 1;
+        out.w[0] = nib & 0xF;
+        return out;
+    }
 
     static nibbles64 from_bytes32(const bytes32& k) {
         nibbles64 out;
-        out.len = 64;
-        for (size_t i = 0; i < 32; ++i) {
-            uint8_t b = k.bytes[i];
-            out[2 * i] = (b >> 4) & 0x0F;
-            out[2 * i + 1] = b & 0x0F;
+        out.assign_bytes32(k);
+        return out;
+    }
+
+    // from_bytes32 in place: that one value-initializes its result for the caller to copy.
+    void assign_bytes32(const bytes32& k) noexcept {
+        len = 64;
+        if (alignof(void*) == 8 && (reinterpret_cast<uintptr_t>(k.bytes) & 7) == 0) [[likely]] {
+            // One swap per key word.
+            typedef uint64_t __attribute__((may_alias)) w64;
+            const w64* const s = reinterpret_cast<const w64*>(std::assume_aligned<8>(k.bytes));
+#pragma GCC unroll 4
+            for (unsigned i = 0; i < 4; ++i) w[i] = nib_swap64(s[i]);
+            return;
+        }
+        for (unsigned i = 0; i < 4; ++i) {
+            uint64_t x = 0;
+            for (unsigned j = 0; j < 8; ++j) x |= uint64_t{k.bytes[8 * i + j]} << (8 * j);
+            w[i] = nib_swap64(x);
+        }
+    }
+
+    // Requires off + n <= 64.
+    nibbles64 slice(size_t off, size_t n) const noexcept {
+        [[assume(off + n <= 64)]];
+        nibbles64 out;
+        out.len = static_cast<uint8_t>(n);
+        size_t i = 0;
+        for (; i + 16 <= n; i += 16) out.w[i >> 4] = nib_word(w.data(), off + i);
+        if (i != n) {  // Mask keeps zero past len.
+            const uint64_t v = nib_word(w.data(), off + i);
+            out.w[i >> 4] = v & ((uint64_t{1} << (4 * (n - i))) - 1);
         }
         return out;
     }
 
-    // from_bytes32 in place: that one value-initializes its result (a 68-byte memset) for the caller to copy.
-    void assign_bytes32(const bytes32& k) noexcept {
-        len = 64;
-        if (alignof(void*) == 8 && (reinterpret_cast<uintptr_t>(k.bytes) & 7) == 0) [[likely]] {
-            // 8 nibbles per word, no byte traffic
-            typedef uint64_t __attribute__((may_alias)) w64;
-            const w64* const s = reinterpret_cast<const w64*>(std::assume_aligned<8>(k.bytes));
-            w64* const t = reinterpret_cast<w64*>(std::assume_aligned<8>(nib.data()));
-#pragma GCC unroll 4
-            for (unsigned w = 0; w < 4; ++w) {
-                const uint64_t v = s[w];
-                t[2 * w]     = nib_expand32(v);
-                t[2 * w + 1] = nib_expand32(v >> 32);
-            }
-            return;
-        }
-        for (size_t i = 0; i < 32; ++i) {
-            uint8_t b = k.bytes[i];
-            nib[2 * i] = (b >> 4) & 0x0F;
-            nib[2 * i + 1] = b & 0x0F;
-        }
-    }
-
     void append(const nibbles64& other) {
         [[assume(len + other.len <= 64)]];
-        std::memcpy(nib.data() + len, other.nib.data(), other.len);
-        len += other.len;
+        size_t i = 0;
+        for (; i + 16 <= other.len; i += 16) or_word(len + i, nib_word(other.w.data(), i));
+        for (; i < other.len; ++i) set(len + i, other.at(i));
+        len = static_cast<uint8_t>(len + other.len);
+    }
+
+  private:
+    // Destination bits must be zero.
+    void or_word(size_t off, uint64_t v) noexcept {
+        const unsigned sh = 4u * static_cast<unsigned>(off & 15u);
+        w[off >> 4] |= v << sh;
+        if (sh != 0 && (off >> 4) + 1 < 4) w[(off >> 4) + 1] |= v >> (64 - sh);
     }
 };
 
@@ -276,7 +329,7 @@ struct ExtensionNode {
 // BranchNode::set_child_hash places an ethash::hash256 into child[slot].bytes; ExtensionNode::set_child_hash
 // stores whole words into child.
 static_assert(offsetof(BranchNode, child) == 0 && alignof(BranchNode) >= 8);
-static_assert(offsetof(nibbles64, nib) == 8 && alignof(nibbles64) == 8);
+static_assert(offsetof(nibbles64, w) == 8 && alignof(nibbles64) == 8);
 static_assert(offsetof(ExtensionNode, child) % 8 == 0);
 static_assert(sizeof(BranchNode) == 704);
 
@@ -375,7 +428,7 @@ struct TrieNodeFlat {
     }
 };
 
-// Leading nibbles two keys share, read from the keys themselves: equal to lcp_nibbles over their 64-nibble
+// Leading nibbles two keys share, read from the keys themselves: equal to lcp_packed over their packed
 // expansions. Word compares need the 4-byte alignment of TrieNodeFlat::key, which a bytes32 elsewhere (in a
 // witness node, say) need not have; no ctz, which rv32im lacks (ctzll is a __ctzdi2 call).
 [[gnu::always_inline]] inline unsigned key_lcp_nibbles(const TrieNodeFlat& a, const TrieNodeFlat& b) noexcept {

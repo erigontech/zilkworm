@@ -134,7 +134,7 @@ bool GridMPT<DeletionEnabled, StateT>::unfold_node_from_rlp(ByteView payload, un
     // A leaf or extension path is decoded straight into the line (both nodes start with their nibbles64
     // path); decode_node writes no branch field for those.
     unsigned mask = 0;
-    Kind kind = decode_node(list, line.branch, is_leaf, line.leaf.path.nib, plen, second, mask);
+    Kind kind = decode_node(list, line.branch, is_leaf, line.leaf.path, plen, second, mask);
     if (kind == kBranch) {
         // One sd: mask plus origin fields.
         const auto node_size = static_cast<size_t>(list.data() + list.size() - node_begin);
@@ -279,7 +279,7 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
         if (grid_line.kind == kBranch && grid_line.branch.has_single_child()) {  // Should get absorbed into an extension
             unsigned non_empty_nib = grid_line.branch.first_set_bit();
             depth_ = depth;
-            ExtensionNode ext{nibbles64{1, {static_cast<uint8_t>(non_empty_nib)}}};
+            ExtensionNode ext{nibbles64::single(non_empty_nib)};
             // TODO optimize by checking it's a branch or not
             if (unfold_slot(non_empty_nib) != UnfoldResult::kSuccess) {  // Needed because if it's a leaf this will get extended.
                 failed_ = true;
@@ -320,7 +320,7 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
             // single-child br -> ext
             if (parent.kind == kBranch && parent.branch.has_single_child()) {
                 unsigned kept_nib = parent.branch.first_set_bit();
-                ExtensionNode ext{nibbles64{1, {static_cast<uint8_t>(kept_nib)}}};
+                ExtensionNode ext{nibbles64::single(kept_nib)};
                 auto clen = parent.branch.child_len[kept_nib];
                 const uint8_t* src = (clen == 32 && parent.branch.child_ptr[kept_nib])
                                          ? parent.branch.child_ptr[kept_nib]
@@ -465,11 +465,8 @@ inline kprefix::Resume GridMPT<DeletionEnabled, StateT>::take_resume_encoded(con
 template <bool DeletionEnabled, class StateT>
 inline LeafNode GridMPT<DeletionEnabled, StateT>::make_cur_leaf(ByteView value_rlp) {
     LeafNode l{};
-    l.parent_slot = search_nibbles_[search_nib_cursor_];
-    l.path.len = 64 - (search_nib_cursor_ + 1);
-    std::memcpy(l.path.nib.data(),
-                search_nibbles_.nib.data() + search_nib_cursor_ + 1,
-                l.path.len);
+    l.parent_slot = search_nibbles_.at(search_nib_cursor_);
+    l.path = search_nibbles_.slice(search_nib_cursor_ + 1, 64 - (search_nib_cursor_ + 1));
     l.value = value_rlp;
     return l;
 }
@@ -744,7 +741,7 @@ inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot)
         std::memcpy(ck, hs, 32);
 #endif
         auto rlp_opt = state_->find_node_rlp(ck, [this]() noexcept {
-            return kprefix::SnapRequest{snap_ && search_nib_cursor_ < 63 ? search_nibbles_[search_nib_cursor_ + 1]
+            return kprefix::SnapRequest{snap_ && search_nib_cursor_ < 63 ? search_nibbles_.at(search_nib_cursor_ + 1)
                                                                          : kprefix::kNoSlot,
                                         grid_n_ & (kprefix::kRows - 1)};
         });

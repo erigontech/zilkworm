@@ -491,36 +491,19 @@ TEST_CASE("GridMPT<true, DirectState> rejects forged witnesses between keys shar
 }
 
 // The keys' own comparison the seek uses (key_lcp_nibbles) and the in-place expansion (assign_bytes32) against
-// the expanded-nibble forms they replace: from_bytes32, and the base seek's lcp_nibbles over them (its code,
-// copied below) clamped to the parent's consumed nibbles. Covers every nibble position of the first
-// difference, both parities, equal keys, and random pairs.
+// a nibble-by-nibble walk of the expanded keys, clamped to the parent's consumed nibbles. Covers every nibble
+// position of the first difference, both parities, equal keys, and random pairs.
 namespace {
-
-size_t base_lcp_nibbles(const uint8_t* a, const uint8_t* b, size_t max) noexcept {  // the base's, verbatim
-    size_t i = 0;
-    while (i + 8 <= max) {
-        uint64_t wa, wb;
-        std::memcpy(&wa, a + i, sizeof(wa));
-        std::memcpy(&wb, b + i, sizeof(wb));
-        const uint64_t diff = wa ^ wb;
-        if (diff != 0) {
-            return i + static_cast<size_t>(__builtin_ctzll(diff)) / 8u;
-        }
-        i += 8;
-    }
-    while (i < max && a[i] == b[i]) ++i;
-    return i;
-}
 
 void check_key_pair(const TrieNodeFlat& a, const TrieNodeFlat& b) {
     const nibbles64 na = nibbles64::from_bytes32(a.key);
     const nibbles64 nb = nibbles64::from_bytes32(b.key);
     size_t naive = 0;
-    while (naive < 64 && na.nib[naive] == nb.nib[naive]) ++naive;
+    while (naive < 64 && na.at(naive) == nb.at(naive)) ++naive;
     REQUIRE(key_lcp_nibbles(a, b) == naive);
     REQUIRE(key_lcp_nibbles(b, a) == naive);
     for (size_t consumed = 1; consumed <= 64; ++consumed) {
-        const size_t expected = base_lcp_nibbles(na.nib.data(), nb.nib.data(), consumed);
+        const size_t expected = naive < consumed ? naive : consumed;
         REQUIRE(std::min<size_t>(key_lcp_nibbles(a, b), consumed) == expected);
     }
 }
@@ -579,11 +562,11 @@ TEST_CASE("nibbles64::assign_bytes32 equals from_bytes32 over any previous conte
         for (auto& b : k.bytes) b = static_cast<uint8_t>(rng());
         nibbles64 dirty;  // stale content and length, as search_nibbles_ holds after the previous key
         dirty.len = static_cast<uint8_t>(rng());
-        for (auto& n : dirty.nib) n = static_cast<uint8_t>(rng());
+        for (auto& x : dirty.w) x = (static_cast<uint64_t>(rng()) << 32) | rng();
         dirty.assign_bytes32(k);
         const nibbles64 fresh = nibbles64::from_bytes32(k);
         REQUIRE(dirty.len == 64);
-        REQUIRE(dirty.nib == fresh.nib);
+        REQUIRE(dirty.w == fresh.w);
     }
 }
 

@@ -924,7 +924,7 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
             // through, as check_root's walks keep theirs: an SSTORE after the SLOAD of a key changes that slot, and
             // check_root's fold of the branch then resumes from the state (see take_walk_state()).
             auto rlp = find_node_rlp(node_hash, [&]() noexcept {
-                return kprefix::SnapRequest{depth < 64 ? want[depth] : kprefix::kNoSlot, kprefix::kAddrRow};
+                return kprefix::SnapRequest{depth < 64 ? want.at(depth) : kprefix::kNoSlot, kprefix::kAddrRow};
             });
             if (!rlp) return std::unexpected{WalkMiss::kInvalid};  // witness incomplete
             node_rlp = *rlp;
@@ -936,7 +936,7 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
 
         BranchNode br{};
         bool is_leaf = false;
-        std::array<uint8_t, 64> ext_path{};
+        nibbles64 ext_path{};
         uint8_t plen = 0;
         ByteView second{};
         unsigned mask = 0;
@@ -945,7 +945,7 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
 
         if (kind == kBranch) {
             if (depth >= 64) return std::unexpected{WalkMiss::kInvalid};
-            const uint8_t nib = want[depth];
+            const uint8_t nib = want.at(depth);
             if ((mask & (1u << nib)) == 0) return std::unexpected{WalkMiss::kAbsent};  // 0x80 child
             const uint8_t clen = br.child_len[nib];
             ++depth;
@@ -964,7 +964,7 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
 
         if (depth + plen > 64) return std::unexpected{WalkMiss::kInvalid};
         for (uint8_t i = 0; i < plen; ++i) {
-            if (want[depth + i] != ext_path[i]) return std::unexpected{WalkMiss::kAbsent};  // path diverges
+            if (want.at(depth + i) != ext_path.at(i)) return std::unexpected{WalkMiss::kAbsent};  // path diverges
         }
         depth += plen;
 

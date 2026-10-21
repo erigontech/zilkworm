@@ -67,63 +67,54 @@ inline uint8_t* encode_list_header(uint8_t* out, size_t len) noexcept {
 
 inline size_t hp_size(size_t nibbles) noexcept { return 1 + ((nibbles + 1) >> 1); }
 
-inline uint8_t* encode_hp_path(uint8_t* out, const uint8_t* nib, size_t n, bool leaf) noexcept {
+inline uint8_t* encode_hp_path(uint8_t* out, const nibbles64& path, bool leaf) noexcept {
+    const size_t n = path.len;
     const bool odd = (n & 1);
     const uint8_t flag = (leaf ? 0x2 : 0x0) | (odd ? 0x1 : 0x0);
-    *out++ = static_cast<uint8_t>((flag << 4) | (odd ? (n ? (nib[0] & 0x0F) : 0) : 0));
+    *out++ = static_cast<uint8_t>((flag << 4) | (odd ? (n ? path.at(0) : 0) : 0));
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-    // nib is a nibbles64 array (4-aligned, 64 bytes). With x a word of it masked to low nibbles,
-    // t = x << 4 | x >> 8 holds n0 n1 in byte 0, n1 n2 in byte 1 and n2 n3 in byte 2.
+    // One swap per 32-bit half.
     typedef uint32_t __attribute__((may_alias)) w32;
-    const w32* w = reinterpret_cast<const w32*>(std::assume_aligned<4>(nib));
-    size_t bytes = n / 2;
-    if (!odd) {
-        for (; bytes >= 2; bytes -= 2, out += 2) {
-            const uint32_t x = *w++ & 0x0F0F0F0Fu;
-            const uint32_t t = (x << 4) | (x >> 8);
-            out[0] = static_cast<uint8_t>(t);
-            out[1] = static_cast<uint8_t>(t >> 16);
-        }
-        if (bytes != 0) {
-            const uint32_t x = *w & 0x0F0F0F0Fu;
-            *out++ = static_cast<uint8_t>((x << 4) | (x >> 8));
-        }
-    } else {
-        // Pairs start at nib[1]: n1 n2 is byte 1 of t, and n3 (t >> 24) pairs with the next word's n0.
-        uint32_t x = *w++ & 0x0F0F0F0Fu;
-        for (; bytes >= 2; bytes -= 2, out += 2) {
-            const uint32_t y = *w++ & 0x0F0F0F0Fu;
-            const uint32_t t = (x << 4) | (x >> 8);
-            out[0] = static_cast<uint8_t>(t >> 8);
-            out[1] = static_cast<uint8_t>((t >> 24) | y);
-            x = y;
-        }
-        if (bytes != 0) *out++ = static_cast<uint8_t>(((x << 4) | (x >> 8)) >> 8);
+    constexpr uint32_t M32 = 0x0F0F0F0Fu;
+    const w32* const hv = reinterpret_cast<const w32*>(path.w.data());
+    uint8_t* q = out;
+    size_t k = odd ? 1 : 0;
+    for (; k + 8 <= n; k += 8) {
+        const size_t h = k >> 3;
+        const uint32_t v = (k & 7) == 0 ? hv[h] : (hv[h] >> 4) | (hv[h + 1] << 28);
+        const uint32_t sw = ((v & M32) << 4) | ((v >> 4) & M32);
+        q[0] = static_cast<uint8_t>(sw);
+        q[1] = static_cast<uint8_t>(sw >> 8);
+        q[2] = static_cast<uint8_t>(sw >> 16);
+        q[3] = static_cast<uint8_t>(sw >> 24);
+        q += 4;
     }
+    for (; k < n; k += 2) {
+        uint8_t b = static_cast<uint8_t>(path.at(k) << 4);
+        if (k + 1 < n) b |= path.at(k + 1);
+        *q++ = b;
+    }
+    return q;
 #elif defined(ZISK) && defined(__riscv) && __riscv_xlen == 64
-    // ZisK: 8B stores; odd = even at nib+1
-    typedef uint64_t __attribute__((may_alias)) w64;
-    const uint8_t* const p = odd ? nib + 1 : nib;
-    const size_t pairs = (n - (odd ? 1 : 0)) / 2;
-    constexpr uint64_t M = 0x0F0F0F0F0F0F0F0Full;
-    size_t i = 0;
-    for (; i + 8 <= pairs; i += 8) {
-        const w64* const w = reinterpret_cast<const w64*>(p + 2 * i);
-        const uint64_t x0 = *w & M;
-        const uint64_t x1 = w[1] & M;
-        const uint64_t t0 = (x0 << 4) | (x0 >> 8);
-        const uint64_t t1 = (x1 << 4) | (x1 >> 8);
-        const uint64_t g0 = (t0 & 0xFF) | ((t0 >> 8) & 0xFF00) | ((t0 >> 16) & 0xFF0000) | ((t0 >> 24) & 0xFF000000);
-        const uint64_t g1 = (t1 & 0xFF) | ((t1 >> 8) & 0xFF00) | ((t1 >> 16) & 0xFF0000) | ((t1 >> 24) & 0xFF000000);
-        const uint64_t r = g0 | (g1 << 32);
-        std::memcpy(out + i, &r, 8);
+    // One nibble swap per word.
+    const uint64_t* const wp = path.w.data();
+    uint8_t* q = out;
+    size_t k = odd ? 1 : 0;
+    for (; k + 16 <= n; k += 16) {
+        const uint64_t r = nib_swap64(nib_word(wp, k));
+        std::memcpy(q, &r, 8);
+        q += 8;
     }
-    for (; i < pairs; ++i) out[i] = static_cast<uint8_t>((p[2 * i] << 4) | (p[2 * i + 1] & 0x0F));
-    out += pairs;
+    for (; k < n; k += 2) {
+        uint8_t b = static_cast<uint8_t>(path.at(k) << 4);
+        if (k + 1 < n) b |= path.at(k + 1);
+        *q++ = b;
+    }
+    return q;
 #else
     size_t i = odd ? 1 : 0;
-    for (; i + 1 < n; i += 2) *out++ = static_cast<uint8_t>((nib[i] << 4) | (nib[i + 1] & 0x0F));
-    if (i < n) *out++ = static_cast<uint8_t>((nib[i] << 4));  // last high nibble only
+    for (; i + 1 < n; i += 2) *out++ = static_cast<uint8_t>((path.at(i) << 4) | path.at(i + 1));
+    if (i < n) *out++ = static_cast<uint8_t>(path.at(i) << 4);  // last high nibble only
 #endif
     return out;
 }
@@ -144,24 +135,34 @@ inline uint8_t* encode_string_header(uint8_t* out, size_t len) noexcept {
     return out;
 }
 
-// HP decode -> (is_leaf, nibbles[]). Returns false on malformed.
-inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, uint8_t& out_len) noexcept {
+// HP decode -> (is_leaf, packed path). Returns false on malformed.
+inline bool hp_decode(ByteView in, bool& is_leaf, nibbles64& path, uint8_t& out_len) noexcept {
     if (in.empty()) [[unlikely]] return false;
-    uint8_t flag = in[0] >> 4;
+    const uint8_t flag = in[0] >> 4;
     is_leaf = (flag & 0x2) != 0;
     const bool odd = (flag & 0x1) != 0;
     // At most 64 nibbles (odd + 2 * (in.size() - 1) <= 64), checked once rather than per byte.
-    if (in.size() - 1 > (odd ? 31u : 32u)) [[unlikely]] return false;
-    uint8_t* o = out.data();
-    if (odd) *o++ = in[0] & 0x0F;
-    const uint8_t* const end = in.data() + in.size();
-#pragma GCC unroll 4
-    for (const uint8_t* p = in.data() + 1; p != end; ++p, o += 2) {
-        const uint8_t b = *p;  // read once: out may alias in as far as the compiler knows
-        o[0] = static_cast<uint8_t>(b >> 4);
-        o[1] = static_cast<uint8_t>(b & 0x0F);
+    const size_t m = in.size() - 1;
+    if (m > (odd ? 31u : 32u)) [[unlikely]] return false;
+    const uint8_t* const p = in.data() + 1;
+    // Odd paths shift up one nibble.
+    std::array<uint64_t, 4> t{};  // Zero past len.
+    size_t b = 0;
+    for (; m - b >= 8; b += 8) {
+        uint64_t x;
+        std::memcpy(&x, p + b, 8);
+        t[b >> 3] = nib_swap64(x);
     }
-    out_len = static_cast<uint8_t>(odd + 2 * (in.size() - 1));
+    for (; b < m; ++b) t[b >> 3] |= nib_swap64(static_cast<uint64_t>(p[b])) << (8 * (b & 7));
+    if (odd) {
+        path.w[0] = (t[0] << 4) | (in[0] & 0xF);
+        path.w[1] = (t[1] << 4) | (t[0] >> 60);
+        path.w[2] = (t[2] << 4) | (t[1] >> 60);
+        path.w[3] = (t[3] << 4) | (t[2] >> 60);
+    } else {
+        path.w = t;
+    }
+    out_len = path.len = static_cast<uint8_t>((odd ? 1u : 0u) + 2 * m);
     return true;
 }
 
@@ -424,7 +425,7 @@ inline uint8_t* encode_short_node_list_header(uint8_t* out, size_t payload) noex
 inline uint8_t* encode_hp_path_rlp(uint8_t* out, const nibbles64& path, bool leaf) noexcept {
     const size_t hp_len = 1 + path.len / 2;
     if (hp_len != 1) *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + hp_len);
-    return encode_hp_path(out, path.nib.data(), path.len, leaf);
+    return encode_hp_path(out, path, leaf);
 }
 
 inline size_t hp_path_rlp_length(const nibbles64& path) noexcept {
@@ -573,7 +574,7 @@ inline bool decode_branch(ByteView payload, BranchNode& out) {
 }
 
 inline bool decode_ext_or_leaf(ByteView payload, bool& is_leaf,
-                               std::array<uint8_t, 64>& path, uint8_t& plen,
+                               nibbles64& path, uint8_t& plen,
                                ByteView& second) {
     ByteView remaining = payload;
 
@@ -618,7 +619,7 @@ inline bool decode_ext_or_leaf(ByteView payload, bool& is_leaf,
 
 // Single-pass node decode; caller stores mask_out.
 inline Kind decode_node(ByteView payload, BranchNode& out_branch,
-                            bool& is_leaf, std::array<uint8_t, 64>& path,
+                            bool& is_leaf, nibbles64& path,
                             uint8_t& plen, ByteView& second, unsigned& mask_out) {
     // A full branch: 16 hash children and an empty value, 16 * 33 + 1 payload bytes. That is
     // most witness branch nodes on mainnet (65% of those re-encoded). Once each child is seen
@@ -743,7 +744,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
 
 // Also stores the mask into out_branch.
 inline Kind decode_node(ByteView payload, BranchNode& out_branch,
-                            bool& is_leaf, std::array<uint8_t, 64>& path,
+                            bool& is_leaf, nibbles64& path,
                             uint8_t& plen, ByteView& second) {
     unsigned mask = 0;
     const Kind kind = decode_node(payload, out_branch, is_leaf, path, plen, second, mask);

@@ -44,7 +44,7 @@ void fill_full_branch(uint8_t* at, std::mt19937_64& rng) {
 BranchNode unfold(const uint8_t* node, size_t size, size_t header = 3) {
     BranchNode b;
     bool is_leaf{};
-    std::array<uint8_t, 64> path{};
+    nibbles64 path{};
     uint8_t plen{};
     ByteView second{};
     REQUIRE(decode_node(ByteView{node + header, size - header}, b, is_leaf, path, plen, second) == kBranch);

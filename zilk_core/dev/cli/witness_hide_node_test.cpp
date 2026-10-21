@@ -150,9 +150,8 @@ DirectState::AccountInfo make_info(const evmc::address& addr, uint64_t nonce, ui
 Bytes make_leaf_rlp(const bytes32& hashed_key, ByteView value) {
     nibbles64 full = nibbles64::from_bytes32(hashed_key);
     LeafNode leaf{};
-    leaf.parent_slot = full.nib[0];
-    leaf.path.len = 63;
-    std::memcpy(leaf.path.nib.data(), full.nib.data() + 1, 63);
+    leaf.parent_slot = full.at(0);
+    leaf.path = full.slice(1, 63);
     leaf.value = value;
     return Bytes{encode_leaf(leaf)};  // copy out of the shared static buffer
 }

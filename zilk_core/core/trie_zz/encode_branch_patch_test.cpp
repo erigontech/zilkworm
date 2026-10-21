@@ -43,7 +43,7 @@ BranchNode unfold(const Bytes& node) {
     REQUIRE(hdr.has_value());
     BranchNode b;
     bool is_leaf{};
-    std::array<uint8_t, 64> path{};
+    nibbles64 path{};
     uint8_t plen{};
     ByteView second{};
     REQUIRE(decode_node(payload, b, is_leaf, path, plen, second) == kBranch);

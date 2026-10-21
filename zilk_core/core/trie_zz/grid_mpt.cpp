@@ -41,52 +41,6 @@
 // ---------------------------------------------------------------
 namespace zilkworm {
 
-// LCP byte length; assumes little-endian host for ctzll byte index.
-[[gnu::always_inline]] inline size_t lcp_nibbles(const uint8_t* a, const uint8_t* b, size_t max) noexcept {
-    size_t i = 0;
-    while (i + 8 <= max) {
-        uint64_t wa, wb;
-        std::memcpy(&wa, a + i, sizeof(wa));
-        std::memcpy(&wb, b + i, sizeof(wb));
-        const uint64_t diff = wa ^ wb;
-        if (diff != 0) {
-            return i + static_cast<size_t>(__builtin_ctzll(diff)) / 8u;
-        }
-        i += 8;
-    }
-    while (i < max && a[i] == b[i]) ++i;
-    return i;
-}
-#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-// lcp_nibbles(a, b + off, max) for 4-aligned a and b with off + max <= 64 (nibbles64 arrays): on this
-// strict-alignment target lcp_nibbles' uint64_t loads are 8 lbu + 8 sb each. Compares a's words with
-// b's words funnel-shifted by off % 4 bytes; the word after the last one compared stays within b[0..63].
-[[gnu::always_inline]] inline size_t lcp_nibbles_aligned(const uint8_t* a, const uint8_t* b, size_t off,
-                                                          size_t max) noexcept {
-    typedef uint32_t __attribute__((may_alias)) w32;
-    const w32* const wa = reinterpret_cast<const w32*>(std::assume_aligned<4>(a));
-    const w32* const ea = wa + max / 4;
-    const w32* pa = wa;
-    const w32* pb = reinterpret_cast<const w32*>(std::assume_aligned<4>(b)) + off / 4;
-    const unsigned sh = 8 * static_cast<unsigned>(off % 4);
-    if (sh == 0) {
-#pragma GCC unroll 4
-        for (; pa != ea && *pa == *pb; ++pa, ++pb) {}
-    } else {
-        uint32_t lo = *pb++;
-#pragma GCC unroll 4
-        for (; pa != ea; ++pa, ++pb) {
-            const uint32_t hi = *pb;
-            if (*pa != ((lo >> sh) | (hi << (32 - sh)))) break;
-            lo = hi;
-        }
-    }
-    size_t k = 4 * static_cast<size_t>(pa - wa);  // the differing word's first byte, or the tail's
-#pragma GCC unroll 1
-    for (; k < max && a[k] == b[off + k]; ++k) {}
-    return k;
-}
-#endif
 // Find the least common path of current key from the top, with the last key as reference
 // (search_nibbles_ still holds the expansion of prev's key, or of whatever key came last when prev is null).
 template <bool DeletionEnabled, class StateT>
@@ -140,7 +94,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
         // The first update of a call never gets here (depth_ is 0 after reset() or construction), nor does a
         // well-formed trie have a branch past nibble 64: compare the expanded keys as before.
         const nibbles64 new_nibbles = nibbles64::from_bytes32(cur.key);
-        lcp = lcp_nibbles(new_nibbles.nib.data(), search_nibbles_.nib.data(), parent_consumed);
+        lcp = lcp_packed(new_nibbles.w.data(), search_nibbles_.w.data(), 0, parent_consumed);
     }
 
     if (lcp >= parent_consumed) {
@@ -278,7 +232,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
             }
             auto& grid_line = grid_[depth_];
             if (grid_line.kind == kBranch) {
-                unsigned nib = search_nibbles_[search_nib_cursor_];
+                unsigned nib = search_nibbles_.at(search_nib_cursor_);
                 auto unfold_res = unfold_slot(nib);
                 if (unfold_res == UnfoldResult::kEmpty) {
                     // Child is empty - insert here
@@ -310,15 +264,12 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 continue;
             } else if (grid_line.kind == kExt) {
                 // go down till the first divergence point
-                const unsigned cur{static_cast<unsigned>(search_nib_cursor_)};
                 const unsigned len{grid_line.ext.path.len};
-                const unsigned lim{len < 64u - cur ? len : 64u - cur};
-                const uint8_t* const ep{grid_line.ext.path.nib.data()};
-                const uint8_t* const sn{search_nibbles_.nib.data() + cur};
-                unsigned m = 0;
-                while (m < lim && ep[m] == sn[m]) ++m;  // locals keep spills out of the loop
-                search_nib_cursor_ = cur + m;
-                unsigned last_nib = grid_line.ext.path[len - 1];
+                const size_t lim = std::min<unsigned>(len, 64 - search_nib_cursor_);
+                unsigned m = static_cast<unsigned>(lcp_packed(grid_line.ext.path.w.data(), search_nibbles_.w.data(),
+                                                               search_nib_cursor_, lim));
+                search_nib_cursor_ += m;
+                unsigned last_nib = grid_line.ext.path.at(len - 1);
                 unsigned old_child_depth{grid_line.child_depth[last_nib]};
 
                 if (m == len) {
@@ -338,7 +289,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             }
                             rlp = *rlp_opt;
                         }
-                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_)) [[unlikely]] {
+                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path.at(m - 1), depth_)) [[unlikely]] {
                             ++missing_count_;
                             failed_ = true;
                             sys_println("ERROR: malformed ext child rlp in node store");
@@ -388,9 +339,9 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (m > 0) {  // orig_ext -> new_br -> (new_ext) -> old_child
                     grid_line.consumed = grid_line.consumed - 1 - new_ext_len;
                     grid_line.ext.child_len = 1;
-                    grid_line.ext.path.len = m;
+                    grid_line.ext.path = grid_line.ext.path.slice(0, m);
                     grid_[depth_].modified = true;
-                    const unsigned new_slot = grid_line.ext.path[m - 1];
+                    const unsigned new_slot = grid_line.ext.path.at(m - 1);
                     insert_line_at(d1, new_slot, depth_, BranchNode{});
                     grid_[d1].modified = true;
                     d1 = 0;  // Used up
@@ -407,15 +358,12 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 auto br_depth = depth_;
                 if (new_ext_len > 0) {  // (orig_ext) -> new_br -> new_ext -> old_child
                     ExtensionNode ext_mplus1{};
-                    ext_mplus1.path.len = new_ext_len;
-                    std::memcpy(ext_mplus1.path.nib.data(),
-                                old_ext_line.ext.path.nib.data() + m + 1,
-                                new_ext_len);
+                    ext_mplus1.path = old_ext_line.ext.path.slice(m + 1, new_ext_len);
                     ext_mplus1.set_child(ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
                     if (d1 == 0) {  // To check if we need d2 slot
                         d1 = d2;
                     }
-                    insert_line_at(d1, old_ext_line.ext.path[m], depth_, std::move(ext_mplus1));
+                    insert_line_at(d1, old_ext_line.ext.path.at(m), depth_, std::move(ext_mplus1));
                     grid_[d1].modified = true;
                 } else {  // () -> new_br -> old_child
                     grid_[depth_].branch.set_child(last_nib, ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
@@ -433,18 +381,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 // It's a leaf:
                 // Find common path and create extension and push
 
-                size_t cp;
-#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-                if (search_nib_cursor_ + grid_line.leaf.path.len <= 64) {
-                    cp = lcp_nibbles_aligned(grid_line.leaf.path.nib.data(), search_nibbles_.nib.data(),
+                const size_t cp = lcp_packed(grid_line.leaf.path.w.data(), search_nibbles_.w.data(),
                                              search_nib_cursor_, grid_line.leaf.path.len);
-                } else
-#endif
-                {
-                    cp = lcp_nibbles(grid_line.leaf.path.nib.data(),
-                                     search_nibbles_.nib.data() + search_nib_cursor_,
-                                     grid_line.leaf.path.len);
-                }
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
                     // Pre-value bind + read-only short-circuit: DirectState only. HashState's update set
                     // carries no initial_value and no read-only entries; its reads are bound to prev_root
@@ -501,11 +439,10 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
                 if (cp > 0) {  // Need to put an extension before the branch
                     ExtensionNode ext_common{};
-                    std::memcpy(ext_common.path.nib.data(), grid_[depth_].leaf.path.nib.data(), cp);
-                    ext_common.path.len = cp;
+                    ext_common.path = grid_[depth_].leaf.path.slice(0, cp);
 
                     // Make the line an extension and insert a branch with this extension as the parent
-                    unsigned ext_last_nib = ext_common.path[cp - 1];
+                    unsigned ext_last_nib = ext_common.path.at(cp - 1);
                     transform_line(grid_[depth_], std::move(ext_common));
                     search_nib_cursor_ += cp;
                     insert_line(ext_last_nib, depth_, std::move(bn));  // sets the depth_ at the branch after
@@ -513,15 +450,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     // Make the line a branch
                     transform_line(grid_[depth_], std::move(bn));
                 }
-                old_leaf.path.len = old_leaf.path.len - cp - 1;  // cp: extension, 1: branch
-                old_leaf.parent_slot = old_leaf.path[cp];
-
-                // Shift the nibble array left by cp + 1
-                if (old_leaf.path.len > 0) {
-                    std::memmove(old_leaf.path.nib.data(),
-                                 old_leaf.path.nib.data() + cp + 1,
-                                 static_cast<size_t>(old_leaf.path.len));
-                }
+                old_leaf.parent_slot = old_leaf.path.at(cp);  // cp: extension, 1: branch
+                old_leaf.path = old_leaf.path.slice(cp + 1, old_leaf.path.len - cp - 1);
                 // Insert the leaves to the branch (which is at depth_ now) as parent
                 auto parent_depth = depth_;
                 auto l = make_cur_leaf(trie_upd.current_value());  // sets parent_slot too at l, with first nib

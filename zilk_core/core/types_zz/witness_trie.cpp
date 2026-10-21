@@ -55,7 +55,7 @@ void walk_tree(
     }
 
     bool is_leaf = false;
-    std::array<uint8_t, 64> ext_path{};
+    nibbles64 ext_path{};
     uint8_t plen = 0;
     ByteView second{};
     if (!decode_ext_or_leaf(body, is_leaf, ext_path, plen, second)) {
@@ -63,7 +63,7 @@ void walk_tree(
     }
 
     if (depth + plen > 64) return;
-    std::memcpy(path.data() + depth, ext_path.data(), plen);
+    for (unsigned i = 0; i < plen; ++i) path[depth + i] = ext_path.at(i);
     const size_t new_depth = depth + plen;
 
     if (is_leaf) {

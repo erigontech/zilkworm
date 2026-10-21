@@ -120,7 +120,7 @@ TEST_CASE("decode_node bounds a leaf value by the encode buffer", "[trie][gridmp
         REQUIRE(h);
         BranchNode br{};
         bool is_leaf = false;
-        std::array<uint8_t, 64> path{};
+        nibbles64 path{};
         uint8_t plen = 0;
         ByteView second{};
         const Kind kind = decode_node(payload.substr(0, h->payload_length), br, is_leaf, path, plen, second);
@@ -131,7 +131,7 @@ TEST_CASE("decode_node bounds a leaf value by the encode buffer", "[trie][gridmp
         REQUIRE(kind == kExtOrLeaf);
         REQUIRE(is_leaf);
         // Re-encoded one level down, as a moved leaf would be.
-        const LeafNode l{nibbles64{static_cast<uint8_t>(plen - 2), path}, 0, second};
+        const LeafNode l{path.slice(0, plen - 2), 0, second};
         const ByteView enc = encode_leaf(l);
         CHECK(enc.data() >= static_buffer);
         CHECK(enc.data() + enc.size() <= static_buffer + kNodeBufferSize);

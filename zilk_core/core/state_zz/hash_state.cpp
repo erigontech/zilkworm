@@ -47,13 +47,13 @@ HashState::HashState(std::uint32_t expected_nodes, std::uint32_t expected_codes,
 
 namespace {
 
-// Inverse of nibbles64::from_bytes32 (mpt.hpp:50): pack a full 64-nibble path back into
+// Inverse of nibbles64::from_bytes32: pack a full 64-nibble path back into
 // its 32-byte key. A well-formed account/storage leaf always accumulates exactly 64
 // nibbles (fixed-length keys), so p.len == 64 here.
 [[gnu::always_inline]] inline evmc::bytes32 path_to_bytes32(const nibbles64& p) noexcept {
     evmc::bytes32 out{};
     for (unsigned i = 0; i < 32; ++i) {
-        out.bytes[i] = static_cast<std::uint8_t>((p.nib[2 * i] << 4) | (p.nib[2 * i + 1] & 0x0F));
+        out.bytes[i] = static_cast<std::uint8_t>((p.at(2 * i) << 4) | p.at(2 * i + 1));
     }
     return out;
 }
@@ -157,7 +157,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
 
             BranchNode branch;
             bool is_leaf = false;
-            std::array<std::uint8_t, 64> np{};
+            nibbles64 np{};
             std::uint8_t plen = 0;
             ByteView second{};
             const Kind kind = decode_node(list, branch, is_leaf, np, plen, second);
@@ -183,7 +183,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
                 malformed_witness_ = true;
                 return;
             }
-            path.append(nibbles64{plen, np});
+            path.append(np);
 
             if (is_leaf) {
                 emit_leaf(path_to_bytes32(path), second);
@@ -230,7 +230,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
 
         // Path to this child = the branch's path + the child's nibble s.
         nibbles64 child_path = stack[top].path;
-        child_path.nib[child_path.len++] = static_cast<std::uint8_t>(s);
+        child_path.push(s);
 
         const std::uint8_t clen = stack[top].branch.child_len[s];
         if (clen == 32) {
@@ -338,7 +338,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
 
         BranchNode branch;
         bool is_leaf = false;
-        std::array<std::uint8_t, 64> np{};
+        nibbles64 np{};
         std::uint8_t plen = 0;
         ByteView second{};
         const Kind kind = decode_node(list, branch, is_leaf, np, plen, second);
@@ -346,7 +346,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
 
         if (kind == kBranch) {
             if (consumed >= 64) return false;  // no nibble left to index a branch (malformed)
-            const unsigned s = target.nib[consumed];
+            const unsigned s = target.at(consumed);
             // Empty child slot (decode_node's child_len == 0, i.e. the RLP 0x80 marker): the
             // target's next nibble leads nowhere -> proven absent.
             if (branch.child_len[s] == 0) return true;
@@ -373,7 +373,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
         const unsigned remaining = 64u - consumed;
         const unsigned overlap = plen < remaining ? plen : remaining;
         for (unsigned i = 0; i < overlap; ++i) {
-            if (target.nib[consumed + i] != np[i]) return true;  // path diverges -> proven absent
+            if (target.at(consumed + i) != np.at(i)) return true;  // path diverges -> proven absent
         }
         if (plen > remaining) return true;  // node path outlasts the key -> divergence -> absent
         consumed += plen;
