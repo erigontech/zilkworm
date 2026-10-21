@@ -366,7 +366,7 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
             std::abort();
         }
         node_store_map_.reset(reinterpret_cast<MphfMapHeader*>(nodestore_bytes.data()));
-        node_verified_.assign((node_store_map_.data_size() / 8 + 31) / 32, 0u);
+        node_verified_.assign((node_store_map_.data_size() / 8 + 63) / 64, 0u);
 #if USE_HASH_KEY
         // The states are written before they are read (verify_and_snap()); only the tags need clearing.
         walk_states_.reset(new kprefix::StateRow[kprefix::kAddrRows]);
@@ -1403,9 +1403,18 @@ bool DirectState::sanitize() {
                 acc_walk_ok = false;
                 return;
             }
-            const w32* const from = reinterpret_cast<const w32*>(slots[s].initial);
-            w32* const to = reinterpret_cast<w32*>(slots[s].current);
-            for (size_t i = 0; i < 8; ++i) to[i] = from[i];
+            const uint8_t* const f = slots[s].initial;
+            uint8_t* const t = slots[s].current;
+            if (((reinterpret_cast<uintptr_t>(f) | reinterpret_cast<uintptr_t>(t)) & 7) == 0) {
+                typedef uint64_t __attribute__((may_alias)) w64;
+                const w64* const from = reinterpret_cast<const w64*>(f);
+                w64* const to = reinterpret_cast<w64*>(t);
+                for (size_t i = 0; i < 4; ++i) to[i] = from[i];
+            } else {
+                const w32* const from = reinterpret_cast<const w32*>(f);
+                w32* const to = reinterpret_cast<w32*>(t);
+                for (size_t i = 0; i < 8; ++i) to[i] = from[i];
+            }
         }
     };
     if (pre_state_meta_->n_accounts > 0) {

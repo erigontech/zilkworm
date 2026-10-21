@@ -211,8 +211,7 @@ struct BranchNode {
 
     inline void set_child(unsigned slot, ByteView b) noexcept {
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
-        mask |= 1 << slot;
+        mask_word |= (uint64_t{1} << slot) | (uint64_t{1} << (32 + slot));
         if (b.size() == 0) {
             child_len[slot] = 1;
             child_ptr[slot] = nullptr;
@@ -226,8 +225,7 @@ struct BranchNode {
     // set_child() for a hash reference: the keccak of `rlp`, a child's encoding of 32 bytes or more.
     inline void set_child_hash(unsigned slot, ByteView rlp) noexcept {
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
-        mask |= 1 << slot;
+        mask_word |= (uint64_t{1} << slot) | (uint64_t{1} << (32 + slot));
         child_len[slot] = 32;
         child_ptr[slot] = nullptr;
         // The keccak returns its hash straight into the slot, with no copy out of a temporary: the
@@ -244,8 +242,7 @@ struct BranchNode {
             return;
         }
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
-        mask |= 1 << slot;
+        mask_word |= (uint64_t{1} << slot) | (uint64_t{1} << (32 + slot));
         child_len[slot] = 32;
         child_ptr[slot] = nullptr;
         ::new (static_cast<void*>(child[slot].bytes))
@@ -257,14 +254,13 @@ struct BranchNode {
     // nonzero, `state` holds the state of the node's first blocks (see take_resumable_blocks()),
     // which the call consumes.
     inline ethash::hash256 full_branch_hash(uint64_t* state, unsigned blocks) const noexcept {
-        return ethash_keccak256_full_branch(state, blocks, orig, dirty, child[0].bytes, child_ptr.data());
+        return ethash_keccak256_full_branch(state, blocks, orig, static_cast<uint16_t>(mask_word >> 32), child[0].bytes, child_ptr.data());
     }
 
     // set_child_hash() for the full branch `node`: its full_branch_hash().
     inline void set_child_hash_of(unsigned slot, const BranchNode& node, uint64_t* state, unsigned blocks) noexcept {
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
-        mask |= 1 << slot;
+        mask_word |= (uint64_t{1} << slot) | (uint64_t{1} << (32 + slot));
         child_len[slot] = 32;
         child_ptr[slot] = nullptr;
         ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(node.full_branch_hash(state, blocks));
@@ -272,10 +268,9 @@ struct BranchNode {
 
     inline void delete_child(unsigned slot) noexcept {
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
+        mask_word = (mask_word | (uint64_t{1} << (32 + slot))) & ~(uint64_t{1} << slot);
         child_len[slot] = 0;
         child_ptr[slot] = nullptr;
-        mask &= ~(uint64_t{1} << slot);
     }
 };
 
@@ -528,7 +523,7 @@ inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
 // More unfolding and folding needed for this or more keys
 template <bool DeletionEnabled = false, class StateT = ActiveState>
 class GridMPT {
-    unsigned depth_{0};              // The current depth we are visiting
+    uint64_t depth_{0};             // The current depth we are visiting
     uint64_t search_nib_cursor_{0};  // The position in the current search key
     // Previous root of the trie
     bytes32 prev_root_;

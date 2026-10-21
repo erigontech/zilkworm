@@ -33,7 +33,7 @@ void walk_tree(
         ByteView body_copy = body;
         if (decode_branch(body_copy, br)) {
             for (unsigned slot = 0; slot < 16; ++slot) {
-                if ((br.mask & (1u << slot)) == 0) continue;
+                if (((br.mask_word >> slot) & 1u) == 0) continue;
                 path[depth] = static_cast<uint8_t>(slot);
                 const uint8_t child_len = br.child_len[slot];
                 if (child_len == 32) {

@@ -302,7 +302,7 @@ inline constexpr size_t kDeferredChildPtr = ~size_t{0};
 // Always inlined (the guest calls it from encode_line() only): grown by the inline hash copies
 // above, it was otherwise compiled out of line and reached by a call.
 [[gnu::always_inline]] inline ByteView encode_branch(const BranchNode& b) {
-    if (b.mask == 0) {
+    if ((b.mask_word << 48) == 0) {
         return empty;
     }
     const uint8_t* const db = deferred_base(b);  // Hoisted: one flag test per branch.
@@ -311,13 +311,13 @@ inline constexpr size_t kDeferredChildPtr = ~size_t{0};
         // At the witness node's phase modulo 32, see static_buffer.
         uint8_t* const out = static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31);
         std::memcpy(out, b.orig, b.orig_size);
-        if (b.dirty == 0) {
+        if ((b.mask_word & 0xFFFF00000000ull) == 0) {
             return ByteView{out, b.orig_size};
         }
         // A full branch (most branches on mainnet) has slot i at 3 + 33 i, so its dirty slots are
         // addressed directly. The general walk below sums the slot sizes up to the last dirty one.
         if (has_full_branch_orig(b)) {
-            for (unsigned dirty = b.dirty; dirty != 0; dirty &= dirty - 1) {
+            for (unsigned dirty = static_cast<unsigned>(b.mask_word >> 32); dirty != 0; dirty &= dirty - 1) {
                 const unsigned i = lowest_set_bit(dirty);
                 uint8_t* const p = out + 3 + 33 * i;
                 *p = 0xa0;
@@ -330,7 +330,7 @@ inline constexpr size_t kDeferredChildPtr = ~size_t{0};
             uint8_t* p = out + (b0 < 0xf8 ? 1 : 1 + (b0 - 0xf7));  // list header length
             // Walk the slots only up to the last dirty one (the rest are already in place), with
             // the mask in a local: the byte copies below may alias b, so b.dirty was reloaded per slot.
-            unsigned dirty = b.dirty;
+            unsigned dirty = static_cast<unsigned>(b.mask_word >> 32);
             for (size_t i = 0; dirty != 0; ++i, dirty >>= 1) {
                 const auto len = b.orig_child_len[i];
                 if (dirty & 1u) {
@@ -410,7 +410,8 @@ inline constexpr size_t kDeferredChildPtr = ~size_t{0};
 // dirty. A state saved for the node serves the encoding if it covers no more blocks than this, the same test as
 // take_resumable_blocks()'s kHeadSlots one: slot i's hash bytes begin at 4 + 33 i, in block (4 + 33 i) / 136.
 [[gnu::always_inline]] inline unsigned full_branch_clean_blocks(const BranchNode& b) noexcept {
-    return b.dirty == 0 ? 3u : kprefix::first_blocks(lowest_set_bit(b.dirty));
+    const unsigned dirty = static_cast<unsigned>(b.mask_word >> 32);
+    return dirty == 0 ? 3u : kprefix::first_blocks(lowest_set_bit(dirty));
 }
 
 // The leading whole blocks of encode_branch(b) that are bytes of b's witness node, for a b laid out as that node
@@ -779,7 +780,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
 inline bool is_empty(const GridLine& line) {
     switch (line.kind) {
         case kBranch:
-            return line.branch.mask == 0;
+            return (line.branch.mask_word << 48) == 0;
         case kExt:
             return line.ext.child_len == 0;
         case kLeaf:

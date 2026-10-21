@@ -443,7 +443,7 @@ template <bool DeletionEnabled, class StateT>
 // take_resume_full(), from the node itself.
 template <bool DeletionEnabled, class StateT>
 inline kprefix::Resume GridMPT<DeletionEnabled, StateT>::take_resume_encoded(const BranchNode& b, size_t row) {
-    if (b.mask == 0 || b.orig == nullptr || (reinterpret_cast<uintptr_t>(b.orig) & 7) != 0 ||
+    if ((b.mask_word << 48) == 0 || b.orig == nullptr || (reinterpret_cast<uintptr_t>(b.orig) & 7) != 0 ||
         b.orig_size < kprefix::kBlock || !b.same_layout_as_orig()) {
         return {nullptr, 0};
     }
@@ -573,9 +573,8 @@ inline void GridMPT<DeletionEnabled, StateT>::link_to_parent(GridLine& line, uns
         line.consumed += parent->consumed;
         parent->child_depth[parent_slot] = static_cast<uint8_t>(depth);
         if (parent->kind == kBranch && parent->branch.child_len[parent_slot] == 0) {
-            parent->branch.mask |= 1 << parent_slot;
+            parent->branch.mask_word |= (uint64_t{1} << parent_slot) | (uint64_t{1} << (32 + parent_slot));
             parent->branch.child_len[parent_slot] = 1;  // Placeholder, update during fold_line
-            parent->branch.dirty |= static_cast<uint16_t>(1u << parent_slot);
         }
         if (parent->kind == kExt && parent->ext.child_len == 0) {
             parent->ext.child_len = 1;  // Placeholder, update during fold_line

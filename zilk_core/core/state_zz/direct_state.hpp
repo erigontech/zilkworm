@@ -132,7 +132,7 @@ class DirectState : public BlockState {
     /// and its keccak matched the key, see find_node_rlp(). Lazily verifying what is used costs
     /// the hashing of only those nodes; sanitize() hashed every node of the witness, a tenth of
     /// which no block ever unfolds.
-    mutable std::vector<uint32_t> node_verified_;
+    mutable std::vector<uint64_t> node_verified_;
     MphfMap code_store_map_;
 #if ZILK_SEAL_CODE_STORE
     /// Set once sanitize() has zeroed the bytes after each code-store payload, which takes the
@@ -586,8 +586,8 @@ DirectState::find_node_rlp_impl(const uint8_t (&node_hash)[32], [[maybe_unused]]
         // The bit is the body offset / 8: validate_mphf rejects any entry not 8-aligned, so no two
         // bodies share one.
         const auto bit = static_cast<uint32_t>(b->data() - node_store_map_.data_base()) >> 3;
-        auto& word = node_verified_[bit >> 5];
-        const auto mask = uint32_t{1} << (bit & 31);
+        auto& word = node_verified_[bit >> 6];
+        const auto mask = uint64_t{1} << (bit & 63);
         if ((word & mask) == 0) {
             const ByteView payload = FlatKv::payload(ByteView{b->data(), b->size()});
             // The snapshot hash is the same keccak of the same bytes, compared in full all the same.
