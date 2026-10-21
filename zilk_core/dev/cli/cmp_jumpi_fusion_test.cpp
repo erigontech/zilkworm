@@ -27,6 +27,7 @@
 #include <evmc/evmc.hpp>
 #include <evmc/mocked_host.hpp>
 #include <evmone/evmone.h>
+#include <evmone/instructions.hpp>
 #include <intx/intx.hpp>
 
 namespace {
@@ -376,5 +377,44 @@ TEST_CASE("comparison PUSH2 JUMPI fusions do not match a group cut off by the co
                 }
             }
         }
+    }
+}
+
+TEST_CASE("uint256 limb-scan compares match intx", "[cmp_jumpi][uint256]") {
+    using intx::uint256;
+    using evmone::instr::core::is_zero_fast;
+    using evmone::instr::core::eq_fast;
+
+    const uint256 max = ~uint256{};
+    const uint256 top = uint256{1} << 255;
+    const std::vector<uint256> samples{0, 1, 2, max, max - 1, top, top - 1, top + 1,
+        uint256{1} << 64, (uint256{1} << 64) - 1, uint256{1} << 128, (uint256{1} << 128) - 1,
+        uint256{1} << 192, (uint256{1} << 192) - 1, uint256{0x8000000000000000} << 64,
+        uint256{0x7fffffffffffffff} << 64, uint256{0xffffffffffffffff},
+        uint256{0xffffffffffffffff} << 192};
+
+    for (const auto& a : samples) {
+        REQUIRE(is_zero_fast(a) == (a == 0));
+        REQUIRE(eq_fast(a, a));
+        for (const auto& b : samples)
+            REQUIRE(eq_fast(a, b) == (a == b));
+        for (const unsigned bit : {0u, 31u, 63u, 64u, 127u, 128u, 191u, 192u, 254u, 255u}) {
+            const auto d = a ^ (uint256{1} << bit);  // differ in one limb
+            REQUIRE(is_zero_fast(d) == (d == 0));
+            REQUIRE_FALSE(eq_fast(a, d));
+        }
+    }
+
+    std::mt19937_64 rng(0x1234'5678'9abc'def0ULL);
+    for (int i = 0; i < 4096; ++i) {
+        const uint256 a{rng(), rng(), rng(), rng()};
+        const uint256 b{rng(), rng(), rng(), rng()};
+        const uint256 s{rng(), 0, 0, 0};  // small EVM-like value
+        REQUIRE(is_zero_fast(a) == (a == 0));
+        REQUIRE(is_zero_fast(s) == (s == 0));
+        REQUIRE(eq_fast(a, b) == (a == b));
+        REQUIRE(eq_fast(a, a));
+        REQUIRE(eq_fast(s, b) == (s == b));
+        REQUIRE(eq_fast(s, s));
     }
 }
