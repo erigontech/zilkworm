@@ -378,14 +378,17 @@ struct GridLine {
     // strict-alignment target rather than a call to memset for 16 unaligned bytes.
     alignas(4) std::array<uint8_t, 16> child_depth{};
 
+    // Parent pointer: kills index mul on climbs
+    GridLine* parent;
+
     union {
         BranchNode branch;
         ExtensionNode ext;
         LeafNode leaf;
     };
 
-    GridLine() : kind(kBranch), parent_slot(0), parent_depth(0), consumed(0), modified(false), branch{} {}
-    GridLine(Kind k, unsigned pslot, unsigned pdepth, unsigned c) {
+    GridLine() : kind(kBranch), parent_slot(0), parent_depth(0), consumed(0), modified(false), parent(nullptr), branch{} {}
+    GridLine(Kind k, unsigned pslot, unsigned pdepth, unsigned c, GridLine* p) : parent(p) {
         // header+child_depth as three word stores
         typedef uint64_t __attribute__((may_alias)) w64;
         *reinterpret_cast<w64*>(std::assume_aligned<8>(this)) =
@@ -400,7 +403,9 @@ struct GridLine {
 };
 
 static_assert(offsetof(GridLine, child_depth) == 8);
-static_assert(offsetof(GridLine, branch) == 24);
+static_assert(offsetof(GridLine, parent) == 24);
+static_assert(offsetof(GridLine, branch) == 32);
+static_assert(sizeof(GridLine) == 736 && alignof(GridLine) == 8);
 
 struct TrieNodeFlat {
     bytes32 key;
@@ -575,11 +580,12 @@ class GridMPT {
     // the DirectState include out of mpt.hpp.
     void init_from_root(bytes32 previous_root_hash, unsigned first_slot);
 
-    // Update the grid_line's parent-child bookkeeping
-    void link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, unsigned parent_depth);
+    // parent is grid_[parent_depth]; null at root.
+    void link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, GridLine* parent);
 
     // emplace_back a grid_line of `kind`, set the `depth_` to it and `link_to_parent()`.
-    GridLine* emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, unsigned consumed_init);
+    GridLine* emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, GridLine* parent,
+                           unsigned consumed_init);
 
     // Whether `lines` more lines fit the grid (see kMaxLines); the walk cannot go on if not.
     bool has_room(unsigned lines);
@@ -627,12 +633,14 @@ class GridMPT {
     }
 
     // Helper methods
-    bool unfold_node_from_rlp(ByteView rlp, unsigned parent_slot_index, unsigned parent_depth);
+    bool unfold_node_from_rlp(ByteView rlp, unsigned parent_slot_index, unsigned parent_depth,
+                              GridLine* parent);
     void delete_line(unsigned depth);
     void fold_line(unsigned depth);
     void pop_back();
     unsigned move_line(unsigned from_depth);
     UnfoldResult unfold_slot(unsigned slot);
+    UnfoldResult unfold_slot(unsigned slot, GridLine& grid_line);
     void seek_with_last_insert(const TrieNodeFlat& cur, const TrieNodeFlat* prev);
     // Whether update `u`, whose key the walk is about to insert, claims the key absent; flags the walk
     // failed if not.
@@ -644,10 +652,11 @@ class GridMPT {
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted);
 
     template <typename NodeType>
-    bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node);
+    bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node, GridLine* parent);
 
     template <typename NodeType>
-    bool insert_line_at(unsigned target_depth, unsigned parent_slot, unsigned parent_depth, NodeType&& node);
+    bool insert_line_at(unsigned target_depth, unsigned parent_slot, unsigned parent_depth, NodeType&& node,
+                        GridLine* parent);
 
     void delete_leaf(unsigned depth);
 

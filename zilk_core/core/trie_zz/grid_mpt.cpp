@@ -107,22 +107,24 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
         }
         // If last was not delete, the logic of splitting a leaf is there in the main loop for updates
     } else if (cur_parent_depth > 0) {
-        unsigned next_parent_depth = grid_[cur_parent_depth].parent_depth;
-        parent_consumed = grid_[next_parent_depth].consumed;  // For the next parent
         GridLine* const lines = grid_.data();  // reserved at construction; appends never reallocate
+        GridLine* par = &lines[cur_parent_depth];
+        unsigned next_parent_depth = par->parent_depth;
+        parent_consumed = par->parent->consumed;  // For the next parent
         while (parent_consumed > lcp && cur_parent_depth > 0) {
-            for (auto i = grid_n_ - 1; i > cur_parent_depth; --i) {
-                if (lines[i].parent_depth >= cur_parent_depth) {
+            for (GridLine* p = lines + (grid_n_ - 1); p > lines + cur_parent_depth; --p) {
+                if (p->parent_depth >= cur_parent_depth) {
                     // Deletes line i alone: only an empty line takes more lines with it (cascade_delete deletes
                     // the ancestors it leaves empty), which would leave i and the lines this loop climbs to
                     // stale, and none gets here. A deletion's empty lines go in the cascade above, before any
                     // fold; a read of an absent key inserts no leaf; decode_node() rejects a leaf without a value.
-                    fold_line(i);
+                    fold_line(static_cast<unsigned>(p - lines));
                 }
             }
             cur_parent_depth = next_parent_depth;
-            next_parent_depth = grid_[cur_parent_depth].parent_depth;
-            parent_consumed = grid_[next_parent_depth].consumed;
+            par = par->parent;
+            next_parent_depth = par->parent_depth;
+            parent_consumed = par->parent->consumed;
         }
         depth_ = cur_parent_depth;
     } else {
@@ -213,7 +215,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
             last_was_delete_ = false;
             root_unfolded_ = false;
             LeafNode l{search_nibbles_, 0, trie_upd.current_value()};
-            insert_line(0, 0, std::move(l));
+            insert_line(0, 0, std::move(l), nullptr);
             continue;
         }
 
@@ -225,15 +227,15 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
         // a line index, and the grid holds up to kMaxLines lines. Leaving the walk here would drop the update
         // unseen, so a node past nibble 63 that is not a leaf fails it.
         while (true) {  // Searching down
-            if (!(search_nib_cursor_ < 64 || grid_[depth_].kind == kLeaf)) [[unlikely]] {
+            auto& grid_line = grid_[depth_];
+            if (!(search_nib_cursor_ < 64 || grid_line.kind == kLeaf)) [[unlikely]] {
                 failed_ = true;
                 sys_println("{\"err\":\"descent past nibble 63\"}");
                 return {};
             }
-            auto& grid_line = grid_[depth_];
             if (grid_line.kind == kBranch) {
                 unsigned nib = search_nibbles_.at(search_nib_cursor_);
-                auto unfold_res = unfold_slot(nib);
+                auto unfold_res = unfold_slot(nib, grid_line);
                 if (unfold_res == UnfoldResult::kEmpty) {
                     // Child is empty - insert here
                     if (!claims_absent(trie_upd)) [[unlikely]] {
@@ -252,8 +254,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     if (!has_room(1)) {
                         return {};
                     }
-                    insert_line(l.parent_slot, depth_, std::move(l));
-                    grid_[depth_].modified = true;
+                    insert_line(l.parent_slot, depth_, std::move(l), &grid_line);
+                    grid_.back().modified = true;  // the new leaf, depth_ now names it
                     break;
                 } else if (unfold_res == UnfoldResult::kMissing || unfold_res == UnfoldResult::kUndefined) {
                     failed_ = true;
@@ -289,7 +291,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             }
                             rlp = *rlp_opt;
                         }
-                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path.at(m - 1), depth_)) [[unlikely]] {
+                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path.at(m - 1), depth_, &grid_line)) [[unlikely]] {
                             ++missing_count_;
                             failed_ = true;
                             sys_println("ERROR: malformed ext child rlp in node store");
@@ -316,13 +318,22 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (!has_room(5)) {
                     return {};
                 }
+                GridLine* const lines = grid_.data();  // reserved at construction; appends never reallocate
                 if (m > 0 || new_ext_len > 0) {
                     d1 = depth_ + 1;
-                    while (d1 < grid_n_ && grid_[d1].parent_depth != 0xFF) ++d1;
+                    GridLine* q = lines + d1;
+                    while (d1 < grid_n_ && q->parent_depth != 0xFF) {
+                        ++d1;
+                        ++q;
+                    }
                 }
                 if (new_ext_len > 0 && m > 0) {
                     d2 = d1 + 1;
-                    while (d2 < grid_n_ && grid_[d2].parent_depth != 0xFF) ++d2;
+                    GridLine* q = lines + d2;
+                    while (d2 < grid_n_ && q->parent_depth != 0xFF) {
+                        ++d2;
+                        ++q;
+                    }
                 }
 
                 if (old_child_depth != 0) {
@@ -340,9 +351,9 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     grid_line.consumed = grid_line.consumed - 1 - new_ext_len;
                     grid_line.ext.child_len = 1;
                     grid_line.ext.path = grid_line.ext.path.slice(0, m);
-                    grid_[depth_].modified = true;
+                    grid_line.modified = true;
                     const unsigned new_slot = grid_line.ext.path.at(m - 1);
-                    insert_line_at(d1, new_slot, depth_, BranchNode{});
+                    insert_line_at(d1, new_slot, depth_, BranchNode{}, &grid_line);
                     grid_[d1].modified = true;
                     d1 = 0;  // Used up
                     // insert_line_at wrote child_depth[new_slot]; clearing last_nib when they alias would orphan the new branch.
@@ -356,6 +367,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
 
                 auto br_depth = depth_;
+                auto* br = &grid_[br_depth];  // d1 when m > 0, else grid_line
                 if (new_ext_len > 0) {  // (orig_ext) -> new_br -> new_ext -> old_child
                     ExtensionNode ext_mplus1{};
                     ext_mplus1.path = old_ext_line.ext.path.slice(m + 1, new_ext_len);
@@ -363,19 +375,22 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     if (d1 == 0) {  // To check if we need d2 slot
                         d1 = d2;
                     }
-                    insert_line_at(d1, old_ext_line.ext.path.at(m), depth_, std::move(ext_mplus1));
+                    insert_line_at(d1, old_ext_line.ext.path.at(m), depth_, std::move(ext_mplus1), br);
                     grid_[d1].modified = true;
                 } else {  // () -> new_br -> old_child
-                    grid_[depth_].branch.set_child(last_nib, ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
+                    br->branch.set_child(last_nib, ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
                 }
 
                 if (old_child_depth != 0) {
-                    grid_[old_child_depth].parent_depth = depth_;
-                    grid_[depth_].child_depth[grid_[old_child_depth].parent_slot] = old_child_depth;
+                    auto& par = grid_[depth_];
+                    auto* och = &grid_[old_child_depth];
+                    och->parent_depth = depth_;
+                    och->parent = &par;
+                    par.child_depth[och->parent_slot] = old_child_depth;
                 }
                 auto l = make_cur_leaf(trie_upd.current_value());
-                insert_line(l.parent_slot, br_depth, std::move(l));
-                grid_[depth_].modified = true;
+                insert_line(l.parent_slot, br_depth, std::move(l), br);
+                grid_.back().modified = true;  // the new leaf, depth_ now names it
                 break;  // insertion complete
             } else {
                 // It's a leaf:
@@ -431,7 +446,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (trie_upd.current_value().empty()) {
                     break;  // a read of a key absent from the trie, which leaves this leaf's path: nothing to insert
                 }
-                LeafNode old_leaf{grid_[depth_].leaf};
+                LeafNode old_leaf{grid_line.leaf};
                 BranchNode bn;
 
                 if (!has_room(3)) {  // the branch and both leaves
@@ -439,26 +454,27 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
                 if (cp > 0) {  // Need to put an extension before the branch
                     ExtensionNode ext_common{};
-                    ext_common.path = grid_[depth_].leaf.path.slice(0, cp);
+                    ext_common.path = grid_line.leaf.path.slice(0, cp);
 
                     // Make the line an extension and insert a branch with this extension as the parent
                     unsigned ext_last_nib = ext_common.path.at(cp - 1);
-                    transform_line(grid_[depth_], std::move(ext_common));
+                    transform_line(grid_line, std::move(ext_common));
                     search_nib_cursor_ += cp;
-                    insert_line(ext_last_nib, depth_, std::move(bn));  // sets the depth_ at the branch after
+                    insert_line(ext_last_nib, depth_, std::move(bn), &grid_line);  // sets the depth_ at the branch after
                 } else {
                     // Make the line a branch
-                    transform_line(grid_[depth_], std::move(bn));
+                    transform_line(grid_line, std::move(bn));
                 }
                 old_leaf.parent_slot = old_leaf.path.at(cp);  // cp: extension, 1: branch
                 old_leaf.path = old_leaf.path.slice(cp + 1, old_leaf.path.len - cp - 1);
                 // Insert the leaves to the branch (which is at depth_ now) as parent
                 auto parent_depth = depth_;
+                auto* br = &grid_[parent_depth];  // grid_line itself when cp == 0
                 auto l = make_cur_leaf(trie_upd.current_value());  // sets parent_slot too at l, with first nib
-                insert_line(old_leaf.parent_slot, parent_depth, std::move(old_leaf));
-                grid_[depth_].modified = true;
-                insert_line(l.parent_slot, parent_depth, std::move(l));
-                grid_[depth_].modified = true;
+                insert_line(old_leaf.parent_slot, parent_depth, std::move(old_leaf), br);
+                grid_.back().modified = true;  // the new leaf, depth_ now names it
+                insert_line(l.parent_slot, parent_depth, std::move(l), br);
+                grid_.back().modified = true;
                 break;  // insertion complete
             }
         }
@@ -506,7 +522,7 @@ void GridMPT<DeletionEnabled, StateT>::init_from_root(bytes32 previous_root_hash
             sys_println("{\"err\":\"no_rlp\"}");
             return;
         }
-        root_unfolded_ = unfold_node_from_rlp(*rlp, 0, 0);
+        root_unfolded_ = unfold_node_from_rlp(*rlp, 0, 0, nullptr);
         if (!root_unfolded_) [[unlikely]] {
             failed_ = true;
             sys_println("{\"err\":\"init_from_root: malformed root rlp\"}");
