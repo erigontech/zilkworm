@@ -21,6 +21,7 @@
 #include <zilk_core/core/chain/genesis.hpp>
 #include <zilk_core/core/common/test_util.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
 #include <zilk_core/core/common_zz/inline_vec.hpp>
 #include <zilk_core/core/protocol/blockchain.hpp>
 #include <zilk_core/core/protocol/param.hpp>
@@ -391,7 +392,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         // Blob and created addr sets should be disjoint.
         int cur_cmp = 0;
         if (it_existing_hashes != end_it_existing && it_created_hashes != end_created_hashes) {
-            cur_cmp = std::memcmp(it_existing_hashes->addr_hash, it_created_hashes->addr_hash, 32);
+            cur_cmp = zilkworm::cmp_bytes32(it_existing_hashes->addr_hash, it_created_hashes->addr_hash);
             if (cur_cmp == 0) [[unlikely]] {
                 sys_println("Created and existing hashes clash");
                 return false;

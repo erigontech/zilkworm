@@ -290,7 +290,7 @@ namespace {
         while (len > 0) {
             const std::ptrdiff_t half = len >> 1;
             S* const mid = first + half;
-            const int c = std::memcmp(mid->key, key.bytes, 32);
+            const int c = ::zilkworm::cmp_bytes32(mid->key, key.bytes);
             if (c < 0) {
                 first = mid + 1;
                 len = len - half - 1;
@@ -1421,7 +1421,7 @@ bool DirectState::sanitize() {
     const uint32_t data_size = pre_state_map_.valid() ? pre_state_map_.header()->data_size : 0u;
     const uint8_t* prev_hash = nullptr;
     for (const auto& e : addr_hashes_) {
-        if (prev_hash != nullptr && std::memcmp(prev_hash, e.addr_hash, 32) >= 0) return false;
+        if (prev_hash != nullptr && ::zilkworm::cmp_bytes32(prev_hash, e.addr_hash) >= 0) return false;
         const auto h = silkworm::keccak256(ByteView{e.addr, 20});
         if (!bytes_equal<32>(h.bytes, e.addr_hash)) return false;
         if (static_cast<uint64_t>(e.entry_offset) + 8u + sizeof(Account) > data_size) return false;

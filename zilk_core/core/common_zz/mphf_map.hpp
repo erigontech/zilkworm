@@ -20,9 +20,31 @@
 
 namespace zilkworm {
 
+namespace detail {
+
+/// Words; one overlapping load covers the tail.
+template <size_t N, bool Lanes>
+[[gnu::always_inline]] inline bool bytes_equal_core(const uint8_t* a, const uint8_t* b) noexcept {
+    if constexpr (!Lanes || N < 8) {
+        return std::memcmp(a, b, N) == 0;
+    } else {
+        typedef uint64_t __attribute__((may_alias)) w64;
+        for (size_t i = 0; i + 8 <= N; i += 8)
+            if (*reinterpret_cast<const w64*>(a + i) != *reinterpret_cast<const w64*>(b + i))
+                return false;
+        if constexpr (N % 8 != 0)
+            if (*reinterpret_cast<const w64*>(a + N - 8) != *reinterpret_cast<const w64*>(b + N - 8))
+                return false;
+        return true;
+    }
+}
+
+}  // namespace detail
+
 /// a[0..N) == b[0..N), for the hash and key checks of the witness lookups. With strict alignment
 /// (rv32 Airbender) memcmp is a call; two word-aligned operands, the usual case, compare a word at
 /// a time inline instead.
+/// ZisK memcmp is a DMA call.
 template <size_t N>
 [[gnu::always_inline]] inline bool bytes_equal(const uint8_t* a, const uint8_t* b) noexcept {
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
@@ -37,7 +59,11 @@ template <size_t N>
         }
     }
 #endif
+#if (defined(ZISK) && defined(__riscv) && __riscv_xlen == 64) || defined(EVMONE_RV64_LANE_TEST)
+    return detail::bytes_equal_core<N, true>(a, b);
+#else
     return std::memcmp(a, b, N) == 0;
+#endif
 }
 
 #if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
