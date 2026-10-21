@@ -164,7 +164,7 @@ public:
     int64_t child_state_gas_left = 0;  // the state gas the child hands back
 
     evmc::Result call(const evmc_message& msg, void* = nullptr, void* = nullptr,
-        void* = nullptr) noexcept override {
+        void* = nullptr, bool = false, bool = false) noexcept override {
         messages.push_back(message_of(msg));
         alignas(4) uint8_t output[8];
         for (size_t i = 0; i < sizeof(output); ++i)
