@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include <evmone/test/state/state_diff.hpp>
 #include <evmone_precompiles/keccak.hpp>
@@ -309,30 +310,45 @@ namespace {
         return ::zilkworm::lt_bytes32(a, b);
     }
 
-    // SOUNDNESS-CRITICAL: the entries of an MphfMap must tile its data section exactly as the
-    // MphfBuilder lays them out — contiguous from offset 8 (the reserved sentinel it leaves so
-    // slot_offsets[idx] == 0 means "empty"), each 8-aligned, with no gaps and no overlaps.
-    // find() and for_each() read bodies in place and sanitize() and the EVM write through the
-    // addr-map bodies, so an entry whose body overlapped another's would let a write into one
-    // change the other after it was bound. Checked once, before anything is written; validate_mphf
-    // has already bounded every entry inside the data region, so each [len] read here is in range.
-    [[nodiscard]] bool mphf_entries_tile(const MphfMap& m) {
-        if (!m.valid() || m.n_keys() == 0) return true;
-        std::vector<uint32_t> offsets;
-        offsets.reserve(m.n_keys());
-        m.for_each_offset([&](uint64_t off) { offsets.push_back(static_cast<uint32_t>(off)); });
-        std::sort(offsets.begin(), offsets.end());
-        const uint8_t* const data = m.data_base();
-        uint64_t expect = 8u;  // data[0..8) is the sentinel the builder reserves
-        for (const uint32_t off : offsets) {
-            if (off != expect) return false;  // a gap, an overlap, or a misaligned start
-            const uint64_t body_len = load_u64_le(data + off);
-            expect = off + mphf_align8(static_cast<uint32_t>(8u + body_len));
-        }
-        return expect == m.data_size();
-    }
-
 }  // namespace
+
+// SOUNDNESS-CRITICAL: the entries of an MphfMap must tile its data section exactly as the
+// MphfBuilder lays them out — contiguous from offset 8 (the reserved sentinel it leaves so
+// slot_offsets[idx] == 0 means "empty"), each 8-aligned, with no gaps and no overlaps.
+// find() and for_each() read bodies in place and sanitize() and the EVM write through the
+// addr-map bodies, so an entry whose body overlapped another's would let a write into one
+// change the other after it was bound. Checked once, before anything is written, by walking
+// the chain the builder writes (self-bounded reads) and taking its marks with the map's own
+// offsets: equal counts rule out a gap, an overlap, a duplicate and a stray alike.
+[[nodiscard]] bool mphf_entries_tile(const MphfMap& m) noexcept {
+    if (!m.valid() || m.n_keys() == 0) return true;
+    const uint8_t* const data = m.data_base();
+    const uint32_t data_size = m.data_size();
+    // Marks chain starts; offsets take them.
+    std::vector<uint8_t> seen(data_size / 64 + 1, 0);
+    uint32_t off = 8u;  // data[0..8) is the sentinel the builder reserves
+    uint32_t chain = 0;
+    while (off < data_size) {
+        if (data_size - off < 8u) return false;  // no room left for the [len] word
+        const uint64_t body_len = load_u64_le(data + off);
+        if (body_len > data_size - off - 8u) return false;
+        seen[(off >> 3) >> 3] |= static_cast<uint8_t>(uint8_t{1} << ((off >> 3) & 7u));
+        ++chain;
+        off += mphf_align8(static_cast<uint32_t>(8u + body_len));
+    }
+    if (off != data_size) return false;
+    uint32_t hits = 0, visits = 0;
+    m.for_each_offset([&](uint64_t o) {
+        ++visits;
+        if ((o & 7u) != 0 || o >= data_size) return;
+        uint8_t& word = seen[(o >> 3) >> 3];
+        const uint8_t mask = static_cast<uint8_t>(uint8_t{1} << ((o >> 3) & 7u));
+        if ((word & mask) == 0) return;
+        word &= static_cast<uint8_t>(~mask);
+        ++hits;
+    });
+    return hits == chain && visits == chain;
+}
 
 namespace detail {
     // Forces single-pass linkers to pull this TU when direct_state_builder.cpp is.

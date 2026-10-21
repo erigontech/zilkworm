@@ -96,6 +96,9 @@ struct CodeStoreVerified {
 };
 extern CodeStoreVerified g_code_store_verified;
 
+/// Whether entries tile the map's data section.
+[[nodiscard]] bool mphf_entries_tile(const MphfMap& m) noexcept;
+
 // Sentinel: in-block created code; look up via created_code_[key8].
 inline constexpr uint32_t kCreatedCodeOffset = ~uint32_t{0};
 

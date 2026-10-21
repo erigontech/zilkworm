@@ -162,6 +162,7 @@ if(BUILD_TESTING)
     zilk_core/core/state_zz/block_hash_cache_test.cpp
     zilk_core/core/trie_zz/unfold_hash_copy_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
+    zilk_core/dev/cli/mphf_tile_equiv_test.cpp
     zilk_core/dev/cli/storage_host_path_test.cpp
     zilk_core/dev/cli/call_frame_result_test.cpp
     zilk_core/dev/cli/word_layout_test.cpp
