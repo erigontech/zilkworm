@@ -243,7 +243,7 @@ release-artifacts:
 	done; \
 	(cd $(RELEASE_DIR) && sha256sum $$names > SHA256SUMS.txt)
 	@echo "release artifacts staged in $(RELEASE_DIR)/:"
-	@ls -l $(RELEASE_DIR)/z6m_guest_hypercube.elf $(RELEASE_DIR)/z6m_guest_hypercube.vk $(RELEASE_DIR)/z6m_prover_hypercube $(RELEASE_DIR)/state_transition_linux_x86_64 $(RELEASE_DIR)/SHA256SUMS.txt
+	@ls -l $(foreach pair,$(RELEASE_BINS),$(RELEASE_DIR)/$(lastword $(subst :, ,$(pair)))) $(RELEASE_DIR)/SHA256SUMS.txt
 	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
 	@cat $(RELEASE_DIR)/SHA256SUMS.txt
 
