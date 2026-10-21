@@ -95,7 +95,7 @@ inline uint8_t* encode_hp_path(uint8_t* out, const nibbles64& path, bool leaf) n
         *q++ = b;
     }
     return q;
-#elif defined(ZISK) && defined(__riscv) && __riscv_xlen == 64
+#elif (defined(ZISK) && defined(__riscv) && __riscv_xlen == 64) || defined(ENCODE_HP_WORD_TAIL_TEST)
     // One nibble swap per word.
     const uint64_t* const wp = path.w.data();
     uint8_t* q = out;
@@ -105,10 +105,15 @@ inline uint8_t* encode_hp_path(uint8_t* out, const nibbles64& path, bool leaf) n
         std::memcpy(q, &r, 8);
         q += 8;
     }
-    for (; k < n; k += 2) {
-        uint8_t b = static_cast<uint8_t>(path.at(k) << 4);
-        if (k + 1 < n) b |= path.at(k + 1);
-        *q++ = b;
+    if (const size_t m = n - k; m != 0) {
+        // One word beats per-byte at().
+        uint64_t r = nib_swap64(nib_word(wp, k));
+        const size_t tb = (m + 1) >> 1;
+        if (m & 1)
+            r &= ~(uint64_t{0xF} << (8u * static_cast<unsigned>(tb - 1)));
+        for (size_t j = 0; j != tb; ++j)
+            q[j] = static_cast<uint8_t>(r >> (8u * static_cast<unsigned>(j)));
+        q += tb;
     }
     return q;
 #else
@@ -256,11 +261,11 @@ template <unsigned Off>
 // fast_decode_header() also takes a 4-byte header with a leading zero, which would leave room for one
 // embedded node of 32 bytes and shift the slots after it.
 [[gnu::always_inline]] inline bool has_full_branch_orig(const BranchNode& b) noexcept {
-    typedef uint32_t __attribute__((may_alias)) w32;
-    const w32* const lens = reinterpret_cast<const w32*>(std::assume_aligned<8>(b.orig_child_len.data()));
+    // lw costs more than ld here.
+    typedef uint64_t __attribute__((may_alias)) w64;
+    const w64* const lens = reinterpret_cast<const w64*>(std::assume_aligned<8>(b.orig_child_len.data()));
     return b.orig_size == kprefix::kNodeSize && b.orig[0] == 0xf9 &&
-           ((lens[0] ^ 0x20202020u) | (lens[1] ^ 0x20202020u) | (lens[2] ^ 0x20202020u) |
-            (lens[3] ^ 0x20202020u)) == 0;
+           ((lens[0] ^ 0x2020202020202020ull) | (lens[1] ^ 0x2020202020202020ull)) == 0;
 }
 
 // Whether encode_branch(b) is the witness node b.orig, a full branch, with the hash bytes of the dirty
