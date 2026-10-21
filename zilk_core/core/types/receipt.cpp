@@ -55,11 +55,47 @@ namespace {
     // alignment is checked, not assumed) and stored only from dst's first word boundary on: each stored
     // word joins the upper bytes of one source word to the lower bytes of the next (little endian), and
     // the bytes before the first and after the last stored word are written one by one.
+    // copy_words for 8-aligned src, n%8==0.
+    uint8_t* copy_words8(uint8_t* dst, const uint8_t* src, size_t n) noexcept {
+        typedef uint64_t __attribute__((may_alias)) w64;
+        const w64* const s{reinterpret_cast<const w64*>(src)};
+        const size_t words{n / 8};
+        const auto off{static_cast<unsigned>(reinterpret_cast<uintptr_t>(dst) & 7)};
+        if (off == 0) {
+            w64* const d{reinterpret_cast<w64*>(dst)};
+            for (size_t i{0}; i < words; ++i) {
+                d[i] = s[i];
+            }
+            return dst + n;
+        }
+        const unsigned lead{8u - off};  // bytes before dst's first word boundary
+        const unsigned shift{8u * lead};
+        uint64_t w{s[0]};
+        for (unsigned k{0}; k < lead; ++k) {
+            dst[k] = static_cast<uint8_t>(w >> (8 * k));
+        }
+        w64* const d{reinterpret_cast<w64*>(dst + lead)};
+        for (size_t i{1}; i < words; ++i) {
+            const uint64_t next{s[i]};
+            d[i - 1] = (w >> shift) | (next << (64 - shift));
+            w = next;
+        }
+        w >>= shift;
+        uint8_t* tail{dst + lead + 8 * (words - 1)};
+        for (unsigned k{0}; k < off; ++k, w >>= 8) {
+            tail[k] = static_cast<uint8_t>(w);
+        }
+        return dst + n;
+    }
+
     uint8_t* copy_words(uint8_t* dst, const uint8_t* src, size_t n) noexcept {
         typedef uint32_t __attribute__((may_alias)) w32;
         assert(n >= 4 && n % 4 == 0);
         if (std::endian::native != std::endian::little || (reinterpret_cast<uintptr_t>(src) & 3) != 0) {
             return copy(dst, src, n);
+        }
+        if ((n & 7) == 0 && (reinterpret_cast<uintptr_t>(src) & 7) == 0) {
+            return copy_words8(dst, src, n);
         }
         const w32* s{reinterpret_cast<const w32*>(src)};
         const size_t words{n / 4};
