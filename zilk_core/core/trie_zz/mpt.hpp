@@ -548,6 +548,8 @@ class GridMPT {
     // and its lookups save no keccak state (unfold_slot()).
     bool snap_{false};
 
+    bool light_ro_{false};
+
     // Node-store lookups go through StateT::find_node_rlp (DirectState owns
     // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload
     // slice directly, and lets us drop the bundle blob span from GridMPT.
@@ -646,6 +648,9 @@ class GridMPT {
     // The same walk over an order of pointers (see sort_trie_node_ptrs()): the nodes stay where they are.
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted);
 
+// all-read walks bind light, not grid
+    void enable_light_read_only() noexcept { light_ro_ = true; }
+
     template <typename NodeType>
     bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node, GridLine* parent);
 
@@ -672,6 +677,18 @@ class GridMPT {
     // The walk of both calc_root_from_updates(), over the nodes or pointers to them (grid_mpt.cpp).
     template <typename It>
     bytes32 calc_root_impl(It updates_it, It updates_end);
+
+// cells whose single-child fold is pending
+    struct RoFoldEntry {
+        unsigned depth;
+        Bytes cell;
+    };
+    template <typename It>
+    bytes32 calc_root_read_only_impl(It updates_it, It updates_end);
+    bool ro_descend(const TrieNodeFlat* u, ByteView node, unsigned consumed, std::vector<RoFoldEntry>* pend,
+                    bool from_ext);
+// sorted writes: lcp neighbours for reads
+    std::vector<const TrieNodeFlat*> light_writes_;
 };
 
 }  // namespace zilkworm
