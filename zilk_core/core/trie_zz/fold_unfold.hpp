@@ -289,8 +289,8 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
                 // No child to absorb: the line folds as the branch it is.
             } else if (grid_.back().kind == kBranch) {
                 auto clen = grid_line.branch.child_len[non_empty_nib];
-                const uint8_t* src = (clen == 32 && grid_line.branch.child_ptr[non_empty_nib])
-                                         ? grid_line.branch.child_ptr[non_empty_nib]
+                const uint8_t* src = clen == 32
+                                         ? branch_hash_src(grid_line.branch, non_empty_nib)
                                          : grid_line.branch.child[non_empty_nib].bytes;
                 ext.child_len = clen;
                 ext.set_child(ByteView{src, clen});
@@ -324,9 +324,8 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
                 unsigned kept_nib = parent.branch.first_set_bit();
                 ExtensionNode ext{nibbles64::single(kept_nib)};
                 auto clen = parent.branch.child_len[kept_nib];
-                const uint8_t* src = (clen == 32 && parent.branch.child_ptr[kept_nib])
-                                         ? parent.branch.child_ptr[kept_nib]
-                                         : parent.branch.child[kept_nib].bytes;
+                const uint8_t* src = clen == 32 ? branch_hash_src(parent.branch, kept_nib)
+                                                 : parent.branch.child[kept_nib].bytes;
                 ext.set_child(ByteView{src, clen});
                 transform_line(parent, std::move(ext));
                 parent.modified = true;
@@ -755,7 +754,7 @@ inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot,
         // Plain bytes, not a bytes32: handed to the keccak compare out of line, a bytes32 gets its
         // zero initialization emitted again here.
         alignas(8) uint8_t ck[32];
-        const uint8_t* hs = grid_line.branch.child_ptr[slot] ? grid_line.branch.child_ptr[slot] : child.bytes;
+        const uint8_t* hs = branch_hash_src(grid_line.branch, slot);
 #if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
         copy32_to_aligned(ck, hs);
 #else

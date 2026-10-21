@@ -950,9 +950,7 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
             const uint8_t clen = br.child_len[nib];
             ++depth;
             if (clen == 32) {
-                // child_ptr set only for 0xa0 hash refs
-                const uint8_t* href = br.child_ptr[nib] ? br.child_ptr[nib] : br.child[nib].bytes;
-                std::memcpy(node_hash.bytes, href, 32);
+                std::memcpy(node_hash.bytes, branch_hash_src(br, nib), 32);
                 node_is_embedded = false;
             } else {
                 std::memcpy(embedded_scratch.data(), br.child[nib].bytes, clen);

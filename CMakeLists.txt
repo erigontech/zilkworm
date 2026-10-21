@@ -149,6 +149,7 @@ if(BUILD_TESTING)
     zilk_core/core/trie_zz/grid_mpt_absent_read_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
     zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp
+    zilk_core/core/trie_zz/decode_diff_test.cpp
     zilk_core/core/trie_zz/encode_branch_patch_test.cpp
     zilk_core/core/trie_zz/encode_hp_path_test.cpp
     zilk_core/core/trie_zz/grid_mpt_kprefix_test.cpp

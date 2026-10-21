@@ -238,10 +238,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             // child.bytes — exactly unfold_slot's source pick, fold_unfold.hpp:524) and
             // resolve it through the store.
             evmc::bytes32 h;
-            const std::uint8_t* hsrc = stack[top].branch.child_ptr[s]
-                                           ? stack[top].branch.child_ptr[s]
-                                           : stack[top].branch.child[s].bytes;
-            std::memcpy(h.bytes, hsrc, 32);
+            std::memcpy(h.bytes, branch_hash_src(stack[top].branch, s), 32);
             auto child = find_node_rlp(h);
             if (!child) {
                 // Pruned boundary (partial witness): do not descend, do not count as missing.
@@ -353,9 +350,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
             ++consumed;
             if (branch.child_len[s] == 32) {  // 32-byte hash ref -> resolve through the store
                 evmc::bytes32 h;
-                const std::uint8_t* hsrc = branch.child_ptr[s] ? branch.child_ptr[s]
-                                                               : branch.child[s].bytes;
-                std::memcpy(h.bytes, hsrc, 32);
+                std::memcpy(h.bytes, branch_hash_src(branch, s), 32);
                 auto child = find_node_rlp(h);
                 if (!child) return false;  // needed node missing -> cannot confirm
                 node_rlp = *child;

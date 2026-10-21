@@ -241,17 +241,39 @@ template <unsigned Off>
 }
 #endif
 
+// Sentinel size: child_ptr[] fill deferred.
+inline constexpr size_t kDeferredChildPtr = ~size_t{0};
+
+// Deferred branch's node base, else null.
+[[gnu::always_inline]] inline const uint8_t* deferred_base(const BranchNode& b) noexcept {
+    return b.value.size() == kDeferredChildPtr ? b.value.data() : nullptr;
+}
+
+// Slot i's hash bytes; needs child_len[i]==32.
+[[gnu::always_inline]] inline const uint8_t* branch_hash_src(const BranchNode& b, size_t i,
+                                                              const uint8_t* dbase) noexcept {
+    if (dbase != nullptr && (b.dirty & (uint16_t{1} << i)) == 0) [[unlikely]] return dbase + 33 * i + 1;
+    const uint8_t* const p = b.child_ptr[i];
+    return p ? p : b.child[i].bytes;
+}
+
+[[gnu::always_inline]] inline const uint8_t* branch_hash_src(const BranchNode& b, size_t i) noexcept {
+    return branch_hash_src(b, i, deferred_base(b));
+}
+
 // Writes branch slot i's 32-byte hash reference to dst.
-[[gnu::always_inline]] inline void put_child_hash(uint8_t* dst, const BranchNode& b, size_t i) noexcept {
+[[gnu::always_inline]] inline void put_child_hash(uint8_t* dst, const BranchNode& b, size_t i,
+                                                  const uint8_t* dbase) noexcept {
+    const uint8_t* const src = branch_hash_src(b, i, dbase);
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
     // child_ptr points into the witness at any alignment; a slot rewritten since holds its hash in
     // child[i], which is 8-aligned.
-    if (b.child_ptr[i] == nullptr) [[likely]] {
+    if (src == b.child[i].bytes) [[likely]] {
         copy32_from_aligned8(dst, b.child[i].bytes);
         return;
     }
 #endif
-    std::memcpy(dst, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
+    std::memcpy(dst, src, 32);
 }
 
 // Whether b's witness node is a full branch: 16 hash references and an empty value, 3 + 16 * 33 + 1
@@ -283,6 +305,7 @@ template <unsigned Off>
     if (b.mask == 0) {
         return empty;
     }
+    const uint8_t* const db = deferred_base(b);  // Hoisted: one flag test per branch.
     // Copy orig encoding; rewrite only dirty slots.
     if (b.orig != nullptr && b.same_layout_as_orig()) {
         // At the witness node's phase modulo 32, see static_buffer.
@@ -298,7 +321,7 @@ template <unsigned Off>
                 const unsigned i = lowest_set_bit(dirty);
                 uint8_t* const p = out + 3 + 33 * i;
                 *p = 0xa0;
-                put_child_hash(p + 1, b, i);
+                put_child_hash(p + 1, b, i, nullptr);  // dirty slot: mutator wrote child_ptr
             }
             return ByteView{out, b.orig_size};
         }
@@ -315,7 +338,7 @@ template <unsigned Off>
                         *p = rlp::kEmptyStringCode;
                     } else if (len == 32) {
                         *p = 0xa0;
-                        put_child_hash(p + 1, b, i);
+                        put_child_hash(p + 1, b, i, nullptr);  // dirty slot: mutator wrote child_ptr
                     } else {
                         std::memcpy(p, b.child[i].bytes, len);
                     }
@@ -339,7 +362,8 @@ template <unsigned Off>
         // payload_length += 1 + child_len;
     }
 
-    payload_length += rlp::length(b.value);
+    const ByteView val = db != nullptr ? ByteView{} : b.value;  // deferred: empty
+    payload_length += rlp::length(val);
     uint8_t* p = encode_list_header(static_buffer, payload_length);
     const uint8_t* const begin = static_buffer;
 
@@ -349,15 +373,14 @@ template <unsigned Off>
             *p++ = rlp::kEmptyStringCode;
         } else if (child_len == 32) {
             *p++ = 0xa0;
-            const uint8_t* href = b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes;
-            std::memcpy(p, href, 32);
+            std::memcpy(p, branch_hash_src(b, i, db), 32);
             p += 32;
         } else {
             std::memcpy(p, b.child[i].bytes, child_len);
             p += child_len;
         }
     }
-    p += rlp::encode_into(p, b.value);
+    p += rlp::encode_into(p, val);
     return ByteView{begin, static_cast<size_t>(p - begin)};
 }
 
@@ -499,8 +522,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
                                                      uint8_t start_byte,
                                                      const uint8_t* data, size_t len, unsigned& mask) {
     if (len == 0) {
-        out.child_len[i] = 0;  // empty child (RLP empty string 0x80)
-        out.child_ptr[i] = nullptr;
+        out.child_len[i] = 0;  // 0x80 empty; readers gate on child_len
         return true;
     }
     if (start_byte != 0xa0) {
@@ -525,9 +547,8 @@ inline ByteView encode_leaf(const LeafNode& l) {
                                                          unsigned& mask) {
     if (remaining.empty()) return false;
     const uint8_t b0 = remaining[0];
-    if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty
+    if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty; readers gate on child_len
         out.child_len[i] = 0;
-        out.child_ptr[i] = nullptr;
         remaining.remove_prefix(1);
         return true;
     }
@@ -642,14 +663,13 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
             }
         }
         if (hashes) [[likely]] {
-#pragma GCC unroll 16
-            for (size_t i = 0; i < 16; ++i) out_branch.child_ptr[i] = p + 33 * i + 1;
             // 4 word stores (child_len is alignas(8)); a memcpy here compiled to a call.
+            // Readers derive child_ptr via branch_hash_src.
             typedef uint32_t __attribute__((may_alias)) w32;
             w32* const cl = reinterpret_cast<w32*>(std::assume_aligned<8>(out_branch.child_len.data()));
             cl[0] = cl[1] = cl[2] = cl[3] = 0x20202020u;
             mask_out = 0xffff;
-            out_branch.value = {};
+            out_branch.value = ByteView{p, kDeferredChildPtr};
             return kBranch;
         }
     }
@@ -715,9 +735,8 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                 out_branch.child_len[i] = 32;
                 mask |= 1u << i;
                 p += 33;
-            } else if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty
+            } else if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty; readers gate on child_len
                 out_branch.child_len[i] = 0;
-                out_branch.child_ptr[i] = nullptr;
                 ++p;
             } else if (b0 >= 0xc0 && b0 <= 0xf7) {  // embedded short list
                 const size_t plen_ = static_cast<size_t>(b0 - 0xc0);
