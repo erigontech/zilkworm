@@ -253,9 +253,9 @@ Components (Reth / Zilkworm): `opcode` 12,983,896,897,645 / 5,501,284,818,016,
 The two blocks where Reth is cheaper are its two mismatches: it stops early on a
 block it gets wrong. On the 98 blocks both validate, Z/R stays within 0.403..0.484.
 
-The alpha.4 DirectState guest with the MFBD host adapter measured Z/R 0.488 on this
-batch (ERE Benchmark CI of the `v0.1.0-alpha.4` release); the HashState guest on the
-raw input is 3.4% cheaper on the same blocks.
+The alpha.4 DirectState guest with the MFBD host adapter, run locally on this batch,
+totals 7,653,392,292,202 (Z/R 0.494); the HashState guest on the raw input is 3.3%
+cheaper on the same blocks.
 
 ### tests-zkevm v21.0.6
 
