@@ -96,6 +96,12 @@ template <uint16_t Csr>
     csrs<0x803>(&p);
 }
 
+/// Hot callers rewrite only p2.
+[[gnu::always_inline]] inline void secp256k1_add(InOutParams& p) noexcept
+{
+    csrs<0x803>(&p);
+}
+
 [[gnu::always_inline]] inline void secp256k1_dbl(uint64_t p[8]) noexcept
 {
     csrs<0x804>(p);
