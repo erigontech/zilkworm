@@ -356,11 +356,13 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     std::vector<zilkworm::AddrHashEntry> created_acc_hashes_spill;  // to be used with InlineVec additional cache area
     zilkworm::InlineVec<zilkworm::AddrHashEntry, 32> created_acc_hashes(
         direct_state.created_accounts().size(), created_acc_hashes_spill);
-    for (auto& [addr, _] : direct_state.created_accounts()) {
-        auto& e = created_acc_hashes.emplace_back();
-        std::memcpy(e.addr_hash, keccak_bytes(addr.bytes).bytes, 32);
-        std::memcpy(e.addr, addr.bytes, 20);
-    }
+    {
+        Z6M_PHASE("cr_setup");
+        for (auto& [addr, _] : direct_state.created_accounts()) {
+            auto& e = created_acc_hashes.emplace_back();
+            std::memcpy(e.addr_hash, keccak_bytes(addr.bytes).bytes, 32);
+            std::memcpy(e.addr, addr.bytes, 20);
+        }
     if (created_acc_hashes.size() > 1) [[likely]] {
         auto* const data = created_acc_hashes.data();
         const std::size_t n = created_acc_hashes.size();
@@ -377,6 +379,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         } else {
             std::sort(data, data + n);
         }
+    }
     }
 
     std::vector<mpt::TrieNodeFlat> acc_updates;
@@ -540,8 +543,11 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                 storage_root = kEmptyRoot;
             }
             storage_trie.reset(storage_root);
-            const bytes32 walked = storage_trie.calc_root_from_updates(
-                std::span<const mpt::TrieNodeFlat* const>{order.data(), order.size()});
+            const bytes32 walked = [&] {
+                Z6M_PHASE("cr_slot_walk");
+                return storage_trie.calc_root_from_updates(
+                    std::span<const mpt::TrieNodeFlat* const>{order.data(), order.size()});
+            }();
             // A failed walk binds none of the slots.
             if (storage_trie.failed()) [[unlikely]] {
                 sys_println("ERROR: storage trie walk failed");
@@ -640,8 +646,11 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                     }
                     zilkworm::sort_trie_nodes(storage_updates.data(), storage_updates.size());
                     storage_trie.reset(storage_root);
-                    storage_root = storage_trie.calc_root_from_updates(
-                        {storage_updates.data(), storage_updates.size()});
+                    {
+                        Z6M_PHASE("cr_slot_walk");
+                        storage_root = storage_trie.calc_root_from_updates(
+                            {storage_updates.data(), storage_updates.size()});
+                    }
                     if (storage_trie.failed()) [[unlikely]] {
                         sys_println("ERROR: storage trie walk failed");
                         return false;
@@ -664,8 +673,12 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         pre_root_set_ = true;
     }
     zilkworm::GridMPT<true, DirectState> acc_trie(direct_state, prev_root);
-    auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
-    sys_println(("New Root: " + to_hex(new_root)).c_str());
+    bytes32 new_root{};
+    {
+        Z6M_PHASE("cr_acc_walk");
+        new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
+        sys_println(("New Root: " + to_hex(new_root)).c_str());
+    }
     // A failed walk returns a zero root, which would match a header committing to one.
     const bool ok = !acc_trie.failed() && new_root == header.state_root;
     // Walked: every record's list was taken in the walks above (a deleted record's with its wiped storage).
@@ -861,7 +874,10 @@ uint64_t StateTransition::run_mfbd() {
 
     for (uint64_t i = 0; i < n_bundles; ++i) {
         std::span<uint8_t> tail{envelope_.data() + cursor, end - cursor};
-        auto fb = ::zilkworm::load_flat_bundle(tail);
+        auto fb = [&] {
+            Z6M_PHASE("mfbd_parse");
+            return ::zilkworm::load_flat_bundle(tail);
+        }();
         if (!fb) [[unlikely]] {
             sys_println("ERROR: MFBD bundle parse failed");
             failed_ = true;

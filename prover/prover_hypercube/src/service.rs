@@ -43,7 +43,9 @@ fn now_ms() -> u64 {
 
 /// Print the executor's per-label cycle tracker (guest stdout
 /// `cycle-tracker-report-start/end:` pairs) when Z6M_CYCLE_TRACKER is set.
-/// Phase labels come from the guest's Z6M_PHASE_TRACE markers.
+/// Phase labels come from the guest's Z6M_PHASE_TRACE markers. Also prints
+/// the RISC-V opcode histogram (top 20) — Hypercube cycles are 1 per
+/// instruction, so the opcode mix is the lever for cycle reduction.
 fn print_cycle_tracker(report: &sp1_sdk::ExecutionReport, block_number: u64) {
     if std::env::var("Z6M_CYCLE_TRACKER").is_err() {
         return;
@@ -51,6 +53,13 @@ fn print_cycle_tracker(report: &sp1_sdk::ExecutionReport, block_number: u64) {
     for (label, cycles) in &report.cycle_tracker {
         println!("CYCLE_TRACKER block={} label={} cycles={}", block_number, label, cycles);
     }
+    let mut opcodes: Vec<_> = report.opcode_counts.iter().collect();
+    opcodes.sort_by(|a, b| b.1.cmp(a.1));
+    for (op, count) in opcodes.iter().take(20) {
+        println!("OPCODE_COUNT block={} op={:?} count={}", block_number, op, count);
+    }
+    // Keep the enum map alive until here.
+    drop(opcodes);
 }
 
 /// Guest-committed public values (see docs/architecture.md for encoding details).
