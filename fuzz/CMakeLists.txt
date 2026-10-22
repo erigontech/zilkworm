@@ -31,6 +31,7 @@ z6m_add_fuzzer(fuzz_state_transition fuzz_state_transition.cpp)
 z6m_add_fuzzer(fuzz_slib fuzz_slib.cpp)
 z6m_add_fuzzer(fuzz_mpt fuzz_mpt.cpp)
 z6m_add_fuzzer(fuzz_prestate fuzz_prestate.cpp)
+z6m_add_fuzzer(fuzz_mphf fuzz_mphf.cpp)
 z6m_add_fuzzer(fuzz_precompiles fuzz_precompiles.cpp)
 target_include_directories(fuzz_precompiles PRIVATE
   ${CMAKE_SOURCE_DIR}/third_party/evmone
