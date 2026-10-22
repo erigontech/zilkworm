@@ -65,12 +65,17 @@ fn main() {
 
     cc::Build::new()
         .file("src/atomic_stubs.c")
-        .compile("atomic_stubs");
+        .file("src/runtime.c")
+        .compile("guest_runtime");
 
     // The zilk_core/third_party tree at the repo root (project zilkworm), the
     // same sources the hypercube guest builds. SP1TURBO selects the rv32 SP1
     // paths (and implies -DSP1 in zilk_core).
     let manifest_root = env::var("CARGO_MANIFEST_DIR").unwrap();
+    // sp1-build only watches the program crate; without these, edits to the
+    // C++ trees never trigger a guest rebuild (stale-ELF debugging trap).
+    println!("cargo:rerun-if-changed={manifest_root}/../../zilk_core");
+    println!("cargo:rerun-if-changed={manifest_root}/../../third_party");
     let dst = cmake::Config::new(format!("{manifest_root}/../.."))
         .build_arg("-j4") // shared machine; keep the parallelism bounded
         .define("SP1TURBO", "ON")
@@ -102,6 +107,9 @@ fn main() {
         "cargo:rustc-link-search=native={home}/.sp1/riscv/riscv32im-linux-x86_64/lib/gcc/riscv32-unknown-elf/13.2.0"
     );
 
+    // guest_runtime (the _sbrk bump allocator) must precede c/nosys: newlib's
+    // malloc pulls the first _sbrk definition it sees, and the libnosys stub
+    // (always -1) must not win.
     let libs = [
         "silkworm_dev",
         "silkworm_core",
@@ -109,10 +117,10 @@ fn main() {
         "evmone",
         "blst",
         "stdc++",
+        "guest_runtime",
         "c",
         "gcc",
         "nosys",
-        "atomic_stubs",
     ];
     for lib in libs {
         println!("cargo:rustc-link-lib=static={lib}");

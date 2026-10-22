@@ -52,8 +52,10 @@ z6m_prover_airbender: z6m_guest_airbender
 test_hc: z6m_prover
 	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp
 
+# Freshness is handled by guest_turbo/build.rs's cargo:rerun-if-changed on the
+# zilk_core/third_party trees, so no forced clean is needed here (the old
+# z6m_guest-* glob silently stopped matching after the crate rename anyway).
 z6m_guest_turbo:
-	rm -r prover/target/elf-compilation/riscv32im-succinct-zkvm-elf/release/build/z6m_guest-* || true
 	(cd prover/guest_turbo && PATH="$(SP1_RV32_TOOLCHAIN_BIN):$$PATH" cargo prove build)
 
 z6m_prover_turbo: z6m_guest_turbo
