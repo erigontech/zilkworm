@@ -19,7 +19,8 @@ unprofiled. The rules are in `../cmake/z6m_pgo.cmake`; the measurements are belo
 Z6M_PGO=USE` pass the mode to both CMake projects: the zilkworm subbuild (evmone, silkworm_core,
 silkworm_dev, silkworm_types_zz) and the guest (z6m_guest). Each prints
 `Z6M_PGO=<mode>: building <zilkworm|guest> with the committed profile` when it uses it. The profile
-is recorded with `USE_HASH_KEY=OFF`; with `ON` the flags differ, so `AUTO` builds without it.
+is recorded with `USE_HASH_KEY=ON`, the Makefile's and the Docker image's default; with `OFF` the
+flags differ, so `AUTO` builds without it.
 
 ## When the profile applies
 
@@ -69,6 +70,22 @@ no training run reached counts as never executed. Trained on the blocks alone, t
 cold paths that mainnet blocks rarely take markedly slower (below); the EEST half covers them.
 
 ## Measurements
+
+The committed profile (recorded with `USE_HASH_KEY=ON`, EEST weight 0.3, 100 block runs and 4,213
+EEST runs), against the unprofiled guest of the same tree:
+
+| | Unprofiled | Profiled |
+| --- | --- | --- |
+| 200-block corpus, cycles | 27,651,052,525 | 27,434,850,689 (-0.78%) |
+| Corpus blocks slower / worst block | | 13 of 200 / +1.81% |
+| EEST, 8,601 passing tests, cycles | 246,187,445,247 | 236,784,625,467 (-3.82%) |
+| The 100 most expensive EEST tests | | -3.62%, worst -0.03% |
+| EEST tests more than 1% / 5% slower | | 64 / 30 (worst +5.98%, `ecpairing_fuzzed/negative`) |
+
+Gas and post-state root match the native run on all 200 blocks, and the same 8,601 EEST tests pass.
+The same training merged at EEST weight 1 gave -0.29% on the corpus.
+
+Earlier, on the round-4 tree with `USE_HASH_KEY=OFF`:
 
 When the profile was recorded (unprofiled guest 3,218,592 bytes, profiled 3,095,712, GEN 4,115,512):
 

@@ -69,8 +69,8 @@ COPY . .
 ARG USE_HASH_KEY=ON
 # Z6M_PGO=USE builds with the committed profile and fails if it does not match the tree, the
 # compiler or the flags (prover/guest_airbender/pgo/README.md). The profile is recorded for
-# USE_HASH_KEY=OFF, so the default USE_HASH_KEY=ON build leaves it off.
-ARG Z6M_PGO=OFF
+# USE_HASH_KEY=ON; a USE_HASH_KEY=OFF build needs Z6M_PGO=OFF.
+ARG Z6M_PGO=USE
 WORKDIR /build/prover/guest_airbender
 RUN make z6m_guest USE_HASH_KEY=${USE_HASH_KEY} Z6M_PGO=${Z6M_PGO}
 

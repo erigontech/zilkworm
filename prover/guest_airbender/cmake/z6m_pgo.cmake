@@ -56,13 +56,17 @@ set(Z6M_PGO_USE_OPTIONS -fprofile-use -fprofile-partial-training -fno-profile-va
                         --param=profile-func-internal-id=1 -Wno-coverage-mismatch -Werror=missing-profile)
 set(Z6M_PGO_USE_LINK_OPTIONS -fprofile-use -fprofile-partial-training -fno-profile-values)
 
-# The runtime and the dump hook are never instrumented.
-set(Z6M_PGO_RUNTIME_REGEX "/(main\\.cpp|airbender_runtime\\.cpp|runtime_stubs\\.c|gcov_dump\\.c)$")
+# The runtime and the dump hook are never instrumented, nor is the guests' shared memcpy/memset
+# (prover/guest_common): it sits outside the guest's source directory, so CMake names its object
+# directory after its absolute path and the profile file name would depend on the checkout.
+set(Z6M_PGO_RUNTIME_REGEX "/(main\\.cpp|airbender_runtime\\.cpp|runtime_stubs\\.c|gcov_dump\\.c|guest_common/src/mem_builtins\\.cpp)$")
 # Cold files, left out of both stages: instrumenting every file overflows the 4 MiB ROM.
 set(Z6M_PGO_COLD_REGEX "/(state_transition|bal|secp256r1|mphf_builder|advanced_instructions|advanced_execution|advanced_analysis|system_contracts|genesis[a-z_]*|bls|ethash_rule_set|direct_state_builder|eip_7685_requests|ripemd160|validation|evmc_bytes32|kzg[a-z_]*|tracing|witness_converter|test_util|blake2b)\\.cpp$")
 # Compiled, but nothing in them is reachable from the guest: instrumentation leaves them without
 # counters, so there is no profile to read.
-set(Z6M_PGO_NO_COUNTERS_REGEX "/(common/assert|trie/prefix_set|types_zz/witness_trie|types/log)\\.cpp$")
+# The HashState / statelessInputBytes sources (hash_state, slib_*, ssz_merkle) are compiled into the
+# libraries but only the Z6M_HASH_STATE guest links them.
+set(Z6M_PGO_NO_COUNTERS_REGEX "/(common/assert|trie/prefix_set|types_zz/witness_trie|types/log|common_zz/ssz_merkle|state_zz/hash_state|state_zz/slib_input|state_zz/slib_payload)\\.cpp$")
 # The interpreter and the file that holds its entry point are instrumented but stay unprofiled:
 # with a profile dispatch_cgoto spills and costs 900M cycles on the corpus.
 set(Z6M_PGO_UNPROFILED_REGEX "/lib/evmone/(baseline_execution|vm)\\.cpp$")

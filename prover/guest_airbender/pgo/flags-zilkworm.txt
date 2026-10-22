@@ -1,7 +1,7 @@
 CMAKE_BUILD_TYPE=Release
 target evmone
-  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
-  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -mbranch-cost=1
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -mbranch-cost=1 -fno-exceptions -fno-rtti -fno-threadsafe-statics
   CMAKE_C_FLAGS_RELEASE=
   CMAKE_CXX_FLAGS_RELEASE=
   directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT
@@ -20,8 +20,8 @@ target evmone
   INTERFACE_INCLUDE_DIRECTORIES=<root>/prover/guest_airbender/build/zilkworm/deps/src/blst/bindings
   SYSTEM=ON
 target silkworm_core
-  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
-  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -mbranch-cost=1
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -mbranch-cost=1 -fno-exceptions -fno-rtti -fno-threadsafe-statics
   CMAKE_C_FLAGS_RELEASE=
   CMAKE_CXX_FLAGS_RELEASE=
   directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
@@ -44,6 +44,7 @@ target silkworm_core
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include>;$<INSTALL_INTERFACE:include>
   SYSTEM=ON
   uses silkworm_types_zz
+  INTERFACE_COMPILE_DEFINITIONS=USE_HASH_KEY=1
   INTERFACE_INCLUDE_DIRECTORIES=<root>
   INTERFACE_COMPILE_FEATURES=cxx_std_23
   INTERFACE_LINK_LIBRARIES=evmc;evmone;intx::intx;magic_enum::magic_enum;nlohmann_json::nlohmann_json
@@ -56,8 +57,8 @@ target silkworm_core
   INTERFACE_COMPILE_FEATURES=cxx_std_11
   SYSTEM=ON
 target silkworm_dev
-  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
-  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -mbranch-cost=1
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -mbranch-cost=1 -fno-exceptions -fno-rtti -fno-threadsafe-statics
   CMAKE_C_FLAGS_RELEASE=
   CMAKE_CXX_FLAGS_RELEASE=
   directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
@@ -87,6 +88,7 @@ target silkworm_dev
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include>;$<INSTALL_INTERFACE:include>
   SYSTEM=ON
   uses silkworm_types_zz
+  INTERFACE_COMPILE_DEFINITIONS=USE_HASH_KEY=1
   INTERFACE_INCLUDE_DIRECTORIES=<root>
   INTERFACE_COMPILE_FEATURES=cxx_std_23
   INTERFACE_LINK_LIBRARIES=evmc;evmone;intx::intx;magic_enum::magic_enum;nlohmann_json::nlohmann_json
@@ -94,12 +96,13 @@ target silkworm_dev
   INTERFACE_INCLUDE_DIRECTORIES=<root>/prover/guest_airbender/build/zilkworm/deps/src/blst/bindings
   SYSTEM=ON
 target silkworm_types_zz
-  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200
-  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+  CMAKE_C_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -mbranch-cost=1
+  CMAKE_CXX_FLAGS=-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC -O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer --param inline-unit-growth=100 --param max-inline-insns-auto=60 --param large-function-growth=200 -mbranch-cost=1 -fno-exceptions -fno-rtti -fno-threadsafe-statics
   CMAKE_C_FLAGS_RELEASE=
   CMAKE_CXX_FLAGS_RELEASE=
   directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
   COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete;-Wstrict-aliasing=1
+  COMPILE_DEFINITIONS=USE_HASH_KEY=1
   INCLUDE_DIRECTORIES=<root>/zilk_core;<root>/prover/guest_airbender/src/include;<root>
   COMPILE_FEATURES=cxx_std_23
   CXX_STANDARD=23
@@ -214,6 +217,8 @@ source silkworm_core <root>/zilk_core/core/types/transaction.cpp
 source silkworm_core <root>/zilk_core/core/types/withdrawal.cpp
   LANGUAGE=CXX
 source silkworm_core <root>/zilk_core/core/types/y_parity_and_chain_id.cpp
+  LANGUAGE=CXX
+source silkworm_dev <root>/zilk_core/dev/blockchain_test_runner.cpp
   LANGUAGE=CXX
 source silkworm_types_zz <root>/zilk_core/core/types_zz/account.cpp
   LANGUAGE=CXX
