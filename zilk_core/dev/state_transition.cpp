@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cstring>
 #include <fstream>
+#include <format>
 #include <memory>
 #include <new>
 #include <string_view>
@@ -48,6 +49,14 @@ namespace silkworm::cmd::state_transition {
 
 using silkworm::protocol::Blockchain;
 using silkworm::protocol::kMaxRlpBlockSize;
+
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+// Profiling counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_node_verify;
+extern "C" uint64_t z6mprof_node_verify_bytes;
+extern "C" uint64_t z6mprof_code_verify;
+extern "C" uint64_t z6mprof_code_verify_bytes;
+#endif
 
 StateTransition::StateTransition(std::span<uint8_t> envelope) noexcept
     : envelope_{envelope} {
@@ -829,6 +838,12 @@ StateTransition::Result StateTransition::run() {
         failed_ = true;
         gas = kRunFailure;
     }
+#endif
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+    sys_println(std::format("[profile] node_verify = {} ({} bytes)", z6mprof_node_verify,
+                            z6mprof_node_verify_bytes).c_str());
+    sys_println(std::format("[profile] code_verify = {} ({} bytes)", z6mprof_code_verify,
+                            z6mprof_code_verify_bytes).c_str());
 #endif
     return Result{
         .gas_used = gas,

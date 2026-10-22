@@ -41,6 +41,12 @@ CodeStoreVerified g_code_store_verified;
 
 namespace trie = ::silkworm::trie;
 using ::silkworm::keccak256;
+
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+// Profiling counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_code_verify;
+extern "C" uint64_t z6mprof_code_verify_bytes;
+#endif
 using ::silkworm::to_bytes32;
 using ::silkworm::zeroless_view;
 namespace rlp = ::silkworm::rlp;
@@ -1181,6 +1187,10 @@ bool DirectState::sanitize() {
             return;
         const uint8_t* const body = code_data + off + 8u;
         const auto body_len = static_cast<size_t>(load_u64_le(code_data + off));
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+        ++z6mprof_code_verify;
+        z6mprof_code_verify_bytes += body_len;
+#endif
         code_keccak_ok &= bytes_equal<32>(
             silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
     });

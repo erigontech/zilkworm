@@ -69,9 +69,19 @@ using ::silkworm::kEmptyRoot;
 struct nibbles64;  // trie_zz/mpt.hpp
 #endif
 
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+// Profiling counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_node_verify;
+extern "C" uint64_t z6mprof_node_verify_bytes;
+#endif
+
 /// Whether the keccak of `payload` is the 32 bytes at `expected` (any alignment). On the Airbender
 /// guest the hash is compared inside the keccak state, so it is never stored out and loaded back.
 [[gnu::always_inline]] inline bool keccak256_equals(ByteView payload, const uint8_t* expected) noexcept {
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+    ++z6mprof_node_verify;
+    z6mprof_node_verify_bytes += payload.size();
+#endif
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
     return ethash_keccak256_eq(expected, payload.data(), payload.size());
 #else
