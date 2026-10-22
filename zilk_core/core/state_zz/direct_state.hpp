@@ -132,6 +132,12 @@ struct WipedStorage {
     uint32_t absent_reads;
 };
 
+// Bounds + alignment + magic/version checks against malicious blob input: the same
+// checks the DirectState constructor performs (aborting on failure), exposed without
+// the abort so a host can pre-check and route the failure to a clean rejection.
+[[nodiscard]] bool validate_prestate_layout(std::span<const uint8_t> blob) noexcept;
+[[nodiscard]] bool validate_nodestore_layout(std::span<const uint8_t> ns) noexcept;
+
 class DirectState : public BlockState {
   private:
     std::span<uint8_t> prestate_view_;

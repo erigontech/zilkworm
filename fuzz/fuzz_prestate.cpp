@@ -17,18 +17,30 @@
 using namespace zilkworm;
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-    if (size < 64 || size > (1u << 20)) {
+    if (size < 68 || size > (1u << 26)) {
         return 0;
     }
     static thread_local std::vector<uint8_t> buf;
     buf.assign(data, data + size);
 
-    // Split into a prestate blob and a node-store blob; 8-align the boundary as the
-    // bundle layout does.
-    size_t mid = size / 2;
-    mid &= ~size_t{7};
-    DirectState st{std::span<uint8_t>{buf.data(), mid},
-                   std::span<uint8_t>{buf.data() + mid, size - mid}};
+    // [u32 LE prestate_size + 4 pad][prestate blob][node-store blob]: the payload
+    // starts 8-aligned, as the bundle layout requires. The bundles concatenate the
+    // two sections this way; a mutated boundary is part of the input space.
+    uint32_t prestate_size{0};
+    std::memcpy(&prestate_size, buf.data(), sizeof(prestate_size));
+    if (prestate_size < 8 || prestate_size > size - 8) {
+        return 0;
+    }
+    const std::span<uint8_t> prestate{buf.data() + 8, prestate_size};
+    const std::span<uint8_t> nodestore{buf.data() + 8 + prestate_size, size - 8 - prestate_size};
+    // The constructor aborts on a malformed blob (the guest fails the proof; there is
+    // no graceful path yet), so the layout validators are applied here first: fuzzing
+    // targets the read paths of blobs that pass validation, and validate_mphf itself
+    // (called by these) is what sweeps hostile layouts.
+    if (!validate_prestate_layout(prestate) || !validate_nodestore_layout(nodestore)) {
+        return 0;
+    }
+    DirectState st{prestate, nodestore};
 
     if (!st.sanitize()) {
         return 0;
