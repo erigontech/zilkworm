@@ -4,6 +4,6 @@
 use sp1_build::build_program_with_args;
 
 fn main() {
-    build_program_with_args("../guest_program", Default::default() )
+    build_program_with_args("../guest_turbo", Default::default() )
 }
 

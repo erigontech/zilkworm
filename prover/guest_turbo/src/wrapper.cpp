@@ -19,6 +19,19 @@ extern void (*__init_array_end[])(void);
 extern void (*__fini_array_start[])(void);
 extern void (*__fini_array_end[])(void);
 
+// sp1_zkvm's own syscall_halt (which commits the public-values digest before
+// the HALT ecall) is private to the crate, so the C-side name has no Rust
+// definition to bind to. The C++ guest only reaches halt on fatal paths inside
+// zilk_core — paths whose proofs would be discarded — so issue the bare HALT
+// ecall (number 0) without the digest commit.
+extern "C" [[noreturn]] void syscall_halt(uint8_t exit_code)
+{
+    register uint32_t t0 asm("t0") = 0;  // SP1 syscall number: HALT
+    register uint32_t a0 asm("a0") = exit_code;
+    asm volatile("ecall" : : "r"(t0), "r"(a0));
+    __builtin_unreachable();
+}
+
 extern "C" uint64_t sample_run_wrapped(rust::Vec<uint8_t> envelope_vec)
 {
     // SP1's _start doesn't run global ctors.
@@ -33,7 +46,8 @@ extern "C" uint64_t sample_run_wrapped(rust::Vec<uint8_t> envelope_vec)
     sys_println("\nZilkworm guest initialized");
 
     silkworm::ByteView view(envelope_vec.data(), envelope_vec.size());
-    auto state_transition = silkworm::cmd::state_transition::StateTransition(view);
+    auto state_transition = silkworm::cmd::state_transition::StateTransition(
+        std::span<uint8_t>(const_cast<uint8_t *>(envelope_vec.data()), envelope_vec.size()));
     auto msg = "state_transition object initialized input size: " + std::to_string(envelope_vec.size());
     sys_println(msg.c_str());
     const auto result = state_transition.run();

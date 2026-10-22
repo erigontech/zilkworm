@@ -7,7 +7,7 @@
 
 if(SP1TURBO)
     add_compile_definitions(-DSP1)
-    include_directories(${CMAKE_SOURCE_DIR}/../prover/guest_program/src/include)
+    include_directories(${CMAKE_SOURCE_DIR}/prover/guest_turbo/src/include)
 endif()
 
 if(SP1)

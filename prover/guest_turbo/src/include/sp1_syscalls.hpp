@@ -4,6 +4,7 @@
 #pragma once
 #include <cstddef> // size_t
 #include <cstdint> // uint8_t, uint32_t, uint64_t
+#include <span>
 #include <string_view>
 #include <intx/intx.hpp>
 
@@ -125,41 +126,41 @@ extern "C"
 
     // Field/Fp and Fp2 ops for BLS12-381 (operands are limb pointers; sizes defined by the ABI)
     // pub fn syscall_bls12381_fp_addmod(p: *mut u32, q: *const u32)
-    void syscall_bls12381_fp_addmod(uint32_t *p, const uint32_t *q);
+    void syscall_bls12381_fp_addmod(size_t *p, const size_t *q);
 
     // pub fn syscall_bls12381_fp_submod(p: *mut u32, q: *const u32)
-    void syscall_bls12381_fp_submod(uint32_t *p, const uint32_t *q);
+    void syscall_bls12381_fp_submod(size_t *p, const size_t *q);
 
     // pub fn syscall_bls12381_fp_mulmod(p: *mut u32, q: *const u32)
-    void syscall_bls12381_fp_mulmod(uint32_t *p, const uint32_t *q);
+    void syscall_bls12381_fp_mulmod(size_t *p, const size_t *q);
 
     // pub fn syscall_bls12381_fp2_addmod(p: *mut u32, q: *const u32)
-    void syscall_bls12381_fp2_addmod(uint32_t *p, const uint32_t *q);
+    void syscall_bls12381_fp2_addmod(size_t *p, const size_t *q);
 
     // pub fn syscall_bls12381_fp2_submod(p: *mut u32, q: *const u32)
-    void syscall_bls12381_fp2_submod(uint32_t *p, const uint32_t *q);
+    void syscall_bls12381_fp2_submod(size_t *p, const size_t *q);
 
     // pub fn syscall_bls12381_fp2_mulmod(p: *mut u32, q: *const u32)
-    void syscall_bls12381_fp2_mulmod(uint32_t *p, const uint32_t *q);
+    void syscall_bls12381_fp2_mulmod(size_t *p, const size_t *q);
 
     // Field/Fp and Fp2 ops for BN254
     // pub fn syscall_bn254_fp_addmod(p: *mut u32, q: *const u32)
-    void syscall_bn254_fp_addmod(uint32_t *p, const uint32_t *q);
+    void syscall_bn254_fp_addmod(size_t *p, const size_t *q);
 
     // pub fn syscall_bn254_fp_submod(p: *mut u32, q: *const u32)
-    void syscall_bn254_fp_submod(uint32_t *p, const uint32_t *q);
+    void syscall_bn254_fp_submod(size_t *p, const size_t *q);
 
     // pub fn syscall_bn254_fp_mulmod(p: *mut u32, q: *const u32)
-    void syscall_bn254_fp_mulmod(uint32_t *p, const uint32_t *q);
+    void syscall_bn254_fp_mulmod(size_t *p, const size_t *q);
 
     // pub fn syscall_bn254_fp2_addmod(p: *mut u32, q: *const u32)
-    void syscall_bn254_fp2_addmod(uint32_t *p, const uint32_t *q);
+    void syscall_bn254_fp2_addmod(size_t *p, const size_t *q);
 
     // pub fn syscall_bn254_fp2_submod(p: *mut u32, q: *const u32)
-    void syscall_bn254_fp2_submod(uint32_t *p, const uint32_t *q);
+    void syscall_bn254_fp2_submod(size_t *p, const size_t *q);
 
     // pub fn syscall_bn254_fp2_mulmod(p: *mut u32, q: *const u32)
-    void syscall_bn254_fp2_mulmod(uint32_t *p, const uint32_t *q);
+    void syscall_bn254_fp2_mulmod(size_t *p, const size_t *q);
 
     // pub fn read_vec_raw() -> ReadVecResult
     ReadVecResult read_vec_raw();
@@ -213,3 +214,13 @@ inline void sp1_point_to_bytes(uint8_t bytes[64], const sp1_AffinePoint r ) noex
     for (size_t i = 0; i < 8; ++i)
          intx::be::unsafe::store<uint32_t>(&y[32 - (i + 1) * 4], r[i + 8]);
 }
+
+// evmone's SP1 MULMOD path (instructions.hpp) calls this wrapper with {y, m}
+// packed in one span of two uint256. The syscall reads y and the modulus from
+// the second pointer (8 + 8 rv32 words) and writes the remainder over x.
+namespace sp1 {
+inline void mulmod(intx::uint256 &x, std::span<const intx::uint256, 2> ym) noexcept {
+    syscall_uint256_mulmod(reinterpret_cast<uint32_t *>(&x),
+                           reinterpret_cast<const uint32_t *>(ym.data()));
+}
+} // namespace sp1

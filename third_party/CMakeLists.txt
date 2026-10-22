@@ -16,8 +16,10 @@ add_subdirectory(evmone/third_party/intx intx)
 # add_subdirectory(evmone) # depends on intx
 if(SP1TURBO)
   # FIXME: I'm not sure why this is not propagated from the top-level CMakeLists.txt.
-  add_compile_definitions(-DSP1TURBO)
-  include_directories(${CMAKE_SOURCE_DIR}/prover/guest_program/src/include)
+  # evmone gates its syscall use on SP1 (instructions.hpp #ifdef SP1), so the rv32
+  # guest needs both macros; zilk_core already derives SP1 from SP1TURBO itself.
+  add_compile_definitions(-DSP1TURBO -DSP1)
+  include_directories(${CMAKE_SOURCE_DIR}/prover/guest_turbo/src/include)
 endif()
 
 if(SP1)

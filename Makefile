@@ -54,10 +54,14 @@ test_hc: z6m_prover
 
 z6m_guest_turbo:
 	rm -r prover/target/elf-compilation/riscv32im-succinct-zkvm-elf/release/build/z6m_guest-* || true
-	(cd prover/guest_turbo && cargo prove build)
+	(cd prover/guest_turbo && PATH="$(SP1_RV32_TOOLCHAIN_BIN):$$PATH" cargo prove build)
 
 z6m_prover_turbo: z6m_guest_turbo
-	cd prover && cargo build --release --manifest-path prover_turbo/Cargo.toml
+	cd prover && PATH="$(SP1_RV32_TOOLCHAIN_BIN):$$PATH" cargo build --release --manifest-path prover_turbo/Cargo.toml
+
+# The turbo guest's C/C++ dependencies find the riscv32 toolchain through PATH
+# (prover/guest_turbo/.cargo/config.toml names the tools without a directory).
+SP1_RV32_TOOLCHAIN_BIN ?= $(HOME)/.sp1/riscv/riscv32im-linux-x86_64/bin
 
 execute-block: z6m_prover
 	prover/target/release/z6m_prover execute --file-name prover/temp/blocks/23519000/unifiedBlockAndStateRlp23519000.bin
