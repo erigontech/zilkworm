@@ -143,7 +143,7 @@ jobs:
             echo
             echo "### Hypercube guests"
             echo
-            echo "- \`z6m_guest_hypercube_mfbd.{elf,vk}\`: DirectState, takes MFBD bundles; \`z6m_guest_hypercube_slib.{elf,vk}\`: HashState, takes statelessInputBytes (the ERE guest)"
+            echo "- \`z6m_guest_hypercube_mfbd.{elf,vk}\`: DirectState, takes MFBD bundles; \`stateless-validator-zilkworm-sp1-<SP1 SDK version>.{elf,vk}\`: HashState, takes statelessInputBytes (the ERE guest, named as the guest handbook asks)"
             echo
             echo "### Airbender image and verification key"
             echo
@@ -163,8 +163,8 @@ jobs:
           files: |
             temp/z6m_guest_hypercube_mfbd.elf
             temp/z6m_guest_hypercube_mfbd.vk
-            temp/z6m_guest_hypercube_slib.elf
-            temp/z6m_guest_hypercube_slib.vk
+            temp/stateless-validator-zilkworm-sp1-*.elf
+            temp/stateless-validator-zilkworm-sp1-*.vk
             temp/z6m_prover_hypercube
             temp/state_transition_linux_x86_64
             temp/z6m_guest_airbender.bin
