@@ -135,12 +135,16 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
         const size_t len{std::max(preceding_len, common_prefix_len)};
         // SILKWORM_ASSERT(len < current.size());
 
-        // Add the digit immediately following the max common prefix
-        const uint8_t extra_digit{current[len]};
-        if (groups_.size() <= len) {
+        // Add the digit immediately following the max common prefix. len can equal
+        // current.size() for the last leaf (the SILKWORM_ASSERT below is commented out);
+        // reading current[len] is then out of bounds, so skip the group bit there.
+        const uint8_t extra_digit{len < current.size() ? current[len] : uint8_t{0}};
+        if (len < current.size() && groups_.size() <= len) {
             groups_.resize(len + 1);
         }
-        groups_[len] |= 1u << extra_digit;
+        if (len < current.size()) {
+            groups_[len] |= 1u << extra_digit;
+        }
 
         if (tree_masks_.size() < current.size()) {
             tree_masks_.resize(current.size());
