@@ -65,6 +65,15 @@ if(BUILD_TESTING)
     add_test(NAME malformed_input_sentinel_test COMMAND malformed_input_sentinel_test)
 endif()
 
+# Regression: validate_block_header must reject a block whose parent_hash names
+# a header with a number other than header.number - 1 (read_header looks up by
+# hash alone). Standalone, exit code = failure count.
+add_executable(parent_number_check_test "parent_number_check_test.cpp")
+target_link_libraries(parent_number_check_test PRIVATE ${ZILK_CLI_TRIE_LIBS})
+if(BUILD_TESTING)
+    add_test(NAME parent_number_check_test COMMAND parent_number_check_test)
+endif()
+
 # file(GLOB STATE_TRANSITION_TESTS CONFIGURE_DEPENDS "state_transition_sample*.json")
 # add_custom_command(
 #   TARGET state_transition

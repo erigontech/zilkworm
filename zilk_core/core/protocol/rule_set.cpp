@@ -139,6 +139,13 @@ ValidationResult RuleSet::validate_block_header(const BlockHeader& header, const
         return ValidationResult::kUnknownParent;
     }
 
+    // The parent is looked up by hash alone (read_header ignores block_num), so a header
+    // the hash names that is not the block's parent by number would otherwise pass every
+    // check below as the parent. A header with another number is not the parent at all.
+    if (header.number != parent->number + 1) {
+        return ValidationResult::kUnknownParent;
+    }
+
     if (header.timestamp <= parent->timestamp) {
         return ValidationResult::kInvalidTimestamp;
     }
