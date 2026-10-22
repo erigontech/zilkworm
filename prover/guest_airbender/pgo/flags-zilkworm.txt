@@ -5,15 +5,16 @@ target evmone
   CMAKE_C_FLAGS_RELEASE=
   CMAKE_CXX_FLAGS_RELEASE=
   directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT
-  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-fno-exceptions;$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes>;$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>
-  COMPILE_DEFINITIONS=EVMONE_TRACING=0;AIRBENDER
+  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-fno-exceptions;$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes>;$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>;-Werror=strict-aliasing;-Wstrict-aliasing=1
+  COMPILE_DEFINITIONS=EVMONE_TRACING=0;AIRBENDER;EVMONE_ADVANCED=0
   INCLUDE_DIRECTORIES=<root>/third_party/evmone/include;<root>/third_party/evmone/lib;<root>/third_party/..;<root>/third_party/evmone;<root>/prover/guest_airbender/src/include;<root>/zilk_core
   POSITION_INDEPENDENT_CODE=TRUE
   uses evmc
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/evmc/include>$<INSTALL_INTERFACE:include>
   INTERFACE_COMPILE_FEATURES=c_std_99
+  SYSTEM=ON
   uses intx::intx
-  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/intx/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/third_party/intx/include>$<INSTALL_INTERFACE:include>
   INTERFACE_COMPILE_FEATURES=cxx_std_20
   uses blst::blst
   INTERFACE_INCLUDE_DIRECTORIES=<root>/prover/guest_airbender/build/zilkworm/deps/src/blst/bindings
@@ -24,7 +25,7 @@ target silkworm_core
   CMAKE_C_FLAGS_RELEASE=
   CMAKE_CXX_FLAGS_RELEASE=
   directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
-  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete
+  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete;-Wstrict-aliasing=1
   INCLUDE_DIRECTORIES=<root>/zilk_core;<root>/prover/guest_airbender/src/include;<root>
   COMPILE_FEATURES=cxx_std_23
   CXX_STANDARD=23
@@ -32,11 +33,12 @@ target silkworm_core
   uses evmc
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/evmc/include>$<INSTALL_INTERFACE:include>
   INTERFACE_COMPILE_FEATURES=c_std_99
+  SYSTEM=ON
   uses evmone
   INTERFACE_INCLUDE_DIRECTORIES=<root>/third_party/evmone/include;<root>/third_party/evmone/lib;<root>/third_party/.
   INTERFACE_LINK_LIBRARIES=evmc;intx::intx;blst::blst
   uses intx::intx
-  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/intx/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/third_party/intx/include>$<INSTALL_INTERFACE:include>
   INTERFACE_COMPILE_FEATURES=cxx_std_20
   uses magic_enum::magic_enum
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include>;$<INSTALL_INTERFACE:include>
@@ -59,7 +61,7 @@ target silkworm_dev
   CMAKE_C_FLAGS_RELEASE=
   CMAKE_CXX_FLAGS_RELEASE=
   directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
-  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete
+  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete;-Wstrict-aliasing=1
   INCLUDE_DIRECTORIES=<root>/zilk_core;<root>/prover/guest_airbender/src/include;<root>
   POSITION_INDEPENDENT_CODE=TRUE
   uses nlohmann_json::nlohmann_json
@@ -74,11 +76,12 @@ target silkworm_dev
   uses evmc
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/evmc/include>$<INSTALL_INTERFACE:include>
   INTERFACE_COMPILE_FEATURES=c_std_99
+  SYSTEM=ON
   uses evmone
   INTERFACE_INCLUDE_DIRECTORIES=<root>/third_party/evmone/include;<root>/third_party/evmone/lib;<root>/third_party/.
   INTERFACE_LINK_LIBRARIES=evmc;intx::intx;blst::blst
   uses intx::intx
-  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/intx/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/third_party/intx/include>$<INSTALL_INTERFACE:include>
   INTERFACE_COMPILE_FEATURES=cxx_std_20
   uses magic_enum::magic_enum
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include>;$<INSTALL_INTERFACE:include>
@@ -96,7 +99,7 @@ target silkworm_types_zz
   CMAKE_C_FLAGS_RELEASE=
   CMAKE_CXX_FLAGS_RELEASE=
   directory COMPILE_DEFINITIONS=SILKWORM_CAPI_COMPONENT;-DAIRBENDER
-  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete
+  COMPILE_OPTIONS=$<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>;-Werror;-Wall;-Wextra;-pedantic;-Wshadow;-Wimplicit-fallthrough;-Wunused;-Wsign-compare;-Wsign-conversion;-Wdouble-promotion;$<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>;$<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>;$<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>;-Wtype-limits;-Wformat=2;-Wno-missing-field-initializers;-Wduplicated-cond;-Wduplicated-branches;-Wlogical-op;-Wno-attributes;-Wno-error=maybe-uninitialized;-Wno-error=mismatched-new-delete;-Wstrict-aliasing=1
   INCLUDE_DIRECTORIES=<root>/zilk_core;<root>/prover/guest_airbender/src/include;<root>
   COMPILE_FEATURES=cxx_std_23
   CXX_STANDARD=23
@@ -104,11 +107,12 @@ target silkworm_types_zz
   uses evmc
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/evmc/include>$<INSTALL_INTERFACE:include>
   INTERFACE_COMPILE_FEATURES=c_std_99
+  SYSTEM=ON
   uses evmone
   INTERFACE_INCLUDE_DIRECTORIES=<root>/third_party/evmone/include;<root>/third_party/evmone/lib;<root>/third_party/.
   INTERFACE_LINK_LIBRARIES=evmc;intx::intx;blst::blst
   uses intx::intx
-  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/intx/include>$<INSTALL_INTERFACE:include>
+  INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/third_party/evmone/third_party/intx/include>$<INSTALL_INTERFACE:include>
   INTERFACE_COMPILE_FEATURES=cxx_std_20
   uses magic_enum::magic_enum
   INTERFACE_INCLUDE_DIRECTORIES=$<BUILD_INTERFACE:<root>/prover/guest_airbender/build/zilkworm/_deps/magic_enum-src/include>;$<INSTALL_INTERFACE:include>
@@ -202,8 +206,6 @@ source silkworm_core <root>/zilk_core/core/types/address.cpp
 source silkworm_core <root>/zilk_core/core/types/block.cpp
   LANGUAGE=CXX
 source silkworm_core <root>/zilk_core/core/types/bloom.cpp
-  LANGUAGE=CXX
-source silkworm_core <root>/zilk_core/core/types/log.cpp
   LANGUAGE=CXX
 source silkworm_core <root>/zilk_core/core/types/receipt.cpp
   LANGUAGE=CXX

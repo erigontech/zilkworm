@@ -19,7 +19,7 @@ target z6m_guest
 source z6m_guest <root>/prover/guest_airbender/src/simple_allocator.cpp
   LANGUAGE=CXX
 source z6m_guest <root>/prover/guest_airbender/src/mem_builtins.c
-  COMPILE_OPTIONS=-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto
+  COMPILE_OPTIONS=-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto;-fno-toplevel-reorder
   LANGUAGE=C
 source z6m_guest <root>/prover/guest_airbender/src/hashtable_policy.cpp
   COMPILE_OPTIONS=-fno-lto

@@ -62,7 +62,7 @@ set(Z6M_PGO_RUNTIME_REGEX "/(main\\.cpp|airbender_runtime\\.cpp|runtime_stubs\\.
 set(Z6M_PGO_COLD_REGEX "/(state_transition|bal|secp256r1|mphf_builder|advanced_instructions|advanced_execution|advanced_analysis|system_contracts|genesis[a-z_]*|bls|ethash_rule_set|direct_state_builder|eip_7685_requests|ripemd160|validation|evmc_bytes32|kzg[a-z_]*|tracing|witness_converter|test_util|blake2b)\\.cpp$")
 # Compiled, but nothing in them is reachable from the guest: instrumentation leaves them without
 # counters, so there is no profile to read.
-set(Z6M_PGO_NO_COUNTERS_REGEX "/(common/assert|trie/prefix_set|types_zz/witness_trie)\\.cpp$")
+set(Z6M_PGO_NO_COUNTERS_REGEX "/(common/assert|trie/prefix_set|types_zz/witness_trie|types/log)\\.cpp$")
 # The interpreter and the file that holds its entry point are instrumented but stay unprofiled:
 # with a profile dispatch_cgoto spills and costs 900M cycles on the corpus.
 set(Z6M_PGO_UNPROFILED_REGEX "/lib/evmone/(baseline_execution|vm)\\.cpp$")
