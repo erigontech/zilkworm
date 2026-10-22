@@ -56,6 +56,15 @@ if(BUILD_TESTING)
     add_test(NAME mfbd_cursor_overshoot_test COMMAND mfbd_cursor_overshoot_test)
 endif()
 
+# Regression: hostile input must fail through the kRunFailure sentinel, not escape
+# run() as an exception (the guest entry has no handler; it used to reach
+# std::terminate). Standalone, exit code = failure count.
+add_executable(malformed_input_sentinel_test "malformed_input_sentinel_test.cpp")
+target_link_libraries(malformed_input_sentinel_test PRIVATE ${ZILK_CLI_TRIE_LIBS})
+if(BUILD_TESTING)
+    add_test(NAME malformed_input_sentinel_test COMMAND malformed_input_sentinel_test)
+endif()
+
 # file(GLOB STATE_TRANSITION_TESTS CONFIGURE_DEPENDS "state_transition_sample*.json")
 # add_custom_command(
 #   TARGET state_transition

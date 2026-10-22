@@ -761,27 +761,45 @@ StateTransition::Result StateTransition::run() {
         envelope_[1] == (::zilkworm::kInputMagicSIB & 0xff)) {
         magic = ::zilkworm::kInputMagicSIB;
     }
-    switch (magic) {
-        case ::zilkworm::kInputMagicSIB:
-            gas = run_sib();
-            break;
-        case ::zilkworm::kInputMagicEJSN:
-            gas = run_ejsn();
-            break;
-        case ::zilkworm::kInputMagicMFBD:
-            gas = run_mfbd();
-            break;
-        default:
-#ifdef Z6M_HASH_STATE
-            // The HashState guest answers any other input, too short or of another schema, as an
-            // undecodable stateless input: the all-zero StatelessValidationResult, not a failed run.
-            gas = run_sib();
-#else
-            sys_println("ERROR: unsupported input magic");
-            failed_ = true;
+    // A malformed or hostile input must fail the run through the sentinel contract, not
+    // terminate the process: the decoders throw on hostile sizes and malformed data
+    // (load_flat_bundle's block_rlps.reserve(n_blocks) with an attacker-named count,
+    // nlohmann::json::parse_error in run_ejsn, std::bad_optional_access from
+    // from_hex(...).value()), and the guest entry has no handler — an exception escaping
+    // run() reaches std::terminate and kills the guest. The guests compile without
+    // exceptions (a throw there is an abort), so the handler exists in host builds only;
+    // the decoders' own bounds keep hostile sizes off the throwing paths in both.
+#if defined(__cpp_exceptions)
+    try {
 #endif
-            break;
+        switch (magic) {
+            case ::zilkworm::kInputMagicSIB:
+                gas = run_sib();
+                break;
+            case ::zilkworm::kInputMagicEJSN:
+                gas = run_ejsn();
+                break;
+            case ::zilkworm::kInputMagicMFBD:
+                gas = run_mfbd();
+                break;
+            default:
+#ifdef Z6M_HASH_STATE
+                // The HashState guest answers any other input, too short or of another schema, as an
+                // undecodable stateless input: the all-zero StatelessValidationResult, not a failed run.
+                gas = run_sib();
+#else
+                sys_println("ERROR: unsupported input magic");
+                failed_ = true;
+#endif
+                break;
+        }
+#if defined(__cpp_exceptions)
+    } catch (...) {
+        sys_println("ERROR: exception while decoding the input");
+        failed_ = true;
+        gas = kRunFailure;
     }
+#endif
     return Result{
         .gas_used = gas,
         .pre_state_root = pre_state_root_,
