@@ -62,16 +62,13 @@ namespace {
         return v;
     }
 
-    // Keeps the hit path frameless; caller has already stored size + data words. Hashes the
-    // slot's stored copy of the input, not the caller's bytes: same 0..size bytes, but the
-    // slot copy is 8-byte aligned, which the guest's keccak fast paths branch on.
+    // Keeps the hit path frameless; caller has already stored size + data words.
     [[gnu::noinline]] ethash::hash256 keccak_memo_fill(const uint8_t* data, size_t size,
                                                        KeccakSlot& slot) noexcept {
 #ifdef Z6M_GUEST_PROFILE
         ++z6mprof_keyhash_miss;
 #endif
-        (void)data;
-        const ethash::hash256 out{ethash::keccak256(slot.data, size)};
+        const ethash::hash256 out{ethash::keccak256(data, size)};
         std::memcpy(slot.hash, out.bytes, 32);
         return out;
     }
