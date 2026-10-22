@@ -383,7 +383,19 @@ namespace rlp {
             to.type = static_cast<TransactionType>(from[0]);
             from.remove_prefix(1);
 
-            return eip2718_decode(from, to, items, sig);
+            // eip2718_decode consumes exactly the items list; the trailing check mirrors
+            // the string-wrapped path below (it was missing: decode_transaction(...,
+            // kProhibit) accepted raw typed transactions with arbitrary trailing bytes,
+            // found by fuzzing the round trip). The views stay empty for a bare typed
+            // transaction, as "decoded transaction views: a bare typed transaction has
+            // none" pins.
+            if (DecodingResult res{eip2718_decode(from, to, items, sig)}; !res) {
+                return res;
+            }
+            if (mode != Leftover::kAllow && !from.empty()) {
+                return std::unexpected{DecodingError::kInputTooLong};
+            }
+            return {};
         }
 
         const auto h{decode_header(from)};

@@ -114,7 +114,7 @@ std::vector<uint8_t> read_genesis_allocation(const nlohmann::json& alloc) {
                 fatal("genesis allocation: invalid code hex");
 #endif
             }
-            Bytes code{std::move(*code_hex)};
+            Bytes code{*code_hex};
             if (!code.empty()) {
                 const auto code_hash_v = keccak256(code);
                 std::memcpy(info.account.code_hash, code_hash_v.bytes, 32);
