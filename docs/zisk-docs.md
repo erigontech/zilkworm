@@ -546,6 +546,17 @@ ELF matches a local one built from the same tree.
 - **Memory map drift.** On a ZisK bump, re-vendor `zisk.ld` and `src/dma/*.s`. A stale memory map
   produces an all-zero output silently, which `zisk_execute.py` reports as ERROR.
 - **`make zisk-emu-check` builds the native runner in the shared `build/` directory.**
+- **`hashtable_policy.cpp` replaces libstdc++'s rehash decision.** Every `std::unordered_map`/
+  `unordered_set` insert asks `_Prime_rehash_policy::_M_need_rehash`, which computes the new bucket
+  count and threshold in `double` — soft-float calls on rv64im (`__adddf3`, `__muldf3`, conversions),
+  about 950 instructions each time a container takes its first element or grows, 231K per 200 blocks.
+  With the default `max_load_factor` 1.0 every `double` in that computation is an exact integer below
+  2^53 (the 512 MiB RAM keeps bucket counts far below it), so the file's integer formulas reproduce
+  libstdc++'s bucket counts, rehash points and iteration order exactly; they diverge only above 2^53.
+  The link wraps the symbol (`-Wl,--wrap` in `prover/guest_zisk`'s CMakeLists.txt); any other load
+  factor goes to the real function, and bucket counts from 14 up come from the real `_M_next_bkt`.
+  Ported from the rv32 airbender guest; on rv64 the `std::pair<bool, size_t>` result already returns
+  in `a0`/`a1`, so no word-packed stand-in is needed.
 
 ## 8. Remaining Backlog
 

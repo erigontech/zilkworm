@@ -1,26 +1,5 @@
-// Integer growth check for the guest's unordered containers.
-//
-// Every insert into a std::unordered_map or std::unordered_set calls libstdc++'s
-// _Prime_rehash_policy::_M_need_rehash (out of line in libstdc++.a) to ask whether the bucket
-// array must grow. Once the element count passes the cached threshold _M_next_resize, it works out
-// the new bucket count and the next threshold in double, which rv64im runs as soft-float calls
-// (__floatundisf, __fixunssfdi, __adddf3, __muldf3, __divdf3, conversions): about 950 instructions
-// each time a container takes its first element or grows, 231K times per 200 blocks.
-//
-// With the default max_load_factor of 1.0f every double in that computation is an exact integer:
-// n / 1.0, floor(x) + 1, n_bkt * 1.0, bucket count * 1.0 (all values below 2^53; the guest's
-// 512 MiB RAM keeps bucket counts far below it). So the integer formulas below give the same
-// result and set the same _M_next_resize: bucket counts, rehash points and iteration order stay
-// those of libstdc++. The two differ only above 2^53, where the double conversion of n_bkt or of
-// the element count rounds (n_bkt == SIZE_MAX additionally converts the out-of-range double 2^64
-// to size_t).
-//
-// The link wraps the symbol (-Wl,--wrap in CMakeLists.txt). Any other load factor goes to the real
-// function, and a bucket count from 14 up comes from the real _M_next_bkt, which owns the prime
-// table.
-//
-// Ported from prover/guest_airbender/src/hashtable_policy.cpp (rv32); on rv64 the
-// std::pair<bool, size_t> result already returns in a0/a1, so no word-packed stand-in is needed.
+// Rehash math: see docs/zisk-docs.md §7.
+// Pinned to libstdc++ 15 by the static_asserts below; --wrap wiring in CMakeLists.txt.
 
 #include <algorithm>
 #include <bit>
