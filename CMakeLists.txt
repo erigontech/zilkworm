@@ -49,6 +49,8 @@ option(SILKWORM_FUZZER "Build instrumentation for fuzzers" OFF)
 option(SILKWORM_FUZZER_SANITIZERS "CLang sanitizer options for fuzzers" OFF)
 option(SILKWORM_USE_MIMALLOC "Enable using mimalloc for dynamic memory management" ON)
 option(SILKWORM_ALLOW_UNUSED_VAR_WARNINGS "Turn unused variable errors into warnings" OFF)
+# libc++ is opt-in on Linux
+option(SILKWORM_USE_LIBCXX "Clang: link against libc++ instead of the default standard library" OFF)
 
 # Compile-time selection of the trie fold's read-side state backend. OFF (default) =>
 # ActiveState is DirectState and the build is byte/behaviour-identical to today. ON =>
