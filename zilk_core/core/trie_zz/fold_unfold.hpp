@@ -61,6 +61,7 @@ namespace rlp = ::silkworm::rlp;
 
 [[gnu::always_inline]] inline rlp::Header fast_decode_header(ByteView& from) noexcept {
     if (from.size() < 8) [[unlikely]] {
+        // Keccak keys never reach sub-8-byte nodes.
         return {false, from.size()};
     }
 #if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
@@ -742,7 +743,7 @@ inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot,
     auto child_len = grid_line.branch.child_len[slot];
     auto& child = grid_line.branch.child[slot];
 
-    if (child_len == 0 || 
+    if (child_len == 0 ||
         (child_len == 1 && child.bytes[0] == 0x80)) {  // empty, nothing to "unfold"
         return UnfoldResult::kEmpty;
     }

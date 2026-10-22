@@ -328,8 +328,7 @@ inline constexpr size_t kDeferredChildPtr = ~size_t{0};
         {
             const uint8_t b0 = b.orig[0];
             uint8_t* p = out + (b0 < 0xf8 ? 1 : 1 + (b0 - 0xf7));  // list header length
-            // Walk the slots only up to the last dirty one (the rest are already in place), with
-            // the mask in a local: the byte copies below may alias b, so b.dirty was reloaded per slot.
+            // Local mask: copies below may alias b.
             unsigned dirty = static_cast<unsigned>(b.mask_word >> 32);
             for (size_t i = 0; dirty != 0; ++i, dirty >>= 1) {
                 const auto len = b.orig_child_len[i];
@@ -357,9 +356,6 @@ inline constexpr size_t kDeferredChildPtr = ~size_t{0};
         payload_length += (child_len == 0 || child_len == 32)
                                 ? 1 + child_len
                                 : child_len;
-
-        // Double encoding of embedded node
-        // payload_length += 1 + child_len;
     }
 
     const ByteView val = db != nullptr ? ByteView{} : b.value;  // deferred: empty
@@ -517,6 +513,16 @@ inline ByteView encode_leaf(const LeafNode& l) {
 // Decoding helpers for MPT nodes
 // ---------------------------------------------
 
+// child_len 32 unambiguously means hash ref.
+enum class SlotClass : uint8_t { kEmpty, kHash, kCell, kBad };
+
+[[nodiscard]] [[gnu::always_inline]] inline constexpr SlotClass branch_slot_class(uint8_t start) noexcept {
+    if (start == rlp::kEmptyStringCode) [[likely]] return SlotClass::kEmpty;
+    if (start == 0xa0) [[likely]] return SlotClass::kHash;
+    if (start >= 0xc0 && start <= 0xde) [[likely]] return SlotClass::kCell;
+    return SlotClass::kBad;
+}
+
 // Store one decoded child into branch slot i (empty / embedded / 0xa0-hash).
 // start_byte is the child's RLP start byte; data/len is its decoded payload.
 [[gnu::always_inline]] inline bool fill_branch_child(BranchNode& out, size_t i,
@@ -527,7 +533,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
         return true;
     }
     if (start_byte != 0xa0) {
-        if (len > 31) return false;  // embedded child must fit child[i].bytes (with header byte)
+        if (len > 30) return false;  // cell must fit child[i].bytes
         out.child_len[i] = static_cast<uint8_t>(len + 1);
         out.child[i].bytes[0] = start_byte;  // keep header byte for embedded child
         out.child_ptr[i] = nullptr;
@@ -540,10 +546,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
     return true;
 }
 
-// Decode one branch child from `remaining` into slot i, advancing `remaining`.
-// A branch child is only: 0x80 (empty) | 0xa0+32 (hash ref) | short embedded
-// list (0xc0..0xf7, <32B). Skips the general decode_header (no single-byte /
-// long-string / long-list handling a branch child never hits).
+// 0x80, 0xa0+32, or <=30-byte cells only.
 [[gnu::always_inline]] inline bool fill_branch_child_rlp(BranchNode& out, size_t i, ByteView& remaining,
                                                          unsigned& mask) {
     if (remaining.empty()) return false;
@@ -563,7 +566,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
     }
     if (b0 >= 0xc0 && b0 <= 0xf7) {  // embedded short list
         const size_t payload = static_cast<size_t>(b0 - 0xc0);
-        if (payload > 31) return false;  // must fit child[i].bytes (header + payload)
+        if (payload > 30) return false;  // child_len 32 is the hash-ref class
         if (remaining.size() < 1 + payload) return false;
         out.child[i].bytes[0] = b0;
         std::copy_n(remaining.data() + 1, payload, &out.child[i].bytes[1]);
@@ -587,17 +590,10 @@ inline bool decode_branch(ByteView payload, BranchNode& out) {
     }
     out.mask = static_cast<uint16_t>(mask);
 
-    // Decode value - usually empty
-    if (remaining.size() == 1 && remaining[0] == rlp::kEmptyStringCode) {
-        out.value = {};
-        return true;  // value empty + list fully consumed
-    }
-    // Rare: non-empty value.
-    auto hdr_value = rlp::decode_header(remaining);
-    if (!hdr_value || hdr_value->list) return false;
-    out.value = remaining.substr(0, hdr_value->payload_length);
-    remaining.remove_prefix(hdr_value->payload_length);
-    return remaining.empty();
+    // Fixed-key tries end at leaves.
+    if (remaining.size() != 1 || remaining[0] != rlp::kEmptyStringCode) return false;
+    out.value = {};
+    return true;
 }
 
 inline bool decode_ext_or_leaf(ByteView payload, bool& is_leaf,
@@ -721,9 +717,8 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
     if (!fill_branch_child(out_branch, 0, e0_start, e0_payload.data(), h0->payload_length, mask)) return kInvalid;
     if (!fill_branch_child(out_branch, 1, e1_start, e1_payload.data(), h1->payload_length, mask)) return kInvalid;
 
-    // Slots 2..15: fill_branch_child_rlp() with the position in local pointers and the mask in a
-    // local. `remaining` escapes into decode_header() below, so each of its updates was a stack
-    // store, and out_branch.mask was reloaded and stored around every child's byte copy.
+    // Slots 2..15: fill_branch_child_rlp(), mask in a local.
+    // Local `remaining` avoids a stack store.
     {
         const uint8_t* p = remaining.data();
         const uint8_t* const end = p + remaining.size();
@@ -741,7 +736,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                 ++p;
             } else if (b0 >= 0xc0 && b0 <= 0xf7) {  // embedded short list
                 const size_t plen_ = static_cast<size_t>(b0 - 0xc0);
-                if (plen_ > 31) return kInvalid;  // must fit child[i].bytes (header + payload)
+                if (plen_ > 30) return kInvalid;  // child_len 32 is the hash-ref class
                 if (static_cast<size_t>(end - p) < 1 + plen_) return kInvalid;
                 out_branch.child[i].bytes[0] = b0;
                 std::copy_n(p + 1, plen_, &out_branch.child[i].bytes[1]);

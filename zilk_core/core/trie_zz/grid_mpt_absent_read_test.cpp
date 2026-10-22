@@ -570,6 +570,60 @@ TEST_CASE("GridMPT light read-only descent agrees on embedded nodes, the 17th va
         expect_agree(nodes, root, {{key_of(nibs, 0xA), v3a, {}}}, {});
     }
 
+// sub-8-byte nodes: fast_decode_header rejects them on both legs (a keccak key never reaches one)
+    {
+        Bytes32Map nodes;
+        const bytes32 root = put(nodes, Bytes{0xc2, 0x31, 0x01});  // 3-byte leaf: plen 1, value 1
+        expect_agree(nodes, root, {{key_with_nibbles({0}, 0), z, {}}}, {});
+        expect_agree(nodes, root, {}, {});
+    }
+    {
+        Bytes32Map nodes;
+        const bytes32 tiny = put(nodes, Bytes{0xc2, 0x31, 0x01});
+        std::vector<Bytes> kids;
+        for (uint8_t i = 0; i < 16; ++i) {
+            kids.push_back(i == 3 ? child_hash_ref(tiny) : Bytes{0x80});
+        }
+        const bytes32 root = chain_to(nodes, pre20, node_branch(std::move(kids)));
+        std::vector<uint8_t> nibs = pre20;
+        nibs.push_back(3);
+        expect_agree(nodes, root, {{key_of(nibs, 0xA), z, {}}}, {});
+        expect_soft(nodes, root, {{key_of(pre20, 0xC), z, {}}}, 0);  // diverges at the lone child
+    }
+
+// branch slots are only empty, hash refs, or embedded lists: raw strings and 32-byte cells fail
+    {
+        Bytes32Map nodes;
+        const bytes32 leaf_hash = put(nodes, node_leaf(std::vector<uint8_t>(43, 0xA), v3a));
+        std::vector<Bytes> kids;
+        for (uint8_t i = 0; i < 16; ++i) {
+            kids.push_back(i == 2 ? child_hash_ref(leaf_hash)
+                                  : i == 5 ? rlp_str(v3a)  // raw string slot
+                                  : Bytes{0x80});
+        }
+        const bytes32 root = chain_to(nodes, pre20, node_branch(std::move(kids)));
+        std::vector<uint8_t> nibs = pre20;
+        nibs.push_back(2);
+        expect_agree(nodes, root, {{key_of(nibs, 0xA), z, {}}}, {});
+        expect_agree(nodes, root, {{key_of(pre20, 0xC), z, {}}}, {});
+    }
+    {
+        Bytes32Map nodes;
+        const bytes32 leaf_hash = put(nodes, node_leaf(std::vector<uint8_t>(43, 0xA), v3a));
+        std::vector<Bytes> kids;
+        for (uint8_t i = 0; i < 16; ++i) {
+            kids.push_back(i == 2 ? child_hash_ref(leaf_hash)
+                                  : i == 5 ? Bytes{0xdf, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                                                   17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}
+                                  : Bytes{0x80});
+        }
+        const bytes32 root = chain_to(nodes, pre20, node_branch(std::move(kids)));
+        std::vector<uint8_t> nibs = pre20;
+        nibs.push_back(2);
+        expect_agree(nodes, root, {{key_of(nibs, 0xA), z, {}}}, {});
+        expect_agree(nodes, root, {{key_of(pre20, 0xC), z, {}}}, {});
+    }
+
 // exercises full-branch fast path
     {
         Bytes32Map nodes;

@@ -231,13 +231,14 @@ bool ro_node_well_formed(ByteView node, unsigned at) {
                                    : ByteView{e1_start_ptr,
                                               static_cast<size_t>(e1_payload.data() - e1_start_ptr) +
                                                   h1->payload_length};
-        return child.size() <= 32;  
+        // Lone ext child: shape only.
+        return child.size() <= 32;
     }
 
-    const auto slot_ok = [](uint8_t start, ByteView payload) {
-        return payload.empty() || start == 0xa0 || payload.size() <= 31;
+    const auto slot_ok = [](uint8_t start) {
+        return branch_slot_class(start) != SlotClass::kBad;
     };
-    if (!slot_ok(e0_start, e0_payload) || !slot_ok(e1_start, e1_payload)) [[unlikely]] {
+    if (!slot_ok(e0_start) || !slot_ok(e1_start)) [[unlikely]] {
         return false;
     }
     const uint8_t* p = rem.data();
@@ -256,7 +257,7 @@ bool ro_node_well_formed(ByteView node, unsigned at) {
             ++p;
         } else if (b0 >= 0xc0 && b0 <= 0xf7) {
             const size_t pl = static_cast<size_t>(b0 - 0xc0);
-            if (pl > 31) [[unlikely]] {
+            if (pl > 30) [[unlikely]] {
                 return false;
             }
             if (static_cast<size_t>(end - p) < 1 + pl) [[unlikely]] {
@@ -408,7 +409,7 @@ template <bool DeletionEnabled, class StateT>
                                        : ByteView{e1_start_ptr,
                                                   static_cast<size_t>(e1_payload.data() - e1_start_ptr) +
                                                       h1->payload_length};
-            if (child.size() > 32) [[unlikely]] {  
+            if (child.size() > 32) [[unlikely]] {
                 return malformed();
             }
             if (probe) [[unlikely]] {
@@ -417,7 +418,7 @@ template <bool DeletionEnabled, class StateT>
             const unsigned m = static_cast<unsigned>(
                 lcp_packed(path.w.data(), key.w.data(), consumed, std::min<unsigned>(plen, 64 - consumed)));
             if (m != plen) {
-                return claims_absent(*u);  
+                return claims_absent(*u);
             }
             consumed += plen;
             if (child.size() == 32) {
@@ -470,7 +471,7 @@ template <bool DeletionEnabled, class StateT>
 
         const auto fill = [&](unsigned i, uint8_t start, ByteView payload) -> bool {
             if (payload.empty()) {
-                return true;  
+                return true;
             }
             if (start == 0xa0) {
                 note(0xa0, payload.data(), 32);
@@ -480,12 +481,12 @@ template <bool DeletionEnabled, class StateT>
                 }
                 return true;
             }
-            if (payload.size() > 31) {
-                return false;  
+            if (payload.size() > 30) {
+                return false;
             }
             note(start, payload.data(), static_cast<uint8_t>(payload.size() + 1));
             if (i == nib) {
-                dst[0] = start;  
+                dst[0] = start;
                 std::memcpy(dst + 1, payload.data(), payload.size());
                 child_at = dst;
                 clen = static_cast<uint8_t>(payload.size() + 1);
@@ -514,10 +515,10 @@ template <bool DeletionEnabled, class StateT>
                 }
                 p += 33;
             } else if (b0 == rlp::kEmptyStringCode) {
-                ++p;  
+                ++p;
             } else if (b0 >= 0xc0 && b0 <= 0xf7) {
                 const size_t pl = static_cast<size_t>(b0 - 0xc0);
-                if (pl > 31) [[unlikely]] {
+                if (pl > 30) [[unlikely]] {
                     return malformed();
                 }
                 if (static_cast<size_t>(end - p) < 1 + pl) [[unlikely]] {
@@ -532,7 +533,7 @@ template <bool DeletionEnabled, class StateT>
                 }
                 p += 1 + pl;
             } else {
-                return malformed();  
+                return malformed();
             }
         }
 // fixed-key tries end at leaves
@@ -555,8 +556,8 @@ template <bool DeletionEnabled, class StateT>
         }
 
         ++consumed;
-        if (clen == 0 || (clen == 1 && child_at[0] == rlp::kEmptyStringCode)) {
-            return claims_absent(*u);  
+        if (clen == 0) {
+            return claims_absent(*u);
         }
         if (clen == 32) {
             bytes32 h;
@@ -613,14 +614,14 @@ template <typename It>
                 if (!r) [[unlikely]] {
                     ++missing_count_;
                     failed_ = true;
-                    sys_println("Error: fold_line unexpected error unfolding non_emtpy_nib");
+                    sys_println("ERROR: missing lone child hash in node store (ro drain)");
                 } else if (!ro_node_well_formed(*r, e.depth + 1)) [[unlikely]] {
                     failed_ = true;
-                    sys_println("Error: fold_line unexpected error unfolding non_emtpy_nib");
+                    sys_println("ERROR: malformed lone child node (ro drain)");
                 }
             } else if (!ro_node_well_formed(ByteView{e.cell.data(), e.cell.size()}, e.depth + 1)) [[unlikely]] {
                 failed_ = true;
-                sys_println("Error: fold_line unexpected error unfolding non_emtpy_nib");
+                sys_println("ERROR: malformed lone child cell (ro drain)");
             }
             return true;
         });
@@ -682,7 +683,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             light_writes_.push_back(&u);
                         }
                     }
-                    ro_reads = true;  
+                    ro_reads = true;
                 }
             }
         }
@@ -694,7 +695,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
     // The update search_nibbles_ was last expanded from: the seek compares the keys themselves, and expanding
     // the new key straight into search_nibbles_ skips a zeroed temporary and its copy.
     const TrieNodeFlat* prev = nullptr;
-    size_t ro_wi = 0;  
+    size_t ro_wi = 0;
     for (; updates_it != updates_end; ++updates_it) {
         const TrieNodeFlat& trie_upd = deref_update(*updates_it);
 
@@ -764,7 +765,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     const BranchNode& bn = grid_line.branch;
                     const uint8_t clen = bn.child_len[nib];
                     const uint8_t* const cb = bn.child[nib].bytes;
-                    if (clen == 0 || (clen == 1 && cb[0] == rlp::kEmptyStringCode)) {
+                    // Same classes decode_node() fills.
+                    if (clen == 0) {
                         if (!claims_absent(trie_upd)) [[unlikely]] {
                             return {};
                         }

@@ -25,17 +25,19 @@ namespace {
 inline bool fill_branch_child_ref(BranchNode& out, size_t i, uint8_t start_byte, const uint8_t* data, size_t len,
                                   unsigned& mask) {
     if (len == 0) {
+        // 0x80 empty; a lone 0xc0 reads empty at slots 0/1 too (byte-changes fail closed on dirty)
         out.child_len[i] = 0;
         out.child_ptr[i] = nullptr;
         return true;
     }
     if (start_byte != 0xa0) {
-        if (len > 31) return false;
+        if (len > 30) return false;  // cell must fit child[i].bytes
         out.child_len[i] = static_cast<uint8_t>(len + 1);
         out.child[i].bytes[0] = start_byte;
         out.child_ptr[i] = nullptr;
         std::copy_n(data, len, &out.child[i].bytes[1]);
     } else {
+        if (len != 32) return false;  // hash ref is exactly 32 bytes
         out.child_len[i] = 32;
         out.child_ptr[i] = data;
     }
@@ -120,7 +122,7 @@ inline Kind decode_node_ref(ByteView payload, BranchNode& out_branch, bool& is_l
                 ++p;
             } else if (b0 >= 0xc0 && b0 <= 0xf7) {
                 const size_t plen_ = static_cast<size_t>(b0 - 0xc0);
-                if (plen_ > 31) return kInvalid;
+                if (plen_ > 30) return kInvalid;
                 if (static_cast<size_t>(end - p) < 1 + plen_) return kInvalid;
                 out_branch.child[i].bytes[0] = b0;
                 std::copy_n(p + 1, plen_, &out_branch.child[i].bytes[1]);
@@ -255,7 +257,7 @@ TEST_CASE("decode deferred equals eager fill", "[decode]") {
             p[33 * i + 1] = 0x7f;
             check(p);
             p = full_branch_payload();
-            p[33 * i] = 0xf7;  // embedded 31-byte list: length class 32, disambiguated by child_ptr
+            p[33 * i] = 0xf7;  // 55-byte payload: truncated, and past the cell bound either way
             for (size_t j = 1; j <= 31; ++j) p[33 * i + j] = static_cast<uint8_t>(j);
             check(p);
         }
@@ -286,7 +288,7 @@ TEST_CASE("decode deferred equals eager fill", "[decode]") {
         check(sparse_payload(all), /*expect_fast=*/true);
     }
 
-    SECTION("embedded children of every size, incl. length class 32") {
+    SECTION("embedded children of every size, incl. the 32-byte bound") {
         for (size_t len = 0; len <= 32; ++len) {
             Bytes p;
             p.push_back(0xa0);
@@ -366,4 +368,39 @@ TEST_CASE("decode deferred equals eager fill", "[decode]") {
         a.node.set_child(15, embed);
         CHECK(Bytes{encode_branch(b.node)} == Bytes{encode_branch(a.node)});
     }
+}
+
+// Fixed-key tries end at leaves: decode_branch matches decode_node's branch grammar.
+TEST_CASE("decode_branch mirrors decode_node branch grammar", "[decode]") {
+    BranchNode b{};
+
+    Bytes valued;
+    valued.insert(valued.end(), 16, rlp::kEmptyStringCode);
+    valued.push_back(0x84);
+    valued.push_back(1);
+    valued.push_back(2);
+    valued.push_back(3);
+    valued.push_back(4);
+    CHECK(decode_branch(valued, b) == false);
+
+    Bytes plain;
+    plain.insert(plain.end(), 17, rlp::kEmptyStringCode);
+    CHECK(decode_branch(plain, b) == true);
+    CHECK(b.mask == 0);
+
+    // Cells stay under 32 bytes total: child_len 32 unambiguously means hash ref.
+    Bytes cell30;
+    cell30.insert(cell30.end(), 15, rlp::kEmptyStringCode);
+    cell30.push_back(0xde);
+    for (uint8_t j = 1; j <= 30; ++j) cell30.push_back(j);
+    cell30.push_back(rlp::kEmptyStringCode);
+    CHECK(decode_branch(cell30, b) == true);
+    CHECK(b.mask == (1u << 15));
+
+    Bytes cell31;
+    cell31.insert(cell31.end(), 15, rlp::kEmptyStringCode);
+    cell31.push_back(0xdf);
+    for (uint8_t j = 1; j <= 31; ++j) cell31.push_back(j);
+    cell31.push_back(rlp::kEmptyStringCode);
+    CHECK(decode_branch(cell31, b) == false);
 }
