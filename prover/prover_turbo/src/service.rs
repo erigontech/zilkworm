@@ -24,7 +24,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use url::Url;
 
-pub const SILK_ST_ELF: &[u8] = include_elf!("z6m_guest");
+pub const SILK_ST_ELF: &[u8] = include_elf!("z6m_guest_turbo");
 
 // Dynamic prover enum to handle both CPU and CUDA provers
 enum DynamicProver {
@@ -223,7 +223,8 @@ impl Z6mProverService {
             block_number: opts.block_number,
             data_dir: opts.data_dir,
             save_all_responses: opts.save_all_responses,
-            build_eth_test: opts.build_eth_test,
+            geth: false,
+            force_rebuild: false,
         })
         .await?;
         Ok(outcome)
@@ -250,8 +251,6 @@ impl Z6mProverService {
         };
 
         let client = ProverClient::from_env();
-        let client2 = Exe
-    
 
         let (mut output, report) = client.execute(SILK_ST_ELF, &stdin).run().unwrap();
 
@@ -542,14 +541,14 @@ impl Z6mProverService {
         info!("Service starting from block: {}", next_block);
 
         loop {
-            // let mut latest = match Self::get_block_number_with_retry(&provider, 3).await {
-            //     Ok(latest) => latest,
-            //     Err(err) => {
-            //         error!(error = %err, "Failed to get latest block number after retries, will retry in 30 seconds");
-            //         sleep(Duration::from_secs(30)).await;
-            //         continue;
-            //     }
-            // };
+            let mut latest = match Self::get_block_number_with_retry(&provider, 3).await {
+                Ok(latest) => latest,
+                Err(err) => {
+                    error!(error = %err, "Failed to get latest block number after retries, will retry in 30 seconds");
+                    sleep(Duration::from_secs(30)).await;
+                    continue;
+                }
+            };
 
             if service.end_block.is_some() {
                 let end = service.end_block.unwrap();
@@ -601,6 +600,132 @@ impl Z6mProverService {
 
             sleep(Duration::from_secs(6)).await;
         }
+    }
+
+    /// Execute a range of locally available blocks without proving, appending one
+    /// log line per block (same format as persist_execution_logs). Ported from the
+    /// hypercube prover's run_test_service; benchmark tooling drives this with
+    /// --start-block/--end-block/--data-dir/--execution-log-file.
+    pub async fn run_test_service(
+        start_block: u64,
+        end_block: u64,
+        execute_every: Option<u64>,
+        data_dir: PathBuf,
+        execution_log_file: Option<PathBuf>,
+    ) -> Result<()> {
+        if start_block > end_block {
+            bail!(
+                "--start-block ({}) must be <= --end-block ({})",
+                start_block,
+                end_block
+            );
+        }
+        info!(
+            "starting test service mode, blocks {} to {}",
+            start_block, end_block
+        );
+        let execute_every = match execute_every {
+            Some(0) => {
+                bail!("--execute-every 0 is invalid in test service mode; use a positive value or omit the flag");
+            }
+            Some(v) => v,
+            None => 1,
+        };
+
+        // Create ONE client upfront and reuse for all blocks
+        let client = ProverClient::from_env();
+
+        // Resolve log path once before the loop
+        let log_path = execution_log_file.unwrap_or_else(|| data_dir.join("executionLogs.log"));
+        let log_file = std::sync::Mutex::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)?,
+        );
+
+        for block_number in start_block..=end_block {
+            if block_number % execute_every != 0 {
+                continue;
+            }
+
+            let input_path = data_dir
+                .join("blocks")
+                .join(block_number.to_string())
+                .join(format!("flatWitnessBundle{}.mfbd", block_number));
+            if !input_path.exists() {
+                warn!(
+                    "block {} not found at {}, skipping",
+                    block_number,
+                    input_path.display()
+                );
+                continue;
+            }
+
+            let stdin = match build_stdin_from_mfbd(&input_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("block {} failed to build stdin: {}, skipping", block_number, e);
+                    continue;
+                }
+            };
+            let (mut output, report) = match client.execute(SILK_ST_ELF, &stdin).run() {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!("block {} execution failed: {}, skipping", block_number, e);
+                    continue;
+                }
+            };
+
+            let gas_used = output.read::<u64>();
+            let cycle_count = report.total_instruction_count();
+            let prover_gas = report.gas.unwrap_or_default();
+            let syscall_count = report.total_syscall_count();
+
+            if gas_used == 0 {
+                error!(
+                    %block_number,
+                    cycles = cycle_count,
+                    prover_gas,
+                    "block execution FAILED (gas_used=0)"
+                );
+                println!(
+                    "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
+                    block_number, cycle_count, prover_gas, syscall_count
+                );
+            }
+
+            let log = ExecutionLog {
+                block_number,
+                gas_used,
+                cycle_count,
+                prover_gas,
+                syscall_count,
+                input_path: input_path.clone(),
+            };
+            {
+                let mut file = log_file.lock().unwrap();
+                writeln!(
+                    &mut *file,
+                    "[{}] block {} executed, gas_used={}, cycle_count={}, prover_gas={}, syscall_count={}, input={}",
+                    Self::format_timestamp(),
+                    log.block_number,
+                    log.gas_used,
+                    log.cycle_count,
+                    log.prover_gas,
+                    log.syscall_count,
+                    log.input_path.display()
+                )?;
+                file.flush()?;
+            }
+            println!(
+                "block {} executed, gas_used={}, cycle_count={}, prover_gas={}, syscall_count={}",
+                block_number, gas_used, cycle_count, prover_gas, syscall_count
+            );
+        }
+
+        info!("test service mode complete");
+        Ok(())
     }
 
     // Helper method to get block number with retry logic
@@ -665,10 +790,11 @@ impl Z6mProverService {
             block_number: Some(block_number),
             data_dir: data_dir.clone(),
             save_all_responses: service.save_all_responses,
-            build_eth_test: false,
+            geth: false,
+            force_rebuild: true,
         })
         .await?;
-        let unified_path = outcome.unified_rlp_path.clone();
+        let unified_path = outcome.flat_bundle_path.clone();
 
         if should_execute {
             println!(
@@ -831,7 +957,7 @@ impl Z6mProverService {
         let file_name = if is_test {
             format!("ethTests{}.json", block_number)
         } else {
-            format!("unifiedBlockAndStateRlp{}.bin", block_number)
+            format!("flatWitnessBundle{}.mfbd", block_number)
         };
         Ok(dir.join(file_name))
     }

@@ -60,6 +60,12 @@ struct Args {
     #[arg(long)]
     ethproofs_cluster_id: Option<u64>,
 
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    test_service: bool,
+
+    #[arg(long)]
+    execution_log_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -164,27 +170,45 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // let ethproofs = match (
-    //     args.ethproofs_endpoint.clone(),
-    //     args.ethproofs_token.clone(),
-    //     args.ethproofs_cluster_id,
-    // ) {
-    //     (Some(endpoint), Some(token), Some(cluster_id)) => Some(EthProofsConfig {
-    //         endpoint,
-    //         token,
-    //         cluster_id,
-    //     }),
-    //     _ => None,
-    // };
+    let ethproofs = match (
+        args.ethproofs_endpoint.clone(),
+        args.ethproofs_token.clone(),
+        args.ethproofs_cluster_id,
+    ) {
+        (Some(endpoint), Some(token), Some(cluster_id)) => Some(EthProofsConfig {
+            endpoint,
+            token,
+            cluster_id,
+        }),
+        _ => None,
+    };
 
-    // let app_config = AppConfig {
-    //     data_dir: args.data_dir.clone(),
-    //     rpc_url: args.rpc_url.clone(),
-    //     save_all_responses: args.save_all_responses,
-    //     ethproofs,
-    // };
+    let app_config = AppConfig {
+        data_dir: args.data_dir.clone(),
+        rpc_url: args.rpc_url.clone(),
+        save_all_responses: args.save_all_responses,
+        ethproofs,
+    };
 
     let app = Z6mProverService::new(app_config)?;
+
+    if args.test_service {
+        if args.command.is_some() {
+            bail!("--test-service cannot be combined with a subcommand");
+        }
+        let (Some(start), Some(end)) = (args.start_block, args.end_block) else {
+            bail!("--test-service requires --start-block and --end-block");
+        };
+        Z6mProverService::run_test_service(
+            start,
+            end,
+            args.execute_every,
+            args.data_dir.clone(),
+            args.execution_log_file.clone(),
+        )
+        .await?;
+        return Ok(());
+    }
 
     if args.service {
         let rpc_url = args.rpc_url.clone().or_else(|| {
