@@ -348,12 +348,63 @@ template <size_t... I>
 // Not __restrict, on purpose: memmove() forwards forward-copyable overlapping ranges here, and
 // __restrict also lets GCC turn the word loops into a call to memcpy, which -Wl,--wrap makes
 // recursive on SP1.
+#if defined(SP1) && defined(Z6M_MEM_STATS)
+extern "C" void syscall_write(uint64_t fd, const uint8_t* buf, size_t nbytes) noexcept;
+#define mem_stats_syscall_write syscall_write
+#else
+inline void mem_stats_syscall_write(uint64_t, const uint8_t*, size_t) noexcept {}
+#endif
+
 extern "C" void* ZILK_MEM_NAME(memcpy)(void* dest, const void* src, size_t n) noexcept
 {
     auto* d = static_cast<uint8_t*>(dest);
     const auto* s = static_cast<const uint8_t*>(src);
     const auto both = reinterpret_cast<uintptr_t>(d) | reinterpret_cast<uintptr_t>(s);
-
+#if defined(Z6M_MEM_STATS)
+    {
+        // Diagnostic build only: bucket copy sizes into a flat histogram the halt path prints.
+        static size_t calls, total;
+        static size_t buckets[32];  // powers of two: bucket i = sizes (2^i, 2^(i+1)]
+        ++calls;
+        total += n;
+        size_t b = 0;
+        for (size_t v = n; v > 1; v >>= 1) ++b;
+        ++buckets[b < 31 ? b : 31];
+        if ((calls & 16383u) == 0)  // Print every ~1M calls: cheap and periodic.
+        {
+            char line[400];
+            size_t at = 0;
+            const auto put = [&](const char* s) {
+                while (*s) line[at++] = *s++;
+            };
+            put("MEMSTAT calls=");
+            // Decimal prints, no stdio in this translation unit.
+            char num[24];
+            const auto put_num = [&](size_t v) {
+                size_t k = 0;
+                if (v == 0) num[k++] = '0';
+                while (v) { num[k++] = static_cast<char>('0' + v % 10); v /= 10; }
+                while (k) line[at++] = num[--k];
+            };
+            put_num(calls);
+            put(" bytes=");
+            put_num(total);
+            for (size_t i = 0; i < 32; ++i) {
+                if (buckets[i]) {
+                    put(" b");
+                    put_num(i);
+                    put(":");
+                    put_num(buckets[i]);
+                    buckets[i] = 0;
+                }
+            }
+            put("\n");
+            mem_stats_syscall_write(1, reinterpret_cast<const uint8_t*>(line), at);
+            calls = 0;
+            total = 0;
+        }
+    }
+#endif
     // Both word-aligned: words, then a masked write of the partial last one.
     if (both % WORD_SIZE == 0)
     {
