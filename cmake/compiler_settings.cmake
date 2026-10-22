@@ -123,13 +123,13 @@ else()
   endif()
 
   # https://clang.llvm.org/docs/SafeStack.html
-  # safe-stack is incompatible with ASan
+  # safe-stack conflicts with manually injected sanitizers
   if("${CMAKE_CXX_COMPILER_ID}" MATCHES ".*Clang$"
      AND NOT SILKWORM_WASM_API
      AND NOT SILKWORM_SANITIZE
      AND NOT SILKWORM_FUZZER
      AND NOT CMAKE_SYSTEM_NAME STREQUAL "Generic"
-     AND NOT "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS}" MATCHES "fsanitize=address"
+     AND NOT "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS}" MATCHES "fsanitize="
   )
     add_compile_options(-fsanitize=safe-stack)
     add_link_options(-fsanitize=safe-stack)
