@@ -61,9 +61,7 @@ make z6m_prover
 ## Other stuff
 AMD AVX
 ```
-rm -rf ../target/elf-compilation/riscv32im-succinct-zkvm-elf/release/build/z6m_guest-* && cargo prove build && RUSTFLAGS="-C target-cpu=znver3" RUST_BACKTRACE=full RUST_LOG=info cargo run --release --manifest-path ../prover/Cargo.toml -- --prove
 
-rm -rf ../target/elf-compilation/riscv32im-succinct-zkvm-elf/release/build/z6m_guest-* && cargo prove build && RUSTFLAGS="-C target-cpu=znver3" RUST_BACKTRACE=full RUST_LOG=info cargo run --release --manifest-path ../prover/Cargo.toml -- --execute
 
 
 RUSTFLAGS="-C target-cpu=znver3" RUST_BACKTRACE=full RUST_LOG=info cargo run --release --manifest-path ../prover/Cargo.toml -- --prove

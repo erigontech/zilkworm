@@ -28,7 +28,6 @@ endif
 clean:
 	rm -rf prover/guest_hypercube/build/
 	rm -rf prover/target
-	rm -rf prover/target-turbo
 	
 # USE_HASH_KEY=ON enables node-store account recovery. For the hypercube guest only: the
 # Airbender guest's own Makefile defaults it ON (don't export this one, which would turn it off).
