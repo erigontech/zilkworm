@@ -673,7 +673,7 @@ A 552-line hand-tuned `memcpy` derived from musl libc, compiled to RISC-V by Cla
 
 #### Dual Architecture: RISC-V 64IM + 32IM
 
-The guest targets **rv64im** for SP1 Hypercube, with **rv32im** supported for legacy SP1 Turbo and QEMU testing. Both architectures have dedicated assembly entry points, linker scripts, and CI workflows.
+The guest targets **rv64im** for SP1 Hypercube, with **rv32im** supported for QEMU testing. Both architectures have dedicated assembly entry points, linker scripts, and CI workflows.
 
 #### SP1 Hypercube v6.0.2 Integration
 

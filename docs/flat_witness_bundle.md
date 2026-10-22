@@ -1036,8 +1036,7 @@ test's `pre` block and exercises one `Blockchain::insert_block` per entry in
 ## 4. SP1 input building
 
 The Rust prover host builds an `SP1Stdin` carrying exactly one envelope per
-proof request. See `prover/prover_hypercube/src/stdin_builders.rs` (and the
-equivalent `prover_turbo` variant):
+proof request. See `prover/prover_hypercube/src/stdin_builders.rs`:
 
 ```rust
 const INPUT_MAGIC_EJSN: u32 = 0x4E534A45;

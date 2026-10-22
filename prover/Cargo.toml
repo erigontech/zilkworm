@@ -5,8 +5,6 @@
 members = [
     "common",
     "prover_hypercube",
-    "prover_turbo",
-    "guest_turbo",
     "witness_ffi",
 ]
 exclude = [

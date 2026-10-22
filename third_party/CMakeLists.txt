@@ -14,13 +14,6 @@ add_subdirectory(evmone/third_party/intx intx)
 
 
 # add_subdirectory(evmone) # depends on intx
-if(SP1TURBO)
-  # FIXME: I'm not sure why this is not propagated from the top-level CMakeLists.txt.
-  # evmone gates its syscall use on SP1 (instructions.hpp #ifdef SP1), so the rv32
-  # guest needs both macros; zilk_core already derives SP1 from SP1TURBO itself.
-  add_compile_definitions(-DSP1TURBO -DSP1)
-  include_directories(${CMAKE_SOURCE_DIR}/prover/guest_turbo/src/include)
-endif()
 
 if(SP1)
     add_compile_definitions(-DSP1)
@@ -124,7 +117,7 @@ endif()
 # need care. The SP1 paths pass words to their syscalls through size_t pointers.
 # -Werror=strict-aliasing also turns the warning on, at the default level 3, which misses these
 # casts: the level has to come after it.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1 AND NOT SP1TURBO)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1)
   target_compile_options(evmone PRIVATE -Werror=strict-aliasing -Wstrict-aliasing=1)
 endif()
 

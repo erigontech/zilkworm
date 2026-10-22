@@ -25,9 +25,10 @@ endif
         release-artifacts \
         zkevm-benchmark-fixtures z6m_guest_slib z6m_prover_slib slib-benchmark
 
-clean: 
+clean:
 	rm -rf prover/guest_hypercube/build/
 	rm -rf prover/target
+	rm -rf prover/target-turbo
 	
 # USE_HASH_KEY=ON enables node-store account recovery. For the hypercube guest only: the
 # Airbender guest's own Makefile defaults it ON (don't export this one, which would turn it off).
@@ -50,20 +51,7 @@ z6m_prover_airbender: z6m_guest_airbender
 	cd prover/prover_airbender && cargo build --release
 
 test_hc: z6m_prover
-	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp
-
-# Freshness is handled by guest_turbo/build.rs's cargo:rerun-if-changed on the
-# zilk_core/third_party trees, so no forced clean is needed here (the old
-# z6m_guest-* glob silently stopped matching after the crate rename anyway).
-z6m_guest_turbo:
-	(cd prover/guest_turbo && PATH="$(SP1_RV32_TOOLCHAIN_BIN):$$PATH" cargo prove build)
-
-z6m_prover_turbo: z6m_guest_turbo
-	cd prover && PATH="$(SP1_RV32_TOOLCHAIN_BIN):$$PATH" cargo build --release --manifest-path prover_turbo/Cargo.toml
-
-# The turbo guest's C/C++ dependencies find the riscv32 toolchain through PATH
-# (prover/guest_turbo/.cargo/config.toml names the tools without a directory).
-SP1_RV32_TOOLCHAIN_BIN ?= $(HOME)/.sp1/riscv/riscv32im-linux-x86_64/bin
+	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/temp
 
 execute-block: z6m_prover
 	prover/target/release/z6m_prover execute --file-name prover/temp/blocks/23519000/unifiedBlockAndStateRlp23519000.bin

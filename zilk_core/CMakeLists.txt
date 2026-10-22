@@ -5,11 +5,6 @@
 
 # project(silkworm LANGUAGES CXX)
 
-if(SP1TURBO)
-    add_compile_definitions(-DSP1)
-    include_directories(${CMAKE_SOURCE_DIR}/prover/guest_turbo/src/include)
-endif()
-
 if(SP1)
     add_compile_definitions(-DSP1)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_hypercube/src/include)

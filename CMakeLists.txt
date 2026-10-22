@@ -302,7 +302,7 @@ if(BUILD_TESTING)
   # separate executable, since SP1 changes what evmone's sources compile to; without the rv32
   # paths' EVMONE_RV32_DISPATCH_TEST, which would build the Airbender ecrecover_batch() instead.
   # keccak.c is C and stays without SP1, which would make it issue the keccak syscall.
-  if(NOT SP1 AND NOT SP1TURBO AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING
+  if(NOT SP1 AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING
      AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(SP1_SECP256K1_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/sp1_secp256k1")
     set(SP1_SECP256K1_EVMONE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/lib/evmone_precompiles")

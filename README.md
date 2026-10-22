@@ -48,7 +48,7 @@ inside the zkVM rather than a Rust one.
 
 ## How to Run
 
-At the moment building from source requires elaborate setup with conan, linux packages and SP1 Turbo SDK pre-requisites. It's recommended to use the pre-built docker image.
+At the moment building from source requires elaborate setup with conan, linux packages and SP1 SDK pre-requisites. It's recommended to use the pre-built docker image.
 
 To run with pre-built docker
 
