@@ -104,6 +104,7 @@ static void pv_buf_append(const uint8_t *data, size_t len) {
 /* ───────── Complex syscall implementations (multi-step / special register setups) ───────── */
 
 extern "C" __attribute__((noinline)) void syscall_write(uint64_t fd, const uint8_t *write_buf, size_t nbytes) {
+    Z6M_PROF_BUMP(z6mprof::S_WRITE);
     register uint64_t t0 asm("t0") = SC_WRITE;
     register uint64_t a0 asm("a0") = fd;
     register uint64_t a1 asm("a1") = reinterpret_cast<uint64_t>(write_buf);
@@ -153,6 +154,7 @@ extern "C" __attribute__((noinline)) [[noreturn]] void syscall_halt(uint8_t exit
 
 extern "C" void syscall_u256x2048_mul(const uint64_t x[4], const uint64_t y[32],
                                        uint64_t lo[32], uint64_t hi[4]) {
+    Z6M_PROF_BUMP(z6mprof::S_U256X2048_MUL);
     register uint64_t t0 asm("t0") = 0x0001012F;
     register uint64_t a0 asm("a0") = reinterpret_cast<uint64_t>(x);
     register uint64_t a1 asm("a1") = reinterpret_cast<uint64_t>(y);
@@ -162,6 +164,7 @@ extern "C" void syscall_u256x2048_mul(const uint64_t x[4], const uint64_t y[32],
 
 extern "C" void syscall_uint256_add_with_carry(const uint64_t a[4], const uint64_t b[4],
                                                 const uint64_t c[4], uint64_t d[4], uint64_t e[4]) {
+    Z6M_PROF_BUMP(z6mprof::S_UINT256_ADD_CARRY);
     register uint64_t t0 asm("t0") = 0x00010130;
     register uint64_t ra0 asm("a0") = reinterpret_cast<uint64_t>(a);
     register uint64_t ra1 asm("a1") = reinterpret_cast<uint64_t>(b);
@@ -171,6 +174,7 @@ extern "C" void syscall_uint256_add_with_carry(const uint64_t a[4], const uint64
 
 extern "C" void syscall_uint256_mul_with_carry(const uint64_t a[4], const uint64_t b[4],
                                                 const uint64_t c[4], uint64_t d[4], uint64_t e[4]) {
+    Z6M_PROF_BUMP(z6mprof::S_UINT256_MUL_CARRY);
     register uint64_t t0 asm("t0") = 0x00010131;
     register uint64_t ra0 asm("a0") = reinterpret_cast<uint64_t>(a);
     register uint64_t ra1 asm("a1") = reinterpret_cast<uint64_t>(b);

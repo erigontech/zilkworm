@@ -25,6 +25,31 @@ extern "C" int main()
     auto st = cmd::state_transition::StateTransition(envelope);
     const auto r = st.run();
 
+#ifdef Z6M_GUEST_PROFILE
+    {
+        static constexpr const char* ecall_names[32] = {
+            "ed_add", "ed_decompress", "secp256k1_double", "secp256k1_add",
+            "secp256r1_double", "secp256r1_add", "bn254_double", "bn254_add",
+            "bls12381_double", "bls12381_add", "keccak_permute", "sha256_compress",
+            "sha256_extend", "uint256_mulmod", "bls_fp_add", "bls_fp_sub",
+            "bls_fp_mul", "bls_fp2_add", "bls_fp2_sub", "bls_fp2_mul",
+            "bn254_fp_add", "bn254_fp_sub", "bn254_fp_mul", "bn254_fp2_add",
+            "bn254_fp2_sub", "bn254_fp2_mul", "e26", "e27", "e28", "e29", "e30", "unmapped"};
+        static constexpr const char* named_names[10] = {
+            "write", "u256_add_carry", "u256_mul_carry", "u256x2048_mul",
+            "read_vec", "alloc_aligned", "verify_sp1_proof", "mprotect",
+            "enter_unconstrained", "exit_unconstrained"};
+        for (unsigned i = 0; i < 32; ++i)
+            if (z6mprof::ecall_counts[i] != 0)
+                sys_println(std::format("[profile] ecall {} = {}", ecall_names[i],
+                                        z6mprof::ecall_counts[i]));
+        for (unsigned i = 0; i < 10; ++i)
+            if (z6mprof::named_counts[i] != 0)
+                sys_println(std::format("[profile] sys {} = {}", named_names[i],
+                                        z6mprof::named_counts[i]));
+    }
+#endif
+
     // Committed Public Values (see docs/architecture.md for details)
     auto syscall_write_u64_le = [](uint64_t value) {
         uint8_t le_bytes8[8];

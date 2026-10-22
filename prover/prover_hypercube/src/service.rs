@@ -41,6 +41,18 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Print the executor's per-label cycle tracker (guest stdout
+/// `cycle-tracker-report-start/end:` pairs) when Z6M_CYCLE_TRACKER is set.
+/// Phase labels come from the guest's Z6M_PHASE_TRACE markers.
+fn print_cycle_tracker(report: &sp1_sdk::ExecutionReport, block_number: u64) {
+    if std::env::var("Z6M_CYCLE_TRACKER").is_err() {
+        return;
+    }
+    for (label, cycles) in &report.cycle_tracker {
+        println!("CYCLE_TRACKER block={} label={} cycles={}", block_number, label, cycles);
+    }
+}
+
 /// Guest-committed public values (see docs/architecture.md for encoding details).
 #[derive(Debug, Clone)]
 struct PublicValues {
@@ -830,6 +842,7 @@ impl Z6mProverService {
                     let cycle_count = report.total_instruction_count();
                     let prover_gas = report.gas().unwrap_or_default();
                     let syscall_count = report.total_syscall_count();
+                    print_cycle_tracker(&report, block_number);
                     // Release the prover lock before file I/O.
                     drop(guard);
 
@@ -959,6 +972,7 @@ impl Z6mProverService {
             let cycle_count = report.total_instruction_count();
             let prover_gas = report.gas().unwrap_or_default();
             let syscall_count = report.total_syscall_count();
+            print_cycle_tracker(&report, block_number);
 
             if gas_used == 0 {
                 error!(%block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used=0)");
@@ -1162,6 +1176,7 @@ impl Z6mProverService {
         let cycle_count = report.total_instruction_count();
         let prover_gas = report.gas().unwrap_or_default();
         let syscall_count = report.total_syscall_count();
+        print_cycle_tracker(&report, opts.block_number);
         if gas_used == 0 {
             error!(block_number = opts.block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used=0)");
             println!(

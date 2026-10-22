@@ -21,6 +21,7 @@
 #include <zilk_core/core/chain/genesis.hpp>
 #include <zilk_core/core/common/test_util.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/common/phase_trace.hpp>
 #include <zilk_core/core/common_zz/inline_vec.hpp>
 #include <zilk_core/core/protocol/blockchain.hpp>
 #include <zilk_core/core/protocol/param.hpp>
@@ -106,13 +107,16 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
     failed_ = true;
     return {0, false};
 #else
-    if (!bundle.direct.sanitize()) {
-        sys_println("ERROR: Witness sanitize failed (identity↔hash mismatch)");
-        failed_ = true;
-        return {0, false};
-    }
-    for (const auto& h : bundle.ancestors) {
-        bundle.direct.insert_header(h);
+    {
+        Z6M_PHASE("sanitize");
+        if (!bundle.direct.sanitize()) {
+            sys_println("ERROR: Witness sanitize failed (identity↔hash mismatch)");
+            failed_ = true;
+            return {0, false};
+        }
+        for (const auto& h : bundle.ancestors) {
+            bundle.direct.insert_header(h);
+        }
     }
 
     const auto cfg_it = test::kNetworkConfig.find(std::string{bundle.network});
@@ -143,7 +147,12 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         }
         Block block;
         ByteView view{bundle.block_rlps[i]};
-        if (!rlp::decode(view, block).has_value()) {
+        bool decoded = false;
+        {
+            Z6M_PHASE("rlp_decode");
+            decoded = rlp::decode(view, block).has_value();
+        }
+        if (!decoded) {
             if (expect_invalid) {
                 sys_println(("block " + std::to_string(i) + " rejected as expected: decode").c_str());
                 continue;
@@ -177,7 +186,11 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         }
 
         bundle.direct.reset_witness_incomplete();
-        const ValidationResult err{blockchain.insert_block(block, false)};
+        ValidationResult err;
+        {
+            Z6M_PHASE("insert_block");
+            err = blockchain.insert_block(block, false);
+        }
         // Execution that read data the witness omits (code, or the hash of an ancestor its headers do not
         // lead to) is invalid whatever its outcome.
         if (bundle.direct.witness_incomplete() || bundle.direct.ancestor_missing()) {
@@ -215,9 +228,13 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         // The post-state root walks the witness trie, so a block is accepted only after it.
         const evmc_revision rev = cfg_it->second.revision(block.header.number, block.header.timestamp);
         const bool was_anchored = pre_root_set_;
-        const bool root_ok = first_root_check
-                                 ? check_root(bundle.direct, block.header, rev)
-                                 : check_root_new_block(bundle.direct, block.header);
+        bool root_ok = false;
+        {
+            Z6M_PHASE(first_root_check ? "check_root" : "check_root_new_block");
+            root_ok = first_root_check
+                          ? check_root(bundle.direct, block.header, rev)
+                          : check_root_new_block(bundle.direct, block.header);
+        }
         if (!root_ok) {
             if (expect_invalid) {
                 // A rejected block anchors nothing in the public values.

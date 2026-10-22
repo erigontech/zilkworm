@@ -17,6 +17,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_definitions(SP1)
 
+# Profiling build: counters on every SP1 ecall choke point + named runtime syscalls,
+# printed to stdout at the end of the run (see src/include/guest_profile.hpp).
+option(Z6M_GUEST_PROFILE "Instrument the guest with syscall/work counters (profiling only)" OFF)
+if(Z6M_GUEST_PROFILE)
+    add_compile_definitions(Z6M_GUEST_PROFILE)
+endif()
+
+# Phase-attribution build: emits the SP1 executor's cycle-tracker-report lines around the
+# major phases (sanitize / rlp_decode / insert_block / recover_senders / execute_block /
+# check_root); the prover prints report.cycle_tracker with Z6M_CYCLE_TRACKER=1.
+option(Z6M_PHASE_TRACE "Instrument the guest with cycle-tracker phase markers (profiling only)" OFF)
+if(Z6M_PHASE_TRACE)
+    add_compile_definitions(Z6M_PHASE_TRACE)
+endif()
+
 # Read-side state backend for the guest; set here because the top-level option does not reach
 # this separate project. See docs/hashstate.md, "Build flag and test targets".
 option(Z6M_HASH_STATE "Build the guest with the HashState/slib (StatelessInputBytes) backend" OFF)
