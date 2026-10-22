@@ -13,6 +13,18 @@
 #include <span>
 #include <string>
 
+#ifdef Z6M_GUEST_PROFILE
+// Keccak-side counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_keccak_permutes;
+extern "C" uint64_t z6mprof_sha3_64;
+extern "C" uint64_t z6mprof_sha3_64_memo_hit;
+extern "C" uint64_t z6mprof_sha3_64_memo_miss;
+extern "C" uint64_t z6mprof_sha3_32;
+extern "C" uint64_t z6mprof_sha3_other;
+extern "C" uint64_t z6mprof_keyhash_hit;
+extern "C" uint64_t z6mprof_keyhash_miss;
+#endif
+
 extern "C" int main()
 {
     using namespace silkworm;
@@ -26,6 +38,20 @@ extern "C" int main()
     const auto r = st.run();
 
 #ifdef Z6M_GUEST_PROFILE
+    {
+        if (z6mprof_keccak_permutes != 0)
+            sys_println(std::format("[profile] keccak_permutes = {}", z6mprof_keccak_permutes));
+        if (z6mprof_sha3_64 != 0)
+            sys_println(std::format("[profile] sha3_64 = {} (hit {}, miss {})", z6mprof_sha3_64,
+                z6mprof_sha3_64_memo_hit, z6mprof_sha3_64_memo_miss));
+        if (z6mprof_sha3_32 != 0 || z6mprof_sha3_other != 0)
+            sys_println(std::format("[profile] sha3_32 = {}, sha3_other = {}", z6mprof_sha3_32,
+                z6mprof_sha3_other));
+        if (z6mprof_keyhash_hit != 0 || z6mprof_keyhash_miss != 0)
+            sys_println(std::format("[profile] keyhash = {} (hit {}, miss {})",
+                z6mprof_keyhash_hit + z6mprof_keyhash_miss, z6mprof_keyhash_hit,
+                z6mprof_keyhash_miss));
+    }
     {
         static constexpr const char* ecall_names[32] = {
             "ed_add", "ed_decompress", "secp256k1_double", "secp256k1_add",
