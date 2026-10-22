@@ -407,6 +407,11 @@ struct GridLine {
     }
 };
 
+static_assert(offsetof(GridLine, kind) == 0);
+static_assert(offsetof(GridLine, parent_slot) == 1);
+static_assert(offsetof(GridLine, parent_depth) == 2);
+static_assert(offsetof(GridLine, consumed) == 3);
+static_assert(offsetof(GridLine, modified) == 4);
 static_assert(offsetof(GridLine, child_depth) == 8);
 static_assert(offsetof(GridLine, parent) == 24);
 static_assert(offsetof(GridLine, branch) == 32);
