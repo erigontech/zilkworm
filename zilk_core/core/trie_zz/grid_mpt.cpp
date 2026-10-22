@@ -164,6 +164,12 @@ namespace {
 [[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat& u) noexcept { return u; }
 [[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat* u) noexcept { return *u; }
 
+// 0x80 is zero's RLP: no trie leaf stores it
+[[gnu::always_inline]] inline bool absent_key_noop(const TrieNodeFlat& u) noexcept {
+    const ByteView v = u.current_value();
+    return v.empty() || (v.size() == 1 && v[0] == rlp::kEmptyStringCode);
+}
+
 // fold's shape check for a lone child
 bool ro_node_well_formed(ByteView node, unsigned at) {
     const auto hh = fast_decode_header(node);
@@ -717,8 +723,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
             if (!claims_absent(trie_upd)) [[unlikely]] {
                 return {};
             }
-            if (trie_upd.current_value().empty()) {
-                continue;  // a read of a key the empty trie does not have: nothing to insert, see below
+            if (absent_key_noop(trie_upd)) {
+                continue;  // a read or absent-key delete: nothing to insert, see below
             }
             last_was_delete_ = false;
             root_unfolded_ = false;
@@ -805,8 +811,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     if (!claims_absent(trie_upd)) [[unlikely]] {
                         return {};
                     }
-                    if (trie_upd.current_value().empty()) {
-                        // A read of a key absent from the trie, which reaching this empty slot shows: nothing to
+                    if (absent_key_noop(trie_upd)) {
+                        // A read — or an absent-key delete — which reaching this empty slot shows: nothing to
                         // insert. An empty leaf would fold away again, but the cascade that deletes it can take
                         // lines the seek still climbs through, and leave a branch with a single child the walk
                         // folded already, whose new hash the witness cannot unfold. The next seek starts from
@@ -897,8 +903,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (!claims_absent(trie_upd)) [[unlikely]] {
                     return {};
                 }
-                if (trie_upd.current_value().empty()) {
-                    // A read of a key absent from the trie: it leaves the extension inside its path. Nothing to
+                if (absent_key_noop(trie_upd)) {
+                    // A read or an absent-key delete: it leaves the extension inside its path. Nothing to
                     // insert, as for an empty slot; the next seek starts from the parent branch.
                     depth_ = grid_line.parent_depth;
                     last_was_delete_ = true;
@@ -1036,8 +1042,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (!claims_absent(trie_upd)) [[unlikely]] {
                     return {};
                 }
-                if (trie_upd.current_value().empty()) {
-                    break;  // a read of a key absent from the trie, which leaves this leaf's path: nothing to insert
+                if (absent_key_noop(trie_upd)) {
+                    break;  // a read or absent-key delete: nothing to insert
                 }
                 LeafNode old_leaf{grid_line.leaf};
                 BranchNode bn;
