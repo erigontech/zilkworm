@@ -13,8 +13,14 @@ on:
       - 'prover/witness_ffi/**'
       - 'zilk_core/core/**'
       - 'zilk_core/dev/**'
+      - 'zilk_core/CMakeLists.txt'
       - 'third_party/evmone/lib/**'
       - 'third_party/evmone'
+      - 'third_party/CMakeLists.txt'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'Makefile'
+      - 'tools/scripts/zisk_execute.py'
   pull_request:
     branches: [master, main, release/*]
     paths:
@@ -27,8 +33,14 @@ on:
       - 'prover/witness_ffi/**'
       - 'zilk_core/core/**'
       - 'zilk_core/dev/**'
+      - 'zilk_core/CMakeLists.txt'
       - 'third_party/evmone/lib/**'
       - 'third_party/evmone'
+      - 'third_party/CMakeLists.txt'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'Makefile'
+      - 'tools/scripts/zisk_execute.py'
   workflow_dispatch:
 
 jobs:
@@ -107,7 +119,8 @@ jobs:
             echo "Using cached raw blocks from local volume"
           else
             mkdir -p /benchmark-blocks
-            curl -L -o /tmp/200_benchmark_blocks.tar.gz \
+            # --retry-all-errors: GH release fetches hit transient 403s.
+            curl -L --retry 5 --retry-all-errors --retry-delay 10 -o /tmp/200_benchmark_blocks.tar.gz \
               "https://github.com/erigontech/zilkworm-testdata/releases/download/benchmark-200-spread/200_benchmark_blocks.tar.gz"
             tar xzf /tmp/200_benchmark_blocks.tar.gz -C /benchmark-blocks
             rm -f /tmp/200_benchmark_blocks.tar.gz

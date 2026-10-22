@@ -13,8 +13,14 @@ on:
       - 'prover/witness_ffi/**'
       - 'zilk_core/core/**'
       - 'zilk_core/dev/**'
+      - 'zilk_core/CMakeLists.txt'
       - 'third_party/evmone/lib/**'
       - 'third_party/evmone'
+      - 'third_party/CMakeLists.txt'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'Makefile'
+      - 'tools/scripts/zisk_execute.py'
   pull_request:
     branches: [master, main, release/*]
     paths:
@@ -27,8 +33,14 @@ on:
       - 'prover/witness_ffi/**'
       - 'zilk_core/core/**'
       - 'zilk_core/dev/**'
+      - 'zilk_core/CMakeLists.txt'
       - 'third_party/evmone/lib/**'
       - 'third_party/evmone'
+      - 'third_party/CMakeLists.txt'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'Makefile'
+      - 'tools/scripts/zisk_execute.py'
   workflow_dispatch:
 
 jobs:
