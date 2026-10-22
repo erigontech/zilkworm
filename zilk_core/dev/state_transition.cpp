@@ -56,6 +56,12 @@ extern "C" uint64_t z6mprof_node_verify;
 extern "C" uint64_t z6mprof_node_verify_bytes;
 extern "C" uint64_t z6mprof_code_verify;
 extern "C" uint64_t z6mprof_code_verify_bytes;
+extern "C" uint64_t z6mprof_verify_snap;
+extern "C" uint64_t z6mprof_verify_snap_bytes;
+extern "C" uint64_t z6mprof_fold_plain;
+extern "C" uint64_t z6mprof_fold_plain_bytes;
+extern "C" uint64_t z6mprof_fold_resume;
+extern "C" uint64_t z6mprof_fold_full_branch;
 #endif
 
 StateTransition::StateTransition(std::span<uint8_t> envelope) noexcept
@@ -844,6 +850,12 @@ StateTransition::Result StateTransition::run() {
                             z6mprof_node_verify_bytes).c_str());
     sys_println(std::format("[profile] code_verify = {} ({} bytes)", z6mprof_code_verify,
                             z6mprof_code_verify_bytes).c_str());
+    sys_println(std::format("[profile] verify_snap = {} ({} bytes)", z6mprof_verify_snap,
+                            z6mprof_verify_snap_bytes).c_str());
+    sys_println(std::format("[profile] fold_plain = {} ({} bytes)", z6mprof_fold_plain,
+                            z6mprof_fold_plain_bytes).c_str());
+    sys_println(std::format("[profile] fold_resume = {}, fold_full_branch = {}", z6mprof_fold_resume,
+                            z6mprof_fold_full_branch).c_str());
 #endif
     return Result{
         .gas_used = gas,
