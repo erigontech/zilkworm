@@ -1290,6 +1290,11 @@ bool DirectState::sanitize() {
         const auto h = silkworm::keccak256(ByteView{e.addr, 20});
         if (!bytes_equal<32>(h.bytes, e.addr_hash)) return false;
         if (static_cast<uint64_t>(e.entry_offset) + 8u + sizeof(Account) > data_size) return false;
+        // entry_offset comes from the addr_hashes section (attacker-controlled); the
+        // slot_offsets/collision entries are alignment-checked by check_entry in
+        // prestate_layout_valid, this parallel route into the same map was not (found
+        // by fuzzing sanitize: misaligned Account member access).
+        if ((e.entry_offset % alignof(Account)) != 0) [[unlikely]] return false;
         auto* pa = account_at_offset(e.entry_offset);
         if (!pa || !eq_addr20(pa->addr, e.addr)) return false;
         pa->modified = false;  // This account's hash now checked
