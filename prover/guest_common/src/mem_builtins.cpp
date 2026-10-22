@@ -365,14 +365,25 @@ extern "C" void* ZILK_MEM_NAME(memcpy)(void* dest, const void* src, size_t n) no
         // Diagnostic build only: bucket copy sizes into a flat histogram the halt path prints.
         static size_t calls, total;
         static size_t buckets[32];  // powers of two: bucket i = sizes (2^i, 2^(i+1)]
+        // Open-addressing map of call-site PCs (return addresses) to counts: post-process the
+        // printed lines with nm/objdump to attribute the copies to functions.
+        struct PcEntry { uintptr_t pc; size_t count; };
+        static PcEntry pcs[512];
         ++calls;
         total += n;
         size_t b = 0;
         for (size_t v = n; v > 1; v >>= 1) ++b;
         ++buckets[b < 31 ? b : 31];
+        {
+            const uintptr_t pc = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+            size_t h = (pc >> 2) & 511u;
+            while (pcs[h].pc != 0 && pcs[h].pc != pc) h = (h + 1) & 511u;
+            pcs[h].pc = pc;
+            ++pcs[h].count;
+        }
         if ((calls & 16383u) == 0)  // Print every ~1M calls: cheap and periodic.
         {
-            char line[400];
+            char line[2400];
             size_t at = 0;
             const auto put = [&](const char* s) {
                 while (*s) line[at++] = *s++;
@@ -398,10 +409,23 @@ extern "C" void* ZILK_MEM_NAME(memcpy)(void* dest, const void* src, size_t n) no
                     buckets[i] = 0;
                 }
             }
+            size_t pc_printed = 0;
+            for (const auto& e : pcs) {
+                if (e.count) {
+                    if (pc_printed++ == 100) break;  // Keep the line bounded; the rest drops.
+                    put(" pc");
+                    // Hex, fixed 12 digits: post-processing maps it with objdump.
+                    for (int sh = 44; sh >= 0; sh -= 4)
+                        line[at++] = "0123456789abcdef"[(e.pc >> sh) & 0xF];
+                    put(":");
+                    put_num(e.count);
+                }
+            }
             put("\n");
             mem_stats_syscall_write(1, reinterpret_cast<const uint8_t*>(line), at);
             calls = 0;
             total = 0;
+            for (auto& e : pcs) e = {};
         }
     }
 #endif
