@@ -82,6 +82,9 @@ target_link_options(z6m_guest PRIVATE
     -Wl,--wrap=memmove
     -Wl,--wrap=memcmp
     -Wl,--wrap=memset
+    # sp1_runtime.cpp defines no-op __retarget_lock_* for the single-threaded guest; libc.a
+    # also defines them, so let this object's definitions win.
+    -Wl,--allow-multiple-definition
 )
 
 # Library search path: use the toolchain's rv64im/lp64 sysroot libraries.

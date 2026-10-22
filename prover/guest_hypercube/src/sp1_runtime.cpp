@@ -13,8 +13,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <sys/lock.h>
 #include "include/sp1_syscalls.hpp"
 #include <evmone_precompiles/sha256.hpp>
+
+/* The guest is single-threaded: newlib's malloc locking goes through these retarget
+   hooks, and the libc.a default implementations cost millions of instructions per
+   block (profiled at ~4% of guest cycles on a call-heavy mainnet block). No-op them. */
+extern "C" {
+void __retarget_lock_acquire(_LOCK_T) noexcept {}
+void __retarget_lock_release(_LOCK_T) noexcept {}
+void __retarget_lock_acquire_recursive(_LOCK_T) noexcept {}
+void __retarget_lock_release_recursive(_LOCK_T) noexcept {}
+}
 
 /* ───────── Bare-metal _sbrk (heap allocator for newlib malloc) ───────── */
 /* The prebuilt libnosys.a stub always returns -1, so malloc fails.
