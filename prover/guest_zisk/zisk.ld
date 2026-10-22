@@ -78,7 +78,7 @@ SECTIONS
   PROVIDE(_global_pointer = .);
   .rodata : { *(.rodata .rodata.*)} >rom AT>rom :rodata
 
-  /* C++ static constructors / destructors (run by _start before/after main),
+  /* C++ static constructors (run by _start before main; fini never runs),
      placed in ROM: the entries are link-time-constant function pointers, never
      written. KEEP prevents --gc-sections from dropping them. The init/fini array
      bound symbols are referenced (strongly) by the runtime, so this section MUST

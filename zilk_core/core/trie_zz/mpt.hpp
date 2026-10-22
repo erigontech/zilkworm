@@ -54,7 +54,7 @@ namespace zilkworm {
     return ((x & M) << 4) | ((x >> 4) & M);
 }
 
-// Reads past nibble 63 yield zero.
+// Requires off <= 63; 64 would read s[4].
 [[gnu::always_inline]] inline uint64_t nib_word(const uint64_t* s, size_t off) noexcept {
     const uint64_t lo = s[off >> 4];
     const unsigned sh = 4u * static_cast<unsigned>(off & 15u);

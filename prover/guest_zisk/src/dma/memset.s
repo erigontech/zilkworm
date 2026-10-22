@@ -26,7 +26,7 @@ memset:
         add     t0, t0, a1
         jr      t0
 
-        # csrs 0x816, a1; addi x0, a0, fill_byte; ret; nop
+        # csrs 0x816, a0; addi x0, a2, fill_byte; ret; nop
         # memset(a0, fill_byte, a2)
 
         # Jump table: 256 entries, each 16 bytes (4 instructions)
