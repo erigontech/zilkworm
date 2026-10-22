@@ -19,19 +19,19 @@ reproduces the reference results, and running the proofs.
 | | |
 |---|---|
 | zilkworm branch | `som/zisk-impl` on `erigontech/zilkworm` |
-| evmone branch | `som/zisk-impl-on-main` on `erigontech/zvm1` (submodule `third_party/evmone` @ `1e8b8ad2`, 12 commits on top of `main` @ `85f66c8e`) |
+| evmone branch | `som/zisk-impl-on-main` on `erigontech/zvm1` (submodule `third_party/evmone` @ `7b8fa2e6`, 59 commits on top of `main` @ `85f66c8e`) |
 | ZisK pin | v1.3.1-alpha (`306a9c934`): guest linker script, `ziskemu`, `zisk-sdk` crates, proving key |
 | Guest compiler | xPack `riscv-none-elf-gcc` 15.2.0-1.1, the only version to have installed (§3.2) |
 
 | Commit | Content |
 |---|---|
-| `8c9ef3367` | `ZISK` build seams, native `Public Values:` line |
-| `ad9a724ab` | guest, `zisk_execute.py`, skill |
-| `1e0b27001` | mem ops through DMA precompiles |
-| `d7c3b4819` | precompile shims, keccak |
-| `19e3e028d` | sha256, ADDMOD/MULMOD, modexp, secp256k1, bn254 |
-| `1ad2de5df` | BLS12-381/KZG, blake2f, p256verify |
-| `93bcdac28` | host prover, Make targets, CI, skill update |
+| `5d6fa08c9` | `ZISK` build seams, native `Public Values:` line |
+| `53154a2dc` | guest, `zisk_execute.py`, skill |
+| `057aef663` | mem ops through DMA precompiles |
+| `857eca208` | precompile shims, keccak |
+| `a652b1291` | sha256, ADDMOD/MULMOD, modexp, secp256k1, bn254 |
+| `a926cc0ac` | BLS12-381/KZG, blake2f, p256verify |
+| `9aaf82284` | host prover, Make targets, CI, skill update |
 
 ### Done
 
@@ -57,9 +57,10 @@ reproduces the reference results, and running the proofs.
 | blake2f | `0x819` |
 | p256verify | `0x802`, `0x817`/`0x818`, fcall 5 (inverse) |
 | memcpy / memmove / memset / memcmp | DMA `0x813` / `0x814` / `0x816` |
+| EVM opcode arithmetic (ADD/MUL/EXP/DIV/SDIV/MOD/SMOD) | ADD `0x811`; MUL + EXP `0x801`; MOD `0x802`; DIV/SDIV/SMOD fcall 19 + `verify_udivrem` |
 
-Still in software: ripemd160 (no ZisK precompile), identity, modexp with operands > 32 B, the
-MUL/EXP/DIV/MOD opcodes, and blst's 256-bit Fr arithmetic and curve formulas.
+Still in software: ripemd160 (no ZisK precompile), identity, modexp with operands > 32 B, and blst's
+256-bit Fr arithmetic and curve formulas.
 
 ### Validated (execute-only; ZisK guest sha256 `24435f23d74c006efced2104ead5bdcb4e08aa1ca472ba2e915fee770bc33973` for the corpus and EEST, `4fa5aa2b…` for the precompile runs)
 
@@ -132,7 +133,7 @@ image at PR head 62430d056 (2026-10-08).
 git clone https://github.com/erigontech/zilkworm.git && cd zilkworm
 git checkout som/zisk-impl
 git submodule update --init --recursive
-git submodule status --recursive   # evmone 1e8b8ad2…; no '+' or '-'
+git submodule status --recursive   # evmone 7b8fa2e6…; no '+' or '-'
 ```
 
 The evmone pin exists only on `erigontech/zvm1` branch `som/zisk-impl-on-main`.
@@ -329,7 +330,7 @@ make eest-mfbd-build        # -> test-fixtures-cache/mfbd-3586193db06d/blockchai
 # Guest and native reference. Both default USE_HASH_KEY=ON (node-store account recovery,
 # as the Airbender guest); `make z6m_guest_zisk ZISK_USE_HASH_KEY=OFF` opts out.
 make z6m_guest_zisk         # postlink prints "ebreak->halt: 16" and the heap range
-sha256sum prover/guest_zisk/build/z6m_guest.elf   # be410c17e0e6f341392e54c117e4e208c7605c299cadb80da0a7eaf3d02ee3ba
+sha256sum prover/guest_zisk/build/z6m_guest.elf   # be96047471aa267b7e0f893db4ecb2192e8e7b3a25dc9ac6786394f727b326b9
 cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S . -DUSE_HASH_KEY=ON && cmake --build build --target state_transition
 ```
 
@@ -572,8 +573,6 @@ ELF matches a local one built from the same tree.
      and the flags under test; `ZISK_GCC_BIN` points the build at another xPack bin dir.
    - Try `-mtune=size`, `-funroll-loops` and the inline parameters.
 3. **Optional accelerators.**
-   - MUL/EXP via `arith256` (`0x801`).
-   - DIV/MOD via fcall 19; the verified `zisk::udivrem` is already in the shim.
    - evmc word-load `==` and hash gates in `evmc.hpp`, after profiling.
    - Plain-form instead of Montgomery blst, which would halve the `0x80B` calls.
 4. **Stack headroom.**
@@ -582,7 +581,7 @@ ELF matches a local one built from the same tree.
    - Make the stack paint an in-tree option.
 5. **EF zkvm-standards C API.** Later, consider moving from raw CSR shims to ZisK's
    `libziskos_staticlib.a` (`zkvm_io.h` / `zkvm_accelerators.h`).
-6. **Upstreaming.** Upstream the 12 evmone ZisK commits (`85f66c8e..1e8b8ad2`) from zvm1
+6. **Upstreaming.** Upstream the 59 evmone ZisK commits (`85f66c8e..7b8fa2e6`) from zvm1
    `som/zisk-impl-on-main` to `main`, then repoint the submodule.
 7. **Smaller items.**
    - Service mode against a live RPC.
