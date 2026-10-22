@@ -326,10 +326,11 @@ tar xzf temp/200_benchmark_blocks.tar.gz -C temp && rm temp/200_benchmark_blocks
 make sp1-benchmark-corpus   # -> temp/200_benchmark_blocks_mfbd_v2/<N>/flatWitnessBundle<N>.mfbd
 make eest-mfbd-build        # -> test-fixtures-cache/mfbd-3586193db06d/blockchain_tests (8615 .mfbd)
 
-# Guest and native reference
+# Guest and native reference. Both default USE_HASH_KEY=ON (node-store account recovery,
+# as the Airbender guest); `make z6m_guest_zisk ZISK_USE_HASH_KEY=OFF` opts out.
 make z6m_guest_zisk         # postlink prints "ebreak->halt: 16" and the heap range
 sha256sum prover/guest_zisk/build/z6m_guest.elf   # be410c17e0e6f341392e54c117e4e208c7605c299cadb80da0a7eaf3d02ee3ba
-cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S . && cmake --build build --target state_transition
+cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S . -DUSE_HASH_KEY=ON && cmake --build build --target state_transition
 ```
 
 A different compiler gives a different ELF hash and different step counts. The public values must

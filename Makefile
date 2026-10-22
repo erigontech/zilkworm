@@ -34,7 +34,8 @@ clean:
 	rm -rf prover/prover_zisk/target
 	
 # USE_HASH_KEY=ON enables node-store account recovery. For the hypercube guest only: the
-# Airbender guest's own Makefile defaults it ON (don't export this one, which would turn it off).
+# Airbender and ZisK guests default it ON via their own build files (don't export this one,
+# which would turn them off).
 USE_HASH_KEY ?= OFF
 z6m_guest:
 	cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
@@ -58,18 +59,21 @@ ZISK_GCC_BIN   ?=
 ZISK_BUILD_DIR ?= prover/guest_zisk/build
 ZISKEMU        ?= ziskemu
 ZISK_ENV := $(if $(ZISK_GCC_BIN),PATH=$(ZISK_GCC_BIN):$$PATH,)
+# Native reference must match the guest.
+ZISK_USE_HASH_KEY ?= ON
 
 z6m_guest_zisk:
 	$(ZISK_ENV) cmake -S prover/guest_zisk -B $(ZISK_BUILD_DIR) \
 		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_zisk/cmake/riscv64im-zisk.cmake \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DZISK=ON \
-		-DUSE_HASH_KEY=$(USE_HASH_KEY)
+		-DUSE_HASH_KEY=$(ZISK_USE_HASH_KEY)
 	$(ZISK_ENV) cmake --build $(ZISK_BUILD_DIR) -j$$(nproc)
 
 # ziskemu vs native public values on BENCH_CORPUS_DIR.
 zisk-emu-check: z6m_guest_zisk
-	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S .
+	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S . \
+		-DUSE_HASH_KEY=$(ZISK_USE_HASH_KEY)
 	cmake --build build --target state_transition -j$$(nproc)
 	python3 tools/scripts/zisk_execute.py --elf $(ZISK_BUILD_DIR)/z6m_guest.elf \
 		--dir $(BENCH_CORPUS_DIR) --native build/zilk_core/dev/cli/state_transition --ziskemu "$(ZISKEMU)"

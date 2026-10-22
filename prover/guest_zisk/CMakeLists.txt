@@ -26,6 +26,9 @@ set(SILKWORM_MAIN_DIR "${Z6M_ROOT}")
 
 set(SW_BIN "${CMAKE_BINARY_DIR}/zilkworm")
 
+# Before zilk_core, whose option() defers.
+option(USE_HASH_KEY "Node-store account recovery for witness preimage gaps" ON)
+
 add_subdirectory("${Z6M_ROOT}/third_party" "${SW_BIN}/third_party")
 
 add_subdirectory("${Z6M_ROOT}/zilk_core"   "${SW_BIN}/zilk_core")
