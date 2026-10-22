@@ -11,7 +11,13 @@ if(MSVC)
   add_link_options(/ignore:4099)
 
 elseif((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR ("${CMAKE_CXX_COMPILER_ID}" MATCHES ".*Clang$"))
-  add_compile_options(-Werror -Wall -Wextra -pedantic)
+  # opt-out via SILKWORM_WERROR=OFF: sanitizer/fuzzer builds on newer compilers than the
+  # project's baseline hit narrowing-conversion differences (clang's -Wconversion, see
+  # below) that would otherwise abort every translation unit.
+  if(NOT SILKWORM_WERROR STREQUAL "OFF")
+    add_compile_options(-Werror)
+  endif()
+  add_compile_options(-Wall -Wextra -pedantic)
   add_compile_options(-Wshadow -Wimplicit-fallthrough -Wunused)
   add_compile_options(-Wsign-compare -Wsign-conversion -Wdouble-promotion)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>)
@@ -44,6 +50,9 @@ elseif((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR ("${CMAKE_CXX_COMPILER_ID}" MAT
 
   elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES ".*Clang$")
     add_compile_options(-Wconversion) # too much noise in gcc
+    # clang narrows more aggressively than GCC; keep these as warnings (as Apple clang does below).
+    add_compile_options(-Wno-error=implicit-int-conversion)
+    add_compile_options(-Wno-error=shorten-64-to-32)
 
     if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
       add_compile_definitions(_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS)

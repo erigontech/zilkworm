@@ -90,6 +90,9 @@ endif()
 
 add_subdirectory(zilk_core)
 
+# libFuzzer harnesses (no-op unless SILKWORM_FUZZER=ON).
+add_subdirectory(fuzz)
+
 # Aggregate Catch2 unit-test target. New *_test.cpp files join its source
 # list; each TEST_CASE is registered with ctest individually. Defined here
 # (not in zilk_core/) so projects embedding zilk_core with BUILD_TESTING=ON
