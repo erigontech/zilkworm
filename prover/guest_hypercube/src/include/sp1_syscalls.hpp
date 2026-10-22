@@ -9,6 +9,8 @@
 
 #include <intx/intx.hpp>
 
+#include "guest_profile.hpp"
+
 // Notes:
 // - Rust `usize` <-> C++ `size_t`
 // - Rust `u8/u32/u64` <-> C++ uint8_t/uint32_t/uint64_t
@@ -33,6 +35,7 @@ using uintType = uint64_t;
 #define SP1_ECALL_2ARG(name, num)                                              \
     [[gnu::always_inline]] inline void name(                                   \
         uint64_t *_p, const uint64_t *_q) noexcept {                           \
+        Z6M_PROF_ECALL(num);                                                  \
         register uint64_t t0 asm("t0") = (num);                               \
         register uint64_t *a0 asm("a0") = _p;                                 \
         register const uint64_t *a1 asm("a1") = _q;                           \
@@ -42,6 +45,7 @@ using uintType = uint64_t;
 #define SP1_ECALL_1ARG(name, num)                                              \
     [[gnu::always_inline]] inline void name(                                   \
         uint64_t *_p) noexcept {                                               \
+        Z6M_PROF_ECALL(num);                                                  \
         register uint64_t t0 asm("t0") = (num);                               \
         register uint64_t *a0 asm("a0") = _p;                                 \
         register uint64_t a1 asm("a1") = 0;                                   \

@@ -46,6 +46,34 @@ if(BUILD_TESTING)
     add_test(NAME witness_hide_node_test COMMAND witness_hide_node_test)
 endif()
 
+# Regression: the MFBD runner's bundle cursor used to overshoot the envelope end
+# (align8 of the last bundle's unaligned section end), wrapping the next span's
+# extent; load_flat_bundle then read its header out of bounds. Standalone, exit
+# code = failure count.
+add_executable(mfbd_cursor_overshoot_test "mfbd_cursor_overshoot_test.cpp")
+target_link_libraries(mfbd_cursor_overshoot_test PRIVATE ${ZILK_CLI_TRIE_LIBS})
+if(BUILD_TESTING)
+    add_test(NAME mfbd_cursor_overshoot_test COMMAND mfbd_cursor_overshoot_test)
+endif()
+
+# Regression: hostile input must fail through the kRunFailure sentinel, not escape
+# run() as an exception (the guest entry has no handler; it used to reach
+# std::terminate). Standalone, exit code = failure count.
+add_executable(malformed_input_sentinel_test "malformed_input_sentinel_test.cpp")
+target_link_libraries(malformed_input_sentinel_test PRIVATE ${ZILK_CLI_TRIE_LIBS})
+if(BUILD_TESTING)
+    add_test(NAME malformed_input_sentinel_test COMMAND malformed_input_sentinel_test)
+endif()
+
+# Regression: validate_block_header must reject a block whose parent_hash names
+# a header with a number other than header.number - 1 (read_header looks up by
+# hash alone). Standalone, exit code = failure count.
+add_executable(parent_number_check_test "parent_number_check_test.cpp")
+target_link_libraries(parent_number_check_test PRIVATE ${ZILK_CLI_TRIE_LIBS})
+if(BUILD_TESTING)
+    add_test(NAME parent_number_check_test COMMAND parent_number_check_test)
+endif()
+
 # file(GLOB STATE_TRANSITION_TESTS CONFIGURE_DEPENDS "state_transition_sample*.json")
 # add_custom_command(
 #   TARGET state_transition

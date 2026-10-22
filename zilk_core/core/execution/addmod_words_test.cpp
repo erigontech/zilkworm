@@ -152,7 +152,7 @@ void check_handler(const uint256& x, const uint256& y, const uint256& m, Counts&
 }
 
 #if defined(EVMONE_RV32_DISPATCH_TEST) || (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32)
-#if !(defined(SP1TURBO) || defined(SP1))
+#if !defined(SP1)
 #define ADDMOD_WORDS_PATH 1
 #endif
 #endif

@@ -228,7 +228,11 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
         const size_t section_end = static_cast<size_t>(hdr->blocks_rlp_off) +
                                    static_cast<size_t>(hdr->blocks_rlp_size);
         size_t cursor = static_cast<size_t>(hdr->blocks_rlp_off) + sizeof(uint64_t);
-        block_rlps.reserve(static_cast<size_t>(n_blocks));
+        // Reserve is bounded by what the section can hold (an aligned block takes >= 8
+        // bytes), so a hostile n_blocks cannot make reserve throw before the loop's own
+        // "cursor past section end" check rejects the over-count.
+        const size_t max_blocks = (section_end - cursor) / 8u + 1u;
+        block_rlps.reserve(std::min(static_cast<size_t>(n_blocks), max_blocks));
         for (size_t i = 0; i < static_cast<size_t>(n_blocks); ++i) {
             if (cursor >= section_end) [[unlikely]] {
                 sys_println("load_flat_bundle: blocks cursor past section end");

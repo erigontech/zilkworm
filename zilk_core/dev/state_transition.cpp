@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cstring>
 #include <fstream>
+#include <format>
 #include <memory>
 #include <new>
 #include <string_view>
@@ -21,6 +22,7 @@
 #include <zilk_core/core/chain/genesis.hpp>
 #include <zilk_core/core/common/test_util.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/common/phase_trace.hpp>
 #include <zilk_core/core/common_zz/inline_vec.hpp>
 #include <zilk_core/core/protocol/blockchain.hpp>
 #include <zilk_core/core/protocol/param.hpp>
@@ -47,6 +49,20 @@ namespace silkworm::cmd::state_transition {
 
 using silkworm::protocol::Blockchain;
 using silkworm::protocol::kMaxRlpBlockSize;
+
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+// Profiling counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_node_verify;
+extern "C" uint64_t z6mprof_node_verify_bytes;
+extern "C" uint64_t z6mprof_code_verify;
+extern "C" uint64_t z6mprof_code_verify_bytes;
+extern "C" uint64_t z6mprof_verify_snap;
+extern "C" uint64_t z6mprof_verify_snap_bytes;
+extern "C" uint64_t z6mprof_fold_plain;
+extern "C" uint64_t z6mprof_fold_plain_bytes;
+extern "C" uint64_t z6mprof_fold_resume;
+extern "C" uint64_t z6mprof_fold_full_branch;
+#endif
 
 StateTransition::StateTransition(std::span<uint8_t> envelope) noexcept
     : envelope_{envelope} {
@@ -106,13 +122,16 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
     failed_ = true;
     return {0, false};
 #else
-    if (!bundle.direct.sanitize()) {
-        sys_println("ERROR: Witness sanitize failed (identity↔hash mismatch)");
-        failed_ = true;
-        return {0, false};
-    }
-    for (const auto& h : bundle.ancestors) {
-        bundle.direct.insert_header(h);
+    {
+        Z6M_PHASE("sanitize");
+        if (!bundle.direct.sanitize()) {
+            sys_println("ERROR: Witness sanitize failed (identity↔hash mismatch)");
+            failed_ = true;
+            return {0, false};
+        }
+        for (const auto& h : bundle.ancestors) {
+            bundle.direct.insert_header(h);
+        }
     }
 
     const auto cfg_it = test::kNetworkConfig.find(std::string{bundle.network});
@@ -143,7 +162,12 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         }
         Block block;
         ByteView view{bundle.block_rlps[i]};
-        if (!rlp::decode(view, block).has_value()) {
+        bool decoded = false;
+        {
+            Z6M_PHASE("rlp_decode");
+            decoded = rlp::decode(view, block).has_value();
+        }
+        if (!decoded) {
             if (expect_invalid) {
                 sys_println(("block " + std::to_string(i) + " rejected as expected: decode").c_str());
                 continue;
@@ -177,7 +201,11 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         }
 
         bundle.direct.reset_witness_incomplete();
-        const ValidationResult err{blockchain.insert_block(block, false)};
+        ValidationResult err;
+        {
+            Z6M_PHASE("insert_block");
+            err = blockchain.insert_block(block, false);
+        }
         // Execution that read data the witness omits (code, or the hash of an ancestor its headers do not
         // lead to) is invalid whatever its outcome.
         if (bundle.direct.witness_incomplete() || bundle.direct.ancestor_missing()) {
@@ -215,9 +243,13 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         // The post-state root walks the witness trie, so a block is accepted only after it.
         const evmc_revision rev = cfg_it->second.revision(block.header.number, block.header.timestamp);
         const bool was_anchored = pre_root_set_;
-        const bool root_ok = first_root_check
-                                 ? check_root(bundle.direct, block.header, rev)
-                                 : check_root_new_block(bundle.direct, block.header);
+        bool root_ok = false;
+        {
+            Z6M_PHASE(first_root_check ? "check_root" : "check_root_new_block");
+            root_ok = first_root_check
+                          ? check_root(bundle.direct, block.header, rev)
+                          : check_root_new_block(bundle.direct, block.header);
+        }
         if (!root_ok) {
             if (expect_invalid) {
                 // A rejected block anchors nothing in the public values.
@@ -339,11 +371,13 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     std::vector<zilkworm::AddrHashEntry> created_acc_hashes_spill;  // to be used with InlineVec additional cache area
     zilkworm::InlineVec<zilkworm::AddrHashEntry, 32> created_acc_hashes(
         direct_state.created_accounts().size(), created_acc_hashes_spill);
-    for (auto& [addr, _] : direct_state.created_accounts()) {
-        auto& e = created_acc_hashes.emplace_back();
-        std::memcpy(e.addr_hash, keccak_bytes(addr.bytes).bytes, 32);
-        std::memcpy(e.addr, addr.bytes, 20);
-    }
+    {
+        Z6M_PHASE("cr_setup");
+        for (auto& [addr, _] : direct_state.created_accounts()) {
+            auto& e = created_acc_hashes.emplace_back();
+            std::memcpy(e.addr_hash, keccak_bytes(addr.bytes).bytes, 32);
+            std::memcpy(e.addr, addr.bytes, 20);
+        }
     if (created_acc_hashes.size() > 1) [[likely]] {
         auto* const data = created_acc_hashes.data();
         const std::size_t n = created_acc_hashes.size();
@@ -360,6 +394,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         } else {
             std::sort(data, data + n);
         }
+    }
     }
 
     std::vector<mpt::TrieNodeFlat> acc_updates;
@@ -523,8 +558,11 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                 storage_root = kEmptyRoot;
             }
             storage_trie.reset(storage_root);
-            const bytes32 walked = storage_trie.calc_root_from_updates(
-                std::span<const mpt::TrieNodeFlat* const>{order.data(), order.size()});
+            const bytes32 walked = [&] {
+                Z6M_PHASE("cr_slot_walk");
+                return storage_trie.calc_root_from_updates(
+                    std::span<const mpt::TrieNodeFlat* const>{order.data(), order.size()});
+            }();
             // A failed walk binds none of the slots.
             if (storage_trie.failed()) [[unlikely]] {
                 sys_println("ERROR: storage trie walk failed");
@@ -623,8 +661,11 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                     }
                     zilkworm::sort_trie_nodes(storage_updates.data(), storage_updates.size());
                     storage_trie.reset(storage_root);
-                    storage_root = storage_trie.calc_root_from_updates(
-                        {storage_updates.data(), storage_updates.size()});
+                    {
+                        Z6M_PHASE("cr_slot_walk");
+                        storage_root = storage_trie.calc_root_from_updates(
+                            {storage_updates.data(), storage_updates.size()});
+                    }
                     if (storage_trie.failed()) [[unlikely]] {
                         sys_println("ERROR: storage trie walk failed");
                         return false;
@@ -647,8 +688,12 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         pre_root_set_ = true;
     }
     zilkworm::GridMPT<true, DirectState> acc_trie(direct_state, prev_root);
-    auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
-    sys_println(("New Root: " + to_hex(new_root)).c_str());
+    bytes32 new_root{};
+    {
+        Z6M_PHASE("cr_acc_walk");
+        new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
+        sys_println(("New Root: " + to_hex(new_root)).c_str());
+    }
     // A failed walk returns a zero root, which would match a header committing to one.
     const bool ok = !acc_trie.failed() && new_root == header.state_root;
     // Walked: every record's list was taken in the walks above (a deleted record's with its wiped storage).
@@ -761,27 +806,57 @@ StateTransition::Result StateTransition::run() {
         envelope_[1] == (::zilkworm::kInputMagicSIB & 0xff)) {
         magic = ::zilkworm::kInputMagicSIB;
     }
-    switch (magic) {
-        case ::zilkworm::kInputMagicSIB:
-            gas = run_sib();
-            break;
-        case ::zilkworm::kInputMagicEJSN:
-            gas = run_ejsn();
-            break;
-        case ::zilkworm::kInputMagicMFBD:
-            gas = run_mfbd();
-            break;
-        default:
-#ifdef Z6M_HASH_STATE
-            // The HashState guest answers any other input, too short or of another schema, as an
-            // undecodable stateless input: the all-zero StatelessValidationResult, not a failed run.
-            gas = run_sib();
-#else
-            sys_println("ERROR: unsupported input magic");
-            failed_ = true;
+    // A malformed or hostile input must fail the run through the sentinel contract, not
+    // terminate the process: the decoders throw on hostile sizes and malformed data
+    // (load_flat_bundle's block_rlps.reserve(n_blocks) with an attacker-named count,
+    // nlohmann::json::parse_error in run_ejsn, std::bad_optional_access from
+    // from_hex(...).value()), and the guest entry has no handler — an exception escaping
+    // run() reaches std::terminate and kills the guest. The guests compile without
+    // exceptions (a throw there is an abort), so the handler exists in host builds only;
+    // the decoders' own bounds keep hostile sizes off the throwing paths in both.
+#if defined(__cpp_exceptions)
+    try {
 #endif
-            break;
+        switch (magic) {
+            case ::zilkworm::kInputMagicSIB:
+                gas = run_sib();
+                break;
+            case ::zilkworm::kInputMagicEJSN:
+                gas = run_ejsn();
+                break;
+            case ::zilkworm::kInputMagicMFBD:
+                gas = run_mfbd();
+                break;
+            default:
+#ifdef Z6M_HASH_STATE
+                // The HashState guest answers any other input, too short or of another schema, as an
+                // undecodable stateless input: the all-zero StatelessValidationResult, not a failed run.
+                gas = run_sib();
+#else
+                sys_println("ERROR: unsupported input magic");
+                failed_ = true;
+#endif
+                break;
+        }
+#if defined(__cpp_exceptions)
+    } catch (...) {
+        sys_println("ERROR: exception while decoding the input");
+        failed_ = true;
+        gas = kRunFailure;
     }
+#endif
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+    sys_println(std::format("[profile] node_verify = {} ({} bytes)", z6mprof_node_verify,
+                            z6mprof_node_verify_bytes).c_str());
+    sys_println(std::format("[profile] code_verify = {} ({} bytes)", z6mprof_code_verify,
+                            z6mprof_code_verify_bytes).c_str());
+    sys_println(std::format("[profile] verify_snap = {} ({} bytes)", z6mprof_verify_snap,
+                            z6mprof_verify_snap_bytes).c_str());
+    sys_println(std::format("[profile] fold_plain = {} ({} bytes)", z6mprof_fold_plain,
+                            z6mprof_fold_plain_bytes).c_str());
+    sys_println(std::format("[profile] fold_resume = {}, fold_full_branch = {}", z6mprof_fold_resume,
+                            z6mprof_fold_full_branch).c_str());
+#endif
     return Result{
         .gas_used = gas,
         .pre_state_root = pre_state_root_,
@@ -826,7 +901,10 @@ uint64_t StateTransition::run_mfbd() {
 
     for (uint64_t i = 0; i < n_bundles; ++i) {
         std::span<uint8_t> tail{envelope_.data() + cursor, end - cursor};
-        auto fb = ::zilkworm::load_flat_bundle(tail);
+        auto fb = [&] {
+            Z6M_PHASE("mfbd_parse");
+            return ::zilkworm::load_flat_bundle(tail);
+        }();
         if (!fb) [[unlikely]] {
             sys_println("ERROR: MFBD bundle parse failed");
             failed_ = true;
@@ -838,7 +916,20 @@ uint64_t StateTransition::run_mfbd() {
             return kRunFailure;
         }
         cumulative_gas += gas;
-        cursor = align8(cursor + fb->blob.size());
+        // The next bundle starts at the next 8-aligned offset. Only align while another
+        // bundle follows: align8 of the last bundle's end may overshoot `end` by up to 7
+        // bytes when its sections end unaligned, and a cursor past `end` would make the
+        // next iteration's `end - cursor` wrap and hand load_flat_bundle a ~2^64-byte span
+        // (its header read then runs past the envelope). A well-formed envelope's bundles
+        // are 8-aligned, so this changes nothing for it.
+        if (i + 1 < n_bundles) [[likely]] {
+            cursor = align8(cursor + fb->blob.size());
+            if (cursor > end) [[unlikely]] {
+                sys_println("ERROR: MFBD bundle padding runs past envelope end");
+                failed_ = true;
+                return kRunFailure;
+            }
+        }
     }
     if (n_bundles == 0)
         return kRunSkipped;

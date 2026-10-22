@@ -41,6 +41,12 @@ CodeStoreVerified g_code_store_verified;
 
 namespace trie = ::silkworm::trie;
 using ::silkworm::keccak256;
+
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+// Profiling counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_code_verify;
+extern "C" uint64_t z6mprof_code_verify_bytes;
+#endif
 using ::silkworm::to_bytes32;
 using ::silkworm::zeroless_view;
 namespace rlp = ::silkworm::rlp;
@@ -50,7 +56,7 @@ namespace {
 
     // Bounds + alignment + magic/version checks against malicious blob input.
     // Run once before any field of the blob is dereferenced.
-    bool validate_prestate_layout(std::span<const uint8_t> blob) noexcept {
+    bool prestate_layout_valid(std::span<const uint8_t> blob) noexcept {
         if (blob.size() < sizeof(PreStateMeta)) [[unlikely]] {
             sys_println("DirectState: blob smaller than PreStateMeta");
             return false;
@@ -203,7 +209,7 @@ namespace {
 
     // The node store is the third MphfMap this class builds. Checked here so every
     // caller of the constructor is covered, not only load_flat_bundle.
-    bool validate_nodestore_layout(std::span<const uint8_t> ns) noexcept {
+    bool nodestore_layout_valid(std::span<const uint8_t> ns) noexcept {
         if (ns.empty()) return true;
         if ((reinterpret_cast<uintptr_t>(ns.data()) % alignof(MphfMapHeader)) != 0) [[unlikely]] {
             sys_println("DirectState: node store not 8-byte aligned");
@@ -217,7 +223,7 @@ namespace {
     }
 
     inline const PreStateMeta* validate_or_abort(std::span<const uint8_t> v) noexcept {
-        if (!validate_prestate_layout(v)) [[unlikely]] {
+        if (!prestate_layout_valid(v)) [[unlikely]] {
             std::abort();
         }
         return reinterpret_cast<const PreStateMeta*>(v.data());
@@ -334,6 +340,18 @@ namespace {
 
 }  // namespace
 
+// Exposed so a host can pre-check a blob without the constructor's abort-on-invalid
+// behavior (the guest fails the proof instead of crashing; see validate_or_abort).
+// "Checked here so every caller of the constructor is covered, not only
+// load_flat_bundle" holds for these wrappers too.
+bool validate_prestate_layout(std::span<const uint8_t> blob) noexcept {
+    return prestate_layout_valid(blob);
+}
+
+bool validate_nodestore_layout(std::span<const uint8_t> ns) noexcept {
+    return nodestore_layout_valid(ns);
+}
+
 namespace detail {
     // Forces single-pass linkers to pull this TU when direct_state_builder.cpp is.
     std::array<uint8_t, 32> keccak_addr(const evmc::address& addr) noexcept {
@@ -362,7 +380,7 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
       addr_hashes_{reinterpret_cast<const AddrHashEntry*>(prestate_view_.data() + pre_state_meta_->addr_hashes_offset), pre_state_meta_->n_accounts},
       block_hashes_{reinterpret_cast<const BlockHashEntry*>(prestate_view_.data() + pre_state_meta_->block_hashes_offset), pre_state_meta_->n_block_hashes} {
     if (!nodestore_bytes.empty()) {
-        if (!validate_nodestore_layout(nodestore_bytes)) [[unlikely]] {
+        if (!nodestore_layout_valid(nodestore_bytes)) [[unlikely]] {
             std::abort();
         }
         node_store_map_.reset(reinterpret_cast<MphfMapHeader*>(nodestore_bytes.data()));
@@ -1181,6 +1199,10 @@ bool DirectState::sanitize() {
             return;
         const uint8_t* const body = code_data + off + 8u;
         const auto body_len = static_cast<size_t>(load_u64_le(code_data + off));
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+        ++z6mprof_code_verify;
+        z6mprof_code_verify_bytes += body_len;
+#endif
         code_keccak_ok &= bytes_equal<32>(
             silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
     });
@@ -1268,6 +1290,11 @@ bool DirectState::sanitize() {
         const auto h = silkworm::keccak256(ByteView{e.addr, 20});
         if (!bytes_equal<32>(h.bytes, e.addr_hash)) return false;
         if (static_cast<uint64_t>(e.entry_offset) + 8u + sizeof(Account) > data_size) return false;
+        // entry_offset comes from the addr_hashes section (attacker-controlled); the
+        // slot_offsets/collision entries are alignment-checked by check_entry in
+        // prestate_layout_valid, this parallel route into the same map was not (found
+        // by fuzzing sanitize: misaligned Account member access).
+        if ((e.entry_offset % alignof(Account)) != 0) [[unlikely]] return false;
         auto* pa = account_at_offset(e.entry_offset);
         if (!pa || !eq_addr20(pa->addr, e.addr)) return false;
         pa->modified = false;  // This account's hash now checked

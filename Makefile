@@ -25,7 +25,7 @@ endif
         release-artifacts \
         zkevm-benchmark-fixtures z6m_guest_slib z6m_prover_slib slib-benchmark
 
-clean: 
+clean:
 	rm -rf prover/guest_hypercube/build/
 	rm -rf prover/target
 	
@@ -50,14 +50,7 @@ z6m_prover_airbender: z6m_guest_airbender
 	cd prover/prover_airbender && cargo build --release
 
 test_hc: z6m_prover
-	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp
-
-z6m_guest_turbo:
-	rm -r prover/target/elf-compilation/riscv32im-succinct-zkvm-elf/release/build/z6m_guest-* || true
-	(cd prover/guest_turbo && cargo prove build)
-
-z6m_prover_turbo: z6m_guest_turbo
-	cd prover && cargo build --release --manifest-path prover_turbo/Cargo.toml
+	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/temp
 
 execute-block: z6m_prover
 	prover/target/release/z6m_prover execute --file-name prover/temp/blocks/23519000/unifiedBlockAndStateRlp23519000.bin

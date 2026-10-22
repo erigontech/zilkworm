@@ -13,6 +13,7 @@
 #include <cstring>
 #include <format>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -63,6 +64,31 @@ namespace {
         kFailed,
         kSkipped
     };
+
+    // Fixture JSON is attacker-controlled on the CLI/fuzz path. nlohmann's const
+    // operator[] on a missing key is UB (fuzzing: heap-use-after-free), so every
+    // field read goes through these checked accessors; a missing field fails the
+    // fixture via the exception wrapper in run_ejsn (guest builds compile without
+    // exceptions: there it halts the run).
+    [[gnu::noreturn]] inline void missing_field(const char* key) {
+#if defined(__cpp_exceptions)
+        throw std::runtime_error(std::string{"fixture missing field "} + key);
+#else
+        fatal((std::string{"fixture missing field "} + key).c_str());
+#endif
+    }
+
+    const nlohmann::json& fixture_field(const nlohmann::json& j, const char* key) {
+        const auto it{j.find(key)};
+        if (it == j.end()) [[unlikely]] missing_field(key);
+        return *it;
+    }
+
+    std::string fixture_string(const nlohmann::json& j, const char* key) {
+        const auto it{j.find(key)};
+        if (it == j.end()) [[unlikely]] missing_field(key);
+        return it->get<std::string>();
+    }
 
     /// Marker indicating the test expects an RLP / structural rejection that
     /// completes before insert_block returns a ValidationResult (e.g. malformed
@@ -188,7 +214,7 @@ namespace {
     // under the flag (Blockchain / DirectState remain complete types), so keep it for S6.
     [[maybe_unused]] Status run_json_block(const nlohmann::json& json_block, Blockchain& blockchain, DirectState& direct) {
         bool invalid{json_block.contains("expectException")};
-        const std::string expectation = invalid ? json_block["expectException"].get<std::string>() : std::string{};
+        const std::string expectation = invalid ? fixture_string(json_block, "expectException") : std::string{};
 
         // Helper to verify a rejection matches expectation when invalid is true.
         // For pre-insert rejections (RLP / oversize), pass nullopt; otherwise pass
@@ -210,7 +236,7 @@ namespace {
                          expectation).c_str());
         };
 
-        std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
+        std::optional<Bytes> rlp{from_hex(fixture_string(json_block, "rlp"))};
         if (!rlp) {
             if (invalid) {
                 if (!check_strict(std::nullopt)) {
@@ -286,7 +312,7 @@ namespace {
         if (invalid) {
             sys_println("Invalid block executed successfully");
             sys_println("ERROR: expected exception");
-            sys_println(json_block["expectException"].dump().c_str());
+            sys_println(fixture_field(json_block, "expectException").dump().c_str());
             return Status::kFailed;
         }
 
@@ -439,7 +465,7 @@ namespace {
         const bool witness_negative = is_stateless_witness_negative(fixture_name);
         uint64_t gas_used = 0;  // of the accepted blocks
         const auto run_slib_arm = [&]() -> Status {
-            const auto network{json_test["network"].get<std::string>()};
+            const auto network{fixture_string(json_test, "network")};
             const auto config_it{test::kNetworkConfig.find(network)};
             if (config_it == test::kNetworkConfig.end()) {
                 sys_println("ERROR: unknown network (slib arm)");
@@ -447,7 +473,7 @@ namespace {
             }
             const ChainConfig& config = config_it->second;
 
-            auto genesis_rlp_opt = from_hex(json_test["genesisRLP"].get<std::string>());
+            auto genesis_rlp_opt = from_hex(fixture_string(json_test, "genesisRLP"));
             if (!genesis_rlp_opt) {
                 sys_println("ERROR: bad genesisRLP hex (slib arm)");
                 return Status::kFailed;
@@ -463,12 +489,12 @@ namespace {
             evmc::bytes32 prev_root = genesis_block.header.state_root;
 
             size_t block_index = 0;
-            for (const auto& json_block : json_test["blocks"]) {
+            for (const auto& json_block : fixture_field(json_test, "blocks")) {
                 if (!json_block.contains("statelessInputBytes")) {
                     sys_println("SKIP: block lacks statelessInputBytes");
                     return Status::kSkipped;
                 }
-                auto blob_opt = from_hex(json_block["statelessInputBytes"].get<std::string>());
+                auto blob_opt = from_hex(fixture_string(json_block, "statelessInputBytes"));
                 if (!blob_opt) {
                     sys_println("ERROR: bad statelessInputBytes hex");
                     return Status::kFailed;
@@ -477,7 +503,7 @@ namespace {
 
                 const bool invalid{json_block.contains("expectException")};
                 const std::string expectation =
-                    invalid ? json_block["expectException"].get<std::string>() : std::string{};
+                    invalid ? fixture_string(json_block, "expectException") : std::string{};
                 const auto check_strict = [&](std::optional<ValidationResult> got) -> bool {
                     if (!got.has_value()) return strict_exception_match_pre_insert(expectation);
                     return strict_exception_match(*got, expectation);
@@ -487,7 +513,7 @@ namespace {
                 };
 
                 // The block RLP gates of run_json_block.
-                std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
+                std::optional<Bytes> rlp{from_hex(fixture_string(json_block, "rlp"))};
                 if (!rlp) {
                     if (invalid) {
                         if (!check_strict(std::nullopt)) {
@@ -600,14 +626,14 @@ namespace {
             return Status::kPassed;  // correctly rejected the deliberately-broken witness.
         return natural;  // kSkipped: cannot classify (selected fixtures always carry one).
 #else
-        const auto network{json_test["network"].get<std::string>()};
+        const auto network{fixture_string(json_test, "network")};
         const auto config_it{test::kNetworkConfig.find(network)};
         if (config_it == test::kNetworkConfig.end()) {
             sys_println("ERROR: unknown network");
             sys_println(network.c_str());
             return Status::kSkipped;
         }
-        auto genesisRLPStr = json_test["genesisRLP"].get<std::string>();
+        auto genesisRLPStr = fixture_string(json_test, "genesisRLP");
         Bytes genesis_rlp{from_hex(genesisRLPStr).value()};
         ByteView genesis_view{genesis_rlp};
         Block genesis_block;
@@ -617,7 +643,7 @@ namespace {
         }
 
         // blob must outlive direct.
-        auto blob = read_genesis_allocation(json_test["pre"]);
+        auto blob = read_genesis_allocation(fixture_field(json_test, "pre"));
         DirectState direct{std::span<uint8_t>{blob.data(), blob.size()}};
         if (!direct.sanitize()) {
             sys_println("ERROR: blockchain_test sanitize failed (identity↔hash mismatch)");
@@ -625,7 +651,7 @@ namespace {
         }
         Blockchain blockchain{direct, config_it->second, genesis_block};
 
-        for (const auto& json_block : json_test["blocks"]) {
+        for (const auto& json_block : fixture_field(json_test, "blocks")) {
             Status status{run_json_block(json_block, blockchain, direct)};
             if (status != Status::kPassed) {
                 return status;
@@ -638,7 +664,7 @@ namespace {
                 sys_println("ERROR: state_root_hash failed (witness incomplete)");
                 return Status::kFailed;
             }
-            std::string expected_hex{json_test["postStateHash"].get<std::string>()};
+            std::string expected_hex{fixture_string(json_test, "postStateHash")};
             if (*state_root != to_bytes32(from_hex(expected_hex).value())) {
                 sys_println("ERROR: postStateHash mismatch");
                 sys_println(to_hex(*state_root).c_str());
@@ -673,17 +699,42 @@ uint64_t StateTransition::run_ejsn() {
     bool any_failed = false;
     bool any_skipped = false;
     uint64_t gas = 0;
-    const auto base_json = nlohmann::json::parse(json_str);
+    // The envelope is attacker-controlled on the fuzz/CLI path; a malformed JSON must fail
+    // the run, not unwind out of a guest-facing entry point. The non-throwing parse works
+    // the same in the exception-free guest builds.
+    const nlohmann::json base_json = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+    if (base_json.is_discarded()) {
+        sys_println("ERROR: EJSN envelope bad JSON");
+        failed_ = true;
+        return kRunFailure;
+    }
     for (const auto& [name, test] : base_json.items()) {
-        const auto result = blockchain_test(name, test);
-        if (result.failed != 0) {
+        // A fixture is attacker-controlled on the CLI/fuzz path: malformed hex (an empty
+        // optional dereference in read_genesis_allocation/from_hex), missing keys
+        // (.at()) or bad integers (stoull/from_string) throw or read garbage — fail the
+        // test instead of unwinding out of the runner.
+        // Guest builds compile without exceptions; there a malformed fixture halts the run.
+        std::optional<RunResults> result;
+#if defined(__cpp_exceptions)
+        try {
+            result = blockchain_test(name, test);
+        } catch (const std::exception& e) {
+            sys_println("ERROR: malformed blockchain_test fixture");
+            sys_println(e.what());
+            any_failed = true;
+            continue;
+        }
+#else
+        result = blockchain_test(name, test);
+#endif
+        if (result->failed != 0) {
             any_failed = true;
             sys_println("    FAILED");
-        } else if (result.skipped != 0) {
+        } else if (result->skipped != 0) {
             sys_println("    SKIPPED");
             any_skipped = true;
         } else {
-            gas += result.gas;
+            gas += result->gas;
             sys_println("    passed");
         }
     }

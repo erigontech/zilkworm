@@ -90,6 +90,14 @@ endif()
 
 add_subdirectory(zilk_core)
 
+# libFuzzer harnesses (no-op unless SILKWORM_FUZZER=ON).
+add_subdirectory(fuzz)
+
+if(AIRBENDER)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/prover/guest_airbender/cmake/z6m_pgo.cmake)
+  z6m_pgo(zilkworm evmone silkworm_core silkworm_dev silkworm_types_zz)
+endif()
+
 # Aggregate Catch2 unit-test target. New *_test.cpp files join its source
 # list; each TEST_CASE is registered with ctest individually. Defined here
 # (not in zilk_core/) so projects embedding zilk_core with BUILD_TESTING=ON
@@ -294,7 +302,7 @@ if(BUILD_TESTING)
   # separate executable, since SP1 changes what evmone's sources compile to; without the rv32
   # paths' EVMONE_RV32_DISPATCH_TEST, which would build the Airbender ecrecover_batch() instead.
   # keccak.c is C and stays without SP1, which would make it issue the keccak syscall.
-  if(NOT SP1 AND NOT SP1TURBO AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING
+  if(NOT SP1 AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING
      AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(SP1_SECP256K1_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/sp1_secp256k1")
     set(SP1_SECP256K1_EVMONE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/lib/evmone_precompiles")

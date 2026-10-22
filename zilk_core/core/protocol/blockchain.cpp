@@ -5,6 +5,7 @@
 #include "blockchain.hpp"
 
 #include <zilk_core/core/common/assert.hpp>
+#include <zilk_core/core/common/phase_trace.hpp>
 #include <zilk_core/core/execution/processor.hpp>
 
 namespace silkworm::protocol {
@@ -25,16 +26,23 @@ ValidationResult Blockchain::insert_block(Block& block, bool check_state_root) {
     // ExecutionProcessor::execute_block() recovers them as a batch that shares inversions:
     // recover them as that batch first.
     if (config_.revision(block.header.number, block.header.timestamp) >= EVMC_AMSTERDAM) {
+        Z6M_PHASE("recover_senders");
         Transaction::recover_senders(block.transactions);
     }
 #endif
-    err = rule_set_->pre_validate_block_body(block, direct_);
+    {
+        Z6M_PHASE("pre_validate_body");
+        err = rule_set_->pre_validate_block_body(block, direct_);
+    }
     if (err != ValidationResult::kOk) {
         return err;
     }
     // Single-block witness flow: no fork resolution / canonical-chain
     // bookkeeping. Just execute the block.
-    return execute_block(block, check_state_root);
+    {
+        Z6M_PHASE("execute_block");
+        return execute_block(block, check_state_root);
+    }
 
     /* --------------------------
 

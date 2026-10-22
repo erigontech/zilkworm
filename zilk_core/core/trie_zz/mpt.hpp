@@ -29,6 +29,14 @@ using ::silkworm::kEmptyRoot;
 using ::silkworm::ByteView;
 using ::silkworm::Bytes;
 
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+// Fold-side hashing counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_fold_plain;
+extern "C" uint64_t z6mprof_fold_plain_bytes;
+extern "C" uint64_t z6mprof_fold_resume;
+extern "C" uint64_t z6mprof_fold_full_branch;
+#endif
+
 // The node-store backend is selected at compile time via the defaulted GridMPT template parameter
 // StateT (default ActiveState, from active_state.hpp above). Node-store lookups go through
 // StateT::find_node_rlp, whose signature is identical on both backends (DirectState / HashState).
@@ -151,6 +159,10 @@ struct BranchNode {
         // bytes array provides storage for it, suitably aligned as child[] leads this 8-aligned
         // struct. The hash bytes of child[] are only ever read through memcpy, byte loads or
         // may_alias words, never through a typed access to the bytes array.
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+        ++z6mprof_fold_plain;
+        z6mprof_fold_plain_bytes += rlp.size();
+#endif
         ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(silkworm::keccak256(rlp));
     }
 
@@ -165,6 +177,9 @@ struct BranchNode {
         mask |= 1 << slot;
         child_len[slot] = 32;
         child_ptr[slot] = nullptr;
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+        ++z6mprof_fold_resume;
+#endif
         ::new (static_cast<void*>(child[slot].bytes))
             ethash::hash256(ethash_keccak256_resume(r.state, r.blocks, rlp.data(), rlp.size()));
     }
@@ -174,6 +189,9 @@ struct BranchNode {
     // nonzero, `state` holds the state of the node's first blocks (see take_resumable_blocks()),
     // which the call consumes.
     inline ethash::hash256 full_branch_hash(uint64_t* state, unsigned blocks) const noexcept {
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+        ++z6mprof_fold_full_branch;
+#endif
         return ethash_keccak256_full_branch(state, blocks, orig, dirty, child[0].bytes, child_ptr.data());
     }
 
@@ -208,6 +226,10 @@ struct ExtensionNode {
 
     // set_child() for a hash reference: the keccak of `rlp`, a child's encoding of 32 bytes or more.
     inline void set_child_hash(ByteView rlp) noexcept {
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+        ++z6mprof_fold_plain;
+        z6mprof_fold_plain_bytes += rlp.size();
+#endif
         const ethash::hash256 h = silkworm::keccak256(rlp);
         // child follows the 68-byte path, so it is only 4-aligned: too little to hold a hash256.
         typedef uint32_t __attribute__((may_alias)) w32;
@@ -222,6 +244,9 @@ struct ExtensionNode {
             set_child_hash(rlp);
             return;
         }
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+        ++z6mprof_fold_resume;
+#endif
         const ethash::hash256 h = ethash_keccak256_resume(r.state, r.blocks, rlp.data(), rlp.size());
         typedef uint32_t __attribute__((may_alias)) w32;
         w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));

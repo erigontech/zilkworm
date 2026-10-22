@@ -134,8 +134,18 @@ static_assert([] {
 /// `want`, saving the state after its first `blocks` blocks in `state`, and the tag `tag` and `sb` of that
 /// row, when it is. Out of line: its tag stores would otherwise add to the registers unfold_slot() keeps
 /// live around the lookup.
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+// Fold-side counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_verify_snap;
+extern "C" uint64_t z6mprof_verify_snap_bytes;
+#endif
+
 [[gnu::noinline]] inline bool verify_and_snap(const uint8_t* node, size_t size, uint64_t* state, const uint8_t*& tag,
                                               uint8_t& sb, unsigned blocks, const uint8_t* want) noexcept {
+#if defined(Z6M_GUEST_PROFILE) || defined(Z6M_HOST_PROFILE)
+    ++z6mprof_verify_snap;
+    z6mprof_verify_snap_bytes += size;
+#endif
     // The row is about to be overwritten, whatever the compare says: a node that fails it must not
     // leave the tag of the node before it over its bytes' state.
     tag = nullptr;

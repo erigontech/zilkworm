@@ -287,6 +287,23 @@ TEST_CASE("decoded transaction views: a bare typed transaction has none") {
     CHECK(payload(decoded) == signing(built));
 }
 
+TEST_CASE("decoded transaction views: a bare typed transaction rejects trailing bytes") {
+    Fixture f;
+    const Transaction built{f.make(TransactionType::kDynamicFee, f.data(30))};
+    Bytes raw{encoded(built, false)};
+    raw.push_back(0x00);
+
+    ByteView prohibit{raw};
+    Transaction decoded;
+    const auto res{rlp::decode_transaction(prohibit, decoded, rlp::Eip2718Wrapping::kNone)};
+    REQUIRE(!res);
+    CHECK(res.error() == DecodingError::kInputTooLong);
+
+    ByteView allow{raw};
+    REQUIRE(rlp::decode_transaction(allow, decoded, rlp::Eip2718Wrapping::kNone, rlp::Leftover::kAllow));
+    CHECK(allow.size() == 1);
+}
+
 TEST_CASE("decoded transaction views: a failed decode leaves them empty") {
     Fixture f;
     const Bytes good{encoded(f.make(TransactionType::kDynamicFee, f.data(30)), true)};

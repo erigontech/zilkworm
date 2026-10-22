@@ -10,6 +10,11 @@
 #include "include/airbender_csr.hpp"
 #include "include/airbender_input.hpp"
 
+#ifdef Z6M_PGO_GEN
+// Instrumented training build: prints the profile counters over the UART (pgo/gcov_dump.c).
+extern "C" void z6m_gcov_dump();
+#endif
+
 int main()
 {
     // Single input blob: an envelope self-described by its leading 4-byte
@@ -44,5 +49,8 @@ int main()
     // are checked against the execution.
     uint32_t out[8];
     std::memcpy(out, r.block_hash.bytes, sizeof(out));
+#ifdef Z6M_PGO_GEN
+    z6m_gcov_dump();
+#endif
     airbender::finish_success(out);
 }

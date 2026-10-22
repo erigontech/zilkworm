@@ -68,7 +68,10 @@ elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES ".*Clang$")
   endif()
 
   # configure libc++ (skip for bare-metal cross-compilation)
-  if(NOT SILKWORM_WASM_API AND NOT CMAKE_SYSTEM_NAME STREQUAL "Generic")
+  # opt-in via SILKWORM_LIBCXX: builds without libc++ dev packages installed
+  # (e.g. fuzzer/sanitizer builds on hosts that only have libstdc++) fall back
+  # to the default standard library.
+  if(NOT SILKWORM_WASM_API AND NOT CMAKE_SYSTEM_NAME STREQUAL "Generic" AND NOT SILKWORM_LIBCXX STREQUAL "OFF")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
     # std::views::join is experimental on clang < 18 and Apple clang < 16
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18)

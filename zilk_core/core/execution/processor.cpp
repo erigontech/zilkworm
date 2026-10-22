@@ -12,6 +12,7 @@
 #include <evmone/test/state/state.hpp>
 #include <evmone/test/state/system_contracts.hpp>
 #include <zilk_core/core/protocol/intrinsic_gas.hpp>
+#include <zilk_core/core/common/phase_trace.hpp>
 #include <zilk_core/core/protocol/param.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/trie/vector_root.hpp>
@@ -188,6 +189,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     // Block-start system calls (EIP-4788 beacon roots, EIP-2935 history storage)
     {
+        Z6M_PHASE("sys_calls_start");
         ActiveStateView state_view{direct_};
         BlockHashes block_hashes{*this};
         auto diff = evmone::state::system_call_block_start(
@@ -206,7 +208,10 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 #if defined(AIRBENDER) || defined(SP1)
     // Recover all senders up front so that their signatures share inversions; validation and
     // execution then read the cached results (identical to recovering each one lazily).
-    Transaction::recover_senders(block_.transactions);
+    {
+        Z6M_PHASE("recover_senders2");
+        Transaction::recover_senders(block_.transactions);
+    }
 #endif
 
     receipts.resize(block_.transactions.size());
@@ -228,11 +233,17 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         // per-dimension check above, so the per-tx budget is the whole block.
         const uint64_t gas_available =
             rev >= EVMC_AMSTERDAM ? block_.header.gas_limit : available_gas();
-        const ValidationResult err{protocol::validate_transaction(txn, direct_, gas_available)};
+        const ValidationResult err{[&] {
+            Z6M_PHASE("validate_tx");
+            return protocol::validate_transaction(txn, direct_, gas_available);
+        }()};
         if (err != ValidationResult::kOk) {
             return err;
         }
-        execute_transaction(txn, *receipt_it);
+        {
+            Z6M_PHASE("exec_tx");
+            execute_transaction(txn, *receipt_it);
+        }
         ++receipt_it;
     }
 
@@ -247,16 +258,20 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         // post-merge, so the block reward is absent. The withdrawals are applied
         // before the block-end system calls.
         ActiveStateView state_view{direct_};
-        const auto fin_diff =
-            evmone::state::finalize(state_view, rev, block_.header.beneficiary,
-                                    /*block_reward=*/std::nullopt, evm1_block_.ommers,
-                                    evm1_block_.withdrawals);
-        bal_builder_.record_diff(post_block_index, fin_diff, state_view);
-        apply_state_diff(fin_diff);
+        {
+            Z6M_PHASE("finalize");
+            const auto fin_diff =
+                evmone::state::finalize(state_view, rev, block_.header.beneficiary,
+                                        /*block_reward=*/std::nullopt, evm1_block_.ommers,
+                                        evm1_block_.withdrawals);
+            bal_builder_.record_diff(post_block_index, fin_diff, state_view);
+            apply_state_diff(fin_diff);
+        }
     }
 
     // Block-end system calls (EIP-7002 withdrawals, EIP-7251 consolidations) + requests hash validation
     if (rev >= EVMC_PRAGUE && block_.header.requests_hash) {
+        Z6M_PHASE("sys_calls_end");
         // Collect deposit requests from logs (EIP-6110), in block order: receipt by receipt, each
         // receipt's logs in order (the receipts own the logs; no block-wide copy of them is made).
         FlatRequests flat_requests;

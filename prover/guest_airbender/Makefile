@@ -5,6 +5,10 @@ CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im.cmake
 # that the block deletes (see docs/airbender-docker-service.md). `make z6m_guest USE_HASH_KEY=OFF`
 # (or `make z6m_guest_airbender USE_HASH_KEY=OFF` from the root) builds without it.
 USE_HASH_KEY ?= ON
+# Profile-guided optimization (cmake/z6m_pgo.cmake, pgo/README.md): OFF, GEN, USE or AUTO. AUTO uses
+# the committed profile when it matches the tree, compiler and flags, and otherwise builds without it
+# and warns; USE fails instead.
+Z6M_PGO ?= AUTO
 LINKER_SCRIPT := $(CURDIR)/link.x
 START_ASM := start.S
 
@@ -16,6 +20,7 @@ zilkworm:
 	cmake -B$(BUILD_DIR)/zilkworm -S../.. \
 		-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
 		-DUSE_HASH_KEY=$(USE_HASH_KEY) \
+		-DZ6M_PGO=$(Z6M_PGO) \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE \
 		-DCMAKE_VERBOSE_MAKEFILE=ON \
@@ -30,6 +35,7 @@ z6m_guest: zilkworm
 	cmake -B$(BUILD_DIR) -S. \
 		-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
 		-DUSE_HASH_KEY=$(USE_HASH_KEY) \
+		-DZ6M_PGO=$(Z6M_PGO) \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE \
 		-DCMAKE_VERBOSE_MAKEFILE=ON \

@@ -14,11 +14,6 @@ add_subdirectory(evmone/third_party/intx intx)
 
 
 # add_subdirectory(evmone) # depends on intx
-if(SP1TURBO)
-  # FIXME: I'm not sure why this is not propagated from the top-level CMakeLists.txt.
-  add_compile_definitions(-DSP1TURBO)
-  include_directories(${CMAKE_SOURCE_DIR}/prover/guest_program/src/include)
-endif()
 
 if(SP1)
     add_compile_definitions(-DSP1)
@@ -122,7 +117,7 @@ endif()
 # need care. The SP1 paths pass words to their syscalls through size_t pointers.
 # -Werror=strict-aliasing also turns the warning on, at the default level 3, which misses these
 # casts: the level has to come after it.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1 AND NOT SP1TURBO)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1)
   target_compile_options(evmone PRIVATE -Werror=strict-aliasing -Wstrict-aliasing=1)
 endif()
 

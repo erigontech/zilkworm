@@ -8,6 +8,12 @@
 #include <cstring>
 #include <memory>
 
+#ifdef Z6M_GUEST_PROFILE
+// Profiling counters, defined in evmone_precompiles/keccak.c.
+extern "C" uint64_t z6mprof_keyhash_hit;
+extern "C" uint64_t z6mprof_keyhash_miss;
+#endif
+
 namespace zilkworm {
 
 namespace {
@@ -59,6 +65,9 @@ namespace {
     // Keeps the hit path frameless; caller has already stored size + data words.
     [[gnu::noinline]] ethash::hash256 keccak_memo_fill(const uint8_t* data, size_t size,
                                                        KeccakSlot& slot) noexcept {
+#ifdef Z6M_GUEST_PROFILE
+        ++z6mprof_keyhash_miss;
+#endif
         const ethash::hash256 out{ethash::keccak256(data, size)};
         std::memcpy(slot.hash, out.bytes, 32);
         return out;
@@ -110,6 +119,9 @@ ethash::hash256 keccak256_memo(const uint8_t* data, size_t size) noexcept {
     // Early-exit compare: SP1 costs executed instructions.
     if (slot.size == size && ld8_a8(d) == w0 && ld8_a8(d + 8) == w1 && ld8_a8(d + 16) == w2 &&
         ld8_a8(d + 24) == w3) [[likely]] {
+#ifdef Z6M_GUEST_PROFILE
+        ++z6mprof_keyhash_hit;
+#endif
         ethash::hash256 out;
         std::memcpy(out.bytes, slot.hash, 32);
         return out;
