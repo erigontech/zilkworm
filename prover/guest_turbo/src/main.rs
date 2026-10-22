@@ -26,6 +26,8 @@ pub fn main() {
     // Single read: SP1Stdin carries one envelope Vec<u8> (MFBD- or
     // EJSN-prefixed). StateTransition::run() dispatches on the leading magic.
     let envelope = sp1_zkvm::io::read_vec();
-    let result = ffi::sample_run_wrapped(envelope);
-    sp1_zkvm::io::commit(&result);
+    // The C++ wrapper commits the 112-byte public values itself (gas_used u64
+    // LE, pre/post state roots, block hash, chain id — the HyperCube layout);
+    // committing the returned gas here as well would append a duplicate u64.
+    let _result = ffi::sample_run_wrapped(envelope);
 }

@@ -24,6 +24,10 @@ struct ReadVecResult
     size_t capacity;
 };
 
+// The fd SP1 routes to the proof's public values (guest_hypercube's
+// sp1_syscalls.hpp defines the same constant).
+constexpr uint32_t SP1_FD_PUBLIC_VALUES = 13;
+
 extern "C"
 {
 
