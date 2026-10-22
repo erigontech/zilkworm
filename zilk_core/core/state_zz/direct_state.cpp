@@ -1467,7 +1467,7 @@ bool DirectState::sanitize() {
 #if ZILK_SEAL_CODE_STORE
     // Every payload is hashed and every account bound to its entry: the lengths and keys are not
     // read again. Zeroing the bytes after each payload but the last pads it for the EVM in place,
-    // see code_store_seal.hpp. The region ends at the last entry, so the 36 bytes after any code
+    // see code_store_seal.hpp. The region ends at the last entry, so the 40 bytes after any code
     // in it lie in the data section.
     if (entries_in_layout) {
         uint8_t* const data = code_store_map_.data();
