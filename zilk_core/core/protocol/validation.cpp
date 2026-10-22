@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <cstring>
 #include <limits>
 
 #include <evmone/constants.hpp>
@@ -64,42 +63,6 @@ ValidationResult pre_validate_transaction(const Transaction& txn, const evmc_rev
 
     if (const auto forks_check = pre_validate_common_forks(txn, rev, blob_gas_price, non_zero_bytes); forks_check != ValidationResult::kOk) {
         return forks_check;
-    }
-
-    return ValidationResult::kOk;
-}
-
-ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::ActiveState& state,
-                                      uint64_t available_gas) noexcept {
-    const std::optional<evmc::address> sender{txn.sender()};
-    if (!sender) {
-        return ValidationResult::kInvalidSignature;
-    }
-
-    const auto* acc = state.read_account(*sender);
-    const bool has_code = acc && std::memcmp(acc->code_hash, kEmptyHash.bytes, 32) != 0;
-    if (has_code) {
-        const auto code = state.read_code(*sender);
-        if (!eip7702::is_code_delegated(code)) {
-            return ValidationResult::kSenderNoEOA;
-        }
-    }
-
-    if (state.get_nonce(*sender) != txn.nonce) {
-        return ValidationResult::kWrongNonce;
-    }
-
-    // See YP, Eq (61) in Section 6.2 "Execution"
-    const intx::uint512 v0{txn.maximum_gas_cost() + txn.value};
-    if (state.get_balance(*sender) < v0) {
-        return ValidationResult::kInsufficientFunds;
-    }
-
-    if (available_gas < txn.gas_limit) { 
-        // Corresponds to the final condition of Eq (58) in Yellow Paper Section 6.2 "Execution".
-        // The sum of the transaction’s gas limit and the gas utilized in this block prior
-        // must be no greater than the block’s gas limit.
-        return ValidationResult::kBlockGasLimitExceeded;
     }
 
     return ValidationResult::kOk;

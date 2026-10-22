@@ -11,6 +11,7 @@
 #include <evmone/test/state/bal.hpp>
 #include <evmone/test/state/block.hpp>
 #include <evmone/test/state/state_diff.hpp>
+#include <evmone/test/state/transaction.hpp>
 #include <zilk_core/core/chain/config.hpp>
 #include <zilk_core/core/protocol/rule_set.hpp>
 #include <zilk_core/core/protocol/validation.hpp>
@@ -44,6 +45,13 @@ class ExecutionProcessor {
      */
     void execute_transaction(const Transaction& txn, Receipt& receipt) noexcept;
 
+    /**
+     * Execute a transaction validated by evmone into @p tx_props, but do not write to the DB yet.
+     * @p evm1_txn is @p txn converted by to_evmone().
+     */
+    void execute_transaction(const Transaction& txn, const evmone::state::Transaction& evm1_txn,
+                             const evmone::state::TransactionProperties& tx_props, Receipt& receipt) noexcept;
+
     //! \brief Execute the block.
     //! \remarks Warning: This method does not verify state root; pre-Byzantium receipt root isn't validated either.
     //! \pre RuleSet's validate_block_header & pre_validate_block_body must return kOk.
@@ -59,6 +67,9 @@ class ExecutionProcessor {
   private:
     //! Evaluate the chain's revision at the current block's number/timestamp.
     evmc_revision revision() const noexcept;
+
+    //! The transaction as evmone takes it. Precondition: the sender is recovered.
+    evmone::state::Transaction to_evmone(const Transaction& txn) const noexcept;
 
     /// Apply an evmone StateDiff to DirectState.
     void apply_state_diff(const evmone::state::StateDiff& diff);

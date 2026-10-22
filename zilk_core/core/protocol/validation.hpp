@@ -7,7 +7,6 @@
 #include <optional>
 
 #include <evmc/evmc.h>
-#include <zilk_core/core/state_zz/active_state.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
 #ifdef Z6M_HASH_STATE
 #include <zilk_core/core/state_zz/hash_state.hpp>
@@ -138,13 +137,6 @@ namespace protocol {
                                               const std::optional<intx::uint256>& blob_gas_price);
 
     ValidationResult pre_validate_transactions(const Block& block, const ChainConfig& config);
-
-    //! \brief Final part of transaction validation that requires access to the state.
-    //!
-    //! Precondition:
-    //! pre_validate_transaction(txn) must return kOk
-    ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::ActiveState& state,
-                                          uint64_t available_gas) noexcept;
 
     ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision revision, uint64_t chain_id,
                                               size_t non_zero_bytes) noexcept;

@@ -5,13 +5,14 @@
 #include "processor.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <variant>
 
 #include <evmone/evmone.h>
 #include <evmone/vm.hpp>
+#include <evmone/test/state/errors.hpp>
 #include <evmone/test/state/state.hpp>
 #include <evmone/test/state/system_contracts.hpp>
-#include <zilk_core/core/protocol/intrinsic_gas.hpp>
 #include <zilk_core/core/protocol/param.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/trie/vector_root.hpp>
@@ -29,6 +30,53 @@ namespace {
             return execution_processor_.get_block_hash_for_evm(block_number);
         }
     };
+
+    //! The ValidationResult of an evmone transaction validation error.
+    ValidationResult to_validation_result(std::error_code ec) noexcept {
+        using namespace evmone::state;
+        switch (ec.value()) {
+            case INTRINSIC_GAS_TOO_LOW:
+                return ValidationResult::kIntrinsicGas;
+            case TYPE_NOT_SUPPORTED:
+                return ValidationResult::kUnsupportedTransactionType;
+            case INSUFFICIENT_ACCOUNT_FUNDS:
+                return ValidationResult::kInsufficientFunds;
+            case NONCE_IS_MAX:
+                return ValidationResult::kNonceTooHigh;
+            case NONCE_TOO_HIGH:
+            case NONCE_TOO_LOW:
+                return ValidationResult::kWrongNonce;
+            case PRIORITY_GREATER_THAN_MAX_FEE_PER_GAS:
+                return ValidationResult::kMaxPriorityFeeGreaterThanMax;
+            case INSUFFICIENT_MAX_FEE_PER_GAS:
+                return ValidationResult::kMaxFeeLessThanBase;
+            case INSUFFICIENT_MAX_FEE_PER_BLOB_GAS:
+                return ValidationResult::kMaxFeePerBlobGasTooLow;
+            case GAS_ALLOWANCE_EXCEEDED:
+                return ValidationResult::kBlockGasLimitExceeded;
+            case SENDER_NOT_EOA:
+                return ValidationResult::kSenderNoEOA;
+            case INITCODE_SIZE_EXCEEDED:
+                return ValidationResult::kMaxInitCodeSizeExceeded;
+            case CREATE_BLOB_TX:
+            case CREATE_SET_CODE_TX:
+                return ValidationResult::kProhibitedContractCreation;
+            case EMPTY_BLOB_HASHES_LIST:
+                return ValidationResult::kNoBlobs;
+            case INVALID_BLOB_HASH_VERSION:
+                return ValidationResult::kWrongBlobCommitmentVersion;
+            case BLOB_GAS_LIMIT_EXCEEDED:
+                return ValidationResult::kTooManyBlobs;
+            case EMPTY_AUTHORIZATION_LIST:
+                return ValidationResult::kEmptyAuthorizations;
+            case GAS_LIMIT_EXCEEDS_MAXIMUM:
+                return ValidationResult::kMaxTransactionGasLimitExceeded;
+            case INVALID_CHAIN_ID:
+                return ValidationResult::kWrongChainId;
+            default:
+                return ValidationResult::kInvalidSignature;
+        }
+    }
 }  // namespace
 
 ExecutionProcessor::ExecutionProcessor(const Block& block, protocol::RuleSet& rule_set,
@@ -73,13 +121,10 @@ evmc::bytes32 ExecutionProcessor::get_block_hash_for_evm(int64_t block_num) cons
     return direct_.get_block_hash(block_.header, static_cast<uint64_t>(block_num));
 }
 
-void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& receipt) noexcept {
-    ActiveStateView evm1_state_view{direct_};
-    BlockHashes evm1_block_hashes{*this};
-
+evmone::state::Transaction ExecutionProcessor::to_evmone(const Transaction& txn) const noexcept {
     evmone::state::Transaction evm1_txn{
         .type = static_cast<evmone::state::Transaction::Type>(txn.type),
-        // Non-owning view; source outlives execute_transaction
+        // Non-owning view; source outlives the evmone transaction
         .data = txn.data,
         .gas_limit = static_cast<int64_t>(txn.gas_limit),
         .max_gas_price = txn.max_fee_per_gas,
@@ -103,6 +148,28 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
                                                .y_parity = authorization.y_parity,
                                                .r = authorization.r,
                                                .s = authorization.s});
+    }
+    return evm1_txn;
+}
+
+void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& receipt) noexcept {
+    const auto evm1_txn = to_evmone(txn);
+    // No block budget to check against: the caller has validated the transaction.
+    constexpr auto kNoLimit = std::numeric_limits<int64_t>::max();
+    const auto tx_props = evmone::state::validate_transaction(evm1_block_, evm1_txn, revision(),
+                                                              kNoLimit, kNoLimit, kNoLimit);
+    execute_transaction(txn, evm1_txn, std::get<evmone::state::TransactionProperties>(tx_props),
+                        receipt);
+}
+
+void ExecutionProcessor::execute_transaction(const Transaction& txn,
+                                             const evmone::state::Transaction& evm1_txn,
+                                             const evmone::state::TransactionProperties& tx_props,
+                                             Receipt& receipt) noexcept {
+    ActiveStateView evm1_state_view{direct_};
+    BlockHashes evm1_block_hashes{*this};
+
+    for (const auto& authorization : txn.authorizations) {
         // The authorization's delegation marker, kept by its hash before the transaction runs:
         // evmone sets it on the authority inside the transaction, and a same-marker read there may
         // find the bytes omitted from the witness (EIP-8025 optional proofs). Address zero clears
@@ -116,30 +183,6 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     }
 
     const auto rev = revision();
-    const auto non_zero_bytes = txn.data_non_zero_bytes();
-
-    // Amsterdam (EIP-2780/8037): g0 is regular gas only. The EIP-7623 floor follows the
-    // EIP-7976/7981 token rules. The transaction state-gas limit is all above the cap constant
-    // (EIP-8037), as in evmone's validate_transaction().
-    evmone::state::TransactionProperties tx_props;
-    if (rev >= EVMC_AMSTERDAM) {
-        const auto cost = protocol::amsterdam_tx_gas_cost(txn, non_zero_bytes);
-        const auto gas_limit = static_cast<int64_t>(txn.gas_limit);
-        const auto state_gas_limit =
-            std::max(gas_limit - int64_t{evmone::state::MAX_TX_GAS_LIMIT}, int64_t{0});
-        tx_props = {.execution_gas_limit = gas_limit - cost.regular - state_gas_limit,
-                    .state_gas_limit = state_gas_limit,
-                    .min_gas_cost = cost.floor};
-    } else {
-        const auto g0 = protocol::intrinsic_gas(txn, rev, non_zero_bytes);
-        // EIP-7623: Increase calldata cost
-        const int64_t floor_cost =
-            rev >= EVMC_PRAGUE ? static_cast<int64_t>(protocol::floor_cost(txn, non_zero_bytes)) : 0;
-        tx_props = {.execution_gas_limit =
-                        static_cast<int64_t>(txn.gas_limit - static_cast<uint64_t>(g0)),
-                    .min_gas_cost = floor_cost};
-    }
-
     auto evm1_receipt = evmone::state::transition(
         evm1_state_view, evm1_block_, evm1_block_hashes, evm1_txn, rev, vm_, tx_props);
 
@@ -212,27 +255,32 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
     receipts.resize(block_.transactions.size());
     auto receipt_it{receipts.begin()};
 
+    // The block's blob gas is checked against its header, not per transaction.
+    constexpr auto kNoBlobGasLimit = std::numeric_limits<int64_t>::max();
+    const auto block_gas_limit = static_cast<int64_t>(block_.header.gas_limit);
+
     for (const auto& txn : block_.transactions) {
-        if (rev >= EVMC_AMSTERDAM) {
-            // EIP-8037 "Transaction validation" rule 2: per-dimension worst-case
-            // inclusion check with bare tx.gas_limit (execution-specs#2892).
-            constexpr int64_t kTxMaxGasLimit = 0x1000000;  // 2**24, EIP-7825
-            const auto block_gas_limit = static_cast<int64_t>(block_.header.gas_limit);
-            const auto gas_limit = static_cast<int64_t>(txn.gas_limit);
-            if (std::min(kTxMaxGasLimit, gas_limit) > block_gas_limit - sum_regular_block_gas_ ||
-                gas_limit > block_gas_limit - sum_state_block_gas_) {
-                return ValidationResult::kBlockGasLimitExceeded;
-            }
+        if (!txn.sender()) {
+            return ValidationResult::kInvalidSignature;
         }
-        // Amsterdam replaces the cumulative available-gas inclusion rule with the
-        // per-dimension check above, so the per-tx budget is the whole block.
-        const uint64_t gas_available =
-            rev >= EVMC_AMSTERDAM ? block_.header.gas_limit : available_gas();
-        const ValidationResult err{protocol::validate_transaction(txn, direct_, gas_available)};
-        if (err != ValidationResult::kOk) {
-            return err;
+        const auto evm1_txn = to_evmone(txn);
+
+        // Amsterdam checks the gas limit against both dimensions of the block gas (EIP-8037).
+        const auto block_gas_left = rev >= EVMC_AMSTERDAM
+                                        ? block_gas_limit - sum_regular_block_gas_
+                                        : static_cast<int64_t>(available_gas());
+        const auto block_state_gas_left = block_gas_limit - sum_state_block_gas_;
+        const auto tx_props = evmone::state::validate_transaction(
+            evm1_block_, evm1_txn, rev, block_gas_left, block_state_gas_left, kNoBlobGasLimit);
+        if (const auto* ec = std::get_if<std::error_code>(&tx_props)) {
+            return to_validation_result(*ec);
         }
-        execute_transaction(txn, *receipt_it);
+        if (const auto ec = evmone::state::validate_transaction_with_state(ActiveStateView{direct_}, evm1_txn)) {
+            return to_validation_result(ec);
+        }
+
+        execute_transaction(txn, evm1_txn, std::get<evmone::state::TransactionProperties>(tx_props),
+                            *receipt_it);
         ++receipt_it;
     }
 
