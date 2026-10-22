@@ -838,7 +838,20 @@ uint64_t StateTransition::run_mfbd() {
             return kRunFailure;
         }
         cumulative_gas += gas;
-        cursor = align8(cursor + fb->blob.size());
+        // The next bundle starts at the next 8-aligned offset. Only align while another
+        // bundle follows: align8 of the last bundle's end may overshoot `end` by up to 7
+        // bytes when its sections end unaligned, and a cursor past `end` would make the
+        // next iteration's `end - cursor` wrap and hand load_flat_bundle a ~2^64-byte span
+        // (its header read then runs past the envelope). A well-formed envelope's bundles
+        // are 8-aligned, so this changes nothing for it.
+        if (i + 1 < n_bundles) [[likely]] {
+            cursor = align8(cursor + fb->blob.size());
+            if (cursor > end) [[unlikely]] {
+                sys_println("ERROR: MFBD bundle padding runs past envelope end");
+                failed_ = true;
+                return kRunFailure;
+            }
+        }
     }
     if (n_bundles == 0)
         return kRunSkipped;

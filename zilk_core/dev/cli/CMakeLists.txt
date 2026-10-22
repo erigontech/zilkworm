@@ -46,6 +46,16 @@ if(BUILD_TESTING)
     add_test(NAME witness_hide_node_test COMMAND witness_hide_node_test)
 endif()
 
+# Regression: the MFBD runner's bundle cursor used to overshoot the envelope end
+# (align8 of the last bundle's unaligned section end), wrapping the next span's
+# extent; load_flat_bundle then read its header out of bounds. Standalone, exit
+# code = failure count.
+add_executable(mfbd_cursor_overshoot_test "mfbd_cursor_overshoot_test.cpp")
+target_link_libraries(mfbd_cursor_overshoot_test PRIVATE ${ZILK_CLI_TRIE_LIBS})
+if(BUILD_TESTING)
+    add_test(NAME mfbd_cursor_overshoot_test COMMAND mfbd_cursor_overshoot_test)
+endif()
+
 # file(GLOB STATE_TRANSITION_TESTS CONFIGURE_DEPENDS "state_transition_sample*.json")
 # add_custom_command(
 #   TARGET state_transition
