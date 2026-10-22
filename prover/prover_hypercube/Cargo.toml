@@ -11,6 +11,10 @@ default-run = "z6m_prover"
 name = "z6m_prover"
 path = "src/main.rs"
 
+[[bin]]
+name = "z6m_profile_report"
+path = "src/bin/profile_report.rs"
+
 [dependencies]
 sp1-sdk = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.6.0", features = ["profiling", "cuda"] }
 sp1-prover = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.6.0" }

@@ -144,3 +144,57 @@ add_custom_command(TARGET z6m_guest POST_BUILD
         "$<TARGET_FILE:z6m_guest>" "${CMAKE_BINARY_DIR}/z6m_guest.text"
     COMMENT "Creating binary and text images"
 )
+
+# Dev tool: syscall calibration guest (see src/calibration.cpp). Built only when asked;
+# run with `z6m_profile_report --elf .../z6m_guest_calib.elf` to measure cycles/syscall.
+option(Z6M_CALIBRATION_GUEST "Build the SP1 syscall calibration guest" OFF)
+if(Z6M_CALIBRATION_GUEST)
+    add_executable(z6m_guest_calib
+        src/sp1_entrypoint.S
+        src/sp1_runtime.cpp
+        src/calibration.cpp
+        src/atomic_stubs.c
+        ${MEM_BUILTINS_SRC}
+    )
+    set_source_files_properties(${MEM_BUILTINS_SRC} PROPERTIES COMPILE_OPTIONS "-fno-builtin;-O3")
+    target_include_directories(z6m_guest_calib PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/include"
+        "${Z6M_ROOT}/third_party/evmone/lib"
+        "${Z6M_ROOT}/third_party/evmone/lib/evmone_precompiles"
+    )
+    target_link_options(z6m_guest_calib PRIVATE
+        -nostdlib
+        -nostartfiles
+        -T${LINKER_SCRIPT}
+        -z norelro
+        -Wl,--gc-sections
+        -Wl,-e,_start
+        -Wl,--wrap=memcpy
+        -Wl,--wrap=memmove
+        -Wl,--wrap=memcmp
+        -Wl,--wrap=memset
+    )
+    target_link_directories(z6m_guest_calib PRIVATE "${_SYSROOT}/lib/${_MULTIDIR}" "${_LIBGCC_DIR}")
+    target_link_libraries(z6m_guest_calib PRIVATE evmone stdc++ c m gcc nosys)
+    target_compile_options(z6m_guest_calib PRIVATE
+        -fno-asynchronous-unwind-tables
+        $<$<COMPILE_LANGUAGE:CXX>:
+            -fno-exceptions
+            -fno-rtti
+            -Wno-unused-parameter
+            -Wno-missing-field-initializers
+            -Wno-unused-variable
+            -Wno-unused-but-set-variable
+            -Wno-class-memaccess
+            -Wno-ignored-attributes
+            -Wno-psabi
+            -Wno-narrowing
+            -Wno-attributes
+            -Wno-register
+            -Wno-unused-function
+            -Wno-cpp
+            -Wno-int-in-bool-context
+        >
+    )
+    set_target_properties(z6m_guest_calib PROPERTIES SUFFIX ".elf" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+endif()
