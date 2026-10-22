@@ -201,8 +201,8 @@ void GridMPT<DeletionEnabled, StateT>::delete_leaf(unsigned depth) {
         // Compact easily if it's in the middle and shares parent with the last one
         if (depth != grid_n_ - 1 && grid_.back().parent_depth == grid_line.parent_depth) {
             grid_line = grid_.back();  // TODO: Use smaller copy for leaf
-            parent.child_depth[grid_line.parent_slot] = depth;
-            depth = grid_n_ - 1;
+            parent.child_depth[grid_line.parent_slot] = static_cast<uint8_t>(depth);
+            depth = static_cast<unsigned>(grid_n_ - 1);
         }
     }
     delete_line(depth);
@@ -505,7 +505,7 @@ unsigned GridMPT<DeletionEnabled, StateT>::move_line(unsigned from_depth) {
                 result_depth = next_depth;
                 first = false;
             } else {
-                grid_[prev_depth].child_depth[prev_slot] = next_depth;
+                grid_[prev_depth].child_depth[prev_slot] = static_cast<uint8_t>(next_depth);
             }
 
             // Update other children's parent_depth to the new position
@@ -513,12 +513,12 @@ unsigned GridMPT<DeletionEnabled, StateT>::move_line(unsigned from_depth) {
             for (unsigned i = 0; i < 16; i++) {
                 if (placed.child_depth[i] != 0 && placed.child_depth[i] != next_depth) {
                     auto& ch = grid_[placed.child_depth[i]];
-                    ch.parent_depth = next_depth;
+                    ch.parent_depth = static_cast<uint8_t>(next_depth);
                     ch.parent = &placed;
                 }
             }
 
-            cache.parent_depth = next_depth;
+            cache.parent_depth = static_cast<uint8_t>(next_depth);
             cache.parent = &placed;
             prev_depth = next_depth;
             prev_slot = child_slot;
@@ -530,7 +530,7 @@ unsigned GridMPT<DeletionEnabled, StateT>::move_line(unsigned from_depth) {
             if (first) {
                 result_depth = pushed;
             } else {
-                grid_[prev_depth].child_depth[prev_slot] = pushed;
+                grid_[prev_depth].child_depth[prev_slot] = static_cast<uint8_t>(pushed);
             }
             break;
         }
@@ -600,7 +600,7 @@ inline GridLine* GridMPT<DeletionEnabled, StateT>::emplace_line(Kind kind, unsig
     ++grid_n_;
     depth_ = grid_n_ - 1;
     if (depth_ > 0)
-        link_to_parent(grid_.back(), depth_, parent_slot, parent);
+        link_to_parent(grid_.back(), static_cast<unsigned>(depth_), parent_slot, parent);
     else
         grid_.back().parent = &grid_.back();  // root climbs to itself
     return &grid_.back();
@@ -781,9 +781,9 @@ inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot,
         sys_println("{\"err\":\"rlp_size_0\"}");
         return UnfoldResult::kMissing;
     }
-    bool success = unfold_node_from_rlp(rlp, slot, depth_, &grid_line);
+    bool success = unfold_node_from_rlp(rlp, slot, static_cast<unsigned>(depth_), &grid_line);
     if (success)
-        grid_line.child_depth[slot] = depth_;
+        grid_line.child_depth[slot] = static_cast<uint8_t>(depth_);
     else
         failed_ = true;  // unfold_node_from_rlp already flags; explicit for the sentinel
     return success ? UnfoldResult::kSuccess : UnfoldResult::kMissing;

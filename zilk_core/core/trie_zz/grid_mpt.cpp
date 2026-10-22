@@ -69,7 +69,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     unsigned cur_parent_depth;
     if constexpr (DeletionEnabled) {
         if (last_was_delete_) {
-            cur_parent_depth = cascade_delete(depth_);
+            cur_parent_depth = cascade_delete(static_cast<unsigned>(depth_));
         } else {
             cur_parent_depth = grid_[depth_].parent_depth;
         }
@@ -791,7 +791,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             return {};
                         }
                     }
-                    if (!ro_descend(&trie_upd, cell, search_nib_cursor_ + 1, nullptr, false)) [[unlikely]] {
+                    if (!ro_descend(&trie_upd, cell, static_cast<unsigned>(search_nib_cursor_ + 1), nullptr, false)) [[unlikely]] {
                         return {};
                     }
                     last_was_delete_ = true;
@@ -816,7 +816,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     if (!has_room(1)) {
                         return {};
                     }
-                    insert_line(l.parent_slot, depth_, std::move(l), &grid_line);
+                    insert_line(l.parent_slot, static_cast<unsigned>(depth_), std::move(l), &grid_line);
                     grid_.back().modified = true;  // the new leaf, depth_ now names it
                     break;
                 } else if (unfold_res == UnfoldResult::kMissing || unfold_res == UnfoldResult::kUndefined) {
@@ -829,7 +829,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
             } else if (grid_line.kind == kExt) {
                 // go down till the first divergence point
                 const unsigned len{grid_line.ext.path.len};
-                const size_t lim = std::min<unsigned>(len, 64 - search_nib_cursor_);
+                const size_t lim = std::min<unsigned>(len, static_cast<unsigned>(64 - search_nib_cursor_));
                 unsigned m = static_cast<unsigned>(lcp_packed(grid_line.ext.path.w.data(), search_nibbles_.w.data(),
                                                                search_nib_cursor_, lim));
                 search_nib_cursor_ += m;
@@ -859,7 +859,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                                 return {};
                             }
                         }
-                        if (!ro_descend(&trie_upd, cell, search_nib_cursor_, nullptr, true)) [[unlikely]] {
+                        if (!ro_descend(&trie_upd, cell, static_cast<unsigned>(search_nib_cursor_), nullptr, true)) [[unlikely]] {
                             return {};
                         }
                         depth_ = grid_line.parent_depth;
@@ -882,7 +882,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             }
                             rlp = *rlp_opt;
                         }
-                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path.at(m - 1), depth_, &grid_line)) [[unlikely]] {
+                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path.at(m - 1), static_cast<unsigned>(depth_), &grid_line)) [[unlikely]] {
                             ++missing_count_;
                             failed_ = true;
                             sys_println("ERROR: malformed ext child rlp in node store");
@@ -911,7 +911,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
                 GridLine* const lines = grid_.data();  // reserved at construction; appends never reallocate
                 if (m > 0 || new_ext_len > 0) {
-                    d1 = depth_ + 1;
+                    d1 = static_cast<unsigned>(depth_ + 1);
                     GridLine* q = lines + d1;
                     while (d1 < grid_n_ && q->parent_depth != 0xFF) {
                         ++d1;
@@ -939,12 +939,12 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
 
                 if (m > 0) {  // orig_ext -> new_br -> (new_ext) -> old_child
-                    grid_line.consumed = grid_line.consumed - 1 - new_ext_len;
+                    grid_line.consumed = static_cast<uint8_t>(grid_line.consumed - 1 - new_ext_len);
                     grid_line.ext.child_len = 1;
                     grid_line.ext.path = grid_line.ext.path.slice(0, m);
                     grid_line.modified = true;
                     const unsigned new_slot = grid_line.ext.path.at(m - 1);
-                    insert_line_at(d1, new_slot, depth_, BranchNode{}, &grid_line);
+                    insert_line_at(d1, new_slot, static_cast<unsigned>(depth_), BranchNode{}, &grid_line);
                     grid_[d1].modified = true;
                     d1 = 0;  // Used up
                     // insert_line_at wrote child_depth[new_slot]; clearing last_nib when they alias would orphan the new branch.
@@ -966,7 +966,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     if (d1 == 0) {  // To check if we need d2 slot
                         d1 = d2;
                     }
-                    insert_line_at(d1, old_ext_line.ext.path.at(m), depth_, std::move(ext_mplus1), br);
+                    insert_line_at(d1, old_ext_line.ext.path.at(m), static_cast<unsigned>(depth_), std::move(ext_mplus1), br);
                     grid_[d1].modified = true;
                 } else {  // () -> new_br -> old_child
                     br->branch.set_child(last_nib, ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
@@ -975,12 +975,12 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (old_child_depth != 0) {
                     auto& par = grid_[depth_];
                     auto* och = &grid_[old_child_depth];
-                    och->parent_depth = depth_;
+                    och->parent_depth = static_cast<uint8_t>(depth_);
                     och->parent = &par;
-                    par.child_depth[och->parent_slot] = old_child_depth;
+                    par.child_depth[och->parent_slot] = static_cast<uint8_t>(old_child_depth);
                 }
                 auto l = make_cur_leaf(trie_upd.current_value());
-                insert_line(l.parent_slot, br_depth, std::move(l), br);
+                insert_line(l.parent_slot, static_cast<unsigned>(br_depth), std::move(l), br);
                 grid_.back().modified = true;  // the new leaf, depth_ now names it
                 break;  // insertion complete
             } else {
@@ -1015,7 +1015,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     if constexpr (DeletionEnabled) {
                         if (trie_upd.current_value() == ByteView{{0x80}}) {
                             auto parent_depth = grid_line.parent_depth;
-                            delete_leaf(depth_);
+                            delete_leaf(static_cast<unsigned>(depth_));
                             last_was_delete_ = true;
                             depth_ = parent_depth;
                             if (grid_n_ != 0) {  // deleting a root leaf empties the grid
@@ -1051,7 +1051,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     unsigned ext_last_nib = ext_common.path.at(cp - 1);
                     transform_line(grid_line, std::move(ext_common));
                     search_nib_cursor_ += cp;
-                    insert_line(ext_last_nib, depth_, std::move(bn), &grid_line);  // sets the depth_ at the branch after
+                    insert_line(ext_last_nib, static_cast<unsigned>(depth_), std::move(bn), &grid_line);  // sets the depth_ at the branch after
                 } else {
                     // Make the line a branch
                     transform_line(grid_line, std::move(bn));
@@ -1062,9 +1062,9 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 auto parent_depth = depth_;
                 auto* br = &grid_[parent_depth];  // grid_line itself when cp == 0
                 auto l = make_cur_leaf(trie_upd.current_value());  // sets parent_slot too at l, with first nib
-                insert_line(old_leaf.parent_slot, parent_depth, std::move(old_leaf), br);
+                insert_line(old_leaf.parent_slot, static_cast<unsigned>(parent_depth), std::move(old_leaf), br);
                 grid_.back().modified = true;  // the new leaf, depth_ now names it
-                insert_line(l.parent_slot, parent_depth, std::move(l), br);
+                insert_line(l.parent_slot, static_cast<unsigned>(parent_depth), std::move(l), br);
                 grid_.back().modified = true;
                 break;  // insertion complete
             }
@@ -1072,7 +1072,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
     }
 
     while (grid_n_ > 1) {
-        fold_line(grid_n_ - 1);
+        fold_line(static_cast<unsigned>(grid_n_ - 1));
     }
 
     if (grid_n_ == 0) {
