@@ -4,10 +4,13 @@
 
 #include "address.hpp"
 
+#include <stdexcept>
+
 #include <evmone_precompiles/keccak.hpp>
 #include <zilk_core/core/common/assert.hpp>
 #include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/rlp/encode.hpp>
+#include <zilk_core/print.hpp>
 
 namespace silkworm {
 
@@ -72,11 +75,18 @@ evmc::address bytes_to_address(ByteView bytes) {
 
 evmc::address hex_to_address(std::string_view hex, bool return_zero_on_err) {
     const std::optional<Bytes> bytes{from_hex(hex)};
-    if (!bytes) {
+    if (!bytes) [[unlikely]] {
         if (return_zero_on_err) {
             return evmc::address{};
         }
-        // abort_due_to_assertion_failure("invalid hex encoding", __FILE__, __LINE__);
+        // Invalid hex used to fall through to *bytes on an empty optional (UB — the
+        // garbage Bytes crashed keccak256 in fuzzing); fail loudly instead. Guest builds
+        // compile without exceptions: there the run halts.
+#if defined(__cpp_exceptions)
+        throw std::runtime_error("invalid hex encoding");
+#else
+        fatal("invalid hex encoding");
+#endif
     }
     return bytes_to_address(*bytes);
 }

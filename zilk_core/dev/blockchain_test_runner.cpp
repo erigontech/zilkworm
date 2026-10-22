@@ -673,17 +673,42 @@ uint64_t StateTransition::run_ejsn() {
     bool any_failed = false;
     bool any_skipped = false;
     uint64_t gas = 0;
-    const auto base_json = nlohmann::json::parse(json_str);
+    // The envelope is attacker-controlled on the fuzz/CLI path; a malformed JSON must fail
+    // the run, not unwind out of a guest-facing entry point. The non-throwing parse works
+    // the same in the exception-free guest builds.
+    const nlohmann::json base_json = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+    if (base_json.is_discarded()) {
+        sys_println("ERROR: EJSN envelope bad JSON");
+        failed_ = true;
+        return kRunFailure;
+    }
     for (const auto& [name, test] : base_json.items()) {
-        const auto result = blockchain_test(name, test);
-        if (result.failed != 0) {
+        // A fixture is attacker-controlled on the CLI/fuzz path: malformed hex (an empty
+        // optional dereference in read_genesis_allocation/from_hex), missing keys
+        // (.at()) or bad integers (stoull/from_string) throw or read garbage — fail the
+        // test instead of unwinding out of the runner.
+        // Guest builds compile without exceptions; there a malformed fixture halts the run.
+        std::optional<RunResults> result;
+#if defined(__cpp_exceptions)
+        try {
+            result = blockchain_test(name, test);
+        } catch (const std::exception& e) {
+            sys_println("ERROR: malformed blockchain_test fixture");
+            sys_println(e.what());
+            any_failed = true;
+            continue;
+        }
+#else
+        result = blockchain_test(name, test);
+#endif
+        if (result->failed != 0) {
             any_failed = true;
             sys_println("    FAILED");
-        } else if (result.skipped != 0) {
+        } else if (result->skipped != 0) {
             sys_println("    SKIPPED");
             any_skipped = true;
         } else {
-            gas += result.gas;
+            gas += result->gas;
             sys_println("    passed");
         }
     }

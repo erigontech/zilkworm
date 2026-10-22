@@ -5,6 +5,7 @@
 #include "genesis.hpp"
 
 #include <bit>
+#include <stdexcept>
 #include <unordered_map>
 
 #include <zilk_core/core/chain/config.hpp>
@@ -102,7 +103,18 @@ std::vector<uint8_t> read_genesis_allocation(const nlohmann::json& alloc) {
         // Default code_hash = kEmptyHash so absent-code matches the trie leaf.
         std::memcpy(info.account.code_hash, kEmptyHash.bytes, 32);
         if (account_json.contains("code")) {
-            Bytes code{*from_hex(account_json["code"].get<std::string>())};
+            // The JSON may be attacker-controlled (blockchain_test fixtures over the
+            // CLI/fuzz path): invalid hex must fail the run, not dereference an empty
+            // optional (UB — the garbage Bytes crashed keccak256 in fuzzing).
+            const auto code_hex{from_hex(account_json["code"].get<std::string>())};
+            if (!code_hex) [[unlikely]] {
+#if defined(__cpp_exceptions)
+                throw std::runtime_error("genesis allocation: invalid code hex");
+#else
+                fatal("genesis allocation: invalid code hex");
+#endif
+            }
+            Bytes code{std::move(*code_hex)};
             if (!code.empty()) {
                 const auto code_hash_v = keccak256(code);
                 std::memcpy(info.account.code_hash, code_hash_v.bytes, 32);
@@ -118,9 +130,16 @@ std::vector<uint8_t> read_genesis_allocation(const nlohmann::json& alloc) {
 
         if (account_json.contains("storage")) {
             for (const auto& storage : account_json["storage"].items()) {
-                const Bytes key{*from_hex(storage.key())};
-                const Bytes value{*from_hex(storage.value().get<std::string>())};
-                info.storage.emplace_back(to_bytes32(key), to_bytes32(value));
+                const auto key_hex{from_hex(storage.key())};
+                const auto value_hex{from_hex(storage.value().get<std::string>())};
+                if (!key_hex || !value_hex) [[unlikely]] {
+#if defined(__cpp_exceptions)
+                    throw std::runtime_error("genesis allocation: invalid storage hex");
+#else
+                    fatal("genesis allocation: invalid storage hex");
+#endif
+                }
+                info.storage.emplace_back(to_bytes32(*key_hex), to_bytes32(*value_hex));
             }
         }
         infos.push_back(std::move(info));
