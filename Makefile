@@ -227,8 +227,8 @@ RELEASE_DIR := temp
 RELEASE_BINS = \
 	prover/guest_hypercube/build/z6m_guest.elf:z6m_guest_hypercube_mfbd.elf \
 	prover/guest_hypercube/build/z6m_guest.vk:z6m_guest_hypercube_mfbd.vk \
-	$(GUEST_SLIB_BUILD)/z6m_guest.elf:z6m_guest_hypercube_slib.elf \
-	$(ERE_VK):z6m_guest_hypercube_slib.vk \
+	$(ERE_ELF):$(ERE_GUEST_NAME)-$(ERE_SP1_SDK_VERSION).elf \
+	$(ERE_VK):$(ERE_GUEST_NAME)-$(ERE_SP1_SDK_VERSION).vk \
 	prover/target/release/z6m_prover:z6m_prover_hypercube \
 	build/zilk_core/dev/cli/state_transition:state_transition_linux_x86_64
 
@@ -354,6 +354,12 @@ ERE_BIN_DIR ?= $(CURDIR)/build/ere-bin
 ERE_GUEST_NAME ?= stateless-validator-zilkworm-sp1
 ERE_ELF := $(ERE_BIN_DIR)/$(ERE_GUEST_NAME).elf
 ERE_VK := $(ERE_BIN_DIR)/$(ERE_GUEST_NAME).vk
+# The SP1 SDK version in the published guest's name (guest handbook:
+# stateless-validator-<guest>-<zkVM>-<zkVM version>.{elf,vk}): the sp1-sdk tag derive_vk builds
+# against, which computes the published VK and must be the one ere resolves (ere-bin-link
+# checks that against the workload at benchmark time).
+ERE_SP1_SDK_VERSION := $(shell sed -nE 's/^sp1-sdk = \{ git = "https:\/\/github\.com\/succinctlabs\/sp1", tag = "([^"]+)".*/\1/p' prover/stateless_validator/Cargo.toml)
+$(if $(ERE_SP1_SDK_VERSION),,$(error cannot read the sp1-sdk tag from prover/stateless_validator/Cargo.toml))
 DERIVE_VK_BIN := prover/target/release/derive_vk
 
 derive_vk:
@@ -409,6 +415,9 @@ ere-fixtures: ere-workload-checkout
 # of the ere the workload resolves; link the unversioned ere-bin outputs under that name.
 ere-bin-link:
 	v=$$(python3 tools/ere_workload.py "$(ERE_WORKLOAD_DIR)" sp1-sdk-version) && \
+	if [ "$$v" != "$(ERE_SP1_SDK_VERSION)" ]; then \
+	    echo "the workload's ere resolves SP1 $$v, derive_vk builds against $(ERE_SP1_SDK_VERSION): bump prover/stateless_validator/Cargo.toml" >&2; exit 1; \
+	fi && \
 	for ext in elf vk; do ln -sf $(ERE_GUEST_NAME).$$ext "$(abspath $(ERE_BIN_PATH))/$(ERE_GUEST_NAME)-$$v.$$ext"; done
 
 ere-validate: $(if $(ERE_GEN_FIXTURES),ere-fixtures) $(if $(ERE_BIN_PATH),ere-bin-link)

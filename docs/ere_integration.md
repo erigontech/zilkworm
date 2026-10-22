@@ -206,9 +206,10 @@ Zilkworm guest in place of the EEST spec guest.
   [`release.yml`](../.github/workflows/release.yml) after a `v*` release is
   published (a release created with `GITHUB_TOKEN` emits no `release` event).
 - **Guest source:** `build` runs `make ere-bin` at the run's ref; `release`
-  downloads `z6m_guest_hypercube_slib.{elf,vk}` of `release_tag`, verified against
+  downloads `stateless-validator-zilkworm-sp1-<SP1 SDK version>.{elf,vk}` of `release_tag`, verified against
   the release `SHA256SUMS.txt`. A release publishes both hypercube guests:
-  `_mfbd` (DirectState, MFBD bundles) and `_slib` (HashState, the ERE guest).
+  `z6m_guest_hypercube_mfbd` (DirectState, MFBD bundles) and the handbook-named
+  `stateless-validator-zilkworm-sp1-<SP1 SDK version>` (HashState, the ERE guest).
 - **Inputs:** `guest_source`, `release_tag`, `catalog_url` (default Sepolia),
   `batch_count` (default 1), `compare` (default off; on for releases),
   `workload_ref` / `ere_guests_ref` (default `canepat/zilkworm_mfbd` on the
@@ -279,7 +280,7 @@ closed on the way:
   (`note_created_code`), which is sound by the hash binding.
 
 The test resolves the guest through `artifact-registry.json`, so until a release
-publishes `z6m_guest_hypercube_slib.{elf,vk}` it runs with the registry pointed at a
+publishes `stateless-validator-zilkworm-sp1-<SP1 SDK version>.{elf,vk}` it runs with the registry pointed at a
 local copy (an `http://127.0.0.1` URL served from `build/ere-bin`, the HTTPS check in
 `registry.rs` relaxed locally; neither edit is committed). Run it alone: it and
 `make ere-validate`/`ere-compare` both drive an ere-server on port 4175, and a
