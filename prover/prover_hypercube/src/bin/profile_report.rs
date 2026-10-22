@@ -31,6 +31,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     let args = Args::parse();
     let mut stdin = SP1Stdin::new();
     if let Some(f) = &args.file_name {

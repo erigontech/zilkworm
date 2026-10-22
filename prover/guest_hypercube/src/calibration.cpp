@@ -7,6 +7,7 @@
 // guest; built only when Z6M_CALIBRATION_GUEST=ON (dev tool).
 
 #include "include/sp1_syscalls.hpp"
+#include <evmone_precompiles/keccak.hpp>
 
 #include <cstdint>
 
@@ -53,6 +54,43 @@ extern "C" int main()
             sink ^= state[0];
         }
     });
+#endif
+
+#if !defined(CALIB_SEL) || defined(CALIB_keccakcalls)
+    // Full ethash_keccak256() calls at trie-node-like sizes, to measure the C wrapper
+    // cost around the permute syscalls (SP1 has no single-block fast path yet).
+    {
+        alignas(8) uint8_t in55[55];
+        alignas(8) uint8_t in100[100];
+        alignas(8) uint8_t in300[300];
+        for (int i = 0; i < 55; ++i) in55[i] = static_cast<uint8_t>(i);
+        for (int i = 0; i < 100; ++i) in100[i] = static_cast<uint8_t>(i * 3);
+        for (int i = 0; i < 300; ++i) in300[i] = static_cast<uint8_t>(i * 7);
+        region("keccak_call_55", [&] {
+            for (uint32_t i = 0; i < N; ++i) {
+                in55[0] = static_cast<uint8_t>(i);
+                sink ^= ethash::keccak256(in55, 55).bytes[0];
+            }
+        });
+        region("keccak_call_100", [&] {
+            for (uint32_t i = 0; i < N; ++i) {
+                in100[0] = static_cast<uint8_t>(i);
+                sink ^= ethash::keccak256(in100, 100).bytes[0];
+            }
+        });
+        region("keccak_call_300", [&] {
+            for (uint32_t i = 0; i < N; ++i) {
+                in300[0] = static_cast<uint8_t>(i);
+                sink ^= ethash::keccak256(in300, 300).bytes[0];
+            }
+        });
+        region("keccak_call_32", [&] {
+            for (uint32_t i = 0; i < N; ++i) {
+                in55[0] = static_cast<uint8_t>(i);
+                sink ^= ethash::keccak256(in55, 32).bytes[0];
+            }
+        });
+    }
 #endif
 
 #if !defined(CALIB_SEL) || defined(CALIB_u256)
