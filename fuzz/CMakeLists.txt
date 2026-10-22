@@ -30,3 +30,20 @@ z6m_add_fuzzer(fuzz_types fuzz_types.cpp)
 z6m_add_fuzzer(fuzz_state_transition fuzz_state_transition.cpp)
 z6m_add_fuzzer(fuzz_slib fuzz_slib.cpp)
 z6m_add_fuzzer(fuzz_mpt fuzz_mpt.cpp)
+z6m_add_fuzzer(fuzz_precompiles fuzz_precompiles.cpp)
+target_include_directories(fuzz_precompiles PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/evmone
+  ${CMAKE_SOURCE_DIR}/third_party/evmone/evmc/include)
+
+# evmone's own differential fuzzer (advanced vs baseline interpreters), reused as-is.
+add_executable(fuzz_evmone ${CMAKE_SOURCE_DIR}/third_party/evmone/test/fuzzer/fuzzer.cpp)
+target_include_directories(fuzz_evmone PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party
+  ${CMAKE_SOURCE_DIR}/third_party/evmone
+  ${CMAKE_SOURCE_DIR}/third_party/evmone/include
+  ${CMAKE_SOURCE_DIR}/third_party/evmone/lib
+  ${CMAKE_SOURCE_DIR}/third_party/evmone/test
+  ${CMAKE_SOURCE_DIR}/third_party/evmone/evmc/include)
+target_link_libraries(fuzz_evmone PRIVATE evmone)
+target_compile_options(fuzz_evmone PRIVATE -fsanitize=fuzzer)
+target_link_options(fuzz_evmone PRIVATE -fsanitize=fuzzer)
