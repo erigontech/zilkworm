@@ -156,6 +156,7 @@ if(BUILD_TESTING)
     zilk_core/core/trie_zz/encode_branch_patch_test.cpp
     zilk_core/core/trie_zz/encode_hp_path_test.cpp
     zilk_core/core/trie_zz/grid_mpt_kprefix_test.cpp
+    zilk_core/core/trie_zz/keccak_cap_test.cpp
     zilk_core/core/trie_zz/grid_mpt_capacity_test.cpp
     zilk_core/core/trie_zz/full_branch_hash_test.cpp
     zilk_core/core/trie_zz/grid_mpt_word_loads_test.cpp

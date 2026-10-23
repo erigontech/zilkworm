@@ -65,6 +65,9 @@ static_assert(alignof(uint256) == 8 && alignof(uint384) == 8);
 
 #if !defined(__riscv)
 void zisk_csr_model(uint16_t csr, const void* p) noexcept;  // Host differential tests link a model.
+// Params flattened in port order.
+void zisk_fcall_model(unsigned id, const uint64_t* params, size_t n_params, uint64_t* results,
+    size_t n_results) noexcept;
 #endif
 
 template <uint16_t Csr>
@@ -369,6 +372,7 @@ template <unsigned Id>
 [[gnu::always_inline]] inline uint256 fcall_inv256(const uint256& x) noexcept
 {
     uint256 r;
+#if defined(__riscv)
     asm volatile(
         "csrs 0x8F2, %4\n\t"
         "csrwi %5, %6\n\t"
@@ -379,6 +383,9 @@ template <unsigned Id>
         : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
         : "r"(&x[0]), "i"(0x8C0 + (Id >> 5)), "i"(Id & 31)
         : "memory");
+#else
+    zisk_fcall_model(Id, &x[0], 4, &r[0], 4);
+#endif
     return r;
 }
 
@@ -387,6 +394,7 @@ template <unsigned Id>
 {
     alignas(8) uint64_t in[8]{x[0], x[1], x[2], x[3], x[4], x[5], 0, 0};
     uint384 r;
+#if defined(__riscv)
     asm volatile(
         "csrs 0x8F3, %6\n\t"
         "csrwi 0x8C0, %7\n\t"
@@ -399,6 +407,9 @@ template <unsigned Id>
         : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5])
         : "r"(in), "i"(kFcallBls12381FpInv)
         : "memory");
+#else
+    zisk_fcall_model(kFcallBls12381FpInv, in, 8, &r[0], 6);
+#endif
     return r;
 }
 
@@ -407,6 +418,7 @@ template <unsigned Id>
     const uint256& x, uint64_t parity, uint256& y) noexcept
 {
     uint64_t is_qr;
+#if defined(__riscv)
     asm volatile(
         "csrs 0x8F2, %5\n\t"
         "csrs 0x8F0, %6\n\t"
@@ -419,12 +431,20 @@ template <unsigned Id>
         : "=r"(is_qr), "=r"(y[0]), "=r"(y[1]), "=r"(y[2]), "=r"(y[3])
         : "r"(&x[0]), "r"(parity), "i"(kFcallSecp256k1FpSqrt)
         : "memory");
+#else
+    const uint64_t in[5]{x[0], x[1], x[2], x[3], parity};
+    uint64_t out[5];
+    zisk_fcall_model(kFcallSecp256k1FpSqrt, in, 5, out, 5);
+    is_qr = out[0];
+    y = uint256{out[1], out[2], out[3], out[4]};
+#endif
     return is_qr;
 }
 
 [[gnu::always_inline]] inline void fcall_uint256_div(
     const uint256& a, const uint256& b, uint256& q, uint256& r) noexcept
 {
+#if defined(__riscv)
     asm volatile(
         "csrs 0x8F2, %8\n\t"
         "csrs 0x8F2, %9\n\t"
@@ -441,12 +461,20 @@ template <unsigned Id>
           "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
         : "r"(&a[0]), "r"(&b[0]), "i"(kFcallUint256Div)
         : "memory");
+#else
+    const uint64_t in[8]{a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]};
+    uint64_t out[8];
+    zisk_fcall_model(kFcallUint256Div, in, 8, out, 8);
+    q = uint256{out[0], out[1], out[2], out[3]};
+    r = uint256{out[4], out[5], out[6], out[7]};
+#endif
 }
 
 // 10 results: k1, k2, sigma1, sigma2.
 [[gnu::always_inline]] inline void fcall_secp256k1_glv_decompose(
     const uint256& k, uint64_t h[10]) noexcept
 {
+#if defined(__riscv)
     asm volatile(
         "csrs 0x8F2, %10\n\t"
         "csrwi 0x8C0, %11\n\t"
@@ -465,6 +493,9 @@ template <unsigned Id>
           "=r"(h[8]), "=r"(h[9])
         : "r"(&k[0]), "i"(kFcallSecp256k1GlvDecompose)
         : "memory");
+#else
+    zisk_fcall_model(kFcallSecp256k1GlvDecompose, &k[0], 4, h, 10);
+#endif
 }
 
 // Hint checks; any mismatch aborts (H1).
