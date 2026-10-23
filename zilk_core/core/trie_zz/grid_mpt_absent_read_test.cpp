@@ -760,7 +760,7 @@ TEST_CASE("GridMPT a malformed extension child under a light read fails a write 
     const Bytes v1 = value(1);
     const bytes32 l0 = put(nodes, node_leaf(std::vector<uint8_t>(63, 1), rlp_str(v1)));
     const bytes32 je = put(nodes, node_ext({2}, rlp_str(Bytes{0xc0})));
-    const bytes32 root = put(nodes, node_branch({child_hash_ref(l0), {}, child_hash_ref(je)}));
+    const bytes32 root = put(nodes, node_branch({child_hash_ref(l0), Bytes{0x80}, child_hash_ref(je)}));
     const bytes32 read_key = key_with_nibbles({2, 2}, 5);
     const ByteView z{kZeroRlp, 1};
     expect_mix(nodes, root, {{ka, ByteView{v1}, value(9)}, {read_key, z, {}}}, bytes32{});
@@ -802,7 +802,7 @@ TEST_CASE("GridMPT a raw byte string in a child cell fails the light descent lik
         const Bytes v1 = value(1);
         const bytes32 l0 = put(nodes, node_leaf(std::vector<uint8_t>(63, 1), rlp_str(v1)));
         const bytes32 je = put(nodes, node_ext({2}, Bytes{0x41}));
-        const bytes32 root = put(nodes, node_branch({child_hash_ref(l0), {}, child_hash_ref(je)}));
+        const bytes32 root = put(nodes, node_branch({child_hash_ref(l0), Bytes{0x80}, child_hash_ref(je)}));
         const bytes32 read_key = key_with_nibbles({2, 2}, 5);
         expect_mix(nodes, root, {{ka, ByteView{v1}, value(9)}, {read_key, z, {}}}, bytes32{});
     }
