@@ -38,6 +38,13 @@ using Fr = Curve::Fr;
 using Fp = Curve::Fp;
 using Bytes = std::array<uint8_t, 32>;
 
+// Only the rv32 NAF path needs full sweeps.
+#if defined(EVMONE_RV32_DISPATCH_TEST)
+constexpr bool kNafPath = true;
+#else
+constexpr bool kNafPath = false;
+#endif
+
 const AffinePoint G{0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798_u256,
     0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8_u256};
 
@@ -358,12 +365,17 @@ TEST_CASE("secp256k1 recovery: random scalars over random points") {
 
 TEST_CASE("secp256k1 recovery: small scalars over small multiples of G") {
     // Q = (k1 + j k2) G: the digits of u1 over G and of u2 over R = jG are the same few points, so
-    // doublings, cancellations and restarts occur throughout. Its 73,964 recoveries are checked in
-    // the malleable mode against k1 G + k2 R from tables of the small multiples: with check(), its
-    // full reference multiplications, second mode and address, the case took 18 minutes of a Debug
-    // build and 23 of the sanitizer build, where ctest stops a test at 25. Neither the mode nor the
-    // address reaches the multiplication, and the other cases check both.
+    // doublings, cancellations and restarts occur throughout. Its recoveries (73,964 on the rv32
+    // NAF path) are checked in the malleable mode against k1 G + k2 R from tables of the small
+    // multiples: with check(), its full reference multiplications, second mode and address, the
+    // case took 18 minutes of a Debug build and 23 of the sanitizer build, where ctest stops a test
+    // at 25. Neither the mode nor the address reaches the multiplication, and the other cases check
+    // both.
     std::mt19937_64 rng{11};
+    // ecc::msm() branches saturate by |k| <= 8.
+    const int near_k = kNafPath ? 20 : 8;
+    // Other points never meet a G digit.
+    const int far_k = kNafPath ? 20 : 2;
     // k P for k from -20 to 20, at index k + 20 (index 20 the point at infinity).
     const auto multiples = [](const AffinePoint& p) {
         std::array<ecc::ProjPoint<Curve>, 41> m{};
@@ -376,6 +388,10 @@ TEST_CASE("secp256k1 recovery: small scalars over small multiples of G") {
     const auto g = multiples(G);
     size_t infinity = 0;
     for (const auto& pt : points(rng)) {
+        bool near = false;
+        for (size_t i = 21; i < g.size(); ++i)
+            near = near || ecc::to_affine(g[i]).x == pt.x;
+        const int kmax = near ? near_k : far_k;
         for (const bool odd : {false, true}) {
             const auto R = with_parity(pt, odd);
             // Affine, the point at infinity as (0, 0): the mixed addition below takes every pair,
@@ -384,8 +400,8 @@ TEST_CASE("secp256k1 recovery: small scalars over small multiples of G") {
             std::array<AffinePoint, 41> r;
             for (size_t i = 0; i < r.size(); ++i)
                 r[i] = ecc::to_affine(rp[i]);
-            for (int k1 = -20; k1 <= 20; ++k1) {
-                for (int k2 = -20; k2 <= 20; ++k2) {
+            for (int k1 = -kmax; k1 <= kmax; ++k1) {
+                for (int k2 = -kmax; k2 <= kmax; ++k2) {
                     const auto u1 = k1 >= 0 ? uint256{static_cast<uint64_t>(k1)} : neg_mod_n(static_cast<uint64_t>(-k1));
                     const auto u2 = k2 >= 0 ? uint256{static_cast<uint64_t>(k2)} : neg_mod_n(static_cast<uint64_t>(-k2));
                     const auto sig = sig_for(u1, u2, R);
@@ -434,9 +450,10 @@ TEST_CASE("secp256k1 recovery: lattice scalars over points that share their digi
         shorts.push_back(random_uint256(rng) >> 129);
     const auto pts = points(rng);
     size_t n = 0;
+    const int per_point = kNafPath ? 160 : 40;
     for (const auto& pt : pts) {
         const auto R = with_parity(pt, (rng() & 1) != 0);
-        for (int i = 0; i < 160; ++i) {
+        for (int i = 0; i < per_point; ++i) {
             const auto& a1 = shorts[rng() % shorts.size()];
             const auto& b1 = shorts[rng() % shorts.size()];
             const auto& a2 = shorts[rng() % shorts.size()];

@@ -256,32 +256,40 @@ std::array<uint8_t, 64> point_bytes(const bn254::AffinePoint& pt)
 TEST_CASE("zisk model: ecmul matches host reference")
 {
     std::mt19937_64 rng{0x5eedu};
-    for (unsigned i = 0; i < 10'000; ++i)
-    {
-        const auto k = rand256(rng) % (bn254::Curve::ORDER - 1) + 1;
+    const auto check = [](const std::array<uint8_t, 64>& point, const uint256& c) {
         std::array<uint8_t, 96> input{};
-        const auto pb = point_bytes(bn254::mul(kG, k));
-        std::memcpy(input.data(), pb.data(), 64);
-        intx::be::store(std::span<uint8_t, 32>{input.data() + 64, 32}, rand256(rng));
-        const auto r = reference_ecmul(input.data(), 96);
-        const auto m = candidate_ecmul(input.data(), 96);
-        REQUIRE(r.fail == m.fail);
-        REQUIRE(r.out == m.out);
-    }
-    // Edge scalars on a fixed base point.
-    const auto base = point_bytes(bn254::mul(kG, 0x1234));
-    const uint256 edges[]{0, 1, 2, bn254::Curve::ORDER, bn254::Curve::ORDER - 1,
-        bn254::Curve::ORDER + 1, uint256{1} << 127, ~uint256{0}, rand256(rng)};
-    for (const auto& c : edges)
-    {
-        std::array<uint8_t, 96> input{};
-        std::memcpy(input.data(), base.data(), 64);
+        std::memcpy(input.data(), point.data(), 64);
         intx::be::store(std::span<uint8_t, 32>{input.data() + 64, 32}, c);
         const auto r = reference_ecmul(input.data(), 96);
         const auto m = candidate_ecmul(input.data(), 96);
         REQUIRE(r.fail == m.fail);
         REQUIRE(r.out == m.out);
+    };
+    // Random scalars and points: values only, not paths.
+    for (unsigned i = 0; i < 200; ++i)
+    {
+        const auto k = rand256(rng) % (bn254::Curve::ORDER - 1) + 1;
+        const auto pb = point_bytes(bn254::mul(kG, k));
+        check(pb, rand256(rng));
     }
+    const auto base = point_bytes(bn254::mul(kG, 0x1234));
+    // Every width: each mask and word rollover.
+    for (unsigned w = 1; w <= 256; ++w)
+    {
+        const auto top = uint256{1} << (w - 1);
+        check(base, top | (rand256(rng) & (top - 1)));
+    }
+    // Every reduction trip count, 0 to 5.
+    for (unsigned t = 0; t <= 5; ++t)
+    {
+        for (const uint64_t d : {0u, 1u, 2u})
+            check(base, bn254::Curve::ORDER * t + d);
+    }
+    // Edge scalars on a fixed base point.
+    const uint256 edges[]{0, 1, 2, bn254::Curve::ORDER, bn254::Curve::ORDER - 1,
+        bn254::Curve::ORDER + 1, uint256{1} << 127, ~uint256{0}, rand256(rng)};
+    for (const auto& c : edges)
+        check(base, c);
     // The zero point and short inputs (zero-padded).
     for (const size_t size : {size_t{0}, size_t{1}, size_t{63}, size_t{64}, size_t{95}, size_t{96}})
     {
@@ -297,16 +305,23 @@ TEST_CASE("zisk model: ecmul matches host reference")
 TEST_CASE("zisk model: ecadd matches host reference")
 {
     std::mt19937_64 rng{0xc0ffeeu};
+    // A pool keeps bn254::mul() out of the loop.
+    std::vector<std::array<uint8_t, 64>> pool;
+    std::vector<std::array<uint8_t, 64>> negated;
+    for (unsigned i = 0; i < 256; ++i)
+    {
+        const auto p = bn254::mul(kG, rand256(rng) % (bn254::Curve::ORDER - 1) + 1);
+        pool.push_back(point_bytes(p));
+        negated.push_back(point_bytes(-p));
+    }
     for (unsigned i = 0; i < 10'000; ++i)
     {
-        const auto k1 = rand256(rng) % (bn254::Curve::ORDER - 1) + 1;
-        const auto k2 = rand256(rng) % (bn254::Curve::ORDER - 1) + 1;
+        const auto ia = rng() % pool.size();
+        const auto ib = rng() % pool.size();
         std::array<uint8_t, 128> input{};
-        const auto a = point_bytes(bn254::mul(kG, k1));
+        const auto& a = pool[ia];
         // Quarter doubles (q == p), quarter negations (q == -p), rest random pairs.
-        const auto b = (i % 4 == 0) ? point_bytes(bn254::mul(kG, k1)) :
-                       (i % 4 == 1) ? point_bytes(-bn254::mul(kG, k1)) :
-                                      point_bytes(bn254::mul(kG, k2));
+        const auto& b = (i % 4 == 0) ? pool[ia] : (i % 4 == 1) ? negated[ia] : pool[ib];
         std::memcpy(input.data(), a.data(), 64);
         std::memcpy(input.data() + 64, b.data(), 64);
         const auto r = reference_ecadd(input.data(), 128);
@@ -336,6 +351,15 @@ TEST_CASE("zisk model: ecadd matches host reference")
     {
         const auto r = reference_ecadd(x.data(), 128);
         const auto m = candidate_ecadd(x.data(), 128);
+        REQUIRE(r.fail == m.fail);
+        REQUIRE(r.out == m.out);
+    }
+    // The zero point first, a valid one second.
+    std::array<uint8_t, 128> zero_first{};
+    std::memcpy(zero_first.data() + 64, v.data(), 64);
+    {
+        const auto r = reference_ecadd(zero_first.data(), 128);
+        const auto m = candidate_ecadd(zero_first.data(), 128);
         REQUIRE(r.fail == m.fail);
         REQUIRE(r.out == m.out);
     }
