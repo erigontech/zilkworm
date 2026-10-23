@@ -74,10 +74,11 @@ extern "C" void *malloc(std::size_t n) noexcept {
 }
 
 extern "C" void free(void *p) noexcept {
+    if (!p) [[unlikely]]
+        return;
     if (class_free(p)) [[likely]]
         return;
-    if (p) [[unlikely]]
-        _free_r(_impure_ptr, p);
+    _free_r(_impure_ptr, p);
 }
 
 extern "C" void *calloc(std::size_t a, std::size_t b) noexcept {
