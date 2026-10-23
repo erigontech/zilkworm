@@ -25,6 +25,11 @@ if(SP1)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_hypercube/src/include)
 endif()
 
+if(ZISK)
+    add_compile_definitions(-DZISK)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../prover/guest_zisk/src/include)
+endif()
+
 if(SILKWORM_WASM_API)
   add_compile_definitions(EVMC_LOADER_MOCK)
 endif()
@@ -119,10 +124,11 @@ endif()
 # test build compiles with EVMONE_RV32_DISPATCH_TEST. It is active where strict aliasing is (-O2
 # and up). It cannot see a cast from void*, a byte pointer or a struct of bytes (evmc's address and
 # bytes32), nor a may_alias typedef lost to auto (deduction drops the attribute), so those still
-# need care. The SP1 paths pass words to their syscalls through size_t pointers.
+# need care. The SP1 paths pass words to their syscalls through size_t pointers, and the ZisK
+# guest compiles those same SP1-shaped point-op paths.
 # -Werror=strict-aliasing also turns the warning on, at the default level 3, which misses these
 # casts: the level has to come after it.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1 AND NOT SP1TURBO)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT SP1 AND NOT SP1TURBO AND NOT ZISK)
   target_compile_options(evmone PRIVATE -Werror=strict-aliasing -Wstrict-aliasing=1)
 endif()
 

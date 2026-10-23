@@ -48,40 +48,125 @@ using ::zilkworm::keccak_bytes32;
 }  // namespace silkworm
 
 namespace zilkworm {
+// Nibble i: bits 4*(i%16) of word i/16.
+[[gnu::always_inline]] inline uint64_t nib_swap64(uint64_t x) noexcept {
+    constexpr uint64_t M = 0x0F0F0F0F0F0F0F0Full;
+    return ((x & M) << 4) | ((x >> 4) & M);
+}
+
+// Requires off <= 63; 64 would read s[4].
+[[gnu::always_inline]] inline uint64_t nib_word(const uint64_t* s, size_t off) noexcept {
+    const uint64_t lo = s[off >> 4];
+    const unsigned sh = 4u * static_cast<unsigned>(off & 15u);
+    if (sh == 0) return lo;
+    const uint64_t hi = (off >> 4) + 1 < 4 ? s[(off >> 4) + 1] : 0;
+    return (lo >> sh) | (hi << (64 - sh));
+}
+
+// Requires off + max <= 64.
+[[gnu::always_inline]] inline size_t lcp_packed(const uint64_t* a, const uint64_t* s, size_t off,
+                                                size_t max) noexcept {
+    size_t k = 0;
+    for (; k + 16 <= max; k += 16) {
+        const uint64_t diff = a[k >> 4] ^ nib_word(s, off + k);
+        if (diff != 0) return k + (static_cast<size_t>(__builtin_ctzll(diff)) >> 2);
+    }
+    if (k != max) {
+        const uint64_t diff = a[k >> 4] ^ nib_word(s, off + k);
+        const size_t rem = max - k;
+        const size_t t = diff != 0 ? static_cast<size_t>(__builtin_ctzll(diff)) >> 2 : rem;
+        return k + (t < rem ? t : rem);
+    }
+    return k;
+}
+
 struct nibbles64 {
     uint8_t len{};
-    // Max trie path is 64 nibbles. Word-aligned so a strict-alignment target (rv32 Airbender)
-    // can zero and copy it with word stores; at offset 1 each was a byte-wise library call.
-    alignas(4) std::array<uint8_t, 64> nib{};
+    // len leads the ext/leaf union; zero past len.
+    alignas(8) std::array<uint64_t, 4> w{};
 
-    uint8_t& operator[](size_t index) { return nib[index]; }
-    const uint8_t& operator[](size_t index) const { return nib[index]; }
+    uint8_t at(size_t i) const noexcept { return static_cast<uint8_t>((w[i >> 4] >> (4u * (i & 15u))) & 0xFu); }
+
+    void set(size_t i, uint8_t v) noexcept {
+        uint64_t& x = w[i >> 4];
+        const unsigned sh = 4u * static_cast<unsigned>(i & 15u);
+        x = (x & ~(uint64_t{0xF} << sh)) | (uint64_t{v} << sh);
+    }
+
+    void push(unsigned nib) noexcept {  // the host trie walks only
+        set(len, static_cast<uint8_t>(nib & 0xF));
+        ++len;
+    }
+
+    static nibbles64 single(unsigned nib) noexcept {
+        nibbles64 out;
+        out.len = 1;
+        out.w[0] = nib & 0xF;
+        return out;
+    }
 
     static nibbles64 from_bytes32(const bytes32& k) {
         nibbles64 out;
-        out.len = 64;
-        for (size_t i = 0; i < 32; ++i) {
-            uint8_t b = k.bytes[i];
-            out[2 * i] = (b >> 4) & 0x0F;
-            out[2 * i + 1] = b & 0x0F;
+        out.assign_bytes32(k);
+        return out;
+    }
+
+    // from_bytes32 in place: that one value-initializes its result for the caller to copy.
+    void assign_bytes32(const bytes32& k) noexcept {
+        len = 64;
+        if (alignof(void*) == 8 && (reinterpret_cast<uintptr_t>(k.bytes) & 7) == 0) [[likely]] {
+            // One swap per key word.
+            typedef uint64_t __attribute__((may_alias)) w64;
+            const w64* const s = reinterpret_cast<const w64*>(std::assume_aligned<8>(k.bytes));
+#pragma GCC unroll 4
+            for (unsigned i = 0; i < 4; ++i) w[i] = nib_swap64(s[i]);
+            return;
+        }
+        for (unsigned i = 0; i < 4; ++i) {
+            uint64_t x = 0;
+            for (unsigned j = 0; j < 8; ++j) x |= uint64_t{k.bytes[8 * i + j]} << (8 * j);
+            w[i] = nib_swap64(x);
+        }
+    }
+
+    // assign_bytes32 for a source that may be misaligned
+    void assign_bytes32_unaligned(const uint8_t* bytes) noexcept {
+        len = 64;
+        for (unsigned i = 0; i < 4; ++i) {
+            uint64_t x = 0;
+            for (unsigned j = 0; j < 8; ++j) x |= uint64_t{bytes[8 * i + j]} << (8 * j);
+            w[i] = nib_swap64(x);
+        }
+    }
+
+    // Requires off + n <= 64.
+    nibbles64 slice(size_t off, size_t n) const noexcept {
+        [[assume(off + n <= 64)]];
+        nibbles64 out;
+        out.len = static_cast<uint8_t>(n);
+        size_t i = 0;
+        for (; i + 16 <= n; i += 16) out.w[i >> 4] = nib_word(w.data(), off + i);
+        if (i != n) {  // Mask keeps zero past len.
+            const uint64_t v = nib_word(w.data(), off + i);
+            out.w[i >> 4] = v & ((uint64_t{1} << (4 * (n - i))) - 1);
         }
         return out;
     }
 
-    // from_bytes32 in place: that one value-initializes its result (a 68-byte memset) for the caller to copy.
-    void assign_bytes32(const bytes32& k) noexcept {
-        len = 64;
-        for (size_t i = 0; i < 32; ++i) {
-            uint8_t b = k.bytes[i];
-            nib[2 * i] = (b >> 4) & 0x0F;
-            nib[2 * i + 1] = b & 0x0F;
-        }
-    }
-
     void append(const nibbles64& other) {
         [[assume(len + other.len <= 64)]];
-        std::memcpy(nib.data() + len, other.nib.data(), other.len);
-        len += other.len;
+        size_t i = 0;
+        for (; i + 16 <= other.len; i += 16) or_word(len + i, nib_word(other.w.data(), i));
+        for (; i < other.len; ++i) set(len + i, other.at(i));
+        len = static_cast<uint8_t>(len + other.len);
+    }
+
+  private:
+    // Destination bits must be zero.
+    void or_word(size_t off, uint64_t v) noexcept {
+        const unsigned sh = 4u * static_cast<unsigned>(off & 15u);
+        w[off >> 4] |= v << sh;
+        if (sh != 0 && (off >> 4) + 1 < 4) w[(off >> 4) + 1] |= v >> (64 - sh);
     }
 };
 
@@ -92,24 +177,32 @@ struct BranchNode {
     std::array<bytes32, 16> child;
     std::array<const uint8_t*, 16> child_ptr;
     alignas(8) std::array<uint8_t, 16> child_len{};
-    uint16_t mask{};
+    // Aliased so one sd sets all four.
+    union {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+        struct {
+            uint64_t mask : 16;
+            uint64_t orig_size : 16;
+            uint64_t dirty : 16;
+            uint64_t spare : 16;
+        };
+#pragma GCC diagnostic pop
+        uint64_t mask_word;
+    };
     ByteView value{};
-    // Original witness RLP this branch was unfolded from (null for branches built in-grid).
-    // encode_branch copy-and-patches it, rewriting only `dirty` slots while no slot changed length class.
+    // Orig witness RLP; null when built in-grid.
     const uint8_t* orig{nullptr};
-    uint16_t orig_size{0};
-    uint16_t dirty{0};
     alignas(8) std::array<uint8_t, 16> orig_child_len{};
 
-    // Layout of the witness encoding is unchanged iff no slot changed length class.
-    // Both child_len and orig_child_len arrays must stay 8-aligned.
+    // Unchanged iff no slot changed length class.
     inline bool same_layout_as_orig() const noexcept {
         // Through data() the 8-byte alignment is lost, and a strict-alignment target then
         // copies both arrays byte-wise (two memcpy calls per encode); read them as words.
-        typedef uint32_t __attribute__((may_alias)) w32;
-        const w32* a = reinterpret_cast<const w32*>(std::assume_aligned<8>(child_len.data()));
-        const w32* b = reinterpret_cast<const w32*>(std::assume_aligned<8>(orig_child_len.data()));
-        return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3])) == 0;
+        typedef uint64_t __attribute__((may_alias)) w64;
+        const w64* a = reinterpret_cast<const w64*>(std::assume_aligned<8>(child_len.data()));
+        const w64* b = reinterpret_cast<const w64*>(std::assume_aligned<8>(orig_child_len.data()));
+        return ((a[0] ^ b[0]) | (a[1] ^ b[1])) == 0;
     }
 
     inline uint8_t child_count() const noexcept {
@@ -124,12 +217,11 @@ struct BranchNode {
         return std::has_single_bit(mask);
     }
 
-    BranchNode() : child_len{}, mask{}, value{} {}
+    BranchNode() : child_len{}, mask_word{0}, value{} {}
 
     inline void set_child(unsigned slot, ByteView b) noexcept {
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
-        mask |= 1 << slot;
+        mask_word |= (uint64_t{1} << slot) | (uint64_t{1} << (32 + slot));
         if (b.size() == 0) {
             child_len[slot] = 1;
             child_ptr[slot] = nullptr;
@@ -143,8 +235,7 @@ struct BranchNode {
     // set_child() for a hash reference: the keccak of `rlp`, a child's encoding of 32 bytes or more.
     inline void set_child_hash(unsigned slot, ByteView rlp) noexcept {
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
-        mask |= 1 << slot;
+        mask_word |= (uint64_t{1} << slot) | (uint64_t{1} << (32 + slot));
         child_len[slot] = 32;
         child_ptr[slot] = nullptr;
         // The keccak returns its hash straight into the slot, with no copy out of a temporary: the
@@ -161,8 +252,7 @@ struct BranchNode {
             return;
         }
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
-        mask |= 1 << slot;
+        mask_word |= (uint64_t{1} << slot) | (uint64_t{1} << (32 + slot));
         child_len[slot] = 32;
         child_ptr[slot] = nullptr;
         ::new (static_cast<void*>(child[slot].bytes))
@@ -174,14 +264,13 @@ struct BranchNode {
     // nonzero, `state` holds the state of the node's first blocks (see take_resumable_blocks()),
     // which the call consumes.
     inline ethash::hash256 full_branch_hash(uint64_t* state, unsigned blocks) const noexcept {
-        return ethash_keccak256_full_branch(state, blocks, orig, dirty, child[0].bytes, child_ptr.data());
+        return ethash_keccak256_full_branch(state, blocks, orig, static_cast<uint16_t>(mask_word >> 32), child[0].bytes, child_ptr.data());
     }
 
     // set_child_hash() for the full branch `node`: its full_branch_hash().
     inline void set_child_hash_of(unsigned slot, const BranchNode& node, uint64_t* state, unsigned blocks) noexcept {
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
-        mask |= 1 << slot;
+        mask_word |= (uint64_t{1} << slot) | (uint64_t{1} << (32 + slot));
         child_len[slot] = 32;
         child_ptr[slot] = nullptr;
         ::new (static_cast<void*>(child[slot].bytes)) ethash::hash256(node.full_branch_hash(state, blocks));
@@ -189,10 +278,9 @@ struct BranchNode {
 
     inline void delete_child(unsigned slot) noexcept {
         [[assume(slot < 16)]];
-        dirty |= static_cast<uint16_t>(1u << slot);
+        mask_word = (mask_word | (uint64_t{1} << (32 + slot))) & ~(uint64_t{1} << slot);
         child_len[slot] = 0;
         child_ptr[slot] = nullptr;
-        mask &= ~(1 << slot);
     }
 };
 
@@ -209,10 +297,10 @@ struct ExtensionNode {
     // set_child() for a hash reference: the keccak of `rlp`, a child's encoding of 32 bytes or more.
     inline void set_child_hash(ByteView rlp) noexcept {
         const ethash::hash256 h = silkworm::keccak256(rlp);
-        // child follows the 68-byte path, so it is only 4-aligned: too little to hold a hash256.
-        typedef uint32_t __attribute__((may_alias)) w32;
-        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
-        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        // the 8-aligned nibbles64 leaves child 8-aligned
+        typedef uint64_t __attribute__((may_alias)) w64;
+        w64* const d = reinterpret_cast<w64*>(std::assume_aligned<8>(child.bytes));
+        for (size_t i = 0; i < 4; ++i) d[i] = h.word64s[i];
         child_len = 32;
     }
 
@@ -223,18 +311,18 @@ struct ExtensionNode {
             return;
         }
         const ethash::hash256 h = ethash_keccak256_resume(r.state, r.blocks, rlp.data(), rlp.size());
-        typedef uint32_t __attribute__((may_alias)) w32;
-        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
-        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        typedef uint64_t __attribute__((may_alias)) w64;
+        w64* const d = reinterpret_cast<w64*>(std::assume_aligned<8>(child.bytes));
+        for (size_t i = 0; i < 4; ++i) d[i] = h.word64s[i];
         child_len = 32;
     }
 
     // set_child_hash() for the full branch `node`, as BranchNode::set_child_hash_of().
     inline void set_child_hash_of(const BranchNode& node, uint64_t* state, unsigned blocks) noexcept {
         const ethash::hash256 h = node.full_branch_hash(state, blocks);
-        typedef uint32_t __attribute__((may_alias)) w32;
-        w32* const d = reinterpret_cast<w32*>(std::assume_aligned<4>(child.bytes));
-        for (size_t i = 0; i < 8; ++i) d[i] = h.word32s[i];
+        typedef uint64_t __attribute__((may_alias)) w64;
+        w64* const d = reinterpret_cast<w64*>(std::assume_aligned<8>(child.bytes));
+        for (size_t i = 0; i < 4; ++i) d[i] = h.word64s[i];
         child_len = 32;
     }
 
@@ -246,7 +334,9 @@ struct ExtensionNode {
 // BranchNode::set_child_hash places an ethash::hash256 into child[slot].bytes; ExtensionNode::set_child_hash
 // stores whole words into child.
 static_assert(offsetof(BranchNode, child) == 0 && alignof(BranchNode) >= 8);
-static_assert(offsetof(ExtensionNode, child) % 4 == 0);
+static_assert(offsetof(nibbles64, w) == 8 && alignof(nibbles64) == 8);
+static_assert(offsetof(ExtensionNode, child) % 8 == 0);
+static_assert(sizeof(BranchNode) == (sizeof(void*) == 4 ? 632 : 704));  // 4-byte ptrs/ByteView on ilp32
 
 struct LeafNode {
     nibbles64 path;
@@ -293,15 +383,39 @@ struct GridLine {
     // strict-alignment target rather than a call to memset for 16 unaligned bytes.
     alignas(4) std::array<uint8_t, 16> child_depth{};
 
+    // Parent pointer: kills index mul on climbs
+    GridLine* parent;
+
     union {
         BranchNode branch;
         ExtensionNode ext;
         LeafNode leaf;
     };
 
-    GridLine() : kind(kBranch), parent_slot(0), parent_depth(0), consumed(0), modified(false), branch{} {}
-    GridLine(Kind k, unsigned pslot, unsigned pdepth, unsigned c) : kind{k}, parent_slot{static_cast<uint8_t>(pslot)}, parent_depth{static_cast<uint8_t>(pdepth)}, consumed{static_cast<uint8_t>(c)}, modified{false}, child_depth{} {}
+    GridLine() : kind(kBranch), parent_slot(0), parent_depth(0), consumed(0), modified(false), parent(nullptr), branch{} {}
+    GridLine(Kind k, unsigned pslot, unsigned pdepth, unsigned c, GridLine* p) : parent(p) {
+        // header+child_depth as three word stores
+        typedef uint64_t __attribute__((may_alias)) w64;
+        *reinterpret_cast<w64*>(std::assume_aligned<8>(this)) =
+            static_cast<uint64_t>(static_cast<uint8_t>(k)) |
+            (static_cast<uint64_t>(static_cast<uint8_t>(pslot)) << 8) |
+            (static_cast<uint64_t>(static_cast<uint8_t>(pdepth)) << 16) |
+            (static_cast<uint64_t>(static_cast<uint8_t>(c)) << 24);
+        w64* const cd = reinterpret_cast<w64*>(std::assume_aligned<8>(child_depth.data()));
+        cd[0] = 0;
+        cd[1] = 0;
+    }
 };
+
+static_assert(offsetof(GridLine, kind) == 0);
+static_assert(offsetof(GridLine, parent_slot) == 1);
+static_assert(offsetof(GridLine, parent_depth) == 2);
+static_assert(offsetof(GridLine, consumed) == 3);
+static_assert(offsetof(GridLine, modified) == 4);
+static_assert(offsetof(GridLine, child_depth) == 8);
+static_assert(offsetof(GridLine, parent) == 24);
+static_assert(offsetof(GridLine, branch) == 32);
+static_assert(sizeof(GridLine) == (sizeof(void*) == 4 ? 664 : 736) && alignof(GridLine) == 8);  // ilp32 child shrink
 
 struct TrieNodeFlat {
     bytes32 key;
@@ -329,7 +443,7 @@ struct TrieNodeFlat {
     }
 };
 
-// Leading nibbles two keys share, read from the keys themselves: equal to lcp_nibbles over their 64-nibble
+// Leading nibbles two keys share, read from the keys themselves: equal to lcp_packed over their packed
 // expansions. Word compares need the 4-byte alignment of TrieNodeFlat::key, which a bytes32 elsewhere (in a
 // witness node, say) need not have; no ctz, which rv32im lacks (ctzll is a __ctzdi2 call).
 [[gnu::always_inline]] inline unsigned key_lcp_nibbles(const TrieNodeFlat& a, const TrieNodeFlat& b) noexcept {
@@ -424,8 +538,8 @@ inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
 // More unfolding and folding needed for this or more keys
 template <bool DeletionEnabled = false, class StateT = ActiveState>
 class GridMPT {
-    unsigned depth_{0};              // The current depth we are visiting
-    unsigned search_nib_cursor_{0};  // The position in the current search key
+    uint64_t depth_{0};             // The current depth we are visiting
+    uint64_t search_nib_cursor_{0};  // The position in the current search key
     // Previous root of the trie
     bytes32 prev_root_;
     // A stack of grid-lines consisting of TrieNodes. Lines name each other by uint8_t depth, 0xFF marking a
@@ -436,6 +550,7 @@ class GridMPT {
     // holds 16 D + 1 lines (76 keys ground to share prefixes of up to 4 nibbles make 81).
     static constexpr size_t kMaxLines = 255;
     std::vector<GridLine> grid_;
+    size_t grid_n_ = 0;  // cached count; kills size()'s div-by-728 in loops
     nibbles64 search_nibbles_;  // The current key being searched for/inserted
 
     bool last_was_delete_{false};
@@ -447,6 +562,8 @@ class GridMPT {
     // Whether the walk's updates write anything, set with root_pending_: a walk that only reads changes no node,
     // and its lookups save no keccak state (unfold_slot()).
     bool snap_{false};
+
+    bool light_ro_{false};
 
     // Node-store lookups go through StateT::find_node_rlp (DirectState owns
     // the cached MphfMapHeader pointer + slot_offsets, returns the FlatKv payload
@@ -475,11 +592,12 @@ class GridMPT {
     // the DirectState include out of mpt.hpp.
     void init_from_root(bytes32 previous_root_hash, unsigned first_slot);
 
-    // Update the grid_line's parent-child bookkeeping
-    void link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, unsigned parent_depth);
+    // parent is grid_[parent_depth]; null at root.
+    void link_to_parent(GridLine& line, unsigned depth, unsigned parent_slot, GridLine* parent);
 
     // emplace_back a grid_line of `kind`, set the `depth_` to it and `link_to_parent()`.
-    GridLine* emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, unsigned consumed_init);
+    GridLine* emplace_line(Kind kind, unsigned parent_slot, unsigned parent_depth, GridLine* parent,
+                           unsigned consumed_init);
 
     // Whether `lines` more lines fit the grid (see kMaxLines); the walk cannot go on if not.
     bool has_room(unsigned lines);
@@ -517,7 +635,8 @@ class GridMPT {
         missing_count_ = 0;
         failed_ = false;
         prev_root_ = new_prev_root;
-        grid_.clear();                  
+        grid_.clear();
+        grid_n_ = 0;
         embedded_rlp_copies_.clear();   // keeps capacity
         // search_nibbles_ is overwritten on each insert by the main algorithm
         // (calc_root_from_updates seeds it from the first update); no need to
@@ -526,12 +645,14 @@ class GridMPT {
     }
 
     // Helper methods
-    bool unfold_node_from_rlp(ByteView rlp, unsigned parent_slot_index, unsigned parent_depth);
+    bool unfold_node_from_rlp(ByteView rlp, unsigned parent_slot_index, unsigned parent_depth,
+                              GridLine* parent);
     void delete_line(unsigned depth);
     void fold_line(unsigned depth);
     void pop_back();
     unsigned move_line(unsigned from_depth);
     UnfoldResult unfold_slot(unsigned slot);
+    UnfoldResult unfold_slot(unsigned slot, GridLine& grid_line);
     void seek_with_last_insert(const TrieNodeFlat& cur, const TrieNodeFlat* prev);
     // Whether update `u`, whose key the walk is about to insert, claims the key absent; flags the walk
     // failed if not.
@@ -542,11 +663,15 @@ class GridMPT {
     // The same walk over an order of pointers (see sort_trie_node_ptrs()): the nodes stay where they are.
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted);
 
-    template <typename NodeType>
-    bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node);
+// all-read walks bind light, not grid
+    void enable_light_read_only() noexcept { light_ro_ = true; }
 
     template <typename NodeType>
-    bool insert_line_at(unsigned target_depth, unsigned parent_slot, unsigned parent_depth, NodeType&& node);
+    bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node, GridLine* parent);
+
+    template <typename NodeType>
+    bool insert_line_at(unsigned target_depth, unsigned parent_slot, unsigned parent_depth, NodeType&& node,
+                        GridLine* parent);
 
     void delete_leaf(unsigned depth);
 
@@ -567,6 +692,18 @@ class GridMPT {
     // The walk of both calc_root_from_updates(), over the nodes or pointers to them (grid_mpt.cpp).
     template <typename It>
     bytes32 calc_root_impl(It updates_it, It updates_end);
+
+// cells whose single-child fold is pending
+    struct RoFoldEntry {
+        unsigned depth;
+        Bytes cell;
+    };
+    template <typename It>
+    bytes32 calc_root_read_only_impl(It updates_it, It updates_end);
+    bool ro_descend(const TrieNodeFlat* u, ByteView node, unsigned consumed, std::vector<RoFoldEntry>* pend,
+                    bool from_ext);
+// sorted writes: lcp neighbours for reads
+    std::vector<const TrieNodeFlat*> light_writes_;
 };
 
 }  // namespace zilkworm

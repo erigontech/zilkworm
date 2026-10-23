@@ -49,6 +49,8 @@ option(SILKWORM_FUZZER "Build instrumentation for fuzzers" OFF)
 option(SILKWORM_FUZZER_SANITIZERS "CLang sanitizer options for fuzzers" OFF)
 option(SILKWORM_USE_MIMALLOC "Enable using mimalloc for dynamic memory management" ON)
 option(SILKWORM_ALLOW_UNUSED_VAR_WARNINGS "Turn unused variable errors into warnings" OFF)
+# libc++ is opt-in on Linux
+option(SILKWORM_USE_LIBCXX "Clang: link against libc++ instead of the default standard library" OFF)
 
 # Compile-time selection of the trie fold's read-side state backend. OFF (default) =>
 # ActiveState is DirectState and the build is byte/behaviour-identical to today. ON =>
@@ -132,6 +134,7 @@ if(BUILD_TESTING)
     zilk_core/core/execution/div_mod_frontend_test.cpp
     zilk_core/core/execution/precompile_ecrec_test.cpp
     zilk_core/core/execution/precompile_lookup_test.cpp
+    zilk_core/core/execution/precompile_zisk_model_test.cpp
     zilk_core/core/execution/exp_pow2_base_test.cpp
     zilk_core/core/execution/kzg_pairing_test.cpp
     zilk_core/core/execution/mulmod_sparse_test.cpp
@@ -145,11 +148,15 @@ if(BUILD_TESTING)
     zilk_core/core/types/transaction_rlp_view_test.cpp
     zilk_core/core/types/transaction_senders_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
+    zilk_core/core/trie_zz/nibbles_packed_test.cpp
     zilk_core/core/trie_zz/grid_mpt_absent_read_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
     zilk_core/core/trie_zz/grid_mpt_unfold_test.cpp
+    zilk_core/core/trie_zz/decode_diff_test.cpp
     zilk_core/core/trie_zz/encode_branch_patch_test.cpp
+    zilk_core/core/trie_zz/encode_hp_path_test.cpp
     zilk_core/core/trie_zz/grid_mpt_kprefix_test.cpp
+    zilk_core/core/trie_zz/keccak_cap_test.cpp
     zilk_core/core/trie_zz/grid_mpt_capacity_test.cpp
     zilk_core/core/trie_zz/full_branch_hash_test.cpp
     zilk_core/core/trie_zz/grid_mpt_word_loads_test.cpp
@@ -159,6 +166,7 @@ if(BUILD_TESTING)
     zilk_core/core/state_zz/block_hash_cache_test.cpp
     zilk_core/core/trie_zz/unfold_hash_copy_test.cpp
     zilk_core/dev/cli/mphf_map_test.cpp
+    zilk_core/dev/cli/mphf_tile_equiv_test.cpp
     zilk_core/dev/cli/storage_host_path_test.cpp
     zilk_core/dev/cli/call_frame_result_test.cpp
     zilk_core/dev/cli/word_layout_test.cpp
@@ -234,6 +242,8 @@ if(BUILD_TESTING)
     set(ZILK_TEST_LIBS -Wl,--start-group silkworm_dev silkworm_core silkworm_types_zz -Wl,--end-group)
   endif()
   # kzg_pairing_test builds proofs and its reference pairing with blst.
+  # precompile_zisk_model_test compiles the guest's CSR-header paths against a host model.
+  target_include_directories(zilkworm.tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/prover/guest_zisk/src/include)
   target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} blst::blst Catch2::Catch2WithMain)
   # The Airbender guest's blst cyclotomic squaring only exists inside evmone's patch script. The
   # test extracts the script's text with Python and runs it on a host emulation of the BigInt

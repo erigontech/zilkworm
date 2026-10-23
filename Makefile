@@ -23,14 +23,19 @@ endif
         sp1-benchmark-corpus sp1-benchmark derive_vk ere-bin \
         ere-workload-checkout ere-fixtures ere-bin-link ere-validate ere-compare \
         release-artifacts \
-        zkevm-benchmark-fixtures z6m_guest_slib z6m_prover_slib slib-benchmark
+        zkevm-benchmark-fixtures z6m_guest_slib z6m_prover_slib slib-benchmark \
+        z6m_guest_zisk zisk-emu-check \
+        z6m_prover_zisk zisk-eest zisk-benchmark
 
 clean: 
 	rm -rf prover/guest_hypercube/build/
 	rm -rf prover/target
+	rm -rf prover/guest_zisk/build*/
+	rm -rf prover/prover_zisk/target
 	
 # USE_HASH_KEY=ON enables node-store account recovery. For the hypercube guest only: the
-# Airbender guest's own Makefile defaults it ON (don't export this one, which would turn it off).
+# Airbender and ZisK guests default it ON via their own build files (don't export this one,
+# which would turn them off).
 USE_HASH_KEY ?= OFF
 z6m_guest:
 	cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
@@ -48,6 +53,46 @@ z6m_guest_airbender:
 
 z6m_prover_airbender: z6m_guest_airbender
 	cd prover/prover_airbender && cargo build --release
+
+# ZisK v1.3.1-alpha. ZISK_GCC_BIN: xPack bin dir.
+ZISK_GCC_BIN   ?=
+ZISK_BUILD_DIR ?= prover/guest_zisk/build
+ZISKEMU        ?= ziskemu
+ZISK_ENV := $(if $(ZISK_GCC_BIN),PATH=$(ZISK_GCC_BIN):$$PATH,)
+# Native reference must match the guest.
+ZISK_USE_HASH_KEY ?= ON
+
+z6m_guest_zisk:
+	$(ZISK_ENV) cmake -S prover/guest_zisk -B $(ZISK_BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_zisk/cmake/riscv64im-zisk.cmake \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DZISK=ON \
+		-DUSE_HASH_KEY=$(ZISK_USE_HASH_KEY)
+	$(ZISK_ENV) cmake --build $(ZISK_BUILD_DIR) -j$$(nproc)
+
+# ziskemu vs native public values on BENCH_CORPUS_DIR.
+zisk-emu-check: z6m_guest_zisk
+	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S . \
+		-DUSE_HASH_KEY=$(ZISK_USE_HASH_KEY)
+	cmake --build build --target state_transition -j$$(nproc)
+	python3 tools/scripts/zisk_execute.py --elf $(ZISK_BUILD_DIR)/z6m_guest.elf \
+		--dir $(BENCH_CORPUS_DIR) --native build/zilk_core/dev/cli/state_transition --ziskemu "$(ZISKEMU)"
+
+# zisk-sdk host; execute needs no key.
+# ZISK_EXECUTOR: emulator, assembly or ziskemu.
+ZISK_PROVER     := prover/prover_zisk/target/release/z6m_prover_zisk
+ZISK_EXECUTOR   ?= emulator
+ZISK_EEST_FLAGS ?=
+z6m_prover_zisk: z6m_guest_zisk
+	cd prover/prover_zisk && cargo build --release
+
+zisk-eest: z6m_prover_zisk eest-mfbd-build
+	Z6M_ZISK_EXECUTOR=$(ZISK_EXECUTOR) python3 tools/scripts/eest_runner.py --prover $(ZISK_PROVER) \
+		--fixtures $(EEST_MFBD_DIR) --log-dir target/zisk-eest-logs $(ZISK_EEST_FLAGS)
+
+zisk-benchmark: z6m_prover_zisk sp1-benchmark-corpus
+	Z6M_ZISK_EXECUTOR=$(ZISK_EXECUTOR) python3 tools/scripts/sp1_benchmark.py --prover $(ZISK_PROVER) \
+		--dir $(BENCH_CORPUS_DIR)
 
 test_hc: z6m_prover
 	prover/target/release/z6m_prover execute --block-number 23540896 --data-dir prover/prover_turbo/temp

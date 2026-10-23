@@ -31,6 +31,7 @@
 
 #include "fold_unfold.hpp"
 
+
 //------------------------- GRID_MPT -----------------------------
 // Here lies an optimized code for stateless Merkle Patricia Trie
 // The core idea is processing nodes in a stack/grid where
@@ -41,52 +42,6 @@
 // ---------------------------------------------------------------
 namespace zilkworm {
 
-// LCP byte length; assumes little-endian host for ctzll byte index.
-[[gnu::always_inline]] inline size_t lcp_nibbles(const uint8_t* a, const uint8_t* b, size_t max) noexcept {
-    size_t i = 0;
-    while (i + 8 <= max) {
-        uint64_t wa, wb;
-        std::memcpy(&wa, a + i, sizeof(wa));
-        std::memcpy(&wb, b + i, sizeof(wb));
-        const uint64_t diff = wa ^ wb;
-        if (diff != 0) {
-            return i + static_cast<size_t>(__builtin_ctzll(diff)) / 8u;
-        }
-        i += 8;
-    }
-    while (i < max && a[i] == b[i]) ++i;
-    return i;
-}
-#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-// lcp_nibbles(a, b + off, max) for 4-aligned a and b with off + max <= 64 (nibbles64 arrays): on this
-// strict-alignment target lcp_nibbles' uint64_t loads are 8 lbu + 8 sb each. Compares a's words with
-// b's words funnel-shifted by off % 4 bytes; the word after the last one compared stays within b[0..63].
-[[gnu::always_inline]] inline size_t lcp_nibbles_aligned(const uint8_t* a, const uint8_t* b, size_t off,
-                                                          size_t max) noexcept {
-    typedef uint32_t __attribute__((may_alias)) w32;
-    const w32* const wa = reinterpret_cast<const w32*>(std::assume_aligned<4>(a));
-    const w32* const ea = wa + max / 4;
-    const w32* pa = wa;
-    const w32* pb = reinterpret_cast<const w32*>(std::assume_aligned<4>(b)) + off / 4;
-    const unsigned sh = 8 * static_cast<unsigned>(off % 4);
-    if (sh == 0) {
-#pragma GCC unroll 4
-        for (; pa != ea && *pa == *pb; ++pa, ++pb) {}
-    } else {
-        uint32_t lo = *pb++;
-#pragma GCC unroll 4
-        for (; pa != ea; ++pa, ++pb) {
-            const uint32_t hi = *pb;
-            if (*pa != ((lo >> sh) | (hi << (32 - sh)))) break;
-            lo = hi;
-        }
-    }
-    size_t k = 4 * static_cast<size_t>(pa - wa);  // the differing word's first byte, or the tail's
-#pragma GCC unroll 1
-    for (; k < max && a[k] == b[off + k]; ++k) {}
-    return k;
-}
-#endif
 // Find the least common path of current key from the top, with the last key as reference
 // (search_nibbles_ still holds the expansion of prev's key, or of whatever key came last when prev is null).
 template <bool DeletionEnabled, class StateT>
@@ -103,9 +58,10 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     // Tip: When we are searching for the next nibble, we don't need more than
     // the first level of children from the common branch, ever again
     //================================================
-    if (grid_.size() <= 1 || depth_ == 0) {
-        if (grid_.size() > 0 && is_empty(grid_[0])) {
-            grid_.clear();  // with every deleted line above the root, as cascade_delete() does
+    if (grid_n_ <= 1 || depth_ == 0) {
+        if (grid_n_ > 0 && is_empty(grid_[0])) {
+            grid_.clear();
+            grid_n_ = 0;  // with every deleted line above the root, as cascade_delete() does
         }
         return;
     }
@@ -113,7 +69,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     unsigned cur_parent_depth;
     if constexpr (DeletionEnabled) {
         if (last_was_delete_) {
-            cur_parent_depth = cascade_delete(depth_);
+            cur_parent_depth = cascade_delete(static_cast<unsigned>(depth_));
         } else {
             cur_parent_depth = grid_[depth_].parent_depth;
         }
@@ -139,7 +95,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
         // The first update of a call never gets here (depth_ is 0 after reset() or construction), nor does a
         // well-formed trie have a branch past nibble 64: compare the expanded keys as before.
         const nibbles64 new_nibbles = nibbles64::from_bytes32(cur.key);
-        lcp = lcp_nibbles(new_nibbles.nib.data(), search_nibbles_.nib.data(), parent_consumed);
+        lcp = lcp_packed(new_nibbles.w.data(), search_nibbles_.w.data(), 0, parent_consumed);
     }
 
     if (lcp >= parent_consumed) {
@@ -152,21 +108,24 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
         }
         // If last was not delete, the logic of splitting a leaf is there in the main loop for updates
     } else if (cur_parent_depth > 0) {
-        unsigned next_parent_depth = grid_[cur_parent_depth].parent_depth;
-        parent_consumed = grid_[next_parent_depth].consumed;  // For the next parent
+        GridLine* const lines = grid_.data();  // reserved at construction; appends never reallocate
+        GridLine* par = &lines[cur_parent_depth];
+        unsigned next_parent_depth = par->parent_depth;
+        parent_consumed = par->parent->consumed;  // For the next parent
         while (parent_consumed > lcp && cur_parent_depth > 0) {
-            for (auto i = grid_.size() - 1; i > cur_parent_depth; --i) {
-                if (grid_[i].parent_depth >= cur_parent_depth) {
+            for (GridLine* p = lines + (grid_n_ - 1); p > lines + cur_parent_depth; --p) {
+                if (p->parent_depth >= cur_parent_depth) {
                     // Deletes line i alone: only an empty line takes more lines with it (cascade_delete deletes
                     // the ancestors it leaves empty), which would leave i and the lines this loop climbs to
                     // stale, and none gets here. A deletion's empty lines go in the cascade above, before any
                     // fold; a read of an absent key inserts no leaf; decode_node() rejects a leaf without a value.
-                    fold_line(i);
+                    fold_line(static_cast<unsigned>(p - lines));
                 }
             }
             cur_parent_depth = next_parent_depth;
-            next_parent_depth = grid_[cur_parent_depth].parent_depth;
-            parent_consumed = grid_[next_parent_depth].consumed;
+            par = par->parent;
+            next_parent_depth = par->parent_depth;
+            parent_consumed = par->parent->consumed;
         }
         depth_ = cur_parent_depth;
     } else {
@@ -204,11 +163,506 @@ template <bool DeletionEnabled, class StateT>
 namespace {
 [[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat& u) noexcept { return u; }
 [[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat* u) noexcept { return *u; }
+
+// 0x80 is zero's RLP: no trie leaf stores it
+[[gnu::always_inline]] inline bool absent_key_noop(const TrieNodeFlat& u) noexcept {
+    const ByteView v = u.current_value();
+    return v.empty() || (v.size() == 1 && v[0] == rlp::kEmptyStringCode);
+}
+
+// fold's shape check for a lone child
+bool ro_node_well_formed(ByteView node, unsigned at) {
+    const auto hh = fast_decode_header(node);
+    if (!hh.list) [[unlikely]] {
+        return false;
+    }
+    const ByteView list = node.substr(0, hh.payload_length);
+
+    if (list.size() == 16 * 33 + 1 && list[16 * 33] == rlp::kEmptyStringCode) [[likely]] {
+        const uint8_t* const p = list.data();
+        bool hashes = true;
+        for (size_t i = 0; i < 16; ++i) {
+            if (p[33 * i] != 0xa0) {
+                hashes = false;
+                break;
+            }
+        }
+        if (hashes) {
+            return true;
+        }
+    }
+
+    ByteView rem = list;
+    const uint8_t e0_start = rem.empty() ? 0 : *rem.data();
+    const auto h0 = rlp::decode_header(rem);
+    ByteView e0_payload;
+    bool e0_list = false;
+    if (h0) {
+        e0_payload = rem.substr(0, h0->payload_length);
+        e0_list = h0->list;
+        rem.remove_prefix(h0->payload_length);
+    }
+    const uint8_t* const e1_start_ptr = rem.data();
+    const uint8_t e1_start = rem.empty() ? 0 : *rem.data();
+    const auto h1 = rlp::decode_header(rem);
+    ByteView e1_payload;
+    bool e1_list = false;
+    if (h1) {
+        e1_payload = rem.substr(0, h1->payload_length);
+        e1_list = h1->list;
+        rem.remove_prefix(h1->payload_length);
+    }
+    if (!h0 || !h1) [[unlikely]] {
+        return false;
+    }
+
+    if (rem.empty()) {
+        if (e0_list || e1_list) [[unlikely]] {
+            return false;
+        }
+        nibbles64 path;
+        bool is_leaf = false;
+        uint8_t plen = 0;
+        if (!hp_decode(e0_payload, is_leaf, path, plen)) [[unlikely]] {
+            return false;
+        }
+        if (is_leaf ? at + plen != 64 : (plen == 0 || at + plen > 63)) [[unlikely]] {
+            return false;
+        }
+        if (is_leaf) [[likely]] {
+            return h1->payload_length != 0 && h1->payload_length <= kMaxLeafValueSize;
+        }
+        const ByteView child = h1->payload_length == 32
+                                   ? e1_payload
+                                   : ByteView{e1_start_ptr,
+                                              static_cast<size_t>(e1_payload.data() - e1_start_ptr) +
+                                                  h1->payload_length};
+        // Lone ext child: shape only.
+        return child.size() <= 32;
+    }
+
+    const auto slot_ok = [](uint8_t start) {
+        return branch_slot_class(start) != SlotClass::kBad;
+    };
+    if (!slot_ok(e0_start) || !slot_ok(e1_start)) [[unlikely]] {
+        return false;
+    }
+    const uint8_t* p = rem.data();
+    const uint8_t* const end = p + rem.size();
+    for (unsigned i = 2; i < 16; ++i) {
+        if (p == end) [[unlikely]] {
+            return false;
+        }
+        const uint8_t b0 = *p;
+        if (b0 == 0xa0) {
+            if (end - p < 33) [[unlikely]] {
+                return false;
+            }
+            p += 33;
+        } else if (b0 == rlp::kEmptyStringCode) {
+            ++p;
+        } else if (b0 >= 0xc0 && b0 <= 0xf7) {
+            const size_t pl = static_cast<size_t>(b0 - 0xc0);
+            if (pl > 30) [[unlikely]] {
+                return false;
+            }
+            if (static_cast<size_t>(end - p) < 1 + pl) [[unlikely]] {
+                return false;
+            }
+            p += 1 + pl;
+        } else [[unlikely]] {
+            return false;
+        }
+    }
+    return static_cast<size_t>(end - p) == 1 && *p == rlp::kEmptyStringCode;
+}
+
+// list header only; 0xf8 needs its byte
+bool ro_child_shape(ByteView cell) {
+    if (cell.empty()) [[unlikely]] {
+        return false;
+    }
+    const uint8_t b0 = cell[0];
+    return (b0 >= 0xc0 && b0 <= 0xf7) || (b0 == 0xf8 && cell.size() >= 2);
+}
 }  // namespace
+
+// u == nullptr probes shape only
+template <bool DeletionEnabled, class StateT>
+[[gnu::noinline]] bool GridMPT<DeletionEnabled, StateT>::ro_descend(const TrieNodeFlat* u, ByteView node,
+                                                                    unsigned consumed,
+                                                                    std::vector<RoFoldEntry>* pend, bool from_ext) {
+    nibbles64 key;
+    key.assign_bytes32(u != nullptr ? u->key : bytes32{});
+    const bool probe = u == nullptr;
+
+// ping-pong buffers: parent overlaps child
+    alignas(8) uint8_t embed[2][32];
+    unsigned phase = 0;
+
+    for (;;) {
+        auto hh = fast_decode_header(node);
+        if (!hh.list) [[unlikely]] {
+            failed_ = true;
+            if (from_ext) {
+                ++missing_count_;
+            }
+            sys_println("{\"err\":\"ro_bind malformed node header\"}");
+            return false;
+        }
+        const ByteView list = node.substr(0, hh.payload_length);
+
+        if (list.size() == 16 * 33 + 1 && list[16 * 33] == rlp::kEmptyStringCode) {
+            const uint8_t* const p = list.data();
+            bool hashes = true;
+#pragma GCC unroll 16
+            for (size_t i = 0; i < 16; ++i) {
+                if (p[33 * i] != 0xa0) {
+                    hashes = false;
+                    break;
+                }
+            }
+            if (hashes) [[likely]] {
+                if (probe) [[unlikely]] {
+                    return true;
+                }
+                if (consumed >= 64) [[unlikely]] {
+                    failed_ = true;
+                    sys_println("{\"err\":\"descent past nibble 63\"}");
+                    return false;
+                }
+                bytes32 h;
+                std::memcpy(h.bytes, p + 33 * key.at(consumed) + 1, 32);
+                const auto next = state_->find_node_rlp(h);
+                if (!next) [[unlikely]] {
+                    ++missing_count_;
+                    failed_ = true;
+                    sys_println("ERROR: missing hash ref in node store (witness incomplete)");
+                    return false;
+                }
+                node = *next;
+                ++consumed;
+                from_ext = false;
+                continue;
+            }
+        }
+
+        auto malformed = [this, from_ext]() {
+            failed_ = true;
+            if (from_ext) {
+                ++missing_count_;
+            }
+            sys_println("{\"err\":\"ro_bind malformed node\"}");
+            return false;
+        };
+
+        ByteView rem = list;
+        const uint8_t e0_start = rem.empty() ? 0 : *rem.data();
+        auto h0 = rlp::decode_header(rem);
+        ByteView e0_payload;
+        bool e0_list = false;
+        if (h0) {
+            e0_payload = rem.substr(0, h0->payload_length);
+            e0_list = h0->list;
+            rem.remove_prefix(h0->payload_length);
+        }
+        const uint8_t* const e1_start_ptr = rem.data();
+        const uint8_t e1_start = rem.empty() ? 0 : *rem.data();
+        auto h1 = rlp::decode_header(rem);
+        ByteView e1_payload;
+        bool e1_list = false;
+        if (h1) {
+            e1_payload = rem.substr(0, h1->payload_length);
+            e1_list = h1->list;
+            rem.remove_prefix(h1->payload_length);
+        }
+        if (!h0 || !h1) [[unlikely]] {
+            return malformed();
+        }
+
+        if (rem.empty()) {
+            if (e0_list || e1_list) [[unlikely]] {
+                return malformed();
+            }
+            nibbles64 path;
+            bool is_leaf = false;
+            uint8_t plen = 0;
+            if (!hp_decode(e0_payload, is_leaf, path, plen)) [[unlikely]] {
+                return malformed();
+            }
+            if (is_leaf ? consumed + plen != 64 : (plen == 0 || consumed + plen > 63)) [[unlikely]] {
+                return malformed();
+            }
+            if (is_leaf) {
+                if (h1->payload_length == 0 || h1->payload_length > kMaxLeafValueSize) [[unlikely]] {
+                    return malformed();
+                }
+                if (probe) [[unlikely]] {
+                    return true;
+                }
+                if (consumed + lcp_packed(path.w.data(), key.w.data(), consumed, plen) == 64) {
+                    if (e1_payload != u->initial_value()) {
+                        failed_ = true;
+                        sys_println("Pre value mismatch in existing leaf");
+                        return false;
+                    }
+                    return true;
+                }
+                return claims_absent(*u);
+            }
+            const ByteView child = h1->payload_length == 32
+                                       ? e1_payload
+                                       : ByteView{e1_start_ptr,
+                                                  static_cast<size_t>(e1_payload.data() - e1_start_ptr) +
+                                                      h1->payload_length};
+            if (child.size() > 32) [[unlikely]] {
+                return malformed();
+            }
+            if (probe) [[unlikely]] {
+                return true;
+            }
+            const unsigned m = static_cast<unsigned>(
+                lcp_packed(path.w.data(), key.w.data(), consumed, std::min<unsigned>(plen, 64 - consumed)));
+            if (m != plen) {
+                return claims_absent(*u);
+            }
+            consumed += plen;
+            if (child.size() == 32) {
+                bytes32 h;
+                std::memcpy(h.bytes, child.data(), 32);
+                const auto r = state_->find_node_rlp(h);
+                if (!r) [[unlikely]] {
+                    ++missing_count_;
+                    failed_ = true;
+                    sys_println("ERROR: missing ext child rlp in node store (witness incomplete)");
+                    return false;
+                }
+                node = *r;
+            } else {
+                if (!ro_child_shape(child)) [[unlikely]] {
+                    failed_ = true;
+                    ++missing_count_;
+                    sys_println("ERROR: malformed ext child rlp in node store");
+                    return false;
+                }
+                uint8_t* const d = embed[phase];
+                std::memcpy(d, child.data(), child.size());
+                node = ByteView{d, child.size()};
+                phase ^= 1;
+            }
+            from_ext = true;
+            continue;
+        }
+
+        if (consumed >= 64) [[unlikely]] {
+            failed_ = true;
+            sys_println("{\"err\":\"descent past nibble 63\"}");
+            return false;
+        }
+        const unsigned nib = key.at(consumed);
+        uint8_t* const dst = embed[phase];
+        const uint8_t* child_at = nullptr;
+        uint8_t clen = 0;
+// grid folds only single-child branches
+        unsigned n_children = 0;
+        const uint8_t* fc_p = nullptr;
+        uint8_t fc_start = 0, fc_len = 0;
+        const auto note = [&](uint8_t start, const uint8_t* q, uint8_t len) {
+            if (n_children++ == 0) {
+                fc_start = start;
+                fc_p = q;
+                fc_len = len;
+            }
+        };
+
+        const auto fill = [&](unsigned i, uint8_t start, ByteView payload) -> bool {
+            if (payload.empty()) {
+                return true;
+            }
+            if (start == 0xa0) {
+                note(0xa0, payload.data(), 32);
+                if (i == nib) {
+                    child_at = payload.data();
+                    clen = 32;
+                }
+                return true;
+            }
+            if (payload.size() > 30) {
+                return false;
+            }
+            note(start, payload.data(), static_cast<uint8_t>(payload.size() + 1));
+            if (i == nib) {
+                dst[0] = start;
+                std::memcpy(dst + 1, payload.data(), payload.size());
+                child_at = dst;
+                clen = static_cast<uint8_t>(payload.size() + 1);
+            }
+            return true;
+        };
+        if (!fill(0, e0_start, e0_payload) || !fill(1, e1_start, e1_payload)) [[unlikely]] {
+            return malformed();
+        }
+
+        const uint8_t* p = rem.data();
+        const uint8_t* const end = p + rem.size();
+        for (unsigned i = 2; i < 16; ++i) {
+            if (p == end) [[unlikely]] {
+                return malformed();
+            }
+            const uint8_t b0 = *p;
+            if (b0 == 0xa0) {
+                if (end - p < 33) [[unlikely]] {
+                    return malformed();
+                }
+                note(0xa0, p + 1, 32);
+                if (i == nib) {
+                    child_at = p + 1;
+                    clen = 32;
+                }
+                p += 33;
+            } else if (b0 == rlp::kEmptyStringCode) {
+                ++p;
+            } else if (b0 >= 0xc0 && b0 <= 0xf7) {
+                const size_t pl = static_cast<size_t>(b0 - 0xc0);
+                if (pl > 30) [[unlikely]] {
+                    return malformed();
+                }
+                if (static_cast<size_t>(end - p) < 1 + pl) [[unlikely]] {
+                    return malformed();
+                }
+                note(b0, p + 1, static_cast<uint8_t>(pl + 1));
+                if (i == nib) {
+                    dst[0] = b0;
+                    std::copy_n(p + 1, pl, dst + 1);
+                    child_at = dst;
+                    clen = static_cast<uint8_t>(pl + 1);
+                }
+                p += 1 + pl;
+            } else {
+                return malformed();
+            }
+        }
+// fixed-key tries end at leaves
+        if (static_cast<size_t>(end - p) != 1 || *p != rlp::kEmptyStringCode) [[unlikely]] {
+            return malformed();
+        }
+        if (pend != nullptr && n_children == 1) [[unlikely]] {
+            Bytes cell(fc_len, 0);
+            if (fc_start == 0xa0) {
+                std::memcpy(cell.data(), fc_p, 32);
+            } else {
+                cell[0] = fc_start;
+                std::memcpy(cell.data() + 1, fc_p, fc_len - 1);
+            }
+            pend->push_back(RoFoldEntry{consumed, std::move(cell)});
+        }
+
+        if (probe) [[unlikely]] {
+            return true;
+        }
+
+        ++consumed;
+        if (clen == 0) {
+            return claims_absent(*u);
+        }
+        if (clen == 32) {
+            bytes32 h;
+            std::memcpy(h.bytes, child_at, 32);
+            const auto next = state_->find_node_rlp(h);
+            if (!next) [[unlikely]] {
+                ++missing_count_;
+                failed_ = true;
+                sys_println("ERROR: missing hash ref in node store (witness incomplete)");
+                return false;
+            }
+            node = *next;
+        } else {
+            if (!ro_child_shape(ByteView{child_at, clen})) [[unlikely]] {
+                failed_ = true;
+                sys_println("ERROR: malformed branch child rlp in node store");
+                return false;
+            }
+            node = ByteView{child_at, clen};  // inside embed[phase]
+            phase ^= 1;
+        }
+        from_ext = false;
+    }
+}
+
+template <bool DeletionEnabled, class StateT>
+template <typename It>
+[[gnu::noinline]] bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_read_only_impl(It updates_it,
+                                                                                      const It updates_end) {
+    if (prev_root_ == kEmptyRoot) {
+        for (; updates_it != updates_end; ++updates_it) {
+            if (!claims_absent(deref_update(*updates_it))) {
+                return {};
+            }
+        }
+        return kEmptyRoot;
+    }
+    const auto root = state_->find_node_rlp(prev_root_);
+    if (!root) [[unlikely]] {
+        failed_ = true;
+        sys_println("{\"err\":\"no_rlp\"}");
+        return {};
+    }
+    std::vector<RoFoldEntry> pend;
+    const auto drain = [&](int lcp) {
+        std::erase_if(pend, [&](const RoFoldEntry& e) {
+            if (lcp >= 0 && static_cast<int>(e.depth) <= lcp) {
+                return false;
+            }
+            if (e.cell.size() == 32) {
+                bytes32 h;
+                std::memcpy(h.bytes, e.cell.data(), 32);
+                const auto r = state_->find_node_rlp(h);
+                if (!r) [[unlikely]] {
+                    ++missing_count_;
+                    failed_ = true;
+                    sys_println("ERROR: missing lone child hash in node store (ro drain)");
+                } else if (!ro_node_well_formed(*r, e.depth + 1)) [[unlikely]] {
+                    failed_ = true;
+                    sys_println("ERROR: malformed lone child node (ro drain)");
+                }
+            } else if (!ro_node_well_formed(ByteView{e.cell.data(), e.cell.size()}, e.depth + 1)) [[unlikely]] {
+                failed_ = true;
+                sys_println("ERROR: malformed lone child cell (ro drain)");
+            }
+            return true;
+        });
+    };
+    if (updates_it == updates_end) {
+        if (!ro_descend(nullptr, *root, 0, &pend, false)) {
+            return {};
+        }
+        drain(-1);  // probe pops the root line too
+        return prev_root_;
+    }
+    bytes32 prev_key{};
+    bool have_prev = false;
+    for (; updates_it != updates_end; ++updates_it) {
+        const TrieNodeFlat& u = deref_update(*updates_it);
+        if (have_prev) {
+            nibbles64 a, b;
+            a.assign_bytes32(prev_key);
+            b.assign_bytes32(u.key);
+            drain(static_cast<int>(lcp_packed(a.w.data(), b.w.data(), 0, 64)));
+        }
+        if (!ro_descend(&u, *root, 0, &pend, false)) {
+            return {};
+        }
+        prev_key = u.key;
+        have_prev = true;
+    }
+    drain(-1);  // end fold reaches root line too
+    return prev_root_;
+}
 
 template <bool DeletionEnabled, class StateT>
 template <typename It>
 bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It updates_end) {
+    bool ro_reads = false;
     if (root_pending_) {
         root_pending_ = false;
         // Updates come in key order and a read changes nothing: the first slot of the root they change is the first
@@ -222,6 +676,23 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
             }
         }
         snap_ = first_slot != kprefix::kNoSlot;
+        if constexpr (state_keeps_prevalue_check<StateT>) {
+            if (!snap_ && light_ro_) {
+                return calc_root_read_only_impl(updates_it, updates_end);
+            }
+            if constexpr (DeletionEnabled) {
+                if (snap_ && light_ro_) {
+                    light_writes_.clear();
+                    for (It it = updates_it; it != updates_end; ++it) {
+                        const TrieNodeFlat& u = deref_update(*it);
+                        if (!u.current_value().empty()) {
+                            light_writes_.push_back(&u);
+                        }
+                    }
+                    ro_reads = true;
+                }
+            }
+        }
         init_from_root(prev_root_, first_slot);
     }
     if (failed_) [[unlikely]] {
@@ -230,12 +701,13 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
     // The update search_nibbles_ was last expanded from: the seek compares the keys themselves, and expanding
     // the new key straight into search_nibbles_ skips a zeroed temporary and its copy.
     const TrieNodeFlat* prev = nullptr;
+    size_t ro_wi = 0;
     for (; updates_it != updates_end; ++updates_it) {
         const TrieNodeFlat& trie_upd = deref_update(*updates_it);
 
         search_nib_cursor_ = 0;
 
-        if (!grid_.empty() && search_nibbles_.len > 0) {
+        if (grid_n_ != 0 && search_nibbles_.len > 0) {
             // At this point a previous leaf exists on the grid,
             // and it's in a branch, or just a leaf, or nothing (can't be ext -> leaf)
             seek_with_last_insert(trie_upd, prev);
@@ -243,7 +715,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
         search_nibbles_.assign_bytes32(trie_upd.key);
         prev = &trie_upd;
 
-        if (grid_.empty()) {
+        if (grid_n_ == 0) {
             // Either the very first update, or the preceding deletes emptied
             // the whole trie (seek pops the last line then). Descending the
             // main loop would read grid_[0] out of bounds; this key simply
@@ -251,17 +723,35 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
             if (!claims_absent(trie_upd)) [[unlikely]] {
                 return {};
             }
-            if (trie_upd.current_value().empty()) {
-                continue;  // a read of a key the empty trie does not have: nothing to insert, see below
+            if (absent_key_noop(trie_upd)) {
+                continue;  // a read or absent-key delete: nothing to insert, see below
             }
             last_was_delete_ = false;
             root_unfolded_ = false;
             LeafNode l{search_nibbles_, 0, trie_upd.current_value()};
-            insert_line(0, 0, std::move(l));
+            insert_line(0, 0, std::move(l), nullptr);
             continue;
         }
 
         last_was_delete_ = false;
+
+// clean subtree: no write diverges below
+        unsigned ro_limit = 0;
+        const bool ro_active = ro_reads && trie_upd.current_value().empty();
+        if (ro_active) {
+            while (ro_wi < light_writes_.size() && lt_bytes32(light_writes_[ro_wi]->key.bytes, trie_upd.key.bytes)) {
+                ++ro_wi;
+            }
+            if (ro_wi > 0) {
+                ro_limit = key_lcp_nibbles(trie_upd, *light_writes_[ro_wi - 1]);
+            }
+            if (ro_wi < light_writes_.size()) {
+                const unsigned l2 = key_lcp_nibbles(trie_upd, *light_writes_[ro_wi]);
+                if (l2 > ro_limit) {
+                    ro_limit = l2;
+                }
+            }
+        }
 
         // MAIN LOOP
         // Every step goes down at least one nibble of the key, and only a leaf is reached with all 64 of them
@@ -269,22 +759,60 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
         // a line index, and the grid holds up to kMaxLines lines. Leaving the walk here would drop the update
         // unseen, so a node past nibble 63 that is not a leaf fails it.
         while (true) {  // Searching down
-            if (!(search_nib_cursor_ < 64 || grid_[depth_].kind == kLeaf)) [[unlikely]] {
+            auto& grid_line = grid_[depth_];
+            if (!(search_nib_cursor_ < 64 || grid_line.kind == kLeaf)) [[unlikely]] {
                 failed_ = true;
                 sys_println("{\"err\":\"descent past nibble 63\"}");
                 return {};
             }
-            auto& grid_line = grid_[depth_];
             if (grid_line.kind == kBranch) {
-                unsigned nib = search_nibbles_[search_nib_cursor_];
-                auto unfold_res = unfold_slot(nib);
+                unsigned nib = search_nibbles_.at(search_nib_cursor_);
+                if (ro_active && ro_limit <= search_nib_cursor_ && grid_line.child_depth[nib] == 0) {
+                    const BranchNode& bn = grid_line.branch;
+                    const uint8_t clen = bn.child_len[nib];
+                    const uint8_t* const cb = bn.child[nib].bytes;
+                    // Same classes decode_node() fills.
+                    if (clen == 0) {
+                        if (!claims_absent(trie_upd)) [[unlikely]] {
+                            return {};
+                        }
+                        last_was_delete_ = true;
+                        break;
+                    }
+                    ByteView cell;
+                    if (clen == 32) {
+                        bytes32 h;
+                        std::memcpy(h.bytes, branch_hash_src(bn, nib), 32);
+                        const auto r = state_->find_node_rlp(h);
+                        if (!r) [[unlikely]] {
+                            ++missing_count_;
+                            failed_ = true;
+                            sys_println("ERROR: missing hash ref in node store (witness incomplete)");
+                            return {};
+                        }
+                        cell = *r;
+                    } else {
+                        cell = ByteView{cb, clen};
+                        if (!ro_child_shape(cell)) [[unlikely]] {
+                            failed_ = true;
+                            sys_println("ERROR: malformed branch child rlp in node store");
+                            return {};
+                        }
+                    }
+                    if (!ro_descend(&trie_upd, cell, static_cast<unsigned>(search_nib_cursor_ + 1), nullptr, false)) [[unlikely]] {
+                        return {};
+                    }
+                    last_was_delete_ = true;
+                    break;
+                }
+                auto unfold_res = unfold_slot(nib, grid_line);
                 if (unfold_res == UnfoldResult::kEmpty) {
                     // Child is empty - insert here
                     if (!claims_absent(trie_upd)) [[unlikely]] {
                         return {};
                     }
-                    if (trie_upd.current_value().empty()) {
-                        // A read of a key absent from the trie, which reaching this empty slot shows: nothing to
+                    if (absent_key_noop(trie_upd)) {
+                        // A read — or an absent-key delete — which reaching this empty slot shows: nothing to
                         // insert. An empty leaf would fold away again, but the cascade that deletes it can take
                         // lines the seek still climbs through, and leave a branch with a single child the walk
                         // folded already, whose new hash the witness cannot unfold. The next seek starts from
@@ -296,8 +824,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     if (!has_room(1)) {
                         return {};
                     }
-                    insert_line(l.parent_slot, depth_, std::move(l));
-                    grid_[depth_].modified = true;
+                    insert_line(l.parent_slot, static_cast<unsigned>(depth_), std::move(l), &grid_line);
+                    grid_.back().modified = true;  // the new leaf, depth_ now names it
                     break;
                 } else if (unfold_res == UnfoldResult::kMissing || unfold_res == UnfoldResult::kUndefined) {
                     failed_ = true;
@@ -308,13 +836,44 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 continue;
             } else if (grid_line.kind == kExt) {
                 // go down till the first divergence point
-                unsigned m = 0;
-                while (m < grid_line.ext.path.len && (search_nib_cursor_ + m) < 64 && grid_line.ext.path[m] == search_nibbles_[search_nib_cursor_ + m]) ++m;
+                const unsigned len{grid_line.ext.path.len};
+                const size_t lim = std::min<unsigned>(len, static_cast<unsigned>(64 - search_nib_cursor_));
+                unsigned m = static_cast<unsigned>(lcp_packed(grid_line.ext.path.w.data(), search_nibbles_.w.data(),
+                                                               search_nib_cursor_, lim));
                 search_nib_cursor_ += m;
-                unsigned last_nib = grid_line.ext.path[grid_line.ext.path.len - 1];
+                unsigned last_nib = grid_line.ext.path.at(len - 1);
                 unsigned old_child_depth{grid_line.child_depth[last_nib]};
 
-                if (m == grid_line.ext.path.len) {
+                if (m == len) {
+                    if (ro_active && ro_limit <= search_nib_cursor_ && old_child_depth == 0) {
+// malformed ext child must bump (from_ext)
+                        ByteView cell;
+                        const uint8_t clen = grid_line.ext.child_len;
+                        if (clen == 32) {
+                            auto rlp_opt = state_->find_node_rlp(grid_line.ext.child);
+                            if (!rlp_opt) [[unlikely]] {
+                                ++missing_count_;
+                                failed_ = true;
+                                sys_println("ERROR: missing ext child rlp in node store (witness incomplete)");
+                                return {};
+                            }
+                            cell = *rlp_opt;
+                        } else {
+                            cell = ByteView{grid_line.ext.child.bytes, clen};
+                            if (!ro_child_shape(cell)) [[unlikely]] {
+                                ++missing_count_;
+                                failed_ = true;
+                                sys_println("ERROR: malformed ext child rlp in node store");
+                                return {};
+                            }
+                        }
+                        if (!ro_descend(&trie_upd, cell, static_cast<unsigned>(search_nib_cursor_), nullptr, true)) [[unlikely]] {
+                            return {};
+                        }
+                        depth_ = grid_line.parent_depth;
+                        last_was_delete_ = true;
+                        break;
+                    }
                     // Full match -> unfold child
                     if (old_child_depth == 0) {
                         ByteView rlp;
@@ -331,7 +890,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             }
                             rlp = *rlp_opt;
                         }
-                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_)) [[unlikely]] {
+                        if (!unfold_node_from_rlp(rlp, grid_line.ext.path.at(m - 1), static_cast<unsigned>(depth_), &grid_line)) [[unlikely]] {
                             ++missing_count_;
                             failed_ = true;
                             sys_println("ERROR: malformed ext child rlp in node store");
@@ -344,8 +903,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (!claims_absent(trie_upd)) [[unlikely]] {
                     return {};
                 }
-                if (trie_upd.current_value().empty()) {
-                    // A read of a key absent from the trie: it leaves the extension inside its path. Nothing to
+                if (absent_key_noop(trie_upd)) {
+                    // A read or an absent-key delete: it leaves the extension inside its path. Nothing to
                     // insert, as for an empty slot; the next seek starts from the parent branch.
                     depth_ = grid_line.parent_depth;
                     last_was_delete_ = true;
@@ -358,13 +917,22 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (!has_room(5)) {
                     return {};
                 }
+                GridLine* const lines = grid_.data();  // reserved at construction; appends never reallocate
                 if (m > 0 || new_ext_len > 0) {
-                    d1 = depth_ + 1;
-                    while (d1 < grid_.size() && grid_[d1].parent_depth != 0xFF) ++d1;
+                    d1 = static_cast<unsigned>(depth_ + 1);
+                    GridLine* q = lines + d1;
+                    while (d1 < grid_n_ && q->parent_depth != 0xFF) {
+                        ++d1;
+                        ++q;
+                    }
                 }
                 if (new_ext_len > 0 && m > 0) {
                     d2 = d1 + 1;
-                    while (d2 < grid_.size() && grid_[d2].parent_depth != 0xFF) ++d2;
+                    GridLine* q = lines + d2;
+                    while (d2 < grid_n_ && q->parent_depth != 0xFF) {
+                        ++d2;
+                        ++q;
+                    }
                 }
 
                 if (old_child_depth != 0) {
@@ -379,12 +947,12 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
 
                 if (m > 0) {  // orig_ext -> new_br -> (new_ext) -> old_child
-                    grid_line.consumed = grid_line.consumed - 1 - new_ext_len;
+                    grid_line.consumed = static_cast<uint8_t>(grid_line.consumed - 1 - new_ext_len);
                     grid_line.ext.child_len = 1;
-                    grid_line.ext.path.len = m;
-                    grid_[depth_].modified = true;
-                    const unsigned new_slot = grid_line.ext.path[m - 1];
-                    insert_line_at(d1, new_slot, depth_, BranchNode{});
+                    grid_line.ext.path = grid_line.ext.path.slice(0, m);
+                    grid_line.modified = true;
+                    const unsigned new_slot = grid_line.ext.path.at(m - 1);
+                    insert_line_at(d1, new_slot, static_cast<unsigned>(depth_), BranchNode{}, &grid_line);
                     grid_[d1].modified = true;
                     d1 = 0;  // Used up
                     // insert_line_at wrote child_depth[new_slot]; clearing last_nib when they alias would orphan the new branch.
@@ -398,46 +966,37 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
 
                 auto br_depth = depth_;
+                auto* br = &grid_[br_depth];  // d1 when m > 0, else grid_line
                 if (new_ext_len > 0) {  // (orig_ext) -> new_br -> new_ext -> old_child
                     ExtensionNode ext_mplus1{};
-                    ext_mplus1.path.len = new_ext_len;
-                    std::memcpy(ext_mplus1.path.nib.data(),
-                                old_ext_line.ext.path.nib.data() + m + 1,
-                                new_ext_len);
+                    ext_mplus1.path = old_ext_line.ext.path.slice(m + 1, new_ext_len);
                     ext_mplus1.set_child(ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
                     if (d1 == 0) {  // To check if we need d2 slot
                         d1 = d2;
                     }
-                    insert_line_at(d1, old_ext_line.ext.path[m], depth_, std::move(ext_mplus1));
+                    insert_line_at(d1, old_ext_line.ext.path.at(m), static_cast<unsigned>(depth_), std::move(ext_mplus1), br);
                     grid_[d1].modified = true;
                 } else {  // () -> new_br -> old_child
-                    grid_[depth_].branch.set_child(last_nib, ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
+                    br->branch.set_child(last_nib, ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
                 }
 
                 if (old_child_depth != 0) {
-                    grid_[old_child_depth].parent_depth = depth_;
-                    grid_[depth_].child_depth[grid_[old_child_depth].parent_slot] = old_child_depth;
+                    auto& par = grid_[depth_];
+                    auto* och = &grid_[old_child_depth];
+                    och->parent_depth = static_cast<uint8_t>(depth_);
+                    och->parent = &par;
+                    par.child_depth[och->parent_slot] = static_cast<uint8_t>(old_child_depth);
                 }
                 auto l = make_cur_leaf(trie_upd.current_value());
-                insert_line(l.parent_slot, br_depth, std::move(l));
-                grid_[depth_].modified = true;
+                insert_line(l.parent_slot, static_cast<unsigned>(br_depth), std::move(l), br);
+                grid_.back().modified = true;  // the new leaf, depth_ now names it
                 break;  // insertion complete
             } else {
                 // It's a leaf:
                 // Find common path and create extension and push
 
-                size_t cp;
-#if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-                if (search_nib_cursor_ + grid_line.leaf.path.len <= 64) {
-                    cp = lcp_nibbles_aligned(grid_line.leaf.path.nib.data(), search_nibbles_.nib.data(),
+                const size_t cp = lcp_packed(grid_line.leaf.path.w.data(), search_nibbles_.w.data(),
                                              search_nib_cursor_, grid_line.leaf.path.len);
-                } else
-#endif
-                {
-                    cp = lcp_nibbles(grid_line.leaf.path.nib.data(),
-                                     search_nibbles_.nib.data() + search_nib_cursor_,
-                                     grid_line.leaf.path.len);
-                }
                 if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
                     // Pre-value bind + read-only short-circuit: DirectState only. HashState's update set
                     // carries no initial_value and no read-only entries; its reads are bound to prev_root
@@ -464,10 +1023,10 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     if constexpr (DeletionEnabled) {
                         if (trie_upd.current_value() == ByteView{{0x80}}) {
                             auto parent_depth = grid_line.parent_depth;
-                            delete_leaf(depth_);
+                            delete_leaf(static_cast<unsigned>(depth_));
                             last_was_delete_ = true;
                             depth_ = parent_depth;
-                            if (!grid_.empty()) {  // deleting a root leaf empties the grid
+                            if (grid_n_ != 0) {  // deleting a root leaf empties the grid
                                 grid_[depth_].modified = true;
                             }
                             break;  // delete complete
@@ -483,10 +1042,10 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 if (!claims_absent(trie_upd)) [[unlikely]] {
                     return {};
                 }
-                if (trie_upd.current_value().empty()) {
-                    break;  // a read of a key absent from the trie, which leaves this leaf's path: nothing to insert
+                if (absent_key_noop(trie_upd)) {
+                    break;  // a read or absent-key delete: nothing to insert
                 }
-                LeafNode old_leaf{grid_[depth_].leaf};
+                LeafNode old_leaf{grid_line.leaf};
                 BranchNode bn;
 
                 if (!has_room(3)) {  // the branch and both leaves
@@ -494,48 +1053,41 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 }
                 if (cp > 0) {  // Need to put an extension before the branch
                     ExtensionNode ext_common{};
-                    std::memcpy(ext_common.path.nib.data(), grid_[depth_].leaf.path.nib.data(), cp);
-                    ext_common.path.len = cp;
+                    ext_common.path = grid_line.leaf.path.slice(0, cp);
 
                     // Make the line an extension and insert a branch with this extension as the parent
-                    unsigned ext_last_nib = ext_common.path[cp - 1];
-                    transform_line(grid_[depth_], std::move(ext_common));
+                    unsigned ext_last_nib = ext_common.path.at(cp - 1);
+                    transform_line(grid_line, std::move(ext_common));
                     search_nib_cursor_ += cp;
-                    insert_line(ext_last_nib, depth_, std::move(bn));  // sets the depth_ at the branch after
+                    insert_line(ext_last_nib, static_cast<unsigned>(depth_), std::move(bn), &grid_line);  // sets the depth_ at the branch after
                 } else {
                     // Make the line a branch
-                    transform_line(grid_[depth_], std::move(bn));
+                    transform_line(grid_line, std::move(bn));
                 }
-                old_leaf.path.len = old_leaf.path.len - cp - 1;  // cp: extension, 1: branch
-                old_leaf.parent_slot = old_leaf.path[cp];
-
-                // Shift the nibble array left by cp + 1
-                if (old_leaf.path.len > 0) {
-                    std::memmove(old_leaf.path.nib.data(),
-                                 old_leaf.path.nib.data() + cp + 1,
-                                 static_cast<size_t>(old_leaf.path.len));
-                }
+                old_leaf.parent_slot = old_leaf.path.at(cp);  // cp: extension, 1: branch
+                old_leaf.path = old_leaf.path.slice(cp + 1, old_leaf.path.len - cp - 1);
                 // Insert the leaves to the branch (which is at depth_ now) as parent
                 auto parent_depth = depth_;
+                auto* br = &grid_[parent_depth];  // grid_line itself when cp == 0
                 auto l = make_cur_leaf(trie_upd.current_value());  // sets parent_slot too at l, with first nib
-                insert_line(old_leaf.parent_slot, parent_depth, std::move(old_leaf));
-                grid_[depth_].modified = true;
-                insert_line(l.parent_slot, parent_depth, std::move(l));
-                grid_[depth_].modified = true;
+                insert_line(old_leaf.parent_slot, static_cast<unsigned>(parent_depth), std::move(old_leaf), br);
+                grid_.back().modified = true;  // the new leaf, depth_ now names it
+                insert_line(l.parent_slot, static_cast<unsigned>(parent_depth), std::move(l), br);
+                grid_.back().modified = true;
                 break;  // insertion complete
             }
         }
     }
 
-    while (grid_.size() > 1) {
-        fold_line(grid_.size() - 1);
+    while (grid_n_ > 1) {
+        fold_line(static_cast<unsigned>(grid_n_ - 1));
     }
 
-    if (grid_.size() == 0) {
+    if (grid_n_ == 0) {
         return kEmptyRoot;
     }
     fold_line(0);
-    if (grid_.empty()) {
+    if (grid_n_ == 0) {
         return kEmptyRoot;
     }
     // An unmodified root is the node verified to hash to prev_root_.
@@ -569,7 +1121,7 @@ void GridMPT<DeletionEnabled, StateT>::init_from_root(bytes32 previous_root_hash
             sys_println("{\"err\":\"no_rlp\"}");
             return;
         }
-        root_unfolded_ = unfold_node_from_rlp(*rlp, 0, 0);
+        root_unfolded_ = unfold_node_from_rlp(*rlp, 0, 0, nullptr);
         if (!root_unfolded_) [[unlikely]] {
             failed_ = true;
             sys_println("{\"err\":\"init_from_root: malformed root rlp\"}");

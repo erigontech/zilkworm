@@ -44,7 +44,7 @@ void fill_full_branch(uint8_t* at, std::mt19937_64& rng) {
 BranchNode unfold(const uint8_t* node, size_t size, size_t header = 3) {
     BranchNode b;
     bool is_leaf{};
-    std::array<uint8_t, 64> path{};
+    nibbles64 path{};
     uint8_t plen{};
     ByteView second{};
     REQUIRE(decode_node(ByteView{node + header, size - header}, b, is_leaf, path, plen, second) == kBranch);
@@ -162,9 +162,7 @@ TEST_CASE("full branch hash: branches it does not take", "[trie][gridmpt][kprefi
         CHECK_FALSE(hashes_from_witness(b));
     }
     SECTION("a 532-byte branch with a 4-byte list header") {
-        // fa 00 02 10: a length with a leading zero, which fast_decode_header() takes. 15 hash
-        // references and an embedded node of 32 bytes (df and 31 bytes) fill 527 bytes, so the node
-        // is 532 bytes with every slot of length class 32, but its slots are not at 3 + 33 i.
+        // fa 00 02 10 passes fast_decode_header; 15 hash refs + a 32-byte cell fill 527 bytes, but the cell is rejected.
         uint8_t* const p = buf;
         p[0] = 0xfa;
         p[1] = 0x00;
@@ -182,13 +180,11 @@ TEST_CASE("full branch hash: branches it does not take", "[trie][gridmpt][kprefi
         }
         p[o++] = 0x80;
         REQUIRE(o == kNode);
-        BranchNode b = unfold(p, kNode, 4);
-        b.set_child(3, ByteView{new_hash.data(), 32});
-        CHECK(b.same_layout_as_orig());
-        CHECK_FALSE(hashes_from_witness(b));
-        // encode_branch() walks the slots: slot 3's hash is at 4 + 33 * 3 + 1.
-        Bytes want{ByteView{p, kNode}};
-        std::memcpy(want.data() + 4 + 33 * 3 + 1, new_hash.data(), 32);
-        CHECK(Bytes{encode_branch(b)} == want);
+        bool is_leaf{};
+        nibbles64 path{};
+        uint8_t plen{};
+        ByteView second{};
+        BranchNode b;
+        REQUIRE(decode_node(ByteView{p + 4, kNode - 4}, b, is_leaf, path, plen, second) == kInvalid);
     }
 }

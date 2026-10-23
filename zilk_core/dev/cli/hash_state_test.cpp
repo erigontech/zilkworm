@@ -248,7 +248,7 @@ struct TestAccount {
 LeafNode make_leaf(const uint8_t* nib, uint8_t len, ByteView value) {
     LeafNode l{};
     l.path.len = len;
-    std::memcpy(l.path.nib.data(), nib, len);
+    for (uint8_t i = 0; i < len; ++i) l.path.set(i, nib[i]);
     l.value = value;
     return l;
 }
@@ -256,7 +256,7 @@ LeafNode make_leaf(const uint8_t* nib, uint8_t len, ByteView value) {
 ExtensionNode make_ext(const uint8_t* nib, uint8_t len, ByteView child_ref) {
     ExtensionNode e{};
     e.path.len = len;
-    std::memcpy(e.path.nib.data(), nib, len);
+    for (uint8_t i = 0; i < len; ++i) e.path.set(i, nib[i]);
     e.set_child(child_ref);  // 32-byte ref -> hash child; <32 -> embedded inline child
     return e;
 }
@@ -1926,11 +1926,16 @@ TEST_CASE("HashState apply_code_diff keeps the storage of a cleared EIP-7702 del
 // secured_trie_path). The sweep used to skip such a node silently.
 TEST_CASE("HashState build_state_from_trie rejects a trie path longer than the key", "[hash_state]") {
     HashState hs;
-    std::array<uint8_t, 66> nib{};
-    nib.fill(0x3);
     const Bytes accv = account_leaf_value(1, silkworm::kEmptyRoot);
-    const LeafNode leaf = make_leaf(nib.data(), 65, ByteView{accv});
-    const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_leaf(leaf)});
+    // raw encode: packed nibbles64 holds 64 only
+    Bytes hp(33, 0x33);  // odd leaf: flag nibble, 32 packed bytes
+    Bytes payload;
+    silkworm::rlp::encode(payload, ByteView{hp});
+    silkworm::rlp::encode(payload, ByteView{accv});
+    Bytes leaf_rlp;
+    silkworm::rlp::encode_header(leaf_rlp, {.list = true, .payload_length = payload.size()});
+    leaf_rlp += payload;
+    const evmc::bytes32 root = hs.add_node(ByteView{leaf_rlp});
     CHECK(hs.build_state_from_trie(root) == HashState::BuildStatus::kMalformed);
 }
 

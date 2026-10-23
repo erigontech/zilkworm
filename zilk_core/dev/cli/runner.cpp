@@ -8,15 +8,29 @@
 #include <fstream>
 #include <iostream>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "../state_transition.hpp"
 #include <zilk_core/core/common/bytes.hpp>
+#include <zilk_core/core/common/endian.hpp>
+#include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/types_zz/flat_bundle.hpp>
 
 using namespace silkworm::cmd::state_transition;
 
 namespace {
+
+// Guest public-values layout (docs/architecture.md).
+std::string hex112(const StateTransition::Result& r) {
+    uint8_t pv[112];
+    silkworm::endian::store_little_u64(pv, r.gas_used);
+    std::memcpy(pv + 8, r.pre_state_root.bytes, 32);
+    std::memcpy(pv + 40, r.post_state_root.bytes, 32);
+    std::memcpy(pv + 72, r.block_hash.bytes, 32);
+    silkworm::endian::store_little_u64(pv + 104, r.chain_id);
+    return silkworm::to_hex(silkworm::ByteView{pv, sizeof(pv)});
+}
 
 int run_json_test_file(const std::string& file_path) {
     std::ifstream file(file_path);
@@ -55,6 +69,7 @@ int run_flat_bundle_file(const std::string& file_path) {
 
     auto state_transition = StateTransition(std::span<uint8_t>{blob});
     const auto result = state_transition.run();
+    std::cout << "Public Values: 0x" << hex112(result) << "\n";
     const uint64_t gas_used = result.gas_used;
     if (gas_used == StateTransition::kRunFailure) {
         std::cout << "FAIL: " << file_path << "\n";

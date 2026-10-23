@@ -4,6 +4,7 @@
 #pragma once
 
 #include <optional>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -43,6 +44,9 @@ struct FlatBundle {
     silkworm::Block genesis;
     std::vector<silkworm::ByteView> block_rlps;  // views into blob
     std::vector<silkworm::BlockHeader> ancestors;
+#ifdef ZISK
+    std::unique_ptr<uint8_t[]> prestate_heap_;  // writable copy; direct mutates only this
+#endif
     DirectState direct;
     std::string_view network;
     std::span<const uint8_t> block_flags;  // empty when absent

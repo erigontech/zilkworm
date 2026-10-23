@@ -89,7 +89,7 @@ bool unfolds_as_root(const Bytes& node) {
         DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
     DirectState direct{std::span<uint8_t>{prestate}};
     GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
-    const bool ok = trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0);
+    const bool ok = trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0, /*parent=*/nullptr);
     CHECK(trie.failed() == !ok);
     return ok;
 }
@@ -106,7 +106,7 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized extension child", "[trie][g
     GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
 
     const Bytes node = ext_node(/*child_len=*/60000);
-    CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
+    CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0, /*parent=*/nullptr));
     CHECK(trie.failed());  // rejected decode must mark the trie failed
 }
 
@@ -120,7 +120,7 @@ TEST_CASE("decode_node bounds a leaf value by the encode buffer", "[trie][gridmp
         REQUIRE(h);
         BranchNode br{};
         bool is_leaf = false;
-        std::array<uint8_t, 64> path{};
+        nibbles64 path{};
         uint8_t plen = 0;
         ByteView second{};
         const Kind kind = decode_node(payload.substr(0, h->payload_length), br, is_leaf, path, plen, second);
@@ -131,7 +131,7 @@ TEST_CASE("decode_node bounds a leaf value by the encode buffer", "[trie][gridmp
         REQUIRE(kind == kExtOrLeaf);
         REQUIRE(is_leaf);
         // Re-encoded one level down, as a moved leaf would be.
-        const LeafNode l{nibbles64{static_cast<uint8_t>(plen - 2), path}, 0, second};
+        const LeafNode l{path.slice(0, plen - 2), 0, second};
         const ByteView enc = encode_leaf(l);
         CHECK(enc.data() >= static_buffer);
         CHECK(enc.data() + enc.size() <= static_buffer + kNodeBufferSize);
@@ -145,7 +145,7 @@ TEST_CASE("unfold_node_from_rlp rejects an oversized leaf value", "[trie][gridmp
     GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
 
     const Bytes node = leaf_node(/*value_len=*/4096);
-    CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
+    CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0, /*parent=*/nullptr));
 }
 
 // A list header with 4 length bytes or more claims a payload no trie node has, and its length would
@@ -159,7 +159,7 @@ TEST_CASE("unfold_node_from_rlp rejects a node with 4 or more length bytes", "[t
     for (const uint8_t first : {uint8_t{0xFB}, uint8_t{0xFF}}) {
         Bytes node{first};
         node.append(40, 0x00);
-        CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
+        CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0, /*parent=*/nullptr));
     }
 }
 
@@ -180,7 +180,7 @@ TEST_CASE("unfold_node_from_rlp rejects a branch with a value", "[trie][gridmpt]
     Bytes node;
     silkworm::rlp::encode_header(node, {.list = true, .payload_length = inner.size()});
     node.append(inner);
-    CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0));
+    CHECK_FALSE(trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0, /*parent=*/nullptr));
 }
 
 // Keys are 64 nibbles, and a witness node is bound only to the hash that referenced it, so a path whose

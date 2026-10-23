@@ -21,7 +21,7 @@ Ethereum block was executed correctly, without requiring re-execution of the blo
 
 Zilkworm is written in C++ (with a Rust orchestration layer) building on past works within Silkworm and EVMOne to run on
 zkVM provers with native support for RISC-V targets (e.g. rv32im).
-At the moment, the zkVM integrated is Succint's SP1 Hypercube.
+At the moment, the zkVMs integrated are Succint's SP1 Hypercube and ZisK (`prover/guest_zisk`, `prover/prover_zisk`).
                                                                                                                                                                                             
 ## High-Level Workflow
 

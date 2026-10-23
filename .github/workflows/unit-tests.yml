@@ -146,7 +146,10 @@ jobs:
         run: cmake --build build --target zilkworm.tests
 
       - name: Run unit tests
-        run: ctest --test-dir build --output-on-failure --parallel
+        run: |
+          # ASan frame inflation: deep EVM recursion overflows
+          ulimit -s 65536
+          ctest --test-dir build --output-on-failure --parallel
 
       - name: Upload test logs
         if: always()

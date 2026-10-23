@@ -67,18 +67,24 @@ elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES ".*Clang$")
     add_link_options(-fprofile-instr-generate -fcoverage-mapping)
   endif()
 
+  # tables exceed clang's constexpr step budget
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fconstexpr-steps=16777216>)
+
   # configure libc++ (skip for bare-metal cross-compilation)
+  # libc++ is opt-in on Linux
   if(NOT SILKWORM_WASM_API AND NOT CMAKE_SYSTEM_NAME STREQUAL "Generic")
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
-    # std::views::join is experimental on clang < 18 and Apple clang < 16
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18)
-      add_compile_options(-fexperimental-library)
+    if(APPLE OR SILKWORM_USE_LIBCXX)
+      add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
+      # std::views::join is experimental on clang < 18 and Apple clang < 16
+      if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18)
+        add_compile_options(-fexperimental-library)
+      endif()
+      if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+        add_compile_options(-fexperimental-library)
+      endif()
+      link_libraries(c++)
+      link_libraries(c++abi)
     endif()
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-      add_compile_options(-fexperimental-library)
-    endif()
-    link_libraries(c++)
-    link_libraries(c++abi)
   endif()
 
 else()
@@ -117,11 +123,13 @@ else()
   endif()
 
   # https://clang.llvm.org/docs/SafeStack.html
+  # safe-stack conflicts with manually injected sanitizers
   if("${CMAKE_CXX_COMPILER_ID}" MATCHES ".*Clang$"
      AND NOT SILKWORM_WASM_API
      AND NOT SILKWORM_SANITIZE
      AND NOT SILKWORM_FUZZER
      AND NOT CMAKE_SYSTEM_NAME STREQUAL "Generic"
+     AND NOT "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS}" MATCHES "fsanitize="
   )
     add_compile_options(-fsanitize=safe-stack)
     add_link_options(-fsanitize=safe-stack)

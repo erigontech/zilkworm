@@ -443,7 +443,7 @@ bool unfolds_at(const uint8_t* node, size_t size, unsigned misalign) {
     GridMPT<false, DirectState> trie{direct, silkworm::kEmptyRoot};
     Placed p{size, misalign};
     std::memcpy(p.at, node, size);
-    return trie.unfold_node_from_rlp(ByteView{p.at, size}, /*parent_slot=*/0, /*parent_depth=*/0);
+    return trie.unfold_node_from_rlp(ByteView{p.at, size}, /*parent_slot=*/0, /*parent_depth=*/0, /*parent=*/nullptr);
 }
 
 Bytes list_of(const Bytes& inner) {

@@ -6,9 +6,8 @@
 
 #include <zilk_core/core/common/util.hpp>
 
-// The Airbender guest is single-threaded bare metal, where thread_local goes through emulated TLS
-// (a call to __emutls_get_address) on every use.
-#if defined(AIRBENDER)
+// Single-threaded guests; thread_local would pay emulated TLS.
+#if defined(AIRBENDER) || defined(ZISK)
 #define ZILK_ENDIAN_SCRATCH static
 #else
 #define ZILK_ENDIAN_SCRATCH thread_local

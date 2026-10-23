@@ -7,6 +7,10 @@ version = "0.1.0"
 edition = "2021"
 links = "z6m_witness_bundle"
 
+[features]
+# Rename keccak symbols clashing with zisk-sdk.
+zisk-host = []
+
 [dependencies]
 eyre = "0.6"
 

@@ -18,6 +18,16 @@ namespace {
 
 inline size_t align8(size_t v) noexcept { return (v + 7u) & ~size_t{7u}; }
 
+#ifdef ZISK
+// +64 zeroed slack for sealed code over-reads.
+std::unique_ptr<uint8_t[]> make_prestate_heap(std::span<const uint8_t> src) {
+    auto* out = new uint8_t[src.size() + 64];
+    std::memcpy(out, src.data(), src.size());
+    std::memset(out + src.size(), 0, 64);
+    return std::unique_ptr<uint8_t[]>{out};
+}
+#endif
+
 }  // namespace
 
 // Member-init order matters: blob first, direct spans into blob.
@@ -32,17 +42,26 @@ FlatBundle::FlatBundle(std::span<uint8_t> blob_in,
       genesis{std::move(genesis_in)},
       block_rlps{std::move(block_rlps_in)},
       ancestors{std::move(ancestors_in)},
+#ifdef ZISK
+      /* Writable section copied; rest read in place. */
+      prestate_heap_{make_prestate_heap(blob_in.subspan(prestate_off, prestate_size))},
+      direct{
+          std::span<uint8_t>{prestate_heap_.get(), prestate_size},
+          nodestore_size > 0
+              ? std::span<uint8_t>{blob_in.data() + nodestore_off, nodestore_size}
+              : std::span<uint8_t>{}},
+#else
       direct{
           std::span<uint8_t>{blob.data() + prestate_off, prestate_size},
           nodestore_size > 0
               ? std::span<uint8_t>{blob.data() + nodestore_off, nodestore_size}
               : std::span<uint8_t>{}},
+#endif
       network{network_size > 0
                   ? std::string_view{
                         reinterpret_cast<const char*>(blob.data() + network_off),
                         network_size}
-                  : std::string_view{}} {
-}
+                  : std::string_view{}} {}
 
 std::vector<uint8_t> build_flat_bundle(
     silkworm::ByteView genesis_rlp,

@@ -37,6 +37,7 @@ std::optional<Bytes> ecrec_run(ByteView input) noexcept {
     if (!input.empty()) std::copy_n(input.data(), std::min(input.size(), d.size()), d.begin());
 
     const auto v{intx::be::unsafe::load<intx::uint256>(&d[32])};
+#if !defined(ZISK)
     const auto r{intx::be::unsafe::load<intx::uint256>(&d[64])};
     const auto s{intx::be::unsafe::load<intx::uint256>(&d[96])};
 
@@ -44,6 +45,7 @@ std::optional<Bytes> ecrec_run(ByteView input) noexcept {
     if (!is_valid_signature(r, s, homestead)) {
         return Bytes{};
     }
+#endif  // ZISK body re-checks r,s in malleable mode
 
     if (v != 27 && v != 28) {
         return Bytes{};

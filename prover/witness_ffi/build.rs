@@ -188,6 +188,17 @@ fn main() {
             .unwrap();
         let status = ar.wait().expect("ar did not run");
         assert!(status.success(), "ar -M failed to merge archives");
+
+        // zisk-sdk's libziskc exports these too.
+        if env::var_os("CARGO_FEATURE_ZISK_HOST").is_some() {
+            let status = Command::new("objcopy")
+                .arg("--redefine-sym=ethash_keccak256=z6m_ethash_keccak256")
+                .arg("--redefine-sym=ethash_keccak256_32=z6m_ethash_keccak256_32")
+                .arg(&merged)
+                .status()
+                .expect("failed to spawn objcopy");
+            assert!(status.success(), "objcopy failed to rename keccak symbols");
+        }
     }
 
     println!("cargo:rustc-link-search=native={}", merged_dir.display());

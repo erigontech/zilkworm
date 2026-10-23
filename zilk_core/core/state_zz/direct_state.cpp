@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include <evmone/test/state/state_diff.hpp>
 #include <evmone_precompiles/keccak.hpp>
@@ -290,7 +291,7 @@ namespace {
         while (len > 0) {
             const std::ptrdiff_t half = len >> 1;
             S* const mid = first + half;
-            const int c = std::memcmp(mid->key, key.bytes, 32);
+            const int c = ::zilkworm::cmp_bytes32(mid->key, key.bytes);
             if (c < 0) {
                 first = mid + 1;
                 len = len - half - 1;
@@ -309,30 +310,45 @@ namespace {
         return ::zilkworm::lt_bytes32(a, b);
     }
 
-    // SOUNDNESS-CRITICAL: the entries of an MphfMap must tile its data section exactly as the
-    // MphfBuilder lays them out — contiguous from offset 8 (the reserved sentinel it leaves so
-    // slot_offsets[idx] == 0 means "empty"), each 8-aligned, with no gaps and no overlaps.
-    // find() and for_each() read bodies in place and sanitize() and the EVM write through the
-    // addr-map bodies, so an entry whose body overlapped another's would let a write into one
-    // change the other after it was bound. Checked once, before anything is written; validate_mphf
-    // has already bounded every entry inside the data region, so each [len] read here is in range.
-    [[nodiscard]] bool mphf_entries_tile(const MphfMap& m) {
-        if (!m.valid() || m.n_keys() == 0) return true;
-        std::vector<uint32_t> offsets;
-        offsets.reserve(m.n_keys());
-        m.for_each_offset([&](uint64_t off) { offsets.push_back(static_cast<uint32_t>(off)); });
-        std::sort(offsets.begin(), offsets.end());
-        const uint8_t* const data = m.data_base();
-        uint64_t expect = 8u;  // data[0..8) is the sentinel the builder reserves
-        for (const uint32_t off : offsets) {
-            if (off != expect) return false;  // a gap, an overlap, or a misaligned start
-            const uint64_t body_len = load_u64_le(data + off);
-            expect = off + mphf_align8(static_cast<uint32_t>(8u + body_len));
-        }
-        return expect == m.data_size();
-    }
-
 }  // namespace
+
+// SOUNDNESS-CRITICAL: the entries of an MphfMap must tile its data section exactly as the
+// MphfBuilder lays them out — contiguous from offset 8 (the reserved sentinel it leaves so
+// slot_offsets[idx] == 0 means "empty"), each 8-aligned, with no gaps and no overlaps.
+// find() and for_each() read bodies in place and sanitize() and the EVM write through the
+// addr-map bodies, so an entry whose body overlapped another's would let a write into one
+// change the other after it was bound. Checked once, before anything is written, by walking
+// the chain the builder writes (self-bounded reads) and taking its marks with the map's own
+// offsets: equal counts rule out a gap, an overlap, a duplicate and a stray alike.
+[[nodiscard]] bool mphf_entries_tile(const MphfMap& m) noexcept {
+    if (!m.valid() || m.n_keys() == 0) return true;
+    const uint8_t* const data = m.data_base();
+    const uint32_t data_size = m.data_size();
+    // Marks chain starts; offsets take them.
+    std::vector<uint8_t> seen(data_size / 64 + 1, 0);
+    uint32_t off = 8u;  // data[0..8) is the sentinel the builder reserves
+    uint32_t chain = 0;
+    while (off < data_size) {
+        if (data_size - off < 8u) return false;  // no room left for the [len] word
+        const uint64_t body_len = load_u64_le(data + off);
+        if (body_len > data_size - off - 8u) return false;
+        seen[(off >> 3) >> 3] |= static_cast<uint8_t>(uint8_t{1} << ((off >> 3) & 7u));
+        ++chain;
+        off += mphf_align8(static_cast<uint32_t>(8u + body_len));
+    }
+    if (off != data_size) return false;
+    uint32_t hits = 0, visits = 0;
+    m.for_each_offset([&](uint64_t o) {
+        ++visits;
+        if ((o & 7u) != 0 || o >= data_size) return;
+        uint8_t& word = seen[(o >> 3) >> 3];
+        const uint8_t mask = static_cast<uint8_t>(uint8_t{1} << ((o >> 3) & 7u));
+        if ((word & mask) == 0) return;
+        word &= static_cast<uint8_t>(~mask);
+        ++hits;
+    });
+    return hits == chain && visits == chain;
+}
 
 namespace detail {
     // Forces single-pass linkers to pull this TU when direct_state_builder.cpp is.
@@ -366,7 +382,7 @@ DirectState::DirectState(std::span<uint8_t> prestate_bytes,
             std::abort();
         }
         node_store_map_.reset(reinterpret_cast<MphfMapHeader*>(nodestore_bytes.data()));
-        node_verified_.assign((node_store_map_.data_size() / 8 + 31) / 32, 0u);
+        node_verified_.assign((node_store_map_.data_size() / 8 + 63) / 64, 0u);
 #if USE_HASH_KEY
         // The states are written before they are read (verify_and_snap()); only the tags need clearing.
         walk_states_.reset(new kprefix::StateRow[kprefix::kAddrRows]);
@@ -873,7 +889,7 @@ std::optional<evmc::bytes32> DirectState::state_root_hash() const {
 void DirectState::apply_state_diff(const evmone::state::StateDiff& diff) {
     for (const auto& m : diff.modified_accounts) {
         // The handle is the record of get_account(), which find_or_create_account() would return.
-#if !defined(AIRBENDER)
+#if !defined(AIRBENDER) && !defined(ZISK)
         check_account_handle(m.addr, m.view_handle);
 #endif
         auto* pa = m.view_handle ? const_cast<Account*>(static_cast<const Account*>(m.view_handle))
@@ -924,7 +940,7 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
             // through, as check_root's walks keep theirs: an SSTORE after the SLOAD of a key changes that slot, and
             // check_root's fold of the branch then resumes from the state (see take_walk_state()).
             auto rlp = find_node_rlp(node_hash, [&]() noexcept {
-                return kprefix::SnapRequest{depth < 64 ? want[depth] : kprefix::kNoSlot, kprefix::kAddrRow};
+                return kprefix::SnapRequest{depth < 64 ? want.at(depth) : kprefix::kNoSlot, kprefix::kAddrRow};
             });
             if (!rlp) return std::unexpected{WalkMiss::kInvalid};  // witness incomplete
             node_rlp = *rlp;
@@ -936,22 +952,21 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
 
         BranchNode br{};
         bool is_leaf = false;
-        std::array<uint8_t, 64> ext_path{};
+        nibbles64 ext_path{};
         uint8_t plen = 0;
         ByteView second{};
-        const Kind kind = decode_node(nbody, br, is_leaf, ext_path, plen, second);
+        unsigned mask = 0;
+        const Kind kind = decode_node(nbody, br, is_leaf, ext_path, plen, second, mask);
         if (kind == ::zilkworm::kInvalid) return std::unexpected{WalkMiss::kInvalid};
 
         if (kind == kBranch) {
             if (depth >= 64) return std::unexpected{WalkMiss::kInvalid};
-            const uint8_t nib = want[depth];
-            if ((br.mask & (1u << nib)) == 0) return std::unexpected{WalkMiss::kAbsent};  // 0x80 child
+            const uint8_t nib = want.at(depth);
+            if ((mask & (1u << nib)) == 0) return std::unexpected{WalkMiss::kAbsent};  // 0x80 child
             const uint8_t clen = br.child_len[nib];
             ++depth;
             if (clen == 32) {
-                // child_ptr set only for 0xa0 hash refs
-                const uint8_t* href = br.child_ptr[nib] ? br.child_ptr[nib] : br.child[nib].bytes;
-                std::memcpy(node_hash.bytes, href, 32);
+                std::memcpy(node_hash.bytes, branch_hash_src(br, nib), 32);
                 node_is_embedded = false;
             } else {
                 std::memcpy(embedded_scratch.data(), br.child[nib].bytes, clen);
@@ -963,7 +978,7 @@ DirectState::walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& wan
 
         if (depth + plen > 64) return std::unexpected{WalkMiss::kInvalid};
         for (uint8_t i = 0; i < plen; ++i) {
-            if (want[depth + i] != ext_path[i]) return std::unexpected{WalkMiss::kAbsent};  // path diverges
+            if (want.at(depth + i) != ext_path.at(i)) return std::unexpected{WalkMiss::kAbsent};  // path diverges
         }
         depth += plen;
 
@@ -998,9 +1013,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     }
     if (recovery_ended_) return nullptr;  // a later block: the address is absent, see end_recovery()
 
-    // Account-trie pre-root = parent block's state_root. get_account has no
-    // header context here; the highest-numbered header in headers_ is the
-    // pre-state parent (ancestors are inserted before execution).
+    // Pre-root: highest header = pre-state parent.
     const BlockHeader* parent = nullptr;
     for (const auto& [h, hdr] : headers_) {
         if (!parent || hdr.number > parent->number) parent = &hdr;
@@ -1046,10 +1059,7 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     sys_println("USE_HASH_KEY: recovered account " +
                 to_hex(ByteView{addr.bytes, sizeof(addr.bytes)}, true) +
                 " from node-store (preimage missing from keys)");
-    // The leaf is already in prev_root; this account is treated as a
-    // read-only prestate account (not in addr_hashes / created), so it is
-    // intentionally excluded from the state-root recompute updates. Cache
-    // the owned copy so the returned pointer outlives the call.
+    // Read-only prestate account; excluded from recompute.
     const Account* ret = acc.get();
     recovered_accounts_.push_back(std::move(acc));
     return ret;
@@ -1115,6 +1125,155 @@ std::optional<intx::uint256> DirectState::total_difficulty(uint64_t, const evmc:
     return std::nullopt;
 }
 
+#if defined(ZISK)
+namespace {
+constexpr uint32_t kCpGMaxM = 256;  // chain capped at 256 blocks
+constexpr uint32_t kCpGMaxEnt = 4096;
+constexpr uint32_t kCpGTabBits = 13;
+constexpr uint32_t kCpGTabSize = 1u << kCpGTabBits;
+constexpr uint32_t kCpGNil = 0xFFFFFFFFu;
+struct CpGEnt {
+    const uint8_t* p;
+    uint32_t L;
+    uint32_t m;
+    uint32_t kstar;
+    uint64_t hb1;
+    uint32_t next;
+};
+CpGEnt cp_g_ents[kCpGMaxEnt];
+uint32_t cp_g_tab[kCpGTabSize];  // head index + 1; 0 empty
+uint32_t cp_g_used[kCpGMaxEnt];  // slots holding heads, so reset costs no table clear
+uint32_t cp_g_nused = 0;
+uint32_t cp_g_n = 0;
+alignas(8) uint64_t cp_g_state[size_t{kCpGMaxM} * 25];
+uint32_t cp_g_epoch[kCpGMaxM];
+uint32_t cp_g_list[kCpGMaxEnt];
+
+constexpr uint64_t kCpGHbMul[5] = {0x9E3779B97F4A7C15ull, 0xBF58476D1CE4E5B9ull,
+                                   0x94D049BB133111EBull, 0xD6E8FEB86659FD93ull,
+                                   0xA0761D6478BD642Full};
+
+bool cp_g_blk_eq136(const uint8_t* a, const uint8_t* b) {
+    const uint64_t* wa = reinterpret_cast<const uint64_t*>(a);
+    const uint64_t* wb = reinterpret_cast<const uint64_t*>(b);
+    for (uint32_t w = 0; w < 17; ++w)
+        if (wa[w] != wb[w])
+            return false;
+    return true;
+}
+
+void cp_g_reset() {
+    cp_g_n = 0;
+    cp_g_nused = 0;
+}
+
+/// Defer whole-block 8-aligned entries; others hash now.
+[[gnu::noinline]] bool cp_g_collect(const uint8_t* body, size_t body_len) {
+    if (body_len < 168 || cp_g_n >= kCpGMaxEnt)
+        return false;
+    const uint8_t* const p = body + 32;
+    if (((reinterpret_cast<uintptr_t>(p)) & 7) != 0)
+        return false;
+    const uint32_t L = static_cast<uint32_t>(body_len - 32);
+    // exact uint32; wrap only bounds reuse
+    const uint32_t m = static_cast<uint32_t>((uint64_t{L} * 2069668946402ull) >> 48);  // L/136
+    if (m > kCpGMaxM)
+        return false;
+    const uint64_t* const w = reinterpret_cast<const uint64_t*>(p);
+    const uint64_t hb = w[0] * kCpGHbMul[0] ^ w[4] * kCpGHbMul[1] ^ w[8] * kCpGHbMul[2] ^
+                        w[12] * kCpGHbMul[3] ^ w[16] * kCpGHbMul[4];
+    CpGEnt& e = cp_g_ents[cp_g_n];
+    e.p = p;
+    e.L = L;
+    e.m = m;
+    e.kstar = 0;
+    e.hb1 = hb;
+    const uint64_t x = (hb ^ (hb >> 32)) * kCpGHbMul[1];
+    uint32_t s = static_cast<uint32_t>(x >> (64 - kCpGTabBits));
+    for (uint32_t probe = 0; probe < kCpGTabSize; ++probe) {
+        const uint32_t h = cp_g_tab[s];
+        if (h == 0) {
+            e.next = kCpGNil;
+            cp_g_tab[s] = cp_g_n + 1;
+            cp_g_used[cp_g_nused++] = s;
+            ++cp_g_n;
+            return true;
+        }
+        if (cp_g_ents[h - 1].hb1 == hb) {
+            e.next = h - 1;
+            cp_g_tab[s] = cp_g_n + 1;
+            ++cp_g_n;
+            return true;
+        }
+        s = (s + 1) & (kCpGTabSize - 1);
+    }
+    return false;  // probe run full: hash now
+}
+
+// Reuse needs adjacent full-byte compare chains.
+[[gnu::noinline]] bool cp_g_run() {
+    bool ok = true;
+    for (uint32_t u = 0; u < cp_g_nused; ++u) {
+        const uint32_t s = cp_g_used[u];
+        const uint32_t head = cp_g_tab[s];
+        cp_g_tab[s] = 0;
+        if (head == 0)
+            continue;
+        uint32_t len = 0;
+        for (uint32_t c = head - 1; c != kCpGNil; c = cp_g_ents[c].next)
+            cp_g_list[len++] = c;
+        for (uint32_t j = 1; j < len; ++j) {
+            CpGEnt& e = cp_g_ents[cp_g_list[j]];
+            const CpGEnt& q = cp_g_ents[cp_g_list[j - 1]];
+            if (!cp_g_blk_eq136(e.p, q.p))
+                continue;
+            uint32_t k = 1;
+            const uint32_t mm = e.m < q.m ? e.m : q.m;
+            while (k < mm && cp_g_blk_eq136(e.p + size_t{k} * 136, q.p + size_t{k} * 136))
+                ++k;
+            e.kstar = k;
+        }
+        if (len == 1) {
+            const CpGEnt& e = cp_g_ents[cp_g_list[0]];
+            const auto h =
+                silkworm::keccak256(FlatKv::payload(ByteView{e.p - 32, e.L + 32}));
+            ok &= bytes_equal<32>(h.bytes, e.p - 32);
+            continue;
+        }
+        std::memset(cp_g_epoch, 0, sizeof cp_g_epoch);
+        for (uint32_t j = 0; j < len; ++j) {
+            CpGEnt& e = cp_g_ents[cp_g_list[j]];
+            const uint8_t* const key = e.p - 32;
+            uint32_t d = e.kstar;
+            if (d != 0) {
+                const uint32_t u1 = cp_g_epoch[d - 1];
+                for (uint32_t r = u1; r < j; ++r)
+                    if (cp_g_ents[cp_g_list[r]].kstar < d) {
+                        d = 0;
+                        break;
+                    }
+            }
+            uint32_t capture_at = 0;
+            if (j + 1 < len && cp_g_ents[cp_g_list[j + 1]].kstar > d) {
+                capture_at = cp_g_ents[cp_g_list[j + 1]].kstar;
+                cp_g_epoch[capture_at - 1] = j + 1;
+            }
+            if (d == 0 && capture_at == 0) {
+                const auto h = silkworm::keccak256(FlatKv::payload(ByteView{key, e.L + 32}));
+                ok &= bytes_equal<32>(h.bytes, key);
+                continue;
+            }
+            const ethash::hash256 h = ethash::keccak256_cap(
+                e.p, e.L, d != 0 ? cp_g_state + size_t{d - 1} * 25 : nullptr, d, capture_at,
+                capture_at != 0 ? cp_g_state + size_t{capture_at - 1} * 25 : nullptr);
+            ok &= bytes_equal<32>(h.bytes, key);
+        }
+    }
+    return ok;
+}
+}  // namespace
+#endif
+
 bool DirectState::sanitize() {
     // SOUNDNESS-CRITICAL: the pre-state blob's sections lie in builder order and do not overlap —
     // meta | prestate MphfMap | addr_hashes | block_hashes | code store — each ending at or before
@@ -1170,6 +1329,9 @@ bool DirectState::sanitize() {
 #endif
     bool code_keccak_ok = true;
     const uint8_t* const code_data = code_store_map_.data();
+#if defined(ZISK)
+    cp_g_reset();
+#endif
     code_store_map_.for_each_offset([&](uint64_t off) {
 #if ZILK_SEAL_CODE_STORE
         entries_in_layout = entries_in_layout && layout.is_entry(off);
@@ -1181,9 +1343,18 @@ bool DirectState::sanitize() {
             return;
         const uint8_t* const body = code_data + off + 8u;
         const auto body_len = static_cast<size_t>(load_u64_le(code_data + off));
+#if defined(ZISK)
+        if (!cp_g_collect(body, body_len))
+            code_keccak_ok &= bytes_equal<32>(
+                silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
+#else
         code_keccak_ok &= bytes_equal<32>(
             silkworm::keccak256(FlatKv::payload(ByteView{body, body_len})).bytes, body);
+#endif
     });
+#if defined(ZISK)
+    code_keccak_ok &= cp_g_run();
+#endif
 #if ZILK_SEAL_CODE_STORE
     // Every entry is bound to its key now (the reader's bits stood for the same bytes), and the
     // seal below takes the lengths and keys; read_code() and recover_account_from_nodestore()
@@ -1248,9 +1419,18 @@ bool DirectState::sanitize() {
                 acc_walk_ok = false;
                 return;
             }
-            const w32* const from = reinterpret_cast<const w32*>(slots[s].initial);
-            w32* const to = reinterpret_cast<w32*>(slots[s].current);
-            for (size_t i = 0; i < 8; ++i) to[i] = from[i];
+            const uint8_t* const f = slots[s].initial;
+            uint8_t* const t = slots[s].current;
+            if (((reinterpret_cast<uintptr_t>(f) | reinterpret_cast<uintptr_t>(t)) & 7) == 0) {
+                typedef uint64_t __attribute__((may_alias)) w64;
+                const w64* const from = reinterpret_cast<const w64*>(f);
+                w64* const to = reinterpret_cast<w64*>(t);
+                for (size_t i = 0; i < 4; ++i) to[i] = from[i];
+            } else {
+                const w32* const from = reinterpret_cast<const w32*>(f);
+                w32* const to = reinterpret_cast<w32*>(t);
+                for (size_t i = 0; i < 8; ++i) to[i] = from[i];
+            }
         }
     };
     if (pre_state_meta_->n_accounts > 0) {
@@ -1264,7 +1444,7 @@ bool DirectState::sanitize() {
     const uint32_t data_size = pre_state_map_.valid() ? pre_state_map_.header()->data_size : 0u;
     const uint8_t* prev_hash = nullptr;
     for (const auto& e : addr_hashes_) {
-        if (prev_hash != nullptr && std::memcmp(prev_hash, e.addr_hash, 32) >= 0) return false;
+        if (prev_hash != nullptr && ::zilkworm::cmp_bytes32(prev_hash, e.addr_hash) >= 0) return false;
         const auto h = silkworm::keccak256(ByteView{e.addr, 20});
         if (!bytes_equal<32>(h.bytes, e.addr_hash)) return false;
         if (static_cast<uint64_t>(e.entry_offset) + 8u + sizeof(Account) > data_size) return false;
@@ -1287,7 +1467,7 @@ bool DirectState::sanitize() {
 #if ZILK_SEAL_CODE_STORE
     // Every payload is hashed and every account bound to its entry: the lengths and keys are not
     // read again. Zeroing the bytes after each payload but the last pads it for the EVM in place,
-    // see code_store_seal.hpp. The region ends at the last entry, so the 36 bytes after any code
+    // see code_store_seal.hpp. The region ends at the last entry, so the 40 bytes after any code
     // in it lie in the data section.
     if (entries_in_layout) {
         uint8_t* const data = code_store_map_.data();

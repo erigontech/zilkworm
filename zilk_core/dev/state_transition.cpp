@@ -17,10 +17,12 @@
 #include <utility>
 #include <vector>
 
+
 #include <magic_enum/magic_enum.hpp>
 #include <zilk_core/core/chain/genesis.hpp>
 #include <zilk_core/core/common/test_util.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
 #include <zilk_core/core/common_zz/inline_vec.hpp>
 #include <zilk_core/core/protocol/blockchain.hpp>
 #include <zilk_core/core/protocol/param.hpp>
@@ -325,6 +327,7 @@ namespace {
         }
         zilkworm::sort_trie_nodes(storage_updates.data(), storage_updates.size());
         storage_trie.reset(wiped.storage_root);
+        storage_trie.enable_light_read_only();
         const bytes32 walked = storage_trie.calc_root_from_updates(
             {storage_updates.data(), storage_updates.size()});
         return !storage_trie.failed() && walked == wiped.storage_root;
@@ -391,7 +394,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         // Blob and created addr sets should be disjoint.
         int cur_cmp = 0;
         if (it_existing_hashes != end_it_existing && it_created_hashes != end_created_hashes) {
-            cur_cmp = std::memcmp(it_existing_hashes->addr_hash, it_created_hashes->addr_hash, 32);
+            cur_cmp = zilkworm::cmp_bytes32(it_existing_hashes->addr_hash, it_created_hashes->addr_hash);
             if (cur_cmp == 0) [[unlikely]] {
                 sys_println("Created and existing hashes clash");
                 return false;
@@ -523,6 +526,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                 storage_root = kEmptyRoot;
             }
             storage_trie.reset(storage_root);
+            storage_trie.enable_light_read_only();
             const bytes32 walked = storage_trie.calc_root_from_updates(
                 std::span<const mpt::TrieNodeFlat* const>{order.data(), order.size()});
             // A failed walk binds none of the slots.
@@ -623,6 +627,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                     }
                     zilkworm::sort_trie_nodes(storage_updates.data(), storage_updates.size());
                     storage_trie.reset(storage_root);
+                    storage_trie.enable_light_read_only();
                     storage_root = storage_trie.calc_root_from_updates(
                         {storage_updates.data(), storage_updates.size()});
                     if (storage_trie.failed()) [[unlikely]] {
@@ -647,6 +652,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         pre_root_set_ = true;
     }
     zilkworm::GridMPT<true, DirectState> acc_trie(direct_state, prev_root);
+    acc_trie.enable_light_read_only();
     auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
     sys_println(("New Root: " + to_hex(new_root)).c_str());
     // A failed walk returns a zero root, which would match a header committing to one.

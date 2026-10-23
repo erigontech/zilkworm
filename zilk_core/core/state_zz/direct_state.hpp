@@ -96,6 +96,9 @@ struct CodeStoreVerified {
 };
 extern CodeStoreVerified g_code_store_verified;
 
+/// Whether entries tile the map's data section.
+[[nodiscard]] bool mphf_entries_tile(const MphfMap& m) noexcept;
+
 // Sentinel: in-block created code; look up via created_code_[key8].
 inline constexpr uint32_t kCreatedCodeOffset = ~uint32_t{0};
 
@@ -132,7 +135,7 @@ class DirectState : public BlockState {
     /// and its keccak matched the key, see find_node_rlp(). Lazily verifying what is used costs
     /// the hashing of only those nodes; sanitize() hashed every node of the witness, a tenth of
     /// which no block ever unfolds.
-    mutable std::vector<uint32_t> node_verified_;
+    mutable std::vector<uint64_t> node_verified_;
     MphfMap code_store_map_;
 #if ZILK_SEAL_CODE_STORE
     /// Set once sanitize() has zeroed the bytes after each code-store payload, which takes the
@@ -314,7 +317,7 @@ class DirectState : public BlockState {
 
     void apply_state_diff(const evmone::state::StateDiff& diff);
 
-#if !defined(AIRBENDER)
+#if !defined(AIRBENDER) && !defined(ZISK)
     /// Host builds check every account handle against the lookup it replaces, so the whole test
     /// suite exercises the invariant that the handle is the record of `addr`.
     void check_account_handle(const evmc::address& addr, const void* handle) const noexcept {
@@ -586,8 +589,8 @@ DirectState::find_node_rlp_impl(const uint8_t (&node_hash)[32], [[maybe_unused]]
         // The bit is the body offset / 8: validate_mphf rejects any entry not 8-aligned, so no two
         // bodies share one.
         const auto bit = static_cast<uint32_t>(b->data() - node_store_map_.data_base()) >> 3;
-        auto& word = node_verified_[bit >> 5];
-        const auto mask = uint32_t{1} << (bit & 31);
+        auto& word = node_verified_[bit >> 6];
+        const auto mask = uint64_t{1} << (bit & 63);
         if ((word & mask) == 0) {
             const ByteView payload = FlatKv::payload(ByteView{b->data(), b->size()});
             // The snapshot hash is the same keccak of the same bytes, compared in full all the same.
@@ -756,7 +759,7 @@ class DirectStateView final : public evmone::state::StateView {
     /// A null handle (access-list placeholder, account made by CREATE) takes the lookup.
     evmc::bytes_view get_account_code_at(const void* handle, const evmc::address& addr) const noexcept override {
         if (handle == nullptr) return get_account_code(addr);
-#if !defined(AIRBENDER)
+#if !defined(AIRBENDER) && !defined(ZISK)
         state_.check_account_handle(addr, handle);
 #endif
         return state_.read_code(*static_cast<const zilkworm::Account*>(handle));
@@ -765,7 +768,7 @@ class DirectStateView final : public evmone::state::StateView {
     evmc::bytes32 get_storage_at(const void* handle, const evmc::address& addr,
                                  const evmc::bytes32& key) const noexcept override {
         if (handle == nullptr) return get_storage(addr, key);
-#if !defined(AIRBENDER)
+#if !defined(AIRBENDER) && !defined(ZISK)
         state_.check_account_handle(addr, handle);
 #endif
         return state_.read_storage(*static_cast<const zilkworm::Account*>(handle), addr, key);
