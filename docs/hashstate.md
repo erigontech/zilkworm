@@ -152,8 +152,58 @@ through the node store:
 The sweep uses an explicit stack, not recursion, which keeps it safe on rv64im.
 It borrows GridMPT's unfold/fold terms but is read-only and insert-only, so it
 has none of GridMPT's delete, cascade or modified-flag machinery. It reuses the
-shared node types (`mpt.hpp`) and the free RLP decoders (`decode_node`,
-`rlp::decode_header`), and never calls a GridMPT method.
+shared `nibbles64` path type (`mpt.hpp`) and the size-safe `rlp::decode_header`,
+and never calls a GridMPT method. It decodes no whole node:
+
+- A stack frame (`HashState::SweepFrame`, 24 bytes) is a branch whose children
+  are still being visited. It holds a cursor into the branch's RLP list payload
+  (`cur`, `end`), the slot the cursor is at (`next_slot`) and the length of the
+  path down to the branch (`path_len`). Node bytes live in the input blob or in
+  `owned_bytes_` and never move, so a frame points at them directly and nothing
+  is copied. The stack is a member, reserved once for the deepest well-formed
+  trie (one frame per branch on a 64-nibble path, so at most 64 are live) and
+  cleared at every sweep entry.
+- A node is classified by the extents of its first two items, the rule
+  `decode_node` applies: exactly two items is an extension or leaf, more is a
+  branch. An extension's or leaf's two items are decoded with
+  `rlp::decode_header`, and the HP path nibbles are appended straight into the
+  sweep's path buffer (the grammar of `hp_decode`). A branch is only pushed; its
+  children are read one item at a time as the main loop reaches them, with the
+  three-case child grammar of `fill_branch_child_rlp` (`0x80` empty, `0xa0` plus
+  32 bytes a hash ref, `0xc0..0xf7` an embedded node of at most 31 payload
+  bytes) and a bounds check against the payload's end on every item. A hash ref
+  is probed in place, and an embedded child is decoded in place from the
+  parent's bytes.
+- One `nibbles64` path buffer serves the whole sweep. Each child visit resets
+  its length to the frame's `path_len` and appends the child's nibble; an
+  extension or leaf then appends its own nibbles. A write only ever lands at or
+  past the top frame's `path_len`, so the prefixes of the frames below stay
+  intact. A branch is pushed only while the path is shorter than 64 nibbles,
+  and an extension or leaf whose nibbles would pass 64 stops the descent, so
+  every write stays inside the buffer.
+- A leaf's value is decoded straight into its arena slot. An account leaf grows
+  the account arena by one `Account` (value-initialised, so every field the
+  decode does not set is zero) and `decode_trie_account` fills it in place; the
+  slot is given back when the value is not an account. A storage leaf grows the
+  storage arena by 32 bytes and right-aligns the trimmed word into them.
+
+Child validation is lazy. `decode_node` validated the child items before any
+child was visited (items 2 to 15 strictly, items 0 and 1 through the looser
+`fill_branch_child`, which tolerated a string item there), so a malformed item
+in a branch dropped the whole branch; the sweep applies the strict grammar to
+all sixteen slots and stops a branch at the first malformed item, after the
+children before it were swept. Either way the witness is malformed and
+`build_state_from_trie` returns `kMalformed`, so the block is rejected.
+
+Every shape `decode_node` rejects sets `malformed_witness_` where the sweep meets
+it: a referenced node that is not a list, a truncated or list-typed path or value
+item, a path past 64 nibbles (a branch at depth 64, or an extension or leaf that
+would pass it), a leaf with no value or one over `kMaxLeafValueSize`, an
+extension whose child is not a 32-byte string, a malformed branch child item, and
+a branch whose 17th item (its value) is not the lone `0x80` that ends the
+payload. The account and storage tries have fixed-length keys, so no branch
+carries a value. A hash-ref child absent from the node index is not malformed,
+it is a pruned boundary.
 
 The traversal lives in one private helper, `sweep(root, emit_leaf)`, and both
 kinds of pass run through it:
@@ -293,10 +343,11 @@ only this diagnostic.
 store, starting at `root`, toward `target_hash`, a 32-byte trie path (an
 `addr_hash` for the account trie, or a `slot_hash` for a storage trie). It
 returns `true` only when it proves `target_hash` absent below `root`, and
-`false` when it cannot. It uses the same decoders as the sweep
-(`rlp::decode_header` to strip the outer list header, then `decode_node` from
-`rlp_sw.hpp` for the branch / extension / leaf split), so a read confirmation
-reads trie bytes exactly the way the build did.
+`false` when it cannot. It strips the outer list header with
+`rlp::decode_header`, as the sweep does, and decodes the node with `decode_node`
+from `rlp_sw.hpp` for the branch / extension / leaf split, the same grammar the
+sweep reads item by item, so a read confirmation reads trie bytes the way the
+build did.
 
 It proves absence (returns `true`) in these cases, mirroring the sweep's own
 node handling:
@@ -1121,14 +1172,14 @@ The `build_state_from_trie` tests hand-build small account tries with the projec
 encoders (`encode_leaf`, `encode_branch` and `encode_ext` in `rlp_sw.hpp`). They add the
 referenced nodes to the store under their real keccak, run `build_state_from_trie(root)`, and
 check the account cache it produces. Using the shared encoders rather than raw RLP bytes keeps the
-fixtures canonical and readable: they are the same bytes `decode_node` reads back.
+fixtures canonical and readable: they are the same bytes the sweep reads back.
 
 `HashState build_state_from_trie account sweep` includes an embedded inline leaf E under a deep
 branch: `root[0x8]` -> extension (60 nibbles) -> `branch2` -> embedded leaf (2 nibbles, 1-byte
 value).
 
 - Embedded inline children only ever hang off a branch. An extension's child is always a 32-byte
-  hash reference, and `decode_node` rejects an inline list as an extension child.
+  hash reference; the sweep, like `decode_node`, stops at an inline list as an extension child.
 - The 60-nibble extension puts the branch deep enough that the leaf's 2-nibble remainder plus its
   1-byte value fit in fewer than 32 bytes, so the leaf is inlined into `branch2`'s RLP instead of
   being hash-referenced.
@@ -1137,6 +1188,37 @@ value).
 - Its 1-byte value is not a decodable account. A real account leaf is always longer than 32 bytes
   (it holds two 32-byte hashes), so it can never be embedded. The leaf is counted as reached but
   never cached.
+
+The sweep's frames and shared path buffer have their own fixtures:
+
+- `resets the path per child across sibling extensions`: two subtrees of the root behind
+  extensions of 50 and 2 nibbles, the long one first and ending in a branch with two leaves,
+  then a direct leaf. All four accounts key correctly only if each child visit resets the
+  shared path buffer to the root's prefix.
+- `sweeps a branch at depth 63 and stops past 64 nibbles`: a branch at depth 63 whose
+  children are empty-path leaves (HP byte `0x20`) at exactly 64 nibbles, a 63-nibble extension
+  ending in an empty-path leaf, and two malformed subtrees (a branch at depth 64, a 71-nibble
+  leaf path) that stop without emitting or touching a counter and make the build report
+  `kMalformed`. The 62- and 63-nibble extension
+  paths are 32-byte strings, the item shape a hash ref also has.
+- `stops a branch at its first malformed child item`: a hand-built branch with hash refs at
+  slots 0 and 1, a 1-byte string at slot 2 and a hash ref at slot 5. The leaves under slots 0
+  and 1 are cached, nothing under slot 5 is, no counter moves and the build reports
+  `kMalformed`: the lazy child validation described under
+  [Building state from the trie](#building-state-from-the-trie).
+- `rejects every node shape decode_node rejects`: one hand-built node per shape (a root that
+  is not a list, a branch with a non-empty, missing or over-long 17th item, a leaf with no
+  value or an oversized one, an extension with a short-string or inline-list child, a list
+  where a path belongs, an item running past its node), each expected to give `kMalformed`,
+  plus a well-formed branch with its last slot present as the control.
+- `decodes one-nibble leaf paths, hashed and embedded`: a one-nibble HP path is a single byte
+  below `0x80`, carried with no RLP header, here as a hash-referenced account leaf and as a
+  3-byte embedded storage leaf decoded in place from its branch's bytes.
+- `after a missing-root build derives the next root`: a build from an absent root followed by
+  a build from a present one on the same instance.
+- `caches nothing for an undecodable hashed leaf`: a leaf whose value is not an account is
+  counted, not cached, and the accounts swept after it land intact, so the arena slot it was
+  decoded into was given back.
 
 ### Partial-witness reads
 
