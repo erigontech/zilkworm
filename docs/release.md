@@ -40,7 +40,7 @@ The release builds the SP1 Hypercube guest twice and publishes both:
   it, both the `release/*` runs and the one `release.yml` triggers after publishing.
 
 After the release, point the `zilkworm` entry of `artifact-registry.json` in the ere-guests fork
-(`canepat/zilkworm_mfbd`) at the `stateless-validator-zilkworm-sp1-<SP1 SDK version>` assets, with their sha256 from `SHA256SUMS.txt`, and bump
+(`som/ere-v0.19.5`) at the `stateless-validator-zilkworm-sp1-<SP1 SDK version>` assets, with their sha256 from `SHA256SUMS.txt`, and bump
 the fork's version strings; the fork's corpus test and the upstream ere-guests PR resolve the
 guest through that entry. The zkevm-benchmark-workload fork then pins its `[patch]` to the new
 ere-guests fork commit.

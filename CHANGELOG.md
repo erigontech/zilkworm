@@ -2,7 +2,7 @@
 
 ## v0.1.0-alpha.7 - SP1 v6.9.0
 
-> **Draft.** Still to come before the tag: the ERE fork moves to ere v0.19.5, any further PRs, Contributors and the Commit Log.
+> **Draft.** Still to come before the tag: any further PRs, Contributors and the Commit Log.
 
 ### Highlights
 
@@ -45,6 +45,14 @@ The keys of the alpha.7 release assets are the ones its workflow derives; a loca
 - `make eest-blockchain-tests`: 12705/12705
 - `tools/scripts/release_state_root_check.sh` on the 200-block mainnet corpus: 200/200, 0 state-root mismatches
 - SP1 benchmark on the same corpus (`z6m_prover` on the v6.9.0 fork, local build): 200/200 blocks, gas used equal to the host's on every block; 17.75B cycles, 40.91B prover gas
+
+### ERE integration
+
+- The erigontech forks of `ere-guests` and `zkevm-benchmark-workload` move to ere v0.19.5 (SP1 v6.9.0) on `som/ere-v0.19.5`. The ere-guests fork takes the Ere bump of eth-act/ere-guests#103 without that PR's Nethermind guest; the workload fork's `[patch]` takes the ere-guests catalog, common and downloader crates from the ere-guests fork at one rev.
+- The `ERE Benchmark` workflow's `workload_ref` and `ere_guests_ref` default to `som/ere-v0.19.5`, whose ere resolves the SP1 v6.9.0 that `derive_vk` builds against, as `make ere-bin-link` requires.
+- The release publishes the ERE guest as `stateless-validator-zilkworm-sp1-v6.9.0.{elf,vk}`, the name ere-hosts loads under ere v0.19.5.
+- The `zilkworm` entry of the ere-guests fork's `artifact-registry.json` still names the alpha.6 SP1 v6.6.0 assets. After the release it moves to the alpha.7 assets and their sha256, and the workload fork's `[patch]` to that ere-guests commit.
+- Under ere v0.19.5 the ere-guests registry, as upstream, keeps no SP1 guest for Reth or Ethrex (theirs target SP1 v6.6.0), so the Reth leg of `make ere-compare` fails until Reth publishes an SP1 v6.9.0 guest; `make ere-validate` is unaffected.
 
 ## v0.1.0-alpha.6 - Native statelessInputBytes with the HashState backend
 
