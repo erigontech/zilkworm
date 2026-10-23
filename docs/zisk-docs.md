@@ -136,7 +136,7 @@ image at PR head 62430d056 (2026-10-08).
 git clone https://github.com/erigontech/zilkworm.git && cd zilkworm
 git checkout som/zisk-impl
 git submodule update --init --recursive
-git submodule status --recursive   # evmone 7b8fa2e6…; no '+' or '-'
+git submodule status --recursive   # evmone 9d9a007e…; no '+' or '-'
 ```
 
 The evmone pin exists only on `erigontech/zvm1` branch `som/zisk-impl-on-main`.
@@ -333,7 +333,7 @@ make eest-mfbd-build        # -> test-fixtures-cache/mfbd-3586193db06d/blockchai
 # Guest and native reference. Both default USE_HASH_KEY=ON (node-store account recovery,
 # as the Airbender guest); `make z6m_guest_zisk ZISK_USE_HASH_KEY=OFF` opts out.
 make z6m_guest_zisk         # postlink prints "ebreak->halt: 7" and the heap range
-sha256sum prover/guest_zisk/build/z6m_guest.elf   # 1190132fb0ad82d48606feb47e4ead72ca974c2cdd4c5e73039e873baa636c97
+sha256sum prover/guest_zisk/build/z6m_guest.elf   # e6828d6ab47c46aca15b5567243870cdc5ea0c8e382f435ecf6f775175b50623
 cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S . -DUSE_HASH_KEY=ON && cmake --build build --target state_transition
 ```
 
@@ -584,7 +584,7 @@ ELF matches a local one built from the same tree.
    - Make the stack paint an in-tree option.
 5. **EF zkvm-standards C API.** Later, consider moving from raw CSR shims to ZisK's
    `libziskos_staticlib.a` (`zkvm_io.h` / `zkvm_accelerators.h`).
-6. **Upstreaming.** Upstream the 59 evmone ZisK commits (`85f66c8e..7b8fa2e6`) from zvm1
+6. **Upstreaming.** Upstream the 61 evmone ZisK commits (`85f66c8e..9d9a007e`) from zvm1
    `som/zisk-impl-on-main` to `main`, then repoint the submodule.
 7. **Smaller items.**
    - Service mode against a live RPC.
