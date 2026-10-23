@@ -2,8 +2,6 @@
 
 ## v0.1.0-alpha.7 - SP1 v6.9.0
 
-> **Draft.** Still to come before the tag: any further PRs, Contributors and the Commit Log.
-
 ### Highlights
 
 This release moves Zilkworm from SP1 v6.6.0 to SP1 v6.9.0. The prover builds on `erigontech/sp1` `erigon/patches-v6.9.0`: v6.9.0 plus `prove_with_cycles`, the one commit `erigon/patches-v6.6.0` carried, cherry-picked unchanged. The ERE leg (`derive_vk` and the published ERE guest) builds on the upstream `v6.9.0` tag, the SP1 that ere v0.19.5 resolves.
@@ -20,14 +18,7 @@ The 26 syscall codes the guest emits are byte-identical in v6.6.0, v6.9.0 and th
 
 When a loadable segment's file bytes end in the middle of an 8-byte word and the segment runs on past them (`memsz > filesz`, the `.data`/`.bss` boundary), v6.6.0 zeroed that whole word while laying out the `.bss` tail, dropping the last file bytes before it; v6.9.0 keeps them. The same ELF therefore has a different initial memory image, and a different program vkey, on the two versions. In both Zilkworm guests the dropped bytes are newlib's `numempty` locale sentinel (`{CHAR_MAX, 0}`). Zeroing those two bytes in the ELF gives the same key on v6.6.0 and v6.9.0, so the loader fix is the whole difference.
 
-| ELF (sha256) | vkey on SP1 v6.6.0 | vkey on SP1 v6.9.0 |
-|---|---|---|
-| alpha.6 release `z6m_guest_hypercube_mfbd.elf` (`4bd40149`) | `0x005b7a791175720074007c3dffd34964652682c54cba11e7b03030d7fbb880e2` (published) | `0x003e1145d16c1e8db31ad51dd670b1f8a8eb21cc35eb5b9b50d148cda172cd3f` |
-| alpha.6 release `stateless-validator-zilkworm-sp1-v6.6.0.elf` (`e94aecf0`) | `0x004af2d21b4670e678cce8ae27e26fbb35095443a7fbdf119eb4321310029938` (published) | `0x001cf4a8d52aff25605e5b3e3dd0ae48651150ff56e3dbf209493814ab28f6fe` |
-| MFBD guest, local build of this release (`2182f5eb`) | `0x00f127ca1769db44b449b402dc0781b2b1fc56271144ce43a50e19b780e48151` | `0x0007f3f8b341b7489c0f1a25087c9270a8536ced378590a579f23af4581913a2` |
-| SLIB guest, local build of this release (`2efd9b3b`) | `0x001fa54aad5bc91d189302b592069034edd7cf5bcd8eca8cf264cd685e1654cf` | `0x00f8816137237db3715e99509c8b88ab5cd276958ae38a0e63dc72d9fd39151f` |
-
-The keys of the alpha.7 release assets are the ones its workflow derives; a local build has different bytes and keys.
+SP1 does not change the guest ELF bytes, only the key derived from them. This release's keys are its published `z6m_guest_hypercube_mfbd.vk` and `stateless-validator-zilkworm-sp1-v6.9.0.vk`, which the release workflow derives from the ELFs it builds; a build with another toolchain has different ELF bytes and so different keys.
 
 #### Pins
 
@@ -48,11 +39,27 @@ The keys of the alpha.7 release assets are the ones its workflow derives; a loca
 
 ### ERE integration
 
-- The erigontech forks of `ere-guests` and `zkevm-benchmark-workload` move to ere v0.19.5 (SP1 v6.9.0) on `som/ere-v0.19.5`. The ere-guests fork takes the Ere bump of eth-act/ere-guests#103 without that PR's Nethermind guest; the workload fork's `[patch]` takes the ere-guests catalog, common and downloader crates from the ere-guests fork at one rev.
+- The erigontech forks of `ere-guests` and `zkevm-benchmark-workload` move to ere v0.19.5 (SP1 v6.9.0) on `som/ere-v0.19.5` (ere-guests `9fc7e71`, workload `61dfd2d`). The ere-guests fork takes the Ere bump of eth-act/ere-guests#103 without that PR's Nethermind guest; the workload fork's `[patch]` takes the ere-guests catalog, common and downloader crates from the ere-guests fork at one rev.
 - The `ERE Benchmark` workflow's `workload_ref` and `ere_guests_ref` default to `som/ere-v0.19.5`, whose ere resolves the SP1 v6.9.0 that `derive_vk` builds against, as `make ere-bin-link` requires.
 - The release publishes the ERE guest as `stateless-validator-zilkworm-sp1-v6.9.0.{elf,vk}`, the name ere-hosts loads under ere v0.19.5.
 - The `zilkworm` entry of the ere-guests fork's `artifact-registry.json` still names the alpha.6 SP1 v6.6.0 assets. After the release it moves to the alpha.7 assets and their sha256, and the workload fork's `[patch]` to that ere-guests commit.
-- Under ere v0.19.5 the ere-guests registry, as upstream, keeps no SP1 guest for Reth or Ethrex (theirs target SP1 v6.6.0), so the Reth leg of `make ere-compare` fails until Reth publishes an SP1 v6.9.0 guest; `make ere-validate` is unaffected.
+- Under ere v0.19.5 the ere-guests registry, as in eth-act/ere-guests#103, keeps no SP1 guest for Reth or Ethrex (theirs target SP1 v6.6.0), so the Reth leg of `make ere-compare` fails until Reth publishes an SP1 v6.9.0 guest; `make ere-validate` is unaffected. The ERE benchmark that `release.yml` runs after publishing therefore has `compare` off for this release: it validates the Zilkworm guest without the cost comparison against Reth.
+
+### Contributors
+
+| Author | Commits |
+|---|---|
+| Somnath Banerjee @somnergy | 2 |
+
+### Commit Log by Category (2 non-merge commits since v0.1.0-alpha.6)
+
+#### SP1
+
+- `a228e18` prover: move SP1 to v6.9.0 on erigon/patches-v6.9.0 (Somnath Banerjee @somnergy)
+
+#### ERE, CI/CD & Release
+
+- `08b5520` release: run the ERE benchmark on the ere v0.19.5 forks (Somnath Banerjee @somnergy)
 
 ## v0.1.0-alpha.6 - Native statelessInputBytes with the HashState backend
 

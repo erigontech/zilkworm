@@ -211,7 +211,8 @@ Zilkworm guest in place of the EEST spec guest.
   `z6m_guest_hypercube_mfbd` (DirectState, MFBD bundles) and the handbook-named
   `stateless-validator-zilkworm-sp1-<SP1 SDK version>` (HashState, the ERE guest).
 - **Inputs:** `guest_source`, `release_tag`, `catalog_url` (default Sepolia),
-  `batch_count` (default 1), `compare` (default off; on for releases),
+  `batch_count` (default 1), `compare` (default off; also off for releases
+  while ere-guests registers no Reth SP1 v6.9.0 guest),
   `workload_ref` / `ere_guests_ref` (default `som/ere-v0.19.5` on the
   erigontech forks).
 - **Layout:** `z6m/`, `zkevm-benchmark-workload_fork/` and `ere-guests_fork/` are
