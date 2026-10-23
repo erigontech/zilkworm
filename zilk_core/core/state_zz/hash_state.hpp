@@ -66,12 +66,23 @@ class HashState : public BlockState {
     evmc::bytes32 add_node_borrowed(ByteView rlp);
     evmc::bytes32 add_code_borrowed(ByteView code);
 
-    // Hot lookup: EXACT DirectState::find_node_rlp seam shape — hit -> ByteView over
-    // the stored RLP, miss -> std::nullopt (NOT an empty ByteView).
+    // Hot lookup by a raw 32-byte hash, read in place: the caller guarantees 32 readable
+    // bytes at `hash32` (a raw pointer carries no size, so every caller keeps its own
+    // size == 32 guard), at any alignment. The trie sweep and the confirmation walk probe
+    // straight from a child hash ref inside a node's RLP this way, with no copy into a
+    // stack bytes32 first. Hit -> ByteView over the stored RLP, miss -> std::nullopt.
+    [[gnu::always_inline]] inline std::optional<ByteView>
+    find_node_rlp(const uint8_t* hash32) const noexcept {
+        if (auto v = node_index_.find_ptr(hash32)) return ByteView{v->data, v->size};
+        return std::nullopt;
+    }
+
+    // Hot lookup: EXACT DirectState::find_node_rlp seam shape (the fold and DirectState
+    // parity need this form) — hit -> ByteView over the stored RLP, miss -> std::nullopt
+    // (NOT an empty ByteView). Same probe as the pointer overload.
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
-        if (auto v = node_index_.find(node_hash.bytes)) return ByteView{v->data, v->size};
-        return std::nullopt;
+        return find_node_rlp(node_hash.bytes);
     }
 
     // GridMPT's keccak-prefix seam (DirectState::find_node_rlp(hash, request) / take_walk_state()):
@@ -85,7 +96,7 @@ class HashState : public BlockState {
     template <class SnapRequestFn>
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const uint8_t (&node_hash)[32], SnapRequestFn&&) const noexcept {
-        return find_node_rlp(std::bit_cast<evmc::bytes32>(node_hash));
+        return find_node_rlp(static_cast<const uint8_t*>(node_hash));
     }
     kprefix::Resume take_walk_state(const uint8_t*, unsigned) const noexcept { return {nullptr, 0}; }
 
@@ -343,11 +354,11 @@ class HashState : public BlockState {
                 static_cast<std::uint32_t>(bytes.size())};
     }
     // Dedupe on the real keccak256, then index `bytes` (which must already be stable).
-    evmc::bytes32 add_view_(HashIndex<32, &hash_key8, StoredBytes>& index, ByteView bytes);
+    evmc::bytes32 add_view_(HashIndex<32, &hash_key8_at, StoredBytes>& index, ByteView bytes);
 
     std::deque<Bytes> owned_bytes_;
-    HashIndex<32, &hash_key8, StoredBytes> node_index_;
-    HashIndex<32, &hash_key8, StoredBytes> code_index_;
+    HashIndex<32, &hash_key8_at, StoredBytes> node_index_;
+    HashIndex<32, &hash_key8_at, StoredBytes> code_index_;
 
     // Account cache — the "recovered" pre-state bucket the design (§1.1) calls for: the
     // accounts build_state_from_trie unfolds out of the node trie. Arena entry layout is a bare
@@ -355,7 +366,7 @@ class HashState : public BlockState {
     // 32-byte addr_hash (the trie path) to that offset. Front-padded 8 bytes in the ctor
     // so the first real offset is >= 8 (never the HashIndex empty-bucket sentinel, 0).
     std::vector<std::uint8_t> accounts_arena_;
-    HashIndex<32, &hash_key8> account_index_;
+    HashIndex<32, &hash_key8_at> account_index_;
 
     // Storage cache — the recovered per-account slot overlay (the role DirectState fills
     // with overflow_slots_ + inline blob slots). One combined store rather than a table
@@ -364,7 +375,7 @@ class HashState : public BlockState {
     // 8). Front-padded 8 bytes in the ctor so the first real offset is >= 8 (never the
     // HashIndex empty-bucket sentinel, 0).
     std::vector<std::uint8_t> storage_arena_;
-    HashIndex<64, &storage_key8> storage_index_;
+    HashIndex<64, &storage_key8_at> storage_index_;
 
     // The headers the witness carries and the chain's genesis, keyed by their hash: read_header()
     // and the BLOCKHASH walk resolve through it.
