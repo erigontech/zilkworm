@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 Zilkworm is integrated as a stateless-validation execution client in the [ERE benchmark](https://github.com/eth-act/zkevm-benchmark-workload). The same canonical EEST benchmark fixtures are executed inside SP1 using the Zilkworm guest, validated against their expected public values, and (optionally) compared with Reth by SP1 estimated prover cost.
 
 The current integration targets **Amsterdam / Sepolia** with the
-**tests-zkevm v21.0.1** stateless schema, on **ere v0.18.1 / ere-guests v0.18.0**. The ERE guest is the HashState
+**tests-zkevm v21.0.1** stateless schema, on **ere v0.19.5 (SP1 v6.9.0) / ere-guests v0.18.0**. The ERE guest is the HashState
 build of the hypercube guest (`make ere-bin`), which takes the canonical EEST `statelessInputBytes` unchanged; see
 [hashstate.md](hashstate.md). The MFBD host adapter in [`prover/stateless_validator`](../prover/stateless_validator)
 serves the DirectState guest and is no longer on the ERE path.
@@ -30,7 +30,7 @@ benchmark fork's `[patch]` and path deps use relative paths (`../ere-guests_fork
 | Repo | Branch | Based on | Carries |
 |---|---|---|---|
 | `erigontech/zilkworm` | `release/0.1.0-alpha.4` | `v0.1.0-alpha.3` | Guest (`zilk_core` + ZVM1 submodule `34cc5a71`, zvm1 `release/0.1.0-alpha.4`) with the stateless new-payload and witness checks, and the host adapter `prover/stateless_validator` (SIOB→MFBD): tests-zkevm v21.0.1 schema, EIP-8282 builder-requests fix, chain id 1 → Amsterdam, Sepolia network config, ERE make targets/docs/fetch script, `eest_runner` cycle metrics, the `ERE Benchmark` workflow and its release hookup. |
-| `erigontech/ere-guests` | `canepat/zilkworm_mfbd` | `main` (`d31055c`, v0.18.0) | One commit mirroring the Nimbus addition (upstream PR #88): `StatelessValidatorKind::Zilkworm` (catalog ID 4), the `zilkworm` entry in `artifact-registry.json` (sp1, `zkvm_version` v6.6.0), the catalog/downloader/test-crate tests, and the README. The guest runs on the fixtures' `statelessInputBytes` like every other guest; `elf_url` names the `z6m_guest_hypercube_slib` assets of a Zilkworm release. |
+| `erigontech/ere-guests` | `canepat/zilkworm_mfbd` | `main` (`d31055c`, v0.18.0) | One commit mirroring the Nimbus addition (upstream PR #88): `StatelessValidatorKind::Zilkworm` (catalog ID 4), the `zilkworm` entry in `artifact-registry.json` (sp1, `zkvm_version` v6.9.0), the catalog/downloader/test-crate tests, and the README. The guest runs on the fixtures' `statelessInputBytes` like every other guest; `elf_url` names the `z6m_guest_hypercube_slib` assets of a Zilkworm release. |
 | `erigontech/zkevm-benchmark-workload` | `canepat/zilkworm_mfbd` | `master` (`274070c`, ere-guests v0.18.0) | The `zilkworm` execution client (`ExecutionClient::Zilkworm`, on the raw `statelessInputBytes` path), the `[patch]` taking the ere-guests catalog from the erigontech fork, and the cross-file EEST fixture-name dedup with its regression test. |
 
 The benchmark's workspace `[patch]` takes `stateless-validator-catalog` from the
@@ -44,9 +44,9 @@ on the upstream tag.
 | OS | macOS, Darwin 25.5.0, arm64 |
 | Container engine | Docker 29.4.0 |
 | Rust | 1.95.0 (pinned in `rust-toolchain.toml`) |
-| ERE harness | `eth-act/ere` tag `v0.18.1` (rev `20e87aa`), image `ghcr.io/eth-act/ere/ere-server-sp1:20e87aa` |
+| ERE harness | `eth-act/ere` tag `v0.19.5` (rev `fba5601`), image `ghcr.io/eth-act/ere/ere-server-sp1:fba5601` |
 | ere-guests | `v0.18.0` (via the benchmark `[patch]` to `../ere-guests_fork`) |
-| SP1 | v6.6.0 (ere v0.18.1) |
+| SP1 | v6.9.0 (ere v0.19.5) |
 | Guest artifacts | zilkworm `local-dev`, reth `0.1.0-rc.4`, ethrex `29.0.0` (all sp1 v6.6.0) |
 | Fixtures | Sepolia block export (Amsterdam since timestamp 1791294816), chainId `0xaa36a7` (11155111), 100-block batches |
 
@@ -87,7 +87,7 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
 ```
 
 - **`ERE_IMAGE_REGISTRY`** is folded into `ERE_RUN_ENV` and prepended to ere's
-  image names so `docker pull` fetches the prebuilt `ere-server-sp1:20e87aa`
+  image names so `docker pull` fetches the prebuilt `ere-server-sp1:fba5601`
   from ghcr. Without it, ere has no default registry and falls back to building
   the images from source. Overridable.
 - **`ERE_BIN_PATH`** (optional): a relative value is resolved against z6m via
@@ -99,8 +99,9 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
   `<bin-path>/stateless-validator-zilkworm-sp1-<SP1 SDK version>.{elf,vk}`, so
   both targets first run `ere-bin-link`, which symlinks the unversioned files
   under the version the workload's ere resolves (`tools/ere_workload.py
-  <workload> sp1-sdk-version`, mirroring ere-catalog's build script: currently
-  `v6.6.0`). The VK must exist but ere-hosts does not read it.
+  <workload> sp1-sdk-version`, mirroring ere-catalog's build script). It stops
+  unless that is `v6.9.0`, the tag `derive_vk` builds against (ere v0.19.5). The VK
+  must exist but ere-hosts does not read it.
 - **`ERE_RETH_ARTIFACT_URL`**: base URL of the reth guest artifacts, passed as
   `--guest-artifact-base-url` on the reth leg of `ere-compare`. Temporary while
   the workload `[patch]`es ere-guests. Derived at make time by navigating the
