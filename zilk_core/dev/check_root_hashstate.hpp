@@ -162,6 +162,14 @@ struct HashStateAccountWrite {
             continue;
         }
 
+        // A built record the block never modified is a verbatim copy of its pre-state leaf
+        // (find_or_create_account copies it on the first READ; every mutator that changes a
+        // leaf field, writes a slot, wipes or revives sets `modified`, destruct sets
+        // `deleted`, see hash_state.hpp), already bound to prev_root by the build sweep, so
+        // its update would meet the leaf unchanged. A record without a pre-trie leaf is
+        // never skipped: a materialized-absent one stays deleted until a revive.
+        if (!acc.modified && hash_state.find_built_account(addr_hash) != nullptr) continue;
+
         // Live account: gather its storage writes, sorted by slot_hash.
         auto& storage = storage_pool.emplace_back();
         if (const auto* slots = hash_state.overflow_slots_for(addr)) {

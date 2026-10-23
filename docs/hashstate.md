@@ -852,9 +852,11 @@ The gather overload is the analog of the gather `check_root` runs over
 substrate, so the real execution path can accept a block right after running
 it, with no hand-supplied span. It mirrors `check_root`'s gather step for step:
 
-- **Iterate the overlay.** It walks `created_accounts()`. Only written
-  accounts live there, so this is `check_root`'s `modified` split expressed
-  structurally: read-only accounts never enter.
+- **Iterate the overlay.** It walks `created_accounts()`. Every account the
+  block loaded lives there, not only the written ones: `HashStateView::get_account`
+  and `apply_state_diff` (evmone's `build_diff` reports every loaded account)
+  go through `find_or_create_account`, which copies a built account into the
+  overlay on its first read, with `modified` false.
 - **Hash the address.** For each account, the 20-byte address is hashed with
   keccak to its `addr_hash`.
 - **Destructed accounts.** A destructed account (`deleted`) that has a
@@ -863,6 +865,29 @@ it, with no hand-supplied span. It mirrors `check_root`'s gather step for step:
   (`find_built_account` misses) is skipped. The probe is the side-effect-free
   `find_built_account`, not `get_account`, so a legitimate miss never bumps
   `unconfirmed_read_count_` and wrongly rejects the block.
+- **Built accounts the block only read.** A built record that is neither
+  `deleted` nor `modified` is a verbatim copy of its pre-state leaf: every
+  mutator that changes a leaf field (nonce, balance, code hash, a storage
+  slot) and every wipe or revive sets `modified`, and destruct sets `deleted`
+  (the invariant is stated at `created_accounts_` in `hash_state.hpp`). The
+  gather skips such a record. This is sound because its update would carry
+  the leaf's own value, which the fold treats as not modified, so the root is
+  unchanged either way: `rlp_into` reproduces the decoded leaf byte for byte,
+  since a built record carries no stamped RLP cache (`acc_rlp_sroot_off ==
+  0`) and re-encodes its fields canonically. No claim is needed for it: the
+  value was bound to `prev_root` by the build sweep, unlike `check_root` over
+  `DirectState`, whose witness values are bound only by the fold's walk and
+  which therefore folds every read-only account too. This is `check_root`'s
+  `modified` split; it saves the leaf encode, the sort entry and the unfolds
+  down to each such leaf (about a quarter of the overlay records of a mainnet
+  block). The skip requires a pre-trie leaf (`find_built_account` hits): a
+  materialized-absent record stays `deleted` until a revive, which sets
+  `modified`, so a record without one is never skipped. The mutators the
+  invariant covers are `set_account_from_diff`, `set_storage_slot`,
+  `apply_code_diff` (including the empty-code arm), `revive_if_deleted_slow`,
+  `set_balance`, `add_to_balance`, `subtract_from_balance`, `set_nonce`,
+  `set_code` and `destruct`; `HashState` has no journal rollback, so no path
+  restores a record.
 - **Storage writes of a live account.** The account's overlay storage writes
   become a `TrieNodeFlat` set sorted by slot hash (raw-key order is not
   `keccak(key)` order). Each value is encoded the way `check_root` encodes it,
@@ -1365,8 +1390,13 @@ DirectState, and delegates to the span-based overload. The gather tests drive re
 the overlay mutators (see "Write overlay and mutators") and check that:
 
 - the gathered decision matches an independent hand-built oracle,
-- it also matches the span-based overload given a hand-built span for the same writes, and
-- an unconfirmed read still makes it reject.
+- it also matches the span-based overload given a hand-built span for the same writes,
+- an unconfirmed read still makes it reject,
+- a built account the block only read is skipped: the root stays the pre-state's, the same
+  account is folded once `set_nonce` modifies it, and one read and then destructed still folds
+  as an `0x80` delete next to a skipped one, and
+- every mutator, including each `apply_state_diff` shape, leaves a read built record `modified` or
+  `deleted`, the premise of the skip.
 
 ### Omitted BLOCKHASH ancestor
 

@@ -3533,3 +3533,212 @@ TEST_CASE("check_root_hashstate gather overload rejects when a read was left unc
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, expected_root));          // gather
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, manual, expected_root));  // span (agrees)
 }
+
+// Gather overload skip of the built accounts the block only READ. A built account enters the
+// overlay on its first read (HashStateView::get_account -> find_or_create_account's copy-on-write)
+// with modified == false, a verbatim copy of its pre-state leaf: the gather does not fold it, and
+// the recomputed root is the one a run without the read gives. Once mutated (set_nonce) it is
+// folded, so only the new root is accepted.
+TEST_CASE("check_root_hashstate gather overload skips a built account the block only read",
+          "[hash_state][accept]") {
+    HashState hs;
+
+    // --- pre-state: ONE built account R with empty storage, a single-leaf account trie. ---
+    const evmc::address aR = s2_addr(0x71);
+    const uint64_t seedR = 71;
+    const Account accR = make_test_account(seedR, silkworm::kEmptyRoot);
+    const Bytes leafR_val = accR.rlp(silkworm::kEmptyRoot);
+    const auto aR_path = nibbles_of(keccak_addr(aR));
+    const LeafNode leafR = make_leaf(aR_path.data(), 64, ByteView{leafR_val});
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_leaf(leafR)});
+
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+    REQUIRE(hs.created_accounts().empty());  // nothing loaded yet
+
+    // The block reads R through the evmone view: R enters the overlay unmodified, not deleted.
+    HashStateView view{hs};
+    const auto seen = view.get_account(aR);
+    REQUIRE(seen.has_value());
+    CHECK(seen->nonce == seedR);
+    REQUIRE(hs.created_accounts().size() == 1u);
+    {
+        const auto it = hs.created_accounts().find(aR);
+        REQUIRE(it != hs.created_accounts().end());
+        CHECK_FALSE(it->second.modified);
+        CHECK_FALSE(it->second.deleted);
+        // The invariant the skip rests on: a read-only record carries no wipe and no slot writes.
+        CHECK_FALSE(hs.storage_wiped(aR));
+        CHECK((hs.overflow_slots_for(aR) == nullptr || hs.overflow_slots_for(aR)->empty()));
+    }
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    // (a) Read only: nothing is folded, the root is the pre-state's; a tampered root rejects.
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, prev_root));
+    evmc::bytes32 bad_root = prev_root;
+    bad_root.bytes[0] = static_cast<uint8_t>(bad_root.bytes[0] ^ 0xFF);
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, bad_root));
+    CHECK(hs.unconfirmed_read_count() == 0u);
+
+    // (b) Then mutated: the record is folded, so the new root and only the new root is accepted.
+    const uint64_t newNonceR = 710;
+    hs.set_nonce(aR, newNonceR);
+    CHECK(hs.created_accounts().find(aR)->second.modified);
+    Account accR_new = make_test_account(seedR, silkworm::kEmptyRoot);
+    accR_new.nonce = newNonceR;
+    const Bytes leafR2_val = accR_new.rlp(silkworm::kEmptyRoot);
+    const LeafNode leafR2 = make_leaf(aR_path.data(), 64, ByteView{leafR2_val});
+    const evmc::bytes32 expected_root = keccak32(ByteView{zilkworm::encode_leaf(leafR2)});
+    REQUIRE_FALSE(eq32(expected_root, prev_root));
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, expected_root));
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, prev_root));
+}
+
+// The skip's premise, mutator by mutator: a built account, read and then changed through any
+// HashState mutator, leaves its overlay record modified or deleted, so the gather folds it. A
+// mutator that changed a leaf field without setting either flag would let the gather accept a
+// wrong root.
+TEST_CASE("every HashState mutator that changes a built account sets modified or deleted",
+          "[hash_state][accept]") {
+    const evmc::address addr = s2_addr(0x7A);
+    const Account acc = make_test_account(7, silkworm::kEmptyRoot);
+    const Bytes val = acc.rlp(silkworm::kEmptyRoot);
+    const auto path = nibbles_of(keccak_addr(addr));
+    const LeafNode leaf = make_leaf(path.data(), 64, ByteView{val});
+
+    evmc::bytes32 skey{};
+    skey.bytes[31] = 0x05;
+    evmc::bytes32 sval{};
+    sval.bytes[31] = 0x06;
+    const Bytes code{0x60, 0x00, 0x60, 0x00, 0xfd};
+    intx::uint256 acc_balance;
+    std::memcpy(&acc_balance, acc.balance, 32);
+
+    const auto changed_by = [&](const char* name, auto&& mutate) {
+        CAPTURE(name);
+        HashState hs;
+        const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_leaf(leaf)});
+        REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+        HashStateView view{hs};
+        REQUIRE(view.get_account(addr).has_value());
+        const auto& rec = hs.created_accounts().find(addr)->second;
+        REQUIRE_FALSE(rec.modified);
+        REQUIRE_FALSE(rec.deleted);
+        mutate(hs);
+        CHECK((rec.modified || rec.deleted));
+    };
+
+    changed_by("set_balance", [&](HashState& hs) { hs.set_balance(addr, intx::uint256{12345}); });
+    changed_by("add_to_balance", [&](HashState& hs) { hs.add_to_balance(addr, intx::uint256{1}); });
+    changed_by("subtract_from_balance",
+               [&](HashState& hs) { hs.subtract_from_balance(addr, intx::uint256{1}); });
+    changed_by("set_nonce", [&](HashState& hs) { hs.set_nonce(addr, 99); });
+    changed_by("set_code", [&](HashState& hs) { hs.set_code(addr, ByteView{code}); });
+    changed_by("destruct", [&](HashState& hs) { hs.destruct(addr); });
+    changed_by("apply_state_diff nonce", [&](HashState& hs) {
+        evmone::state::StateDiff diff;
+        evmone::state::StateDiff::Entry e{};
+        e.addr = addr;
+        e.nonce = 8;
+        e.balance = acc_balance;
+        diff.modified_accounts.push_back(std::move(e));
+        hs.apply_state_diff(diff);
+    });
+    changed_by("apply_state_diff storage only", [&](HashState& hs) {
+        evmone::state::StateDiff diff;
+        evmone::state::StateDiff::Entry e{};
+        e.addr = addr;
+        e.nonce = acc.nonce;
+        e.balance = acc_balance;
+        e.modified_storage = {{skey, sval}};
+        diff.modified_accounts.push_back(std::move(e));
+        hs.apply_state_diff(diff);
+    });
+    changed_by("apply_state_diff code", [&](HashState& hs) {
+        evmone::state::StateDiff diff;
+        evmone::state::StateDiff::Entry e{};
+        e.addr = addr;
+        e.nonce = acc.nonce;
+        e.balance = acc_balance;
+        e.code = evmc::bytes{code.data(), code.size()};
+        diff.modified_accounts.push_back(std::move(e));
+        hs.apply_state_diff(diff);
+    });
+    changed_by("apply_state_diff cleared delegation", [&](HashState& hs) {
+        evmone::state::StateDiff diff;
+        evmone::state::StateDiff::Entry e{};
+        e.addr = addr;
+        e.nonce = acc.nonce;
+        e.balance = acc_balance;
+        e.code = evmc::bytes{};
+        diff.modified_accounts.push_back(std::move(e));
+        hs.apply_state_diff(diff);
+    });
+    changed_by("apply_state_diff deletion", [&](HashState& hs) {
+        evmone::state::StateDiff diff;
+        diff.deleted_accounts.push_back(addr);
+        hs.apply_state_diff(diff);
+    });
+}
+
+// A built account the block read and then destructed still emits its 0x80 leaf delete: the
+// deleted branch of the gather runs ahead of the read-only skip. A second built account read
+// alongside it is skipped, and the recomputed root is the trie with only that leaf left.
+TEST_CASE("check_root_hashstate gather overload deletes a built account read then destructed",
+          "[hash_state][accept]") {
+    HashState hs;
+
+    // --- pre-state: a root branch over two built accounts on different first nibbles: R (read
+    // only) and D (read, then destructed). ---
+    const evmc::address aR = s2_addr(0x72);
+    const uint8_t nibR0 = static_cast<uint8_t>(keccak_addr(aR).bytes[0] >> 4);
+    evmc::address aD{};
+    bool found_d = false;
+    for (int t = 1; t < 256 && !found_d; ++t) {
+        const evmc::address cand = s2_addr(static_cast<uint8_t>(t));
+        if (cand == aR) continue;
+        if (static_cast<uint8_t>(keccak_addr(cand).bytes[0] >> 4) != nibR0) {
+            aD = cand;
+            found_d = true;
+        }
+    }
+    REQUIRE(found_d);
+    const uint8_t nibD0 = static_cast<uint8_t>(keccak_addr(aD).bytes[0] >> 4);
+
+    const Account accR = make_test_account(72, silkworm::kEmptyRoot);
+    const Bytes leafR_val = accR.rlp(silkworm::kEmptyRoot);
+    const auto aR_path = nibbles_of(keccak_addr(aR));
+    const LeafNode leafR = make_leaf(&aR_path[1], 63, ByteView{leafR_val});
+    const evmc::bytes32 hR = hs.add_node(ByteView{zilkworm::encode_leaf(leafR)});
+    const Account accD = make_test_account(73, silkworm::kEmptyRoot);
+    const Bytes leafD_val = accD.rlp(silkworm::kEmptyRoot);
+    const auto aD_path = nibbles_of(keccak_addr(aD));
+    const LeafNode leafD = make_leaf(&aD_path[1], 63, ByteView{leafD_val});
+    const evmc::bytes32 hD = hs.add_node(ByteView{zilkworm::encode_leaf(leafD)});
+    BranchNode root;
+    root.set_child(nibR0, ByteView{hR.bytes, 32});
+    root.set_child(nibD0, ByteView{hD.bytes, 32});
+    const evmc::bytes32 prev_root = hs.add_node(ByteView{zilkworm::encode_branch(root)});
+
+    REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+
+    // Both read through the view, then D destructed.
+    HashStateView view{hs};
+    REQUIRE(view.get_account(aR).has_value());
+    REQUIRE(view.get_account(aD).has_value());
+    hs.destruct(aD);
+    REQUIRE(hs.created_accounts().size() == 2u);
+    CHECK_FALSE(hs.created_accounts().find(aR)->second.modified);  // skipped by the gather
+    CHECK(hs.created_accounts().find(aD)->second.deleted);         // folded as a delete
+    CHECK(hs.read_account(aD) == nullptr);
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+
+    // Oracle: D's leaf deleted, the branch collapses to R alone, a single full-path leaf.
+    const LeafNode leafR_post = make_leaf(aR_path.data(), 64, ByteView{leafR_val});
+    const evmc::bytes32 expected_root = keccak32(ByteView{zilkworm::encode_leaf(leafR_post)});
+    REQUIRE_FALSE(eq32(expected_root, prev_root));
+    CHECK(zilkworm::check_root_hashstate(hs, prev_root, expected_root));
+    CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, prev_root));  // the delete is not lost
+}
+
