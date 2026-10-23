@@ -45,6 +45,14 @@ extern "C"
     void zisk_commit_public(const uint8_t* bytes, size_t len) noexcept;
 }
 
+// Tail bytes would commit silently.
+template <std::size_t N>
+void zisk_commit_public(const uint8_t (&bytes)[N]) noexcept
+{
+    static_assert(N % 4 == 0 && N / 4 <= zisk::kPublicSlots);
+    zisk_commit_public(bytes, N);
+}
+
 inline void sys_print(std::string_view s) noexcept
 {
     zisk::uart_write(s.data(), s.size());

@@ -39,7 +39,7 @@ extern "C" int main()
     std::memcpy(pv + 40, r.post_state_root.bytes, 32);
     std::memcpy(pv + 72, r.block_hash.bytes, 32);
     store_u64_le(pv + 104, r.chain_id);
-    zisk_commit_public(pv, sizeof(pv));
+    zisk_commit_public(pv);
 
     if (st.failed()) {
         if (r.block_hash != kZeroHash) {
