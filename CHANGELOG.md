@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.1.0-alpha.7 - SP1 v6.9.0
+
+> **Draft.** Still to come before the tag: the ERE fork moves to ere v0.19.5, any further PRs, Contributors and the Commit Log.
+
+### Highlights
+
+This release moves Zilkworm from SP1 v6.6.0 to SP1 v6.9.0. The prover builds on `erigontech/sp1` `erigon/patches-v6.9.0`: v6.9.0 plus `prove_with_cycles`, the one commit `erigon/patches-v6.6.0` carried, cherry-picked unchanged. The ERE leg (`derive_vk` and the published ERE guest) builds on the upstream `v6.9.0` tag, the SP1 that ere v0.19.5 resolves.
+
+The guests are unchanged. The C++ guest issues its own `ecall`s and links no SP1 crate, and nothing it depends on in SP1 moved between v6.6.0 and v6.9.0. The verifying keys did change: SP1 v6.9.0 loads a guest ELF's initial memory correctly where v6.6.0 zeroed up to four bytes of it (succinctlabs/sp1#2981), and both Zilkworm guests hit the case. Keys published for alpha.6 do not verify alpha.7 proofs.
+
+### SP1 v6.9.0
+
+#### No guest ABI change
+
+The 26 syscall codes the guest emits are byte-identical in v6.6.0, v6.9.0 and the erigontech fork, as are the ecall handlers (`executor/src/vm`, `minimal/ecall.rs`), the core machine circuits, `crates/zkvm` (entrypoint, memory layout) and the linker script. The guest's own constants (stack top `0x78000000`, 2^37 bytes of memory, the 2^34 input region, public values on fd 13) still hold. The fork's commit touches the SDK, prover and verifier only, none of the syscall surface.
+
+#### Verifying keys (succinctlabs/sp1#2981)
+
+When a loadable segment's file bytes end in the middle of an 8-byte word and the segment runs on past them (`memsz > filesz`, the `.data`/`.bss` boundary), v6.6.0 zeroed that whole word while laying out the `.bss` tail, dropping the last file bytes before it; v6.9.0 keeps them. The same ELF therefore has a different initial memory image, and a different program vkey, on the two versions. In both Zilkworm guests the dropped bytes are newlib's `numempty` locale sentinel (`{CHAR_MAX, 0}`). Zeroing those two bytes in the ELF gives the same key on v6.6.0 and v6.9.0, so the loader fix is the whole difference.
+
+| ELF (sha256) | vkey on SP1 v6.6.0 | vkey on SP1 v6.9.0 |
+|---|---|---|
+| alpha.6 release `z6m_guest_hypercube_mfbd.elf` (`4bd40149`) | `0x005b7a791175720074007c3dffd34964652682c54cba11e7b03030d7fbb880e2` (published) | `0x003e1145d16c1e8db31ad51dd670b1f8a8eb21cc35eb5b9b50d148cda172cd3f` |
+| alpha.6 release `stateless-validator-zilkworm-sp1-v6.6.0.elf` (`e94aecf0`) | `0x004af2d21b4670e678cce8ae27e26fbb35095443a7fbdf119eb4321310029938` (published) | `0x001cf4a8d52aff25605e5b3e3dd0ae48651150ff56e3dbf209493814ab28f6fe` |
+| MFBD guest, local build of this release (`2182f5eb`) | `0x00f127ca1769db44b449b402dc0781b2b1fc56271144ce43a50e19b780e48151` | `0x0007f3f8b341b7489c0f1a25087c9270a8536ced378590a579f23af4581913a2` |
+| SLIB guest, local build of this release (`2efd9b3b`) | `0x001fa54aad5bc91d189302b592069034edd7cf5bcd8eca8cf264cd685e1654cf` | `0x00f8816137237db3715e99509c8b88ab5cd276958ae38a0e63dc72d9fd39151f` |
+
+The keys of the alpha.7 release assets are the ones its workflow derives; a local build has different bytes and keys.
+
+#### Pins
+
+| Where | v0.1.0-alpha.6 | v0.1.0-alpha.7 |
+|---|---|---|
+| `prover/prover_hypercube` (sp1-sdk, sp1-prover, sp1-cuda, sp1-core-executor, sp1-zkvm, sp1-build) | `erigontech/sp1` `erigon/patches-v6.6.0` (`e4fa2f0`) | `erigontech/sp1` `erigon/patches-v6.9.0` (`d6eb0ae`) |
+| `prover/stateless_validator` sp1-sdk (`derive_vk`) | `succinctlabs/sp1` `v6.6.0` | `succinctlabs/sp1` `v6.9.0` |
+| `Dockerfile` SP1 GPU server | `erigon/patches-v6.6.0` | `erigon/patches-v6.9.0` |
+| ERE guest assets | `stateless-validator-zilkworm-sp1-v6.6.0.{elf,vk}` | `stateless-validator-zilkworm-sp1-v6.9.0.{elf,vk}` |
+
+`prover/Cargo.lock` moves the 49 SP1 crates and `Cargo.lock` the 47 SP1 crates to 6.9.0; no other dependency changes. `make ere-bin-link` refuses a workload whose ere still resolves SP1 v6.6.0 (ere v0.18.1): the ERE workload needs ere v0.19.5.
+
+#### Validation
+
+- `make eest-blockchain-tests`: 12705/12705
+- `tools/scripts/release_state_root_check.sh` on the 200-block mainnet corpus: 200/200, 0 state-root mismatches
+- SP1 benchmark on the same corpus (`z6m_prover` on the v6.9.0 fork, local build): 200/200 blocks, gas used equal to the host's on every block; 17.75B cycles, 40.91B prover gas
+
 ## v0.1.0-alpha.6 - Native statelessInputBytes with the HashState backend
 
 ### Highlights
