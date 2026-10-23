@@ -43,15 +43,18 @@ reproduces the reference results, and running the proofs.
   `--service`), plus `--executor emulator|assembly|ziskemu`, `--elf`, `--proving-key` and `--remote`.
 - **Tooling and CI**: Make targets, `tools/scripts/zisk_execute.py`, `--prover` support in
   `eest_runner.py` and `sp1_benchmark.py`, the CI image and two execute-only workflows (§6).
-- **Accelerators**: raw CSR precompiles. Every free-input (fcall) hint is verified in the guest,
-  which halts with error on a bad hint.
+- **Accelerators**: raw CSR precompiles. Every free-input (fcall) hint is verified in the guest
+  (`prover/guest_zisk/src/include/zisk_precompiles.hpp`). A bad inverse, sqrt or division hint halts
+  with error, so no proof exists (`verify_inv256`, `verify_inv384`, `verify_secp256k1_fp_sqrt`,
+  `verify_udivrem`); a bad GLV hint (`verify_secp256k1_glv` returns false) silently falls back to
+  the hint-free software split.
 
 | Area | ZisK precompiles |
 |---|---|
 | keccak-f | `0x800` |
 | sha256 | `0x805` |
 | ADDMOD / MULMOD, modexp with operands ≤ 32 B | `arith256_mod` `0x802` |
-| ecrecover (secp256k1) | `0x802`, `0x803`/`0x804`, fcall 3 (sqrt), fcall 2 (inverse) |
+| ecrecover (secp256k1) | `0x802`, `0x803`/`0x804`, fcall 3 (sqrt), fcall 2 (inverse), fcall 4 (GLV split) |
 | bn254 ecadd / ecmul / ecpairing | `0x802`, `0x806`/`0x807`, `0x808`–`0x80A` |
 | BLS12-381 (EIP-2537) and KZG point evaluation (patched blst) | `0x80B`, `0x80E`–`0x810`, fcall 10 (inverse) |
 | blake2f | `0x819` |
@@ -329,8 +332,8 @@ make eest-mfbd-build        # -> test-fixtures-cache/mfbd-3586193db06d/blockchai
 
 # Guest and native reference. Both default USE_HASH_KEY=ON (node-store account recovery,
 # as the Airbender guest); `make z6m_guest_zisk ZISK_USE_HASH_KEY=OFF` opts out.
-make z6m_guest_zisk         # postlink prints "ebreak->halt: 16" and the heap range
-sha256sum prover/guest_zisk/build/z6m_guest.elf   # be96047471aa267b7e0f893db4ecb2192e8e7b3a25dc9ac6786394f727b326b9
+make z6m_guest_zisk         # postlink prints "ebreak->halt: 7" and the heap range
+sha256sum prover/guest_zisk/build/z6m_guest.elf   # 1190132fb0ad82d48606feb47e4ead72ca974c2cdd4c5e73039e873baa636c97
 cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S . -DUSE_HASH_KEY=ON && cmake --build build --target state_transition
 ```
 
@@ -518,7 +521,7 @@ ELF matches a local one built from the same tree.
 ## 7. Known Issues and Gotchas
 
 - **`ebreak` is a no-op on ZisK** (and `unimp` is not a trap). `zisk_postlink.py` rewrites every
-  `ebreak` in the linked ELF to `0xFFFFFFFF`, ZisK's halt-with-error word. The current ELF has 16
+  `ebreak` in the linked ELF to `0xFFFFFFFF`, ZisK's halt-with-error word. The current ELF has 7
   sites. It also checks ISA, layout and memory-map symbols, and on a violation it renames the ELF to
   `*.rejected` and fails the build. The guest's own aborts emit `0xFFFFFFFF` directly.
 - **Re-patching blst.** ExternalProject does not track `patch_blst_zisk.sh`. After editing it, run
