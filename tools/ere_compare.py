@@ -10,7 +10,8 @@ aggregate cost comparison, a per-test-family breakdown, and the best/worst N
 fixtures for Zilkworm. --validate gates one client on output_matched; --cost prints
 one client's SP1 estimated cost: totals, components, families, heaviest fixtures.
 --table prints one row per metric and one column per client directory, as plain
-text or, with --markdown, a GitHub table.
+text or, with --markdown, a GitHub table; the Zilkworm column is named after this
+checkout's PROJECT_VERSION, the guest under test.
 
 Usage:
     tools/ere_compare.py <metrics-dir> [--reth-glob reth-*] [--zilk-glob zilkworm-*] [--top 10]
@@ -22,6 +23,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import statistics
 import sys
 from collections import namedtuple
@@ -138,20 +140,32 @@ def ere_version(release, revs):
     return ",".join(sorted(revs)) or "?"
 
 
+def project_version():
+    """PROJECT_VERSION from this checkout's top-level CMakeLists.txt."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "CMakeLists.txt")) as f:
+        return re.search(r"set\(PROJECT_VERSION ([^)\s]+)\)", f.read())[1]
+
+
 def summary_table(metrics_dir, globs, workload, markdown=False):
     """One column per client directory matching globs: ere version, estimate counts and cost."""
     release = ere_workload.ere_release(workload)
+    zilkworm = f"zilkworm-{project_version()}"
+
+    def label(name):
+        # ere-hosts names dirs after the registry.
+        return zilkworm if name.startswith("zilkworm-") else name
+
     cols = []
     for pattern in globs:
         roots = _roots(metrics_dir, pattern)
         if not roots:
-            cols.append([pattern] + ["-"] * 5)
+            cols.append([label(pattern)] + ["-"] * 5)
         for root in roots:
             name = os.path.basename(root)
             m = load(metrics_dir, glob.escape(name), "cost_estimation")
             rows, missing, mismatched = _estimates(m)
             cost = sum(v.cost for v in rows.values())
-            cols.append([name, ere_version(release, {v.ere_rev for v in m.values() if v.ere_rev}),
+            cols.append([label(name), ere_version(release, {v.ere_rev for v in m.values() if v.ere_rev}),
                          f"{len(rows)}/{len(m)}", str(len(rows) - len(mismatched)), str(len(missing)),
                          f"{cost / 1e9:,.2f}"])
     labels = ["", "ere-version", "completed", "output_matched", "incomplete", "cost (G)"]
