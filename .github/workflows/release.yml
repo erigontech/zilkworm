@@ -183,5 +183,5 @@ jobs:
     with:
       guest_source: release
       release_tag: ${{ github.event.inputs.tag || github.ref_name }}
-      compare: true
+      compare: false  # no Reth SP1 v6.9.0 guest in ere-guests yet
     secrets: inherit

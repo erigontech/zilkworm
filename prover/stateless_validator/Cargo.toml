@@ -29,8 +29,8 @@ serde = { version = "1", features = ["derive"], optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
 
 # Optional, gated by the `vk-derive` feature: derive the SP1 program VK for release packaging.
-# Same SP1 as ere (v0.18.1), so the published VK matches ere-guests' regenerated program VK.
-sp1-sdk = { git = "https://github.com/succinctlabs/sp1", tag = "v6.6.0", optional = true }
+# Same SP1 as ere (v0.19.5), so the published VK matches ere-guests' regenerated program VK.
+sp1-sdk = { git = "https://github.com/succinctlabs/sp1", tag = "v6.9.0", optional = true }
 
 # Optional deps used by the parity-check binary only.
 serde_json = { version = "1", optional = true }

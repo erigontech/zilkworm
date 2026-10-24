@@ -7276,16 +7276,16 @@ checksum = "04dc19736151f35336d325007ac991178d504a119863a2fcb3758cdb5e52c50d"
 
 [[package]]
 name = "slop-air"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-air 0.4.3-succinct",
 ]
 
 [[package]]
 name = "slop-algebra"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "itertools 0.14.0",
  "p3-field 0.4.3-succinct",
@@ -7294,8 +7294,8 @@ dependencies = [
 
 [[package]]
 name = "slop-alloc"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "serde",
  "slop-algebra",
@@ -7304,8 +7304,8 @@ dependencies = [
 
 [[package]]
 name = "slop-baby-bear"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "lazy_static",
  "p3-baby-bear 0.4.3-succinct",
@@ -7318,8 +7318,8 @@ dependencies = [
 
 [[package]]
 name = "slop-basefold"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "derive-where",
  "itertools 0.14.0",
@@ -7340,8 +7340,8 @@ dependencies = [
 
 [[package]]
 name = "slop-basefold-prover"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "derive-where",
  "itertools 0.14.0",
@@ -7365,8 +7365,8 @@ dependencies = [
 
 [[package]]
 name = "slop-bn254"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "ff 0.13.1",
  "p3-bn254-fr 0.4.3-succinct",
@@ -7379,8 +7379,8 @@ dependencies = [
 
 [[package]]
 name = "slop-challenger"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-challenger 0.4.3-succinct",
  "serde",
@@ -7390,8 +7390,8 @@ dependencies = [
 
 [[package]]
 name = "slop-commit"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-commit 0.4.3-succinct",
  "serde",
@@ -7400,8 +7400,8 @@ dependencies = [
 
 [[package]]
 name = "slop-dft"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-dft 0.4.3-succinct",
  "serde",
@@ -7413,16 +7413,16 @@ dependencies = [
 
 [[package]]
 name = "slop-fri"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-fri 0.4.3-succinct",
 ]
 
 [[package]]
 name = "slop-futures"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "crossbeam",
  "futures",
@@ -7435,8 +7435,8 @@ dependencies = [
 
 [[package]]
 name = "slop-jagged"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "itertools 0.14.0",
  "num_cpus",
@@ -7465,16 +7465,16 @@ dependencies = [
 
 [[package]]
 name = "slop-keccak-air"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-keccak-air 0.4.3-succinct",
 ]
 
 [[package]]
 name = "slop-koala-bear"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "lazy_static",
  "p3-koala-bear",
@@ -7487,24 +7487,24 @@ dependencies = [
 
 [[package]]
 name = "slop-matrix"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-matrix 0.4.3-succinct",
 ]
 
 [[package]]
 name = "slop-maybe-rayon"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-maybe-rayon 0.4.3-succinct",
 ]
 
 [[package]]
 name = "slop-merkle-tree"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "itertools 0.14.0",
  "p3-merkle-tree 0.4.3-succinct",
@@ -7526,8 +7526,8 @@ dependencies = [
 
 [[package]]
 name = "slop-multilinear"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "derive-where",
  "num_cpus",
@@ -7544,21 +7544,21 @@ dependencies = [
 
 [[package]]
 name = "slop-poseidon2"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-poseidon2 0.4.3-succinct",
 ]
 
 [[package]]
 name = "slop-primitives"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 
 [[package]]
 name = "slop-stacked"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "derive-where",
  "itertools 0.14.0",
@@ -7577,8 +7577,8 @@ dependencies = [
 
 [[package]]
 name = "slop-sumcheck"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "itertools 0.14.0",
  "rayon",
@@ -7593,16 +7593,16 @@ dependencies = [
 
 [[package]]
 name = "slop-symmetric"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-symmetric 0.4.3-succinct",
 ]
 
 [[package]]
 name = "slop-tensor"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "arrayvec",
  "derive-where",
@@ -7619,16 +7619,16 @@ dependencies = [
 
 [[package]]
 name = "slop-uni-stark"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-uni-stark 0.4.3-succinct",
 ]
 
 [[package]]
 name = "slop-utils"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "p3-util 0.4.3-succinct",
  "tracing-forest",
@@ -7637,8 +7637,8 @@ dependencies = [
 
 [[package]]
 name = "slop-whir"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "derive-where",
  "itertools 0.14.0",
@@ -7716,15 +7716,15 @@ dependencies = [
 
 [[package]]
 name = "sp1-build"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "anyhow",
  "cargo_metadata",
  "chrono",
  "clap",
  "dirs",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
 ]
 
 [[package]]
@@ -7768,8 +7768,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-core-executor"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "bincode 1.3.3",
  "cfg-if",
@@ -7793,10 +7793,10 @@ dependencies = [
  "slop-algebra",
  "slop-maybe-rayon",
  "slop-symmetric",
- "sp1-curves 6.6.0",
+ "sp1-curves 6.9.0",
  "sp1-hypercube",
  "sp1-jit",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "strum 0.27.2",
  "subenum",
  "thiserror 1.0.69",
@@ -7808,8 +7808,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-core-executor-runner"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "base64 0.22.1",
  "bincode 1.3.3",
@@ -7818,10 +7818,10 @@ dependencies = [
  "hex",
  "libc",
  "sha2",
- "sp1-core-executor 6.6.0",
+ "sp1-core-executor 6.9.0",
  "sp1-core-executor-runner-binary",
  "sp1-jit",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "sysinfo",
  "tracing",
  "uuid",
@@ -7829,14 +7829,14 @@ dependencies = [
 
 [[package]]
 name = "sp1-core-executor-runner-binary"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "bincode 1.3.3",
  "crash-handler",
  "libc",
  "serde",
- "sp1-core-executor 6.6.0",
+ "sp1-core-executor 6.9.0",
  "sp1-jit",
  "tracing-subscriber",
 ]
@@ -7899,8 +7899,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-core-machine"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "bincode 1.3.3",
  "cfg-if",
@@ -7921,13 +7921,13 @@ dependencies = [
  "slop-matrix",
  "slop-maybe-rayon",
  "slop-uni-stark",
- "sp1-core-executor 6.6.0",
+ "sp1-core-executor 6.9.0",
  "sp1-core-executor-runner",
- "sp1-curves 6.6.0",
- "sp1-derive 6.6.0",
+ "sp1-curves 6.9.0",
+ "sp1-derive 6.9.0",
  "sp1-hypercube",
  "sp1-jit",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "static_assertions",
  "struct-reflection",
  "strum 0.27.2",
@@ -7959,18 +7959,18 @@ dependencies = [
 
 [[package]]
 name = "sp1-cuda"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "bincode 1.3.3",
  "bytes",
  "reqwest",
  "serde",
- "sp1-core-executor 6.6.0",
- "sp1-core-machine 6.6.0",
+ "sp1-core-executor 6.9.0",
+ "sp1-core-machine 6.9.0",
  "sp1-hypercube",
- "sp1-primitives 6.6.0",
- "sp1-prover 6.6.0",
+ "sp1-primitives 6.9.0",
+ "sp1-prover 6.9.0",
  "sp1-prover-types",
  "thiserror 1.0.69",
  "tokio",
@@ -8001,8 +8001,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-curves"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",
@@ -8017,7 +8017,7 @@ dependencies = [
  "serde",
  "slop-algebra",
  "snowbridge-amcl",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "typenum",
 ]
 
@@ -8033,8 +8033,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-derive"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8043,8 +8043,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-hypercube"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "arrayref",
  "deepsize2",
@@ -8077,8 +8077,8 @@ dependencies = [
  "slop-tensor",
  "slop-uni-stark",
  "slop-whir",
- "sp1-derive 6.6.0",
- "sp1-primitives 6.6.0",
+ "sp1-derive 6.9.0",
+ "sp1-primitives 6.9.0",
  "struct-reflection",
  "strum 0.27.2",
  "thiserror 1.0.69",
@@ -8089,8 +8089,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-jit"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "dynasmrt",
  "hashbrown 0.14.5",
@@ -8098,7 +8098,7 @@ dependencies = [
  "memfd",
  "memmap2",
  "serde",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "tracing",
  "uuid",
 ]
@@ -8137,8 +8137,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-primitives"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -8206,8 +8206,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-prover"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -8238,19 +8238,19 @@ dependencies = [
  "slop-challenger",
  "slop-futures",
  "slop-symmetric",
- "sp1-core-executor 6.6.0",
+ "sp1-core-executor 6.9.0",
  "sp1-core-executor-runner",
- "sp1-core-machine 6.6.0",
+ "sp1-core-machine 6.9.0",
  "sp1-hypercube",
  "sp1-jit",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "sp1-prover-types",
- "sp1-recursion-circuit 6.6.0",
- "sp1-recursion-compiler 6.6.0",
+ "sp1-recursion-circuit 6.9.0",
+ "sp1-recursion-compiler 6.9.0",
  "sp1-recursion-executor",
- "sp1-recursion-gnark-ffi 6.6.0",
+ "sp1-recursion-gnark-ffi 6.9.0",
  "sp1-recursion-machine",
- "sp1-verifier 6.6.0",
+ "sp1-verifier 6.9.0",
  "static_assertions",
  "tempfile",
  "thiserror 1.0.69",
@@ -8262,8 +8262,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-prover-types"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "anyhow",
  "async-scoped",
@@ -8274,9 +8274,9 @@ dependencies = [
  "mti",
  "prost",
  "serde",
- "sp1-core-machine 6.6.0",
+ "sp1-core-machine 6.9.0",
  "sp1-hypercube",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "tokio",
  "tonic",
  "tonic-build",
@@ -8320,8 +8320,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-recursion-circuit"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "bincode 1.3.3",
  "itertools 0.14.0",
@@ -8346,12 +8346,12 @@ dependencies = [
  "slop-symmetric",
  "slop-tensor",
  "slop-whir",
- "sp1-core-executor 6.6.0",
- "sp1-core-machine 6.6.0",
- "sp1-derive 6.6.0",
+ "sp1-core-executor 6.9.0",
+ "sp1-core-machine 6.9.0",
+ "sp1-derive 6.9.0",
  "sp1-hypercube",
- "sp1-primitives 6.6.0",
- "sp1-recursion-compiler 6.6.0",
+ "sp1-primitives 6.9.0",
+ "sp1-recursion-compiler 6.9.0",
  "sp1-recursion-executor",
  "sp1-recursion-machine",
  "tracing",
@@ -8381,8 +8381,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-recursion-compiler"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "backtrace",
  "cfg-if",
@@ -8391,9 +8391,9 @@ dependencies = [
  "slop-algebra",
  "slop-bn254",
  "slop-symmetric",
- "sp1-core-machine 6.6.0",
+ "sp1-core-machine 6.9.0",
  "sp1-hypercube",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "sp1-recursion-executor",
  "tracing",
  "vec_map",
@@ -8454,8 +8454,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-recursion-executor"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "backtrace",
  "cfg-if",
@@ -8468,7 +8468,7 @@ dependencies = [
  "slop-poseidon2",
  "slop-symmetric",
  "smallvec",
- "sp1-derive 6.6.0",
+ "sp1-derive 6.9.0",
  "sp1-hypercube",
  "static_assertions",
  "thiserror 1.0.69",
@@ -8503,8 +8503,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-recursion-gnark-ffi"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -8516,17 +8516,17 @@ dependencies = [
  "slop-algebra",
  "slop-symmetric",
  "sp1-hypercube",
- "sp1-primitives 6.6.0",
- "sp1-recursion-compiler 6.6.0",
- "sp1-verifier 6.6.0",
+ "sp1-primitives 6.9.0",
+ "sp1-recursion-compiler 6.9.0",
+ "sp1-verifier 6.9.0",
  "tempfile",
  "tracing",
 ]
 
 [[package]]
 name = "sp1-recursion-machine"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "itertools 0.14.0",
  "rand 0.8.5",
@@ -8536,9 +8536,9 @@ dependencies = [
  "slop-matrix",
  "slop-maybe-rayon",
  "slop-symmetric",
- "sp1-derive 6.6.0",
+ "sp1-derive 6.9.0",
  "sp1-hypercube",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "sp1-recursion-executor",
  "strum 0.27.2",
  "tracing",
@@ -8599,8 +8599,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-sdk"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8613,17 +8613,17 @@ dependencies = [
  "k256",
  "num-bigint 0.4.6",
  "serde",
- "sp1-build 6.6.0",
- "sp1-core-executor 6.6.0",
+ "sp1-build 6.9.0",
+ "sp1-core-executor 6.9.0",
  "sp1-core-executor-runner",
- "sp1-core-machine 6.6.0",
- "sp1-cuda 6.6.0",
+ "sp1-core-machine 6.9.0",
+ "sp1-cuda 6.9.0",
  "sp1-hypercube",
- "sp1-primitives 6.6.0",
- "sp1-prover 6.6.0",
+ "sp1-primitives 6.9.0",
+ "sp1-prover 6.9.0",
  "sp1-prover-types",
  "sp1-recursion-executor",
- "sp1-verifier 6.6.0",
+ "sp1-verifier 6.9.0",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -8681,8 +8681,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-verifier"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -8696,7 +8696,7 @@ dependencies = [
  "slop-primitives",
  "slop-symmetric",
  "sp1-hypercube",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
  "sp1-recursion-executor",
  "sp1-recursion-machine",
  "strum 0.27.2",
@@ -8724,8 +8724,8 @@ dependencies = [
 
 [[package]]
 name = "sp1-zkvm"
-version = "6.6.0"
-source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.6.0#e4fa2f0fed9b8b7f1391d61549ad6ffb78444eef"
+version = "6.9.0"
+source = "git+https://github.com/erigontech/sp1.git?branch=erigon%2Fpatches-v6.9.0#d6eb0ae1a91531d917785e4bd1970e8021518ee7"
 dependencies = [
  "cfg-if",
  "critical-section",
@@ -8734,7 +8734,7 @@ dependencies = [
  "getrandom 0.3.3",
  "rand 0.8.5",
  "sha2",
- "sp1-primitives 6.6.0",
+ "sp1-primitives 6.9.0",
 ]
 
 [[package]]
@@ -10449,12 +10449,12 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sp1-build 6.6.0",
- "sp1-core-executor 6.6.0",
- "sp1-cuda 6.6.0",
- "sp1-prover 6.6.0",
- "sp1-sdk 6.6.0",
- "sp1-zkvm 6.6.0",
+ "sp1-build 6.9.0",
+ "sp1-core-executor 6.9.0",
+ "sp1-cuda 6.9.0",
+ "sp1-prover 6.9.0",
+ "sp1-sdk 6.9.0",
+ "sp1-zkvm 6.9.0",
  "tokio",
  "tracing",
  "tracing-subscriber",
