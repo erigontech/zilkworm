@@ -615,14 +615,41 @@ TEST_CASE("HashIndex capacity_for clamps instead of overflowing", "[hash_index]"
     CHECK(Idx::capacity_for(0xFFFFFFFFu) == (1u << 31));
 }
 
-// The key functions HashIndex takes read through a pointer, so any alignment works.
-TEST_CASE("HashIndex key functions agree between array and pointer forms", "[hash_index]") {
-    const auto k = make_key32(0x0123456789ABCDEFULL, 0x5A);
-    CHECK(hash_key8_at(k.data()) == hash_key8(ref32(k)));
-    const auto s = make_key64(0x1111ULL, 0x2222ULL, 0x5A);
-    CHECK(storage_key8_at(s.data()) == storage_key8(ref64(s)));
-    const auto a = make_addr(0x7, 0x3, 0x11);
-    CHECK(addr_key8_at(a.data()) == addr_key8(ref20(a)));
+// Expected keys are assembled by hand.
+TEST_CASE("HashIndex key functions match hand-assembled keys at any alignment", "[hash_index]") {
+    STATIC_REQUIRE(std::endian::native == std::endian::little);
+    std::array<uint8_t, 64> k{};
+    for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<uint8_t>(0x11u + 13u * i);
+    const auto le = [&k](std::size_t at, std::size_t n) {
+        uint64_t v = 0;
+        for (std::size_t i = 0; i < n; ++i) v |= uint64_t{k[at + i]} << (8u * i);
+        return v;
+    };
+    const uint64_t want_hash = le(0, 8);
+    const uint64_t want_addr = le(0, 7) | (uint64_t{k[19]} << 56);
+    const uint64_t want_storage = le(0, 8) ^ le(32, 8);
+    REQUIRE(want_addr != want_hash);
+    REQUIRE(want_storage != want_hash);
+
+    for (const std::size_t off : {std::size_t{0}, std::size_t{1}, std::size_t{3}, std::size_t{5},
+                                  std::size_t{7}}) {
+        CAPTURE(off);
+        alignas(8) std::array<uint8_t, 72> buf{};
+        const uint8_t* p = buf.data() + off;
+        REQUIRE((off == 0) == (reinterpret_cast<std::uintptr_t>(p) % 8 == 0));
+        std::memcpy(buf.data() + off, k.data(), k.size());
+        CHECK(hash_key8_at(p) == want_hash);
+        CHECK(addr_key8_at(p) == want_addr);
+        CHECK(storage_key8_at(p) == want_storage);
+    }
+
+    std::array<uint8_t, 32> k32{};
+    std::array<uint8_t, 20> k20{};
+    std::memcpy(k32.data(), k.data(), 32);
+    std::memcpy(k20.data(), k.data(), 20);
+    CHECK(hash_key8(ref32(k32)) == want_hash);
+    CHECK(addr_key8(ref20(k20)) == want_addr);
+    CHECK(storage_key8(ref64(k)) == want_storage);
 }
 
 // clear empties the table in place: every key misses afterwards, the count is zero, the

@@ -25,6 +25,7 @@
 #include <zilk_core/core/common_zz/hash_index.hpp>
 #include <zilk_core/core/rlp/encode.hpp>            // silkworm::rlp::encode (storage-value encode)
 #include <zilk_core/core/common_zz/mphf_map.hpp>  // mix64_body (public)
+#include <zilk_core/core/common_zz/ssz_read.hpp>
 #include <zilk_core/core/state_zz/hash_state.hpp>
 #include <zilk_core/core/state_zz/slib_input.hpp>  // decode/parse/run_slib (the SSZ front-end)
 #include <zilk_core/core/state_zz/slib_payload.hpp>  // decode_slib_payload, slib_payload_root, slib_payload_block
@@ -1030,6 +1031,48 @@ TEST_CASE("HashState build_state_from_trie rejects every node shape decode_node 
     SECTION("an item running past its node") {
         Bytes p{0x85, 0x01, 0x02};
         CHECK(build(rlp_list_of(p)) == HashState::BuildStatus::kMalformed);
+    }
+
+    // tests-zkevm overlength leaves, under root slot 1.
+    const auto under_slot1 = [](const Bytes& leaf_rlp) {
+        HashState hs;
+        const evmc::bytes32 h = hs.add_node(ByteView{leaf_rlp});
+        BranchNode b;
+        b.set_child(0x1, ByteView{h.bytes, 32});
+        const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_branch(b)});
+        return hs.build_state_from_trie(root);
+    };
+    TestAccount acc;
+    acc.build(72);
+    const auto leaf_of = [&](const Bytes& hp, const Bytes& value) {
+        return rlp_list_of(string_of(hp) + string_of(value));
+    };
+
+    SECTION("tests-zkevm cumulative_path_exceeds_key_length: 64 nibbles at depth 1") {
+        Bytes fixture{0xe3, 0xa1, 0x20};
+        fixture.append(32, 0x00);
+        fixture.push_back(0x80);
+        CHECK(under_slot1(fixture) == HashState::BuildStatus::kMalformed);
+
+        Bytes hp64{0x20};
+        hp64.append(32, 0x00);
+        Bytes hp63{0x30};
+        hp63.append(31, 0x00);
+        CHECK(build(leaf_of(hp64, acc.leaf_value)) == HashState::BuildStatus::kOk);
+        CHECK(under_slot1(leaf_of(hp64, acc.leaf_value)) == HashState::BuildStatus::kMalformed);
+        CHECK(under_slot1(leaf_of(hp63, acc.leaf_value)) == HashState::BuildStatus::kOk);
+    }
+    SECTION("tests-zkevm leaf_segment_exceeds_key_length: a 67-nibble segment") {
+        Bytes fixture{0xe4, 0xa2, 0x30};
+        fixture.append(33, 0x00);
+        fixture.push_back(0x80);
+        CHECK(under_slot1(fixture) == HashState::BuildStatus::kMalformed);
+        CHECK(build(fixture) == HashState::BuildStatus::kMalformed);
+
+        Bytes hp67{0x30};
+        hp67.append(33, 0x00);
+        CHECK(build(leaf_of(hp67, acc.leaf_value)) == HashState::BuildStatus::kMalformed);
+        CHECK(under_slot1(leaf_of(hp67, acc.leaf_value)) == HashState::BuildStatus::kMalformed);
     }
 }
 
@@ -2704,6 +2747,135 @@ TEST_CASE("slib rejects a state list announcing more than the node count cap",
     CHECK(hs_small.node_count() == 1u);
 }
 
+// Counts over kMaxReserve size like kMaxReserve.
+TEST_CASE("slib clamps the store hints of a count past kMaxReserve", "[hash_state][slib]") {
+    using Index = HashIndex<32, &hash_key8_at>;
+    // Second count catches an unclamped account hint.
+    for (const std::uint32_t n : {HashState::kMaxReserve + 1u, 2u * HashState::kMaxReserve}) {
+        CAPTURE(n);
+        REQUIRE(Index::capacity_for(n) != Index::capacity_for(HashState::kMaxReserve));
+        Bytes table(static_cast<std::size_t>(n) * 4u, 0);
+        for (std::uint32_t i = 0; i < n; ++i)
+            put_u32_at(table, static_cast<std::size_t>(i) * 4u, n * 4u);
+        const Bytes blob = encode_stateless_input_lists(table, table, /*chain_id=*/1);
+
+        HashState hs{4, 4, 4, 4};
+        auto v = zilkworm::parse_stateless_input(ByteView{blob}, hs);
+        REQUIRE(v.has_value());
+        CHECK(v->node_count == n);
+        CHECK(v->code_count == n);
+        CHECK(hs.node_count() == 1u);
+        CHECK(hs.code_count() == 1u);
+        const auto caps = hs.index_capacities();
+        CHECK(caps[0] == Index::capacity_for(HashState::kMaxReserve));
+        CHECK(caps[1] == Index::capacity_for(HashState::kMaxReserve));
+        CHECK(caps[2] == Index::capacity_for(HashState::kMaxReserve / 8u));
+        CHECK(caps[3] == Index::capacity_for(4096u));
+    }
+    REQUIRE(Index::capacity_for(2u * HashState::kMaxReserve / 8u) !=
+            Index::capacity_for(HashState::kMaxReserve / 8u));
+}
+
+TEST_CASE("HashState reserve_stores caps every hint at kMaxReserve", "[hash_state]") {
+    using Index = HashIndex<32, &hash_key8_at>;
+    const std::uint32_t cap = Index::capacity_for(HashState::kMaxReserve);
+
+    HashState below{4, 4, 4, 4};
+    below.reserve_stores(3000, 10, 100, HashState::kMaxReserve);
+    const auto b = below.index_capacities();
+    CHECK(b[0] == Index::capacity_for(3000));
+    CHECK(b[1] == Index::capacity_for(10));
+    CHECK(b[2] == Index::capacity_for(100));
+    CHECK(b[3] == cap);
+
+    HashState above{4, 4, 4, 4};
+    above.reserve_stores(HashState::kMaxReserve + 1u, 1u << 20, 1u << 18, 1u << 17);
+    for (const std::uint32_t c : above.index_capacities()) CHECK(c == cap);
+}
+
+TEST_CASE("ssz for_each_byte_list rejects bad tables and stops on the sink",
+          "[hash_state][slib]") {
+    const auto list_of = [](const std::vector<std::uint32_t>& offsets, std::size_t size) {
+        Bytes b(size, 0xEE);
+        for (std::size_t i = 0; i < offsets.size(); ++i) put_u32_at(b, i * 4u, offsets[i]);
+        return b;
+    };
+    std::vector<Bytes> got;
+    const auto walk = [&got](const Bytes& blob, std::uint32_t elem_cap, std::uint32_t count_cap,
+                             std::size_t stop_at = SIZE_MAX) {
+        got.clear();
+        return zilkworm::ssz::for_each_byte_list(ByteView{blob}, elem_cap, count_cap,
+                                                 [&](ByteView e) {
+                                                     got.emplace_back(e);
+                                                     return got.size() - 1 != stop_at;
+                                                 });
+    };
+    std::vector<ByteView> out;
+
+    SECTION("a well-formed list delivers every element") {
+        const Bytes b = encode_bytelist_list({Bytes{0x01}, Bytes{}, Bytes{0x02, 0x03}});
+        CHECK(zilkworm::ssz::byte_list_count(ByteView{b}, 3) == 3u);
+        REQUIRE(walk(b, 2, 3));
+        REQUIRE(got.size() == 3u);
+        CHECK(got[0] == Bytes{0x01});
+        CHECK(got[1].empty());
+        CHECK(got[2] == (Bytes{0x02, 0x03}));
+    }
+    SECTION("an empty blob is the empty list") {
+        CHECK(zilkworm::ssz::byte_list_count(ByteView{}, 3) == 0u);
+        CHECK(walk(Bytes{}, 2, 3));
+        CHECK(got.empty());
+    }
+    SECTION("a blob shorter than one offset") {
+        const Bytes b{0x04, 0x00, 0x00};
+        CHECK_FALSE(zilkworm::ssz::byte_list_count(ByteView{b}, 3).has_value());
+        CHECK_FALSE(walk(b, 2, 3));
+    }
+    SECTION("a first offset that is not a multiple of 4") {
+        const Bytes b = list_of({6, 6}, 8);
+        CHECK_FALSE(zilkworm::ssz::byte_list_count(ByteView{b}, 3).has_value());
+        CHECK_FALSE(walk(b, 2, 3));
+        CHECK(got.empty());
+    }
+    SECTION("a first offset below 4 or past the blob") {
+        CHECK_FALSE(walk(list_of({0}, 4), 2, 3));
+        CHECK_FALSE(walk(list_of({12}, 8), 2, 3));
+        CHECK(got.empty());
+    }
+    SECTION("more elements than count_cap") {
+        const Bytes b = encode_bytelist_list({Bytes{0x01}, Bytes{0x02}, Bytes{0x03}});
+        CHECK_FALSE(zilkworm::ssz::byte_list_count(ByteView{b}, 2).has_value());
+        CHECK_FALSE(walk(b, 2, 2));
+        CHECK(got.empty());
+        CHECK_FALSE(zilkworm::ssz::decode_byte_lists(ByteView{b}, 2, 2, out));
+    }
+    SECTION("an offset past the blob") {
+        CHECK_FALSE(walk(list_of({12, 13, 99}, 14), 2, 3));
+        REQUIRE(got.size() == 1u);
+        CHECK(got[0].size() == 1u);
+    }
+    SECTION("an offset below the one before it") {
+        CHECK_FALSE(walk(list_of({12, 14, 13}, 15), 2, 3));
+        REQUIRE(got.size() == 1u);
+        CHECK(got[0].size() == 2u);
+        CHECK_FALSE(zilkworm::ssz::decode_byte_lists(ByteView{list_of({12, 14, 13}, 15)}, 2, 3, out));
+    }
+    SECTION("an element over elem_cap") {
+        const Bytes b = encode_bytelist_list({Bytes{0x01}, Bytes(5, 0x02), Bytes{0x03}});
+        CHECK_FALSE(walk(b, 4, 3));
+        REQUIRE(got.size() == 1u);
+        CHECK(got[0] == Bytes{0x01});
+        CHECK(walk(b, 5, 3));
+    }
+    SECTION("a sink that returns false stops the walk") {
+        const Bytes b = encode_bytelist_list({Bytes{0x01}, Bytes{0x02}, Bytes{0x03}});
+        CHECK_FALSE(walk(b, 2, 3, /*stop_at=*/1));
+        REQUIRE(got.size() == 2u);
+        CHECK(got[0] == Bytes{0x01});
+        CHECK(got[1] == Bytes{0x02});
+    }
+}
+
 // Write overlay, mutators and address-keyed readers, plus the two DirectState divergences.
 // See docs/hashstate.md, "Write overlay and mutators".
 
@@ -3742,3 +3914,111 @@ TEST_CASE("check_root_hashstate gather overload deletes a built account read the
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, prev_root));  // the delete is not lost
 }
 
+
+// Skipping real read-only records keeps the root.
+TEST_CASE("slib real sample: folding the accounts the block only read leaves the root unchanged",
+          "[hash_state][slib][accept]") {
+    const Bytes blob = hex_to_bytes(slib_sample::kBlobHex);
+    const auto dec = zilkworm::decode_stateless_input(ByteView{blob});
+    REQUIRE(dec.has_value());
+    REQUIRE_FALSE(dec->headers.empty());
+    const auto payload = zilkworm::decode_slib_payload(dec->new_payload_request);
+    REQUIRE(payload.has_value());
+    const auto block = zilkworm::slib_payload_block(*payload);
+    REQUIRE(block.has_value());
+    silkworm::BlockHeader parent;
+    ByteView hv{dec->headers.back()};
+    REQUIRE(silkworm::rlp::decode(hv, parent));
+    const evmc::bytes32 prev_root = parent.state_root;
+
+    HashState hs;
+    const auto res = zilkworm::run_slib(ByteView{blob}, hs, prev_root);
+    REQUIRE(res.has_value());
+    REQUIRE(res->status == HashState::BuildStatus::kOk);
+    REQUIRE(hs.missing_count() == 0u);
+
+    // Every account the payload names, BAL included.
+    std::vector<evmc::address> candidates{block->header.beneficiary};
+    for (const auto& tx : block->transactions) {
+        if (const auto sender = tx.sender()) candidates.push_back(*sender);
+        if (tx.to) candidates.push_back(*tx.to);
+    }
+    for (const auto& w : payload->withdrawals) candidates.push_back(w.address);
+    ByteView bal = payload->block_access_list;
+    const auto bal_list = silkworm::rlp::decode_header(bal);
+    REQUIRE((bal_list && bal_list->list && bal_list->payload_length == bal.size()));
+    while (!bal.empty()) {
+        const auto entry = silkworm::rlp::decode_header(bal);
+        REQUIRE((entry && entry->list && entry->payload_length <= bal.size()));
+        ByteView fields = bal.substr(0, entry->payload_length);
+        bal.remove_prefix(entry->payload_length);
+        const auto addr = silkworm::rlp::decode_header(fields);
+        REQUIRE((addr && !addr->list && addr->payload_length == 20u));
+        evmc::address a;
+        std::memcpy(a.bytes, fields.data(), 20);
+        candidates.push_back(a);
+    }
+    // Absent ones would leave an unconfirmed read.
+    std::vector<evmc::address> addrs;
+    for (const auto& a : candidates) {
+        if (hs.find_built_account(keccak_addr(a)) == nullptr) continue;
+        if (std::find(addrs.begin(), addrs.end(), a) == addrs.end()) addrs.push_back(a);
+    }
+    REQUIRE(addrs.size() >= 2u);
+
+    HashStateView view{hs};
+    for (const auto& a : addrs) REQUIRE(view.get_account(a).has_value());
+    REQUIRE(hs.unconfirmed_read_count() == 0u);
+    REQUIRE(hs.created_accounts().size() == addrs.size());
+    for (const auto& [addr, acc] : hs.created_accounts()) {
+        CHECK_FALSE(acc.modified);
+        CHECK_FALSE(acc.deleted);
+    }
+
+    const auto gather_updates = [&hs](bool modified_only) {
+        std::vector<zilkworm::TrieNodeFlat> updates;
+        for (const auto& [addr, acc] : hs.created_accounts()) {
+            if (modified_only && !acc.modified) continue;
+            auto& node = updates.emplace_back(keccak_addr(addr));
+            evmc::bytes32 storage_root{};
+            std::memcpy(storage_root.bytes, acc.storage_root, 32);
+            node.current_off = 0;
+            node.current_len = acc.rlp_into(node.buf, storage_root);
+        }
+        std::sort(updates.begin(), updates.end());
+        return updates;
+    };
+    const auto fold = [&hs, &prev_root](const std::vector<zilkworm::TrieNodeFlat>& updates) {
+        zilkworm::GridMPT<true, HashState> acc_trie(hs, prev_root);
+        const evmc::bytes32 root = acc_trie.calc_root_from_updates({updates.data(), updates.size()});
+        CHECK(acc_trie.missing_count() == 0u);
+        return root;
+    };
+
+    {
+        const auto all = gather_updates(false);
+        REQUIRE(all.size() == addrs.size());
+        REQUIRE(gather_updates(true).empty());
+        CHECK(eq32(fold(all), prev_root));
+        CHECK(zilkworm::check_root_hashstate(hs, prev_root, prev_root));
+        evmc::bytes32 bad_root = prev_root;
+        bad_root.bytes[0] = static_cast<std::uint8_t>(bad_root.bytes[0] ^ 0x01);
+        CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, bad_root));
+    }
+
+    const auto* first = hs.read_account(addrs[0]);
+    REQUIRE(first != nullptr);
+    hs.set_nonce(addrs[0], first->nonce + 1);
+    {
+        const auto all = gather_updates(false);
+        const auto modified = gather_updates(true);
+        REQUIRE(all.size() == addrs.size());
+        REQUIRE(modified.size() == 1u);
+        const evmc::bytes32 root_mod = fold(modified);
+        CHECK(eq32(fold(all), root_mod));
+        CHECK_FALSE(eq32(root_mod, prev_root));
+        CHECK(zilkworm::check_root_hashstate(hs, prev_root, root_mod));
+        CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, prev_root));
+    }
+    CHECK(hs.unconfirmed_read_count() == 0u);
+}

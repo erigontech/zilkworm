@@ -1209,7 +1209,9 @@ an 8-aligned buffer and expects the same hit, value and miss as the array form. 
 full-key compare covers every byte of a 32-byte key` (and the per-byte loop in the 64-byte
 case) flips one bit at every byte position of a stored key and expects a miss from each, so a
 word the compare skipped would show. The bucket sizes (40, 72, 24 and 48 bytes) are asserted at
-compile time through `bucket_bytes()`.
+compile time through `bucket_bytes()`. `HashIndex key functions match hand-assembled keys at
+any alignment` assembles each expected key8 from the key's bytes in little-endian order and
+checks the array forms and the `_at` forms read from offsets 0, 1, 3, 5 and 7.
 
 `HashIndex reserve pre-sizes an empty table` checks `reserve` against the constructor's sizing
 rule for a range of counts, that the reserved number of inserts then triggers no growth (the
@@ -1245,7 +1247,9 @@ same stored view as the `bytes32` form, and misses on a never-added hash.
 3,000 nodes through `reserve_stores`, adds them borrowed and finds each as the borrowed view
 itself, then adds a repeat from a different buffer and checks the count is unchanged and the
 view added first is the one indexed (for the code store too); a later `reserve_stores` on the
-populated stores changes nothing.
+populated stores changes nothing. `HashState reserve_stores caps every hint at kMaxReserve`
+checks that hints below the cap size each index exactly as `capacity_for` does, and that hints
+past it all size like `kMaxReserve`.
 
 A literal 8-byte key8 collision cannot feasibly be constructed under real keccak, so the test uses
 a home-bucket collision instead, where the home bucket is `mix64_body(hash_key8(h)) &
@@ -1297,7 +1301,10 @@ The sweep's frames and shared path buffer have their own fixtures:
   is not a list, a branch with a non-empty, missing or over-long 17th item, a leaf with no
   value or an oversized one, an extension with a short-string or inline-list child, a list
   where a path belongs, an item running past its node), each expected to give `kMalformed`,
-  plus a well-formed branch with its last slot present as the control.
+  plus a well-formed branch with its last slot present as the control. Two sections pin the
+  tests-zkevm `witness_state_overlength` leaves, hashed under root slot 1: a 64-nibble leaf
+  path at depth 1 and a 67-nibble one, both `kMalformed`; a 64-nibble path at depth 0 and a
+  63-nibble one at depth 1 are the controls.
 - `decodes one-nibble leaf paths, hashed and embedded`: a one-nibble HP path is a single byte
   below `0x80`, carried with no RLP header, here as a hash-referenced account leaf and as a
   3-byte embedded storage leaf decoded in place from its branch's bytes.
@@ -1410,6 +1417,12 @@ the overlay mutators (see "Write overlay and mutators") and check that:
 - every mutator, including each `apply_state_diff` shape, leaves a read built record `modified` or
   `deleted`, the premise of the skip.
 
+`slib real sample: folding the accounts the block only read leaves the root unchanged` runs the
+skip over the tests-zkevm sample: it reads the built accounts the payload names (the coinbase,
+senders, recipients, withdrawals and the EIP-7928 access list). Folding all of them gives the
+parent root, which the gather (skipping them all) accepts; after `set_nonce` on one, folding all
+of them or only the modified one gives the same new root, which the gather accepts.
+
 ### Omitted BLOCKHASH ancestor
 
 `check_root_hashstate rejects a BLOCKHASH read of an omitted in-range ancestor` is a soundness
@@ -1456,7 +1469,11 @@ the caller to discard is pinned. `slib rejects a state list announcing more than
 cap` builds a state list whose offset table really is `(cap + 1) * 4` bytes long (every entry the
 table end, so the elements are well-formed and empty) and expects `std::nullopt` with nothing
 fed, which is the count check rejecting it before any store is sized; the same shape with three
-elements parses.
+elements parses. `slib clamps the store hints of a count past kMaxReserve` parses 65,537 and
+131,072 empty state and code elements and checks the indexes are sized like `kMaxReserve`, the
+account index from the clamped node count. `ssz
+for_each_byte_list rejects bad tables and stops on the sink` covers each offset-table rejection
+of the streamed reader and a sink that returns false.
 
 `slib_sample_fixture.hpp` is generated; do not edit it by hand. Its source is the tests-zkevm
 v21.0.1 corpus as ere-guests ships it (`crates/stateless-validator-test/fixtures`), case
