@@ -12,10 +12,10 @@ name = "z6m_prover"
 path = "src/main.rs"
 
 [dependencies]
-sp1-sdk = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.6.0", features = ["profiling", "cuda"] }
-sp1-prover = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.6.0" }
-sp1-cuda = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.6.0" }
-sp1-core-executor = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.6.0" }
+sp1-sdk = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.9.0", features = ["profiling", "cuda"] }
+sp1-prover = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.9.0" }
+sp1-cuda = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.9.0" }
+sp1-core-executor = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.9.0" }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 serde = { version = "1.0.200", default-features = false, features = ["derive"] }
 clap = { version = "4.0", features = ["derive", "env"] }
@@ -64,9 +64,9 @@ default-features = false
 
 [dependencies.sp1-zkvm]
 git = "https://github.com/erigontech/sp1.git"
-branch = "erigon/patches-v6.6.0"
+branch = "erigon/patches-v6.9.0"
 default-features = false
 
 [build-dependencies]
-sp1-build = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.6.0" }
+sp1-build = { git = "https://github.com/erigontech/sp1.git", branch = "erigon/patches-v6.9.0" }
 cxx-build = "1.0.160" # build-time codegen & C++ compilation

@@ -35,11 +35,11 @@ on:
       workload_ref:
         description: erigontech/zkevm-benchmark-workload ref
         type: string
-        default: canepat/zilkworm_mfbd
+        default: som/ere-v0.19.5
       ere_guests_ref:
         description: erigontech/ere-guests ref
         type: string
-        default: canepat/zilkworm_mfbd
+        default: som/ere-v0.19.5
   workflow_call:
     inputs:
       guest_source:
@@ -74,9 +74,9 @@ env:
   BATCH_COUNT: ${{ inputs.batch_count || '1' }}
   # Temporary: erigontech forks carry the zilkworm client and ere-guests entry until upstreamed.
   WORKLOAD_REPO: erigontech/zkevm-benchmark-workload
-  WORKLOAD_REF: ${{ inputs.workload_ref || 'canepat/zilkworm_mfbd' }}
+  WORKLOAD_REF: ${{ inputs.workload_ref || 'som/ere-v0.19.5' }}
   ERE_GUESTS_REPO: erigontech/ere-guests
-  ERE_GUESTS_REF: ${{ inputs.ere_guests_ref || 'canepat/zilkworm_mfbd' }}
+  ERE_GUESTS_REF: ${{ inputs.ere_guests_ref || 'som/ere-v0.19.5' }}
 
 jobs:
   guest-build:
@@ -173,8 +173,6 @@ jobs:
           ref: ${{ inputs.guest_source == 'release' && inputs.release_tag || github.sha }}
           path: z6m
 
-      # The workload resolves ../z6m (host adapter path dependency) and ../ere-guests_fork ([patch])
-      # relative to itself, so the checkouts are siblings with these names.
       - name: Checkout zkevm-benchmark-workload
         uses: actions/checkout@v4
         with:
@@ -182,6 +180,7 @@ jobs:
           ref: ${{ env.WORKLOAD_REF }}
           path: zkevm-benchmark-workload_fork
 
+      # Summary only; the workload [patch] pins its rev.
       - name: Checkout ere-guests
         uses: actions/checkout@v4
         with:
