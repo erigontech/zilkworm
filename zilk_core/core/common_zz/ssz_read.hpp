@@ -54,10 +54,7 @@ inline bool split_variable(ByteView body, size_t fixed_size, std::span<const siz
     return true;
 }
 
-/// The element count n of a byte-list blob (the layout decode_byte_lists reads) after its
-/// list-level checks: nullopt when the table is not a multiple of 4 within the blob or n is
-/// over `count_cap`. An empty blob is the empty list. The table then holds n*4 <= blob.size()
-/// bytes, so rd_u32(blob, i * 4) is in bounds for every i < n.
+/// Guarantees n * 4 <= blob.size().
 inline std::optional<uint32_t> byte_list_count(ByteView blob, uint32_t count_cap) noexcept {
     if (blob.empty()) return 0u;
     if (blob.size() < 4) return std::nullopt;
@@ -68,9 +65,7 @@ inline std::optional<uint32_t> byte_list_count(ByteView blob, uint32_t count_cap
     return n;
 }
 
-/// decode_byte_lists' checks, with each element handed to `sink(ByteView) -> bool` as soon as
-/// it is validated; a false from the sink stops the walk. Returns false on a violation or a
-/// stopped walk, leaving the elements before it delivered. One u32 read per element.
+/// Elements before a violation are already delivered.
 template <class Sink>
 inline bool for_each_byte_list(ByteView blob, uint32_t elem_cap, uint32_t count_cap, Sink&& sink) {
     const auto count = byte_list_count(blob, count_cap);
@@ -88,10 +83,7 @@ inline bool for_each_byte_list(ByteView blob, uint32_t elem_cap, uint32_t count_
     return true;
 }
 
-/// List[List[byte, elem_cap], count_cap] or ProgressiveList[ProgressiveList[byte]]: an offset
-/// table of n uint32 followed by the elements. Rejects a table that is not a multiple of 4, an
-/// offset out of order or out of bounds, more than `count_cap` elements or one over `elem_cap`
-/// bytes. Clears `out`.
+/// Materialising for_each_byte_list; clears `out`.
 inline bool decode_byte_lists(ByteView blob, uint32_t elem_cap, uint32_t count_cap,
                               std::vector<ByteView>& out) {
     out.clear();

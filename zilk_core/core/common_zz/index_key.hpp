@@ -20,8 +20,7 @@
 
 namespace zilkworm {
 
-/// Index key of the 32-byte keccak hash at `hash`, readable at any alignment (HashIndex probes
-/// straight from a hash ref inside a node's RLP); see hash_key8(const uint8_t (&)[32]). This is the form HashIndex takes as its Key8.
+/// hash_key8 of the bytes at `hash`, unaligned.
 [[gnu::always_inline]] inline uint64_t hash_key8_at(const uint8_t* hash) noexcept {
     uint64_t k;
     std::memcpy(&k, hash, 8);
@@ -39,7 +38,7 @@ namespace zilkworm {
     return hash_key8_at(hash);
 }
 
-/// Index key of a 32-byte keccak hash; see hash_key8(const uint8_t (&)[32]). This is the form HashIndex takes as its Key8.
+/// Index key of a 32-byte keccak hash; see hash_key8(const uint8_t (&)[32]).
 ///
 /// @param hash  the full 32-byte hash
 [[gnu::always_inline]] inline uint64_t hash_key8(const evmc::bytes32& hash) noexcept {
@@ -47,7 +46,7 @@ namespace zilkworm {
 }
 
 /// Index key of a 20-byte account address: its first 7 bytes as the low 7 bytes of the key,
-/// and its last byte (byte 19) as the top byte. `addr` need only be readable, not aligned.
+/// and its last byte (byte 19) as the top byte.
 ///
 /// Used for DirectState's address map. A plain 8-byte prefix would give every precompile
 /// the same key, because precompile addresses are zero in every byte but the last; taking
@@ -68,7 +67,7 @@ namespace zilkworm {
     k = (k & 0x00FFFFFFFFFFFFFFull) | (uint64_t(addr[19]) << 56); return k;
 }
 
-/// Index key of a 20-byte account address; see addr_key8_at.
+/// See addr_key8_at.
 [[gnu::always_inline]] inline uint64_t addr_key8(const uint8_t (&addr)[20]) noexcept {
     return addr_key8_at(addr);
 }
@@ -80,8 +79,7 @@ namespace zilkworm {
     return addr_key8_at(addr.bytes);
 }
 
-/// Index key of the 64-byte storage key at `key`, readable at any alignment; see
-/// storage_key8(const uint8_t (&)[64]).
+/// storage_key8 of the bytes at `key`, unaligned.
 [[gnu::always_inline]] inline uint64_t storage_key8_at(const uint8_t* key) noexcept {
     uint64_t addr_prefix;
     uint64_t slot_prefix;

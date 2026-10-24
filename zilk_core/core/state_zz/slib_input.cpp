@@ -13,7 +13,7 @@ namespace zilkworm {
 
 namespace {
 
-// The witness lists as raw section bytes, once the outer framing has been validated.
+// Framing validated; the lists are still raw.
 struct Sections {
     std::uint64_t chain_id = 0;
     ByteView new_payload_request;
@@ -46,10 +46,6 @@ std::optional<Sections> split_stateless_input(ByteView blob) {
     return out;
 }
 
-// Caps the size hint taken from an announced count, so a hostile offset table (up to
-// kMax*Nodes/Codes elements) cannot force a large zero-fill; growth backstops a larger count.
-constexpr std::uint32_t kReserveCap = 1u << 16;
-
 }  // namespace
 
 std::optional<DecodedStatelessInput> decode_stateless_input(ByteView blob) {
@@ -70,19 +66,17 @@ std::optional<StatelessInputView> parse_stateless_input(ByteView blob, HashState
     const auto sec = split_stateless_input(blob);
     if (!sec) return std::nullopt;
 
-    // Size the stores from the announced counts before the first insert; accounts at
-    // max(1024, nodes / 8) (mainnet runs near nodes / 15), slots at the constructor's 4096.
     const auto n_state = ssz::byte_list_count(sec->state, kMaxWitnessStateNodes);
     const auto n_codes = ssz::byte_list_count(sec->codes, kMaxWitnessCodes);
     if (!n_state || !n_codes) return std::nullopt;
-    const std::uint32_t nodes_hint = std::min(*n_state, kReserveCap);
-    hs.reserve_stores(nodes_hint, std::min(*n_codes, kReserveCap),
-                      std::max<std::uint32_t>(1024u, nodes_hint / 8u), 4096u);
+    // Accounts derive from the clamped node hint.
+    const std::uint32_t nodes_hint = std::min(*n_state, HashState::kMaxReserve);
+    hs.reserve_stores(nodes_hint, *n_codes, std::max<std::uint32_t>(1024u, nodes_hint / 8u), 4096u);
 
     StatelessInputView v;
     v.chain_id = sec->chain_id;
     v.new_payload_request = sec->new_payload_request;
-    // Fed as validated: a malformed element leaves `hs` partly filled and the caller drops it.
+    // A bad element leaves hs partly fed.
     if (!ssz::for_each_byte_list(sec->state, kMaxBytesPerWitnessNode, kMaxWitnessStateNodes,
                                  [&](ByteView node) {
                                      hs.add_node_borrowed(node);

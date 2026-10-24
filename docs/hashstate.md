@@ -94,7 +94,7 @@ authenticate so the accept gate can reject the block.
 
 `HashState` owns the two content stores that `DirectState` reads through a
 serialized `MphfMap`. `HashState` builds them in-guest and indexes them with the
-plain open-addressed `HashIndex<32, &hash_key8, StoredBytes>`, so there is no displacement
+plain open-addressed `HashIndex<32, &hash_key8_at, StoredBytes>`, so there is no displacement
 or collision sidecar to serialize ahead of time.
 
 | Store      | Key               | Value             | Lookup          |
@@ -162,7 +162,8 @@ and never calls a GridMPT method. It decodes no whole node:
   `owned_bytes_` and never move, so a frame points at them directly and nothing
   is copied. The stack is a member, reserved once for the deepest well-formed
   trie (one frame per branch on a 64-nibble path, so at most 64 are live) and
-  cleared at every sweep entry.
+  cleared at every sweep entry. `sweep` is therefore not reentrant;
+  `confirm_absent` keeps its own stackless walk.
 - A node is classified by the extents of its first two items, the rule
   `decode_node` applies: exactly two items is an extension or leaf, more is a
   branch. An extension's or leaf's two items are decoded with
@@ -185,7 +186,8 @@ and never calls a GridMPT method. It decodes no whole node:
   the account arena by one `Account` (value-initialised, so every field the
   decode does not set is zero) and `decode_trie_account` fills it in place; the
   slot is given back when the value is not an account. A storage leaf grows the
-  storage arena by 32 bytes and right-aligns the trimmed word into them.
+  storage arena by 32 bytes and right-aligns the trimmed word into them; a value
+  that is not an RLP string of at most 32 bytes inside the leaf is skipped.
 
 Child validation is lazy. `decode_node` validated the child items before any
 child was visited (items 2 to 15 strictly, items 0 and 1 through the looser
@@ -195,15 +197,19 @@ all sixteen slots and stops a branch at the first malformed item, after the
 children before it were swept. Either way the witness is malformed and
 `build_state_from_trie` returns `kMalformed`, so the block is rejected.
 
-Every shape `decode_node` rejects sets `malformed_witness_` where the sweep meets
-it: a referenced node that is not a list, a truncated or list-typed path or value
-item, a path past 64 nibbles (a branch at depth 64, or an extension or leaf that
-would pass it), a leaf with no value or one over `kMaxLeafValueSize`, an
-extension whose child is not a 32-byte string, a malformed branch child item, and
-a branch whose 17th item (its value) is not the lone `0x80` that ends the
-payload. The account and storage tries have fixed-length keys, so no branch
-carries a value. A hash-ref child absent from the node index is not malformed,
-it is a pruned boundary.
+Every node the sweep reads is bound to the root by keccak: it was fetched from
+the node store by its hash (the store keys a node by its real keccak, and every
+hit is confirmed against all 32 bytes) or sits embedded inside such a node. A
+root taken from a real chain therefore never leads to a malformed shape, but a
+hand-built or hostile witness can. Every shape `decode_node` rejects sets
+`malformed_witness_` where the sweep meets it: a referenced node that is not a
+list, a truncated or list-typed path or value item, a path past 64 nibbles (a
+branch at depth 64, or an extension or leaf that would pass it), a leaf with no
+value or one over `kMaxLeafValueSize`, an extension whose child is not a 32-byte
+string, a malformed branch child item, and a branch whose 17th item (its value)
+is not the lone `0x80` that ends the payload. The account and storage tries have
+fixed-length keys, so no branch carries a value. A hash-ref child absent from the
+node index is not malformed, it is a pruned boundary.
 
 The traversal lives in one private helper, `sweep(root, emit_leaf)`, and both
 kinds of pass run through it:
@@ -329,7 +335,7 @@ a single-path confirmation walk, `confirm_absent`, and bump
   `confirm_absent`, so the read is recorded rather than passed off as a silent
   zero. A miss the walk proves absent is memoized for the build under its
   `addr_hash ‖ slot_hash` key (`absent_slots_`, a
-  `HashIndex<64, &storage_key8, uint8_t>` holding a constant 1 per entry), so a
+  `HashIndex<64, &storage_key8_at, uint8_t>` holding a constant 1 per entry), so a
   repeated miss of the same slot, which a block often makes, is answered from
   the memo without another walk. Only a proven miss is entered; an unprovable
   one is recorded on every read, as before. The memo is sound because a proof
@@ -601,7 +607,9 @@ MPHF maps and `HashIndex`:
   instructions per witness node and code added, and per entry rehashed.
 - Capacity is sized to about twice the expected entry count (load factor about 0.5).
   This keeps probe runs short and guarantees that a free bucket exists, so every lookup
-  terminates on the empty sentinel. A value-initialized `Value` is reserved as that
+  terminates on the empty sentinel. `capacity_for` computes the size in 64 bits and clamps
+  it at 2^31, so a count at or above 2^30 cannot wrap the doubling or hand `std::bit_ceil`
+  a value it cannot represent. A value-initialized `Value` is reserved as that
   sentinel (offset `0`, or a null view), and `insert` rejects it, so real entries never
   carry it.
 
@@ -772,6 +780,10 @@ The hints handed to `reserve_stores`:
 | account cache | `max(1024, nodes / 8)` |
 | storage cache | 4,096 (the constructor's value) |
 
+The cap is `HashState::kMaxReserve` (65,536). `reserve_stores` clamps every hint to it, so
+the bound holds for any caller, not only the parser. The parser also clamps the node count
+before deriving the account hint from it, which keeps that hint at 8,192 or below.
+
 The cap is 2.6x the largest mainnet witness in the benchmark corpus (24,678 nodes), so a
 real block pays no growth, while a hostile offset table announcing the count cap (2^20
 elements, a 4 MB table) cannot make the guest zero-fill on the order of 100 MB of buckets
@@ -869,25 +881,25 @@ it, with no hand-supplied span. It mirrors `check_root`'s gather step for step:
   `deleted` nor `modified` is a verbatim copy of its pre-state leaf: every
   mutator that changes a leaf field (nonce, balance, code hash, a storage
   slot) and every wipe or revive sets `modified`, and destruct sets `deleted`
-  (the invariant is stated at `created_accounts_` in `hash_state.hpp`). The
-  gather skips such a record. This is sound because its update would carry
-  the leaf's own value, which the fold treats as not modified, so the root is
-  unchanged either way: `rlp_into` reproduces the decoded leaf byte for byte,
-  since a built record carries no stamped RLP cache (`acc_rlp_sroot_off ==
-  0`) and re-encodes its fields canonically. No claim is needed for it: the
-  value was bound to `prev_root` by the build sweep, unlike `check_root` over
-  `DirectState`, whose witness values are bound only by the fold's walk and
-  which therefore folds every read-only account too. This is `check_root`'s
-  `modified` split; it saves the leaf encode, the sort entry and the unfolds
-  down to each such leaf (about a quarter of the overlay records of a mainnet
-  block). The skip requires a pre-trie leaf (`find_built_account` hits): a
-  materialized-absent record stays `deleted` until a revive, which sets
-  `modified`, so a record without one is never skipped. The mutators the
-  invariant covers are `set_account_from_diff`, `set_storage_slot`,
-  `apply_code_diff` (including the empty-code arm), `revive_if_deleted_slow`,
-  `set_balance`, `add_to_balance`, `subtract_from_balance`, `set_nonce`,
-  `set_code` and `destruct`; `HashState` has no journal rollback, so no path
-  restores a record.
+  (noted at `created_accounts_` in `hash_state.hpp`; every new mutator must
+  keep it). The gather skips such a record. This is sound because its update
+  would carry the leaf's own value, which the fold treats as not modified, so
+  the root is unchanged either way: `rlp_into` reproduces the decoded leaf
+  byte for byte, since a built record carries no stamped RLP cache
+  (`acc_rlp_sroot_off == 0`) and re-encodes its fields canonically. No claim
+  is needed for it: the value was bound to `prev_root` by the build sweep,
+  unlike `check_root` over `DirectState`, whose witness values are bound only
+  by the fold's walk and which therefore folds every read-only account too.
+  This is `check_root`'s `modified` split; it saves the leaf encode, the sort
+  entry and the unfolds down to each such leaf (about a quarter of the overlay
+  records of a mainnet block). The skip requires a pre-trie leaf
+  (`find_built_account` hits): a materialized-absent record stays `deleted`
+  until a revive, which sets `modified`, so a record without one is never
+  skipped. The mutators the invariant covers are `set_account_from_diff`,
+  `set_storage_slot`, `apply_code_diff` (including the empty-code arm),
+  `revive_if_deleted_slow`, `set_balance`, `add_to_balance`,
+  `subtract_from_balance`, `set_nonce`, `set_code` and `destruct`; `HashState`
+  has no journal rollback, so no path restores a record.
 - **Storage writes of a live account.** The account's overlay storage writes
   become a `TrieNodeFlat` set sorted by slot hash (raw-key order is not
   `keccak(key)` order). Each value is encoded the way `check_root` encodes it,
@@ -1217,7 +1229,7 @@ the capacity unchanged, and the table takes keys again with no growth.
 
 `HashState` is the node and code store for the SSZ input path, parallel to `DirectState`'s
 serialized `MphfMap` stores. `add_node` and `add_code` key their input by its real keccak256 and
-record a view of a stored copy in an open-addressed `HashIndex<32, &hash_key8, StoredBytes>`;
+record a view of a stored copy in an open-addressed `HashIndex<32, &hash_key8_at, StoredBytes>`;
 `find_node_rlp` and `find_code` return that view.
 
 The store tests cover round-trip, dedupe, a definitive miss, and the case that carries the most
