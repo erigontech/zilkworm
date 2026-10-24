@@ -2,34 +2,57 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compare execution metrics produced by the zkevm-benchmark-workload runner.
+"""Report execution metrics produced by the zkevm-benchmark-workload runner.
 
-Reads the per-fixture JSON reports written under <metrics-dir>/<client>/<zkvm>/ for
-two execution clients (Zilkworm and Reth) and prints a validation summary, an
-aggregate cycle comparison, a per-test-family breakdown, and the best/worst N
-fixtures for Zilkworm.
+Reads the per-fixture JSON reports written under <metrics-dir>/<client>/<zkvm>/.
+For two execution clients (Zilkworm and Reth) it prints a validation summary, an
+aggregate cost comparison, a per-test-family breakdown, and the best/worst N
+fixtures for Zilkworm. --validate gates one client on output_matched; --cost prints
+one client's SP1 estimated cost: totals, components, families, heaviest fixtures.
+--table prints one row per metric and one column per client directory, as plain
+text or, with --markdown, a GitHub table; the Zilkworm column is named after this
+checkout's PROJECT_VERSION, the guest under test.
 
 Usage:
     tools/ere_compare.py <metrics-dir> [--reth-glob reth-*] [--zilk-glob zilkworm-*] [--top 10]
+    tools/ere_compare.py --validate 'zilkworm-*' <metrics-dir>
+    tools/ere_compare.py --cost 'zilkworm-*' <metrics-dir> [--top 10]
+    tools/ere_compare.py --table 'zilkworm-*' [--table 'reth-*'] <metrics-dir> [--markdown] [--workload DIR]
 """
 import argparse
 import glob
 import json
 import os
+import re
+import statistics
 import sys
+from collections import namedtuple
+
+import ere_workload
+
+Record = namedtuple("Record", "completed output_matched cost reason cost_kind family parts ere_rev")
+
+# SP1 ExecutionReport::gas(): cost / 10 * 10 / 191
+SP1_GAS_DIVISOR = 191
+
+COMPONENTS = {
+    "opcode": "RISC-V instructions (total - syscall - system)",
+    "syscall": "syscalls, incl. precompile chips",
+    "system": "chips every program runs (memory)",
+}
 
 
 def _cost(d, ex):
-    """Scalar cost for comparisons: legacy execution cycles when present, else the
+    """(scalar cost, kind, components): legacy execution cycles when present, else the
     summed cost_estimation components. ere >= v0.17 records no cycles on
     `--action execute`; they come from `--action estimate-cost`."""
     s = ex.get("success", {})
     if "total_num_cycles" in s:
-        return s["total_num_cycles"], "cycles"
+        return s["total_num_cycles"], "cycles", None
     ce = (d.get("cost_estimation") or {}).get("success")
     if ce and isinstance(ce.get("cost"), dict):
-        return sum(ce["cost"].values()), "estimated cost"
-    return None, None
+        return sum(ce["cost"].values()), "estimated cost", ce["cost"]
+    return None, None, None
 
 
 def _family(d):
@@ -41,9 +64,15 @@ def _family(d):
     return os.path.dirname(md.get("source_path") or "") or "(blocks)"
 
 
-def load(metrics_dir, pattern):
-    """Map fixture name -> (completed, output_matched, cost, reason, cost_kind, family) for the client dir matching pattern."""
-    roots = [d for d in glob.glob(os.path.join(metrics_dir, pattern)) if os.path.isdir(d)]
+def _roots(metrics_dir, pattern):
+    return sorted(d for d in glob.glob(os.path.join(metrics_dir, pattern)) if os.path.isdir(d))
+
+
+def load(metrics_dir, pattern, action=None):
+    """Map fixture name -> Record for the client dir matching pattern. The `action` block
+    (execution, cost_estimation) decides completion; by default `execution`, or
+    `cost_estimation` for records without one (`--action estimate-cost` only)."""
+    roots = _roots(metrics_dir, pattern)
     if not roots:
         sys.exit(f"no client directory matching {pattern!r} under {metrics_dir}")
     out = {}
@@ -52,19 +81,18 @@ def load(metrics_dir, pattern):
             if os.path.basename(f) == "hardware.json":
                 continue
             d = json.load(open(f))
-            ex = d.get("execution", {})
-            ce = d.get("cost_estimation") or {}
-            # `--action estimate-cost` records carry no `execution`; either success block completes.
-            ok = ex.get("success") or ce.get("success")
+            ex = d.get("execution") or {}
+            key = action or ("execution" if ex else "cost_estimation")
+            block = d.get(key) or {}
+            ok = block.get("success")
             if ok:
-                cost, kind = _cost(d, ex)
-                out[d["name"]] = (True, ok.get("output_matched"), cost, "", kind, _family(d))
+                cost, kind, parts = _cost(d, ex)
+                rev = (ok.get("context") or {}).get("ere_revision")
+                out[d["name"]] = Record(True, ok.get("output_matched"), cost, "", kind, _family(d), parts, rev)
             else:
-                reason = ""
-                for k, v in list(ex.items()) + list(ce.items()):
-                    if isinstance(v, dict):
-                        reason = v.get("reason", k)
-                out[d["name"]] = (False, None, None, reason or "failed", None, _family(d))
+                reason = next((v.get("reason", k) for k, v in block.items() if isinstance(v, dict)), "")
+                reason = reason or ("failed" if block else f"no {key} record")
+                out[d["name"]] = Record(False, None, None, reason, None, _family(d), None, None)
     return out
 
 
@@ -97,19 +125,135 @@ def validate(metrics_dir, client_glob):
     sys.exit(0 if ok else 1)
 
 
+def _estimates(m):
+    """(estimated rows, [(missing, reason)], [mismatched]) of a cost_estimation load."""
+    rows = {k: v for k, v in m.items() if v.completed and v.parts is not None}
+    missing = [(k, v.reason) for k, v in m.items() if k not in rows]
+    mismatched = [k for k, v in rows.items() if not v.output_matched]
+    return rows, missing, mismatched
+
+
+def ere_version(release, revs):
+    """The lockfile's ere version when it built these records, else their ere_revision."""
+    if release and all(release[1].startswith(r) for r in revs):
+        return release[0]
+    return ",".join(sorted(revs)) or "?"
+
+
+def project_version():
+    """PROJECT_VERSION from this checkout's top-level CMakeLists.txt."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "CMakeLists.txt")) as f:
+        return re.search(r"set\(PROJECT_VERSION ([^)\s]+)\)", f.read())[1]
+
+
+def summary_table(metrics_dir, globs, workload, markdown=False):
+    """One column per client directory matching globs: ere version, estimate counts and cost."""
+    release = ere_workload.ere_release(workload)
+    zilkworm = f"zilkworm-{project_version()}"
+
+    def label(name):
+        # ere-hosts names dirs after the registry.
+        return zilkworm if name.startswith("zilkworm-") else name
+
+    cols = []
+    for pattern in globs:
+        roots = _roots(metrics_dir, pattern)
+        if not roots:
+            cols.append([label(pattern)] + ["-"] * 5)
+        for root in roots:
+            name = os.path.basename(root)
+            m = load(metrics_dir, glob.escape(name), "cost_estimation")
+            rows, missing, mismatched = _estimates(m)
+            cost = sum(v.cost for v in rows.values())
+            cols.append([label(name), ere_version(release, {v.ere_rev for v in m.values() if v.ere_rev}),
+                         f"{len(rows)}/{len(m)}", str(len(rows) - len(mismatched)), str(len(missing)),
+                         f"{cost / 1e9:,.2f}"])
+    labels = ["", "ere-version", "completed", "output_matched", "incomplete", "cost (G)"]
+    table = list(zip(labels, *cols))
+    if markdown:
+        print("| " + " | ".join(table[0]) + " |")
+        print("|" + "---|" * len(table[0]))
+        for r in table[1:]:
+            print("| " + " | ".join(r) + " |")
+        return
+    widths = [max(map(len, col)) for col in zip(*table)]
+    for r in table:
+        print("   ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+
+
+def cost_report(metrics_dir, client_glob, top):
+    """Single-client SP1 estimated cost from `--action estimate-cost` records. Exit 1 if there are none."""
+    m = load(metrics_dir, client_glob, "cost_estimation")
+    rows, missing, mismatched = _estimates(m)
+    print(f"=== SP1 ESTIMATED COST ({client_glob}) ===")
+    if not rows:
+        print(f"  no cost estimates among {len(m)} fixtures (run ere-hosts --action estimate-cost)")
+        sys.exit(1)
+    costs = [v.cost for v in rows.values()]
+    total = sum(costs)
+    print("  unit: ere's SP1 cost, 3 * trace area + chip complexity, summed over fixtures")
+    print(f"  fixtures estimated   : {len(rows)}/{len(m)}  output_matched {len(rows) - len(mismatched)}"
+          f"  incomplete {len(missing)}")
+    print(f"  total estimated cost : {total:,}")
+    print(f"  ~ SP1 prover gas     : {total // SP1_GAS_DIVISOR:,}  (cost/{SP1_GAS_DIVISOR}, the prover_gas sp1_benchmark reports)")
+    print(f"  per fixture          : mean {statistics.mean(costs):,.0f}  median {statistics.median(costs):,.0f}"
+          f"  min {min(costs):,}  max {max(costs):,}")
+    for k, reason in missing[:10]:
+        print(f"  INCOMPLETE: {short(k)} -> {reason}")
+    for k in mismatched[:10]:
+        print(f"  MISMATCH:   {short(k)}")
+
+    parts = {}
+    for v in rows.values():
+        for c, x in v.parts.items():
+            parts[c] = parts.get(c, 0) + x
+    print("\n=== COST COMPONENTS (total estimated cost) ===")
+    for c, x in sorted(parts.items(), key=lambda p: -p[1]):
+        print(f"  {c:8s} {x:>22,} {100 * x / total:6.1f}%  {COMPONENTS.get(c, '')}")
+
+    fams = {}
+    for v in rows.values():
+        acc = fams.setdefault(v.family, [0, 0])
+        acc[0] += 1
+        acc[1] += v.cost
+    print("\n=== BY FAMILY (total estimated cost) ===")
+    for fam, (n, x) in sorted(fams.items(), key=lambda f: -f[1][1]):
+        print(f"  {fam:48s} n={n:4d}  {x:>22,} {100 * x / total:6.1f}%  mean {x / n:,.0f}")
+
+    print(f"\n=== Heaviest {min(top, len(rows))} fixtures (estimated cost) ===")
+    for k, v in sorted(rows.items(), key=lambda r: -r[1].cost)[:top]:
+        print(f"  {short(k):60s} {v.cost:>19,}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("metrics_dir")
     ap.add_argument("--reth-glob", default="reth-*")
     ap.add_argument("--zilk-glob", default="zilkworm-*")
-    ap.add_argument("--validate", metavar="CLIENT_GLOB",
-                    help="validate a single client's metrics (e.g. 'zilkworm-*'): "
-                         "exit 0 only if every fixture completed with output_matched")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--validate", metavar="CLIENT_GLOB",
+                      help="validate a single client's metrics (e.g. 'zilkworm-*'): "
+                           "exit 0 only if every fixture completed with output_matched")
+    mode.add_argument("--cost", metavar="CLIENT_GLOB",
+                      help="report a single client's SP1 estimated cost (e.g. 'zilkworm-*')")
+    mode.add_argument("--table", metavar="CLIENT_GLOB", action="append",
+                      help="summary table column(s), repeatable: ere version, completed, "
+                           "output_matched, incomplete, estimated cost in G")
+    ap.add_argument("--markdown", action="store_true", help="print --table as a GitHub markdown table")
+    ap.add_argument("--workload", help="workload checkout whose Cargo.lock names the ere version "
+                                       "(default: the parent of metrics_dir)")
     ap.add_argument("--top", type=int, default=10)
     a = ap.parse_args()
 
     if a.validate:
         validate(a.metrics_dir, a.validate)
+    if a.cost:
+        cost_report(a.metrics_dir, a.cost, a.top)
+        return
+    if a.table:
+        summary_table(a.metrics_dir, a.table,
+                      a.workload or os.path.dirname(os.path.abspath(a.metrics_dir)), a.markdown)
+        return
 
     R = load(a.metrics_dir, a.reth_glob)
     Z = load(a.metrics_dir, a.zilk_glob)

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # ERE Benchmark Integration
 
-Zilkworm is integrated as a stateless-validation execution client in the [ERE benchmark](https://github.com/eth-act/zkevm-benchmark-workload). The same canonical EEST benchmark fixtures are executed inside SP1 using the Zilkworm guest, validated against their expected public values, and (optionally) compared with Reth by SP1 estimated prover cost.
+Zilkworm is integrated as a stateless-validation execution client in the [ERE benchmark](https://github.com/eth-act/zkevm-benchmark-workload). The same canonical EEST benchmark fixtures are executed inside SP1 using the Zilkworm guest, validated against their expected public values, and costed with SP1's prover-cost estimate, optionally side by side with Reth.
 
 The current integration targets **Amsterdam / Sepolia** with the
 **tests-zkevm v21.0.1** stateless schema, on **ere v0.19.5 (SP1 v6.9.0) / ere-guests `main`** (erigontech fork, below). The ERE guest is the HashState
@@ -55,7 +55,7 @@ not representative.
 
 ## Quick start
 
-Two `Makefile` targets drive the ERE harness. Both run `ere-hosts` inside `$(ERE_WORKLOAD_DIR)`:
+Three `Makefile` targets drive the ERE harness. All run `ere-hosts` inside `$(ERE_WORKLOAD_DIR)`:
 
 ```sh
 # Validate Zilkworm against a fixture folder
@@ -63,7 +63,12 @@ make ere-validate \
     ERE_WORKLOAD_DIR=../zkevm-benchmark-workload_fork \
     ERE_BIN_PATH=build/ere-bin
 
-# Estimate cost (SP1 gas model) for Zilkworm and Reth and print the comparison
+# Estimate Zilkworm's SP1 cost and print the cost report
+make ere-cost \
+    ERE_WORKLOAD_DIR=../zkevm-benchmark-workload_fork \
+    ERE_BIN_PATH=build/ere-bin
+
+# ere-cost, then Reth's SP1 cost and the comparison
 make ere-compare \
     ERE_WORKLOAD_DIR=../zkevm-benchmark-workload_fork \
     ERE_BIN_PATH=build/ere-bin
@@ -96,7 +101,7 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
   (`z6m_guest_slib`), which takes the fixtures' `statelessInputBytes` unchanged
   (outputs `build/ere-bin/stateless-validator-zilkworm-sp1.{elf,vk}`). ere-hosts loads
   `<bin-path>/stateless-validator-zilkworm-sp1-<SP1 SDK version>.{elf,vk}`, so
-  both targets first run `ere-bin-link`, which symlinks the unversioned files
+  `ere-validate` and `ere-cost` first run `ere-bin-link`, which symlinks the unversioned files
   under the version the workload's ere resolves (`tools/ere_workload.py
   <workload> sp1-sdk-version`, mirroring ere-catalog's build script). It stops
   unless that is `v6.9.0`, the tag `derive_vk` builds against (ere v0.19.5). The VK
@@ -129,22 +134,43 @@ ERE_TIMEOUT        ?= 60m                    # per-action timeout
 `ere-hosts` writes one result JSON per fixture under
 `$(ERE_WORKLOAD_DIR)/zkevm-metrics/<client>-<ver>/<zkvm>-<sdk>/`, and by default
 **skips** any fixture that already has a result there. That silently reuses stale
-results from a previous guest. Both targets therefore pass `--force-rerun`
-unconditionally so validate/compare always re-execute against the current guest.
+results from a previous guest. The targets therefore pass `--force-rerun`
+unconditionally so every run re-executes against the current guest.
 
 ### Actions and metrics (ere ≥ v0.17)
 
 Since ere v0.17 / benchmark master (#310, #312) the per-fixture record written
 by `--action execute` carries only `output_matched` and `execution_duration`:
 **no cycle count**. Cost data comes from `--action estimate-cost`, which stores
-`cost_estimation.success.cost`, a per-component map (`opcode`, `syscall`,
-`system`) from SP1's estimated prover-cost model, plus `peak_heap_bytes`.
+`cost_estimation.success.cost`, a per-component map from SP1's estimated
+prover-cost model (`peak_heap_bytes` is null since ere v0.19). The unit is
+`3 × trace area + chip complexity`; SP1's own gas is that over 10, and its
+`ExecutionReport::gas()`, which `sp1_benchmark` reports as prover gas, is the
+estimate over 191. The components (ere `crates/prover/sp1`):
+
+| Component | Rows charged |
+|---|---|
+| `opcode` | plain RISC-V instructions (the total minus the other two) |
+| `syscall` | syscalls, including the precompile chips they invoke |
+| `system` | chips every program runs, such as memory |
+
 Accordingly:
 
 - `ere-validate` runs `--action execute` and gates on `output_matched`.
-- `ere-compare` runs `--action estimate-cost` for reth and zilkworm and compares
-  the summed components. Records are merged per fixture file, so a compare run
-  keeps the `execution` block written by a preceding validate run.
+- `ere-cost` runs `--action estimate-cost` for zilkworm and prints
+  `ere_compare.py --table`, one column per client with the ere version,
+  completed, output_matched, incomplete and estimated cost in G, then
+  `ere_compare.py --cost`: total estimated cost and its prover-gas equivalent,
+  per-fixture mean and median, component and test-family totals, and the
+  heaviest fixtures. It fails only when no fixture has an estimate.
+- `ere-compare` runs `ere-cost`, then `--action estimate-cost` for reth, prints
+  the table with a reth column, and compares the summed components.
+  `make ere-compare -o ere-cost` skips the zilkworm leg when `ere-cost` already
+  ran, as CI does.
+- Records are merged per fixture file, so an estimate-cost run keeps the
+  `execution` block written by a preceding validate run. `--validate` decides
+  on that block when a record has one, so a `--validate` after `ere-cost`
+  (the CI summary's) still reports the execute results.
 - `tools/ere_compare.py` reports one comparison per metric kind and never sums
   legacy execution cycles (results from ere ≤ v0.16) with estimated cost.
 
@@ -198,7 +224,7 @@ To run the general EEST corpus instead, pass `ERE_GEN_FIXTURES=1` (and set
 ## CI
 
 [`.github/workflows/ere-benchmark.yml`](../.github/workflows/ere-benchmark.yml) runs
-`make ere-validate` (and optionally `make ere-compare`) on the latest batches of an
+`make ere-validate` and `make ere-cost` (and optionally the Reth leg of `make ere-compare`) on the latest batches of an
 R2 catalog, mirroring the upstream `eest-r2-stateless-inputs.yml` selection with the
 Zilkworm guest in place of the EEST spec guest.
 
@@ -211,7 +237,7 @@ Zilkworm guest in place of the EEST spec guest.
   `z6m_guest_hypercube_mfbd` (DirectState, MFBD bundles) and the handbook-named
   `stateless-validator-zilkworm-sp1-<SP1 SDK version>` (HashState, the ERE guest).
 - **Inputs:** `guest_source`, `release_tag`, `catalog_url` (default Sepolia),
-  `batch_count` (default 1), `compare` (default off; also off for releases
+  `batch_count` (default 1), `compare` (Reth's cost and the comparison; default off; also off for releases
   while ere-guests registers no Reth SP1 v6.9.0 guest),
   `workload_ref` / `ere_guests_ref` (default `som/ere-v0.19.5` on the
   erigontech forks).
@@ -220,8 +246,10 @@ Zilkworm guest in place of the EEST spec guest.
   workload's `[patch]` pins its rev.
   The ere job runs on the runner host: ere-hosts reaches `ere-server-sp1` on
   `127.0.0.1:4175`.
-- **Output:** the step summary records the three commits, the guest ELF sha256,
-  the block range and the `ere_compare.py` report; `zkevm-metrics/` is uploaded.
+- **Output:** the step summary opens with the `--table --markdown` table (a reth
+  column with `compare`), then records the three commits, the guest ELF sha256,
+  the block range, the `--validate` result and the Zilkworm cost report
+  (`--cost`), plus the Reth comparison with `compare`; `zkevm-metrics/` is uploaded.
 
 Once the zilkworm client and registry entry are upstreamed, the ere-guests
 checkout and the workload `[patch]` go away.
