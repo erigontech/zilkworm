@@ -252,9 +252,15 @@ jobs:
           GUEST_SOURCE: ${{ inputs.guest_source == 'release' && format('release {0}', inputs.release_tag) || 'build' }}
         run: |
           metrics="$WORKLOAD_DIR/zkevm-metrics"
+          clients=(--table 'zilkworm-*')
+          [ "$COMPARE" != true ] || clients+=(--table 'reth-*')
           {
             echo "### ERE benchmark: zilkworm, sp1"
             echo
+            if [ -d "$metrics" ]; then
+              python3 tools/ere_compare.py "${clients[@]}" --markdown "$metrics" || true
+              echo
+            fi
             echo "| | ref | commit |"
             echo "|---|---|---|"
             echo "| z6m | \`$GUEST_SOURCE\` | \`$(git rev-parse --short=12 HEAD)\` |"

@@ -47,3 +47,4 @@ third_party/*/*/deps/
 .claude/worktrees
 .claude/INTENTIONS.md
 test-fixtures-cache/
+__pycache__/

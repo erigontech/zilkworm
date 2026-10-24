@@ -158,12 +158,15 @@ Accordingly:
 
 - `ere-validate` runs `--action execute` and gates on `output_matched`.
 - `ere-cost` runs `--action estimate-cost` for zilkworm and prints
+  `ere_compare.py --table`, one column per client with the ere version,
+  completed, output_matched, incomplete and estimated cost in G, then
   `ere_compare.py --cost`: total estimated cost and its prover-gas equivalent,
   per-fixture mean and median, component and test-family totals, and the
   heaviest fixtures. It fails only when no fixture has an estimate.
-- `ere-compare` runs `ere-cost`, then `--action estimate-cost` for reth, and
-  compares the summed components. `make ere-compare -o ere-cost` skips the
-  zilkworm leg when `ere-cost` already ran, as CI does.
+- `ere-compare` runs `ere-cost`, then `--action estimate-cost` for reth, prints
+  the table with a reth column, and compares the summed components.
+  `make ere-compare -o ere-cost` skips the zilkworm leg when `ere-cost` already
+  ran, as CI does.
 - Records are merged per fixture file, so an estimate-cost run keeps the
   `execution` block written by a preceding validate run. `--validate` decides
   on that block when a record has one, so a `--validate` after `ere-cost`
@@ -243,7 +246,8 @@ Zilkworm guest in place of the EEST spec guest.
   workload's `[patch]` pins its rev.
   The ere job runs on the runner host: ere-hosts reaches `ere-server-sp1` on
   `127.0.0.1:4175`.
-- **Output:** the step summary records the three commits, the guest ELF sha256,
+- **Output:** the step summary opens with the `--table --markdown` table (a reth
+  column with `compare`), then records the three commits, the guest ELF sha256,
   the block range, the `--validate` result and the Zilkworm cost report
   (`--cost`), plus the Reth comparison with `compare`; `zkevm-metrics/` is uploaded.
 

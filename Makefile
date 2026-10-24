@@ -430,6 +430,7 @@ ere-cost: $(if $(ERE_GEN_FIXTURES),ere-fixtures) $(if $(ERE_BIN_PATH),ere-bin-li
 	cd "$(ERE_WORKLOAD_DIR)" && $(ERE_RUN_ENV) \
 	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) --action estimate-cost \
 	        $(if $(ERE_BIN_PATH),--bin-path $(abspath $(ERE_BIN_PATH)),) stateless-validator --execution-client zilkworm --input-folder $(abspath $(ERE_INPUT_FOLDER))
+	python3 $(CURDIR)/tools/ere_compare.py --table 'zilkworm-*' "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 	python3 $(CURDIR)/tools/ere_compare.py --cost 'zilkworm-*' "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 
 # `make ere-compare -o ere-cost` reuses an earlier ere-cost.
@@ -437,5 +438,6 @@ ere-compare: ere-cost
 	cd "$(ERE_WORKLOAD_DIR)" && url="$(ERE_RETH_ARTIFACT_URL)" && $(ERE_RUN_ENV) \
 	    cargo run -p ere-hosts --release -- --zkvms sp1 --force-rerun --timeout $(ERE_TIMEOUT) --action estimate-cost \
 	        $${url:+--guest-artifact-base-url $$url} stateless-validator --execution-client reth --input-folder $(abspath $(ERE_INPUT_FOLDER))
+	python3 $(CURDIR)/tools/ere_compare.py --table 'zilkworm-*' --table 'reth-*' "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 	python3 $(CURDIR)/tools/ere_compare.py "$(ERE_WORKLOAD_DIR)/zkevm-metrics"
 

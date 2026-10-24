@@ -9,11 +9,14 @@ For two execution clients (Zilkworm and Reth) it prints a validation summary, an
 aggregate cost comparison, a per-test-family breakdown, and the best/worst N
 fixtures for Zilkworm. --validate gates one client on output_matched; --cost prints
 one client's SP1 estimated cost: totals, components, families, heaviest fixtures.
+--table prints one row per metric and one column per client directory, as plain
+text or, with --markdown, a GitHub table.
 
 Usage:
     tools/ere_compare.py <metrics-dir> [--reth-glob reth-*] [--zilk-glob zilkworm-*] [--top 10]
     tools/ere_compare.py --validate 'zilkworm-*' <metrics-dir>
     tools/ere_compare.py --cost 'zilkworm-*' <metrics-dir> [--top 10]
+    tools/ere_compare.py --table 'zilkworm-*' [--table 'reth-*'] <metrics-dir> [--markdown] [--workload DIR]
 """
 import argparse
 import glob
@@ -23,7 +26,9 @@ import statistics
 import sys
 from collections import namedtuple
 
-Record = namedtuple("Record", "completed output_matched cost reason cost_kind family parts")
+import ere_workload
+
+Record = namedtuple("Record", "completed output_matched cost reason cost_kind family parts ere_rev")
 
 # SP1 ExecutionReport::gas(): cost / 10 * 10 / 191
 SP1_GAS_DIVISOR = 191
@@ -57,11 +62,15 @@ def _family(d):
     return os.path.dirname(md.get("source_path") or "") or "(blocks)"
 
 
+def _roots(metrics_dir, pattern):
+    return sorted(d for d in glob.glob(os.path.join(metrics_dir, pattern)) if os.path.isdir(d))
+
+
 def load(metrics_dir, pattern, action=None):
     """Map fixture name -> Record for the client dir matching pattern. The `action` block
     (execution, cost_estimation) decides completion; by default `execution`, or
     `cost_estimation` for records without one (`--action estimate-cost` only)."""
-    roots = [d for d in glob.glob(os.path.join(metrics_dir, pattern)) if os.path.isdir(d)]
+    roots = _roots(metrics_dir, pattern)
     if not roots:
         sys.exit(f"no client directory matching {pattern!r} under {metrics_dir}")
     out = {}
@@ -76,11 +85,12 @@ def load(metrics_dir, pattern, action=None):
             ok = block.get("success")
             if ok:
                 cost, kind, parts = _cost(d, ex)
-                out[d["name"]] = Record(True, ok.get("output_matched"), cost, "", kind, _family(d), parts)
+                rev = (ok.get("context") or {}).get("ere_revision")
+                out[d["name"]] = Record(True, ok.get("output_matched"), cost, "", kind, _family(d), parts, rev)
             else:
                 reason = next((v.get("reason", k) for k, v in block.items() if isinstance(v, dict)), "")
                 reason = reason or ("failed" if block else f"no {key} record")
-                out[d["name"]] = Record(False, None, None, reason, None, _family(d), None)
+                out[d["name"]] = Record(False, None, None, reason, None, _family(d), None, None)
     return out
 
 
@@ -113,12 +123,54 @@ def validate(metrics_dir, client_glob):
     sys.exit(0 if ok else 1)
 
 
-def cost_report(metrics_dir, client_glob, top):
-    """Single-client SP1 estimated cost from `--action estimate-cost` records. Exit 1 if there are none."""
-    m = load(metrics_dir, client_glob, "cost_estimation")
+def _estimates(m):
+    """(estimated rows, [(missing, reason)], [mismatched]) of a cost_estimation load."""
     rows = {k: v for k, v in m.items() if v.completed and v.parts is not None}
     missing = [(k, v.reason) for k, v in m.items() if k not in rows]
     mismatched = [k for k, v in rows.items() if not v.output_matched]
+    return rows, missing, mismatched
+
+
+def ere_version(release, revs):
+    """The lockfile's ere version when it built these records, else their ere_revision."""
+    if release and all(release[1].startswith(r) for r in revs):
+        return release[0]
+    return ",".join(sorted(revs)) or "?"
+
+
+def summary_table(metrics_dir, globs, workload, markdown=False):
+    """One column per client directory matching globs: ere version, estimate counts and cost."""
+    release = ere_workload.ere_release(workload)
+    cols = []
+    for pattern in globs:
+        roots = _roots(metrics_dir, pattern)
+        if not roots:
+            cols.append([pattern] + ["-"] * 5)
+        for root in roots:
+            name = os.path.basename(root)
+            m = load(metrics_dir, glob.escape(name), "cost_estimation")
+            rows, missing, mismatched = _estimates(m)
+            cost = sum(v.cost for v in rows.values())
+            cols.append([name, ere_version(release, {v.ere_rev for v in m.values() if v.ere_rev}),
+                         f"{len(rows)}/{len(m)}", str(len(rows) - len(mismatched)), str(len(missing)),
+                         f"{cost / 1e9:,.2f}"])
+    labels = ["", "ere-version", "completed", "output_matched", "incomplete", "cost (G)"]
+    table = list(zip(labels, *cols))
+    if markdown:
+        print("| " + " | ".join(table[0]) + " |")
+        print("|" + "---|" * len(table[0]))
+        for r in table[1:]:
+            print("| " + " | ".join(r) + " |")
+        return
+    widths = [max(map(len, col)) for col in zip(*table)]
+    for r in table:
+        print("   ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+
+
+def cost_report(metrics_dir, client_glob, top):
+    """Single-client SP1 estimated cost from `--action estimate-cost` records. Exit 1 if there are none."""
+    m = load(metrics_dir, client_glob, "cost_estimation")
+    rows, missing, mismatched = _estimates(m)
     print(f"=== SP1 ESTIMATED COST ({client_glob}) ===")
     if not rows:
         print(f"  no cost estimates among {len(m)} fixtures (run ere-hosts --action estimate-cost)")
@@ -170,6 +222,12 @@ def main():
                            "exit 0 only if every fixture completed with output_matched")
     mode.add_argument("--cost", metavar="CLIENT_GLOB",
                       help="report a single client's SP1 estimated cost (e.g. 'zilkworm-*')")
+    mode.add_argument("--table", metavar="CLIENT_GLOB", action="append",
+                      help="summary table column(s), repeatable: ere version, completed, "
+                           "output_matched, incomplete, estimated cost in G")
+    ap.add_argument("--markdown", action="store_true", help="print --table as a GitHub markdown table")
+    ap.add_argument("--workload", help="workload checkout whose Cargo.lock names the ere version "
+                                       "(default: the parent of metrics_dir)")
     ap.add_argument("--top", type=int, default=10)
     a = ap.parse_args()
 
@@ -177,6 +235,10 @@ def main():
         validate(a.metrics_dir, a.validate)
     if a.cost:
         cost_report(a.metrics_dir, a.cost, a.top)
+        return
+    if a.table:
+        summary_table(a.metrics_dir, a.table,
+                      a.workload or os.path.dirname(os.path.abspath(a.metrics_dir)), a.markdown)
         return
 
     R = load(a.metrics_dir, a.reth_glob)
