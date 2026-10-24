@@ -29,7 +29,7 @@ on:
         type: string
         default: "1"
       compare:
-        description: Also estimate SP1 prover cost against Reth
+        description: Also estimate Reth's SP1 cost and compare it with Zilkworm's
         type: boolean
         default: false
       workload_ref:
@@ -234,10 +234,15 @@ jobs:
         working-directory: z6m
         run: make ere-validate ERE_WORKLOAD_DIR="$WORKLOAD_DIR" ERE_BIN_PATH="$BIN_DIR" ERE_INPUT_FOLDER="$FIXTURES_DIR/latest"
 
-      - name: Estimate cost against Reth
+      - name: Estimate cost
+        working-directory: z6m
+        run: make ere-cost ERE_WORKLOAD_DIR="$WORKLOAD_DIR" ERE_BIN_PATH="$BIN_DIR" ERE_INPUT_FOLDER="$FIXTURES_DIR/latest"
+
+      # Zilkworm's cost leg ran in Estimate cost.
+      - name: Compare cost with Reth
         if: inputs.compare
         working-directory: z6m
-        run: make ere-compare ERE_WORKLOAD_DIR="$WORKLOAD_DIR" ERE_BIN_PATH="$BIN_DIR" ERE_INPUT_FOLDER="$FIXTURES_DIR/latest"
+        run: make ere-compare -o ere-cost ERE_WORKLOAD_DIR="$WORKLOAD_DIR" ERE_BIN_PATH="$BIN_DIR" ERE_INPUT_FOLDER="$FIXTURES_DIR/latest"
 
       - name: Summary
         if: always()
@@ -247,9 +252,15 @@ jobs:
           GUEST_SOURCE: ${{ inputs.guest_source == 'release' && format('release {0}', inputs.release_tag) || 'build' }}
         run: |
           metrics="$WORKLOAD_DIR/zkevm-metrics"
+          clients=(--table 'zilkworm-*')
+          [ "$COMPARE" != true ] || clients+=(--table 'reth-*')
           {
             echo "### ERE benchmark: zilkworm, sp1"
             echo
+            if [ -d "$metrics" ]; then
+              python3 tools/ere_compare.py "${clients[@]}" --markdown "$metrics" || true
+              echo
+            fi
             echo "| | ref | commit |"
             echo "|---|---|---|"
             echo "| z6m | \`$GUEST_SOURCE\` | \`$(git rev-parse --short=12 HEAD)\` |"
@@ -263,7 +274,9 @@ jobs:
             if [ -d "$metrics" ]; then
               echo '```'
               python3 tools/ere_compare.py --validate 'zilkworm-*' "$metrics" || true
-              [ "$COMPARE" != true ] || python3 tools/ere_compare.py "$metrics" || true
+              echo
+              python3 tools/ere_compare.py --cost 'zilkworm-*' "$metrics" || true
+              [ "$COMPARE" != true ] || { echo; python3 tools/ere_compare.py "$metrics" || true; }
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

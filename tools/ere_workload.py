@@ -64,6 +64,17 @@ def sp1_sdk_version(meta):
     return _resolve_version(matches[0])
 
 
+def ere_release(workload_dir):
+    """(version, git rev) of the ere-dockerized the workload lockfile pins, or None."""
+    try:
+        with open(os.path.join(workload_dir, "Cargo.lock"), "rb") as f:
+            packages = tomllib.load(f)["package"]
+    except FileNotFoundError:
+        return None
+    pkg = next((p for p in packages if p["name"] == "ere-dockerized"), None)
+    return pkg and (_resolve_version(pkg), pkg.get("source", "").partition("#")[2])
+
+
 def reth_artifact_url(meta):
     registry = os.path.join(_manifest_dir(meta, "stateless-validator-downloader"), "..", "..", "artifact-registry.json")
     with open(registry) as f:
