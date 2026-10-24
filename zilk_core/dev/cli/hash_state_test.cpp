@@ -130,9 +130,7 @@ TEST_CASE("HashState miss on never-added node hash", "[hash_state]") {
     CHECK_FALSE(hs.find_node_rlp(h).has_value());
 }
 
-// The raw-pointer find_node_rlp (the form the trie sweep and the confirmation walk use on a
-// child hash ref inside node RLP) is the same probe as the bytes32 form: the same view on a
-// hit and a miss on a never-added hash, from an unaligned pointer.
+// Child refs inside node RLP are unaligned.
 TEST_CASE("HashState find_node_rlp by raw pointer matches the bytes32 overload", "[hash_state]") {
     HashState hs;
     const Bytes rlp = payload(0xB17E5ULL);
@@ -199,7 +197,6 @@ TEST_CASE("HashState full-key gate on home-bucket collision", "[hash_state]") {
     CHECK(eq32(hs.add_node(view_of(p_b)), h_b));
     CHECK(hs.node_count() == 2u);
 
-    // The full-key compare gate routes each colliding lookup to its OWN payload.
     auto ga = hs.find_node_rlp(h_a);
     auto gb = hs.find_node_rlp(h_b);
     REQUIRE(ga.has_value());
@@ -241,10 +238,7 @@ TEST_CASE("HashState code round-trips by code_hash", "[hash_state]") {
     CHECK(miss.empty());
 }
 
-// reserve_stores sizes the stores for the counts the input announces before the first add
-// (the slib parser's path), and the borrowed adds that follow dedupe by content with the
-// FIRST view kept: one probe inserts or finds the hash present, and a repeat is the same
-// bytes under the same hash.
+// reserve_stores precedes the first add: slib's path.
 TEST_CASE("HashState reserve_stores then borrowed adds dedupe first-wins", "[hash_state]") {
     HashState hs{4, 4, 4, 4};  // tiny constructor hints: the reserve below does the sizing
     hs.reserve_stores(3000, 10, 100, 100);
@@ -264,8 +258,6 @@ TEST_CASE("HashState reserve_stores then borrowed adds dedupe first-wins", "[has
         CHECK(got->size() == n.size());
     }
 
-    // A repeat from a different buffer with the same content is deduped, and the view added
-    // first stays indexed.
     const Bytes again = nodes[7];
     REQUIRE(again.data() != nodes[7].data());
     CHECK(eq32(hs.add_node_borrowed(view_of(again)), keccak32(view_of(nodes[7]))));
@@ -282,7 +274,7 @@ TEST_CASE("HashState reserve_stores then borrowed adds dedupe first-wins", "[has
     CHECK(hs.code_count() == 1u);
     CHECK(hs.find_code(keccak32(view_of(code))).data() == code.data());
 
-    // A later reserve_stores on stores that already hold entries changes nothing.
+    // reserve_stores on populated stores is a no-op.
     hs.reserve_stores(100000, 100000, 1, 1);
     CHECK(hs.node_count() == 3000u);
     CHECK(hs.code_count() == 1u);
@@ -745,17 +737,9 @@ TEST_CASE("HashState build_state_from_trie skips an absent storage root", "[hash
     CHECK(hs.storage_slot_count() == 0u);
 }
 
-// ---------------------------------------------------------------------------
-// The sweep's frames and path buffer. The sweep keeps one branch frame per level, a cursor
-// into the branch's RLP, and ONE path buffer for the whole trie, resetting it to the frame's
-// prefix at every child visit; a branch's children are read lazily, one item at a time, with
-// the strict child grammar. These fixtures pin the behaviour that layout depends on.
-// See docs/hashstate.md, "Trie sweep tests".
-// ---------------------------------------------------------------------------
-
 namespace {
 
-// RLP list wrapper around an already-encoded payload (for hand-built branch nodes).
+// For hand-built nodes the encoders cannot emit.
 [[nodiscard]] Bytes rlp_list_of(const Bytes& payload) {
     Bytes out;
     silkworm::rlp::encode_header(out, {.list = true, .payload_length = payload.size()});
@@ -765,12 +749,7 @@ namespace {
 
 }  // namespace
 
-// Sibling subtrees of one branch whose extensions differ in length, the long one first:
-// root[0x3] -> ext(50) -> branch -> leaf(12) x2, then root[0x9] -> ext(2) -> leaf(61), then
-// root[0xD] -> leaf(63). After the first subtree the path buffer holds 52 nibbles of its
-// prefix, so the second subtree's leaves are keyed correctly only if each child visit resets
-// the path to the root's own prefix (a stale suffix would push them past 64 nibbles or key
-// them under the wrong hash). The first subtree pops back from a frame at depth 52.
+// Long subtree first: 52 stale path nibbles.
 TEST_CASE("HashState build_state_from_trie resets the path per child across sibling extensions",
           "[hash_state]") {
     HashState hs;
@@ -785,7 +764,7 @@ TEST_CASE("HashState build_state_from_trie resets the path per child across sibl
     TestAccount aA1, aA2, aB, aC;
     aA1.build(41); aA2.build(42); aB.build(43); aC.build(44);
 
-    // Subtree A: a branch at depth 51 with two 12-nibble leaves, behind a 50-nibble extension.
+    // Subtree A: root[0x3]->ext(50)->branch->leaf(12)x2.
     const LeafNode leafA1 = make_leaf(&kA1.nib[52], 12, ByteView{aA1.leaf_value});
     const evmc::bytes32 hA1 = hs.add_node(ByteView{zilkworm::encode_leaf(leafA1)});
     const LeafNode leafA2 = make_leaf(&kA2.nib[52], 12, ByteView{aA2.leaf_value});
@@ -797,7 +776,7 @@ TEST_CASE("HashState build_state_from_trie resets the path per child across sibl
     const ExtensionNode extA = make_ext(&kA1.nib[1], 50, ByteView{hBranchA.bytes, 32});
     const evmc::bytes32 hExtA = hs.add_node(ByteView{zilkworm::encode_ext(extA)});
 
-    // Subtree B: a 61-nibble leaf behind a 2-nibble extension.
+    // Subtree B: root[0x9]->ext(2)->leaf(61).
     const LeafNode leafB = make_leaf(&kB.nib[3], 61, ByteView{aB.leaf_value});
     const evmc::bytes32 hB = hs.add_node(ByteView{zilkworm::encode_leaf(leafB)});
     const ExtensionNode extB = make_ext(&kB.nib[1], 2, ByteView{hB.bytes, 32});
@@ -825,19 +804,12 @@ TEST_CASE("HashState build_state_from_trie resets the path per child across sibl
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// The 64-nibble bounds. A branch at depth 63 (root[0x2] -> ext(62) -> branch) is the deepest a
-// well-formed branch can sit: its children are leaves with empty paths (HP byte 0x20) at
-// exactly 64 nibbles, all cached. A 63-nibble extension under root[0x6] ends in a leaf with an
-// empty path: exactly 64 nibbles, cached. Two malformed subtrees stop without emitting and
-// without touching the counters, and the build reports kMalformed: root[0x5] -> ext(63) ->
-// branch (a branch at depth 64 has no room for a child nibble) and root[0x8] -> ext(60) ->
-// leaf(10) (71 nibbles). The 62- and
-// 63-nibble extension paths are 32-byte strings (0xa0 items), the shape a hash ref also has.
+// 62/63-nibble paths are 0xa0 items, hash-ref shaped.
 TEST_CASE("HashState build_state_from_trie sweeps a branch at depth 63 and stops past 64 nibbles",
           "[hash_state]") {
     HashState hs;
 
-    // Three keys sharing a 63-nibble prefix (root slot 0x2 + 62 extension nibbles).
+    // D: root[0x2]->ext(62)->branch->leaf(0)x3.
     const Key kD1 = key_with(0x2, 3, 5);
     Key kD2 = kD1;
     Key kD3 = kD1;
@@ -865,13 +837,13 @@ TEST_CASE("HashState build_state_from_trie sweeps a branch at depth 63 and stops
     const ExtensionNode extD = make_ext(&kD1.nib[1], 62, ByteView{hBranch63.bytes, 32});
     const evmc::bytes32 hExtD = hs.add_node(ByteView{zilkworm::encode_ext(extD)});
 
-    // 63-nibble extension ending in an empty-path leaf: exactly 64 nibbles.
+    // E: ext(63)->leaf(0), exactly 64 nibbles.
     const LeafNode leafE = make_leaf(&kE.nib[64], 0, ByteView{aE.leaf_value});
     const evmc::bytes32 hE = hs.add_node(ByteView{zilkworm::encode_leaf(leafE)});
     const ExtensionNode extE = make_ext(&kE.nib[1], 63, ByteView{hE.bytes, 32});
     const evmc::bytes32 hExtE = hs.add_node(ByteView{zilkworm::encode_ext(extE)});
 
-    // Malformed X: a branch at depth 64 (nothing below it can be keyed).
+    // Malformed X: a branch at depth 64.
     const LeafNode leafX = make_leaf(&kX.nib[64], 0, ByteView{aX.leaf_value});
     const evmc::bytes32 hX = hs.add_node(ByteView{zilkworm::encode_leaf(leafX)});
     BranchNode branch64;
@@ -880,7 +852,7 @@ TEST_CASE("HashState build_state_from_trie sweeps a branch at depth 63 and stops
     const ExtensionNode extX = make_ext(&kX.nib[1], 63, ByteView{hBranch64.bytes, 32});
     const evmc::bytes32 hExtX = hs.add_node(ByteView{zilkworm::encode_ext(extX)});
 
-    // Malformed Y: 1 + 60 + 10 = 71 nibbles.
+    // Malformed Y: 1+60+10 = 71 nibbles.
     const LeafNode leafY = make_leaf(&kY.nib[54], 10, ByteView{aY.leaf_value});
     const evmc::bytes32 hY = hs.add_node(ByteView{zilkworm::encode_leaf(leafY)});
     const ExtensionNode extY = make_ext(&kY.nib[1], 60, ByteView{hY.bytes, 32});
@@ -907,12 +879,7 @@ TEST_CASE("HashState build_state_from_trie sweeps a branch at depth 63 and stops
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// Lazy child validation. A branch's children are read one item at a time as the sweep passes
-// them, so a malformed item at slot k (here a 1-byte string at slot 2: a branch child is only
-// 0x80, 0xa0 + 32 bytes or an embedded list 0xc0..0xf7) stops the branch at k: the leaves
-// under slots 0 and 1 are cached, nothing under slot 5 is, no counter moves and the build
-// reports kMalformed, as decode_node rejecting the node does. The node is built by hand
-// because the encoders cannot emit it.
+// Hand-built: the encoders cannot emit this shape.
 TEST_CASE("HashState build_state_from_trie stops a branch at its first malformed child item",
           "[hash_state]") {
     HashState hs;
@@ -951,10 +918,6 @@ TEST_CASE("HashState build_state_from_trie stops a branch at its first malformed
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// Every node shape decode_node rejects makes the witness malformed, wherever the sweep meets
-// it: a referenced node that is not a list, a branch whose 17th item is not the lone 0x80, a
-// leaf with no value or one over kMaxLeafValueSize, an extension whose child is not a 32-byte
-// string, a list item where a path or child string belongs, and an item running past its node.
 TEST_CASE("HashState build_state_from_trie rejects every node shape decode_node rejects",
           "[hash_state]") {
     const auto build = [](const Bytes& node_rlp) {
@@ -1002,6 +965,94 @@ TEST_CASE("HashState build_state_from_trie rejects every node shape decode_node 
         const evmc::bytes32 root = hs.add_node(ByteView{zilkworm::encode_branch(b)});
         CHECK(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
         CHECK(hs.account_count() == 1u);
+    }
+
+    // Slot 15 present: 17th-item check on pop.
+    const auto with_slot15 = [](const Bytes& tail) {
+        HashState hs;
+        const Key kA = key_with(0xF, 3, 5);
+        TestAccount aA;
+        aA.build(71);
+        const LeafNode leafA = make_leaf(&kA.nib[1], 63, ByteView{aA.leaf_value});
+        const evmc::bytes32 hA = hs.add_node(ByteView{zilkworm::encode_leaf(leafA)});
+        Bytes p(15, 0x80);
+        p.push_back(0xa0);
+        p.append(hA.bytes, 32);
+        p += tail;
+        const evmc::bytes32 root = hs.add_node(ByteView{rlp_list_of(p)});
+        const auto status = hs.build_state_from_trie(root);
+        return std::pair{status, hs.account_count()};
+    };
+    SECTION("slot 15 present, the lone 0x80: the control") {
+        const auto [status, accounts] = with_slot15(Bytes{0x80});
+        CHECK(status == HashState::BuildStatus::kOk);
+        CHECK(accounts == 1u);
+    }
+    SECTION("slot 15 present, a non-empty 17th item") {
+        const auto [status, accounts] = with_slot15(Bytes{0x07});
+        CHECK(status == HashState::BuildStatus::kMalformed);
+        CHECK(accounts == 1u);
+    }
+    SECTION("slot 15 present, bytes after the 17th item") {
+        const auto [status, accounts] = with_slot15(Bytes{0x80, 0x80});
+        CHECK(status == HashState::BuildStatus::kMalformed);
+        CHECK(accounts == 1u);
+    }
+    SECTION("slot 15 present, no 17th item") {
+        const auto [status, accounts] = with_slot15(Bytes{});
+        CHECK(status == HashState::BuildStatus::kMalformed);
+        CHECK(accounts == 1u);
+    }
+
+    // Slots 0,1: A,B; 3: item; 5: C.
+    const auto with_slot3 = [](const Bytes& item, bool rest) {
+        HashState hs;
+        const Key kA = key_with(0x0, 3, 5);
+        const Key kB = key_with(0x1, 5, 2);
+        const Key kC = key_with(0x5, 7, 1);
+        TestAccount aA, aB, aC;
+        aA.build(61); aB.build(62); aC.build(63);
+        const auto hash_ref = [&hs](const Key& k, const TestAccount& a) {
+            const LeafNode leaf = make_leaf(&k.nib[1], 63, ByteView{a.leaf_value});
+            const evmc::bytes32 h = hs.add_node(ByteView{zilkworm::encode_leaf(leaf)});
+            Bytes out{0xa0};
+            out.append(h.bytes, 32);
+            return out;
+        };
+        Bytes p = hash_ref(kA, aA) + hash_ref(kB, aB);
+        p.push_back(0x80);
+        p += item;
+        if (rest) {
+            p.push_back(0x80);
+            p += hash_ref(kC, aC);
+            p.append(11, 0x80);
+        }
+        const evmc::bytes32 root = hs.add_node(ByteView{rlp_list_of(p)});
+        const auto status = hs.build_state_from_trie(root);
+        return std::tuple{status, hs.account_count(), hs.find_built_account(kC.hash()) != nullptr};
+    };
+    SECTION("an embedded child over 31 payload bytes") {
+        // Well-formed 32-byte leaf; only the cap rejects.
+        Bytes item{0xe0, 0x20, 0x9e};
+        item.append(30, 0x44);
+        const auto [status, accounts, c_built] = with_slot3(item, true);
+        CHECK(status == HashState::BuildStatus::kMalformed);
+        CHECK(accounts == 2u);
+        CHECK_FALSE(c_built);
+    }
+    SECTION("an embedded child of 31 payload bytes: the control") {
+        Bytes item{0xdf, 0x20, 0x9d};
+        item.append(29, 0x44);
+        const auto [status, accounts, c_built] = with_slot3(item, true);
+        CHECK(status == HashState::BuildStatus::kOk);
+        CHECK(accounts == 3u);
+        CHECK(c_built);
+    }
+    SECTION("an embedded child running past its branch") {
+        const auto [status, accounts, c_built] = with_slot3(Bytes{0xc5, 0x20, 0x81}, false);
+        CHECK(status == HashState::BuildStatus::kMalformed);
+        CHECK(accounts == 2u);
+        CHECK_FALSE(c_built);
     }
     SECTION("a leaf with an empty value") {
         Bytes p = string_of(leaf_path);
@@ -1076,11 +1127,7 @@ TEST_CASE("HashState build_state_from_trie rejects every node shape decode_node 
     }
 }
 
-// One-nibble paths. A one-nibble HP path is a single byte below 0x80 (0x30 | nibble for a
-// leaf), which RLP carries with no header: account X sits at root[0x4] -> ext(62) -> leaf(1),
-// and its storage trie holds one slot at root[s] -> ext(61) -> branch -> embedded leaf(1)
-// (a 3-byte inline node decoded in place from the branch's bytes) next to a direct
-// 63-nibble leaf. Every path totals 64 nibbles and every value reads back exactly.
+// One-nibble HP paths carry no RLP header.
 TEST_CASE("HashState build_state_from_trie decodes one-nibble leaf paths, hashed and embedded",
           "[hash_state]") {
     HashState hs;
@@ -1111,7 +1158,7 @@ TEST_CASE("HashState build_state_from_trie decodes one-nibble leaf paths, hashed
     sroot.set_child(0xC, ByteView{hS2.bytes, 32});
     const evmc::bytes32 storage_root = hs.add_node(ByteView{zilkworm::encode_branch(sroot)});
 
-    // --- account trie: root[0x4] -> ext(62) -> leaf(1) ---
+    // --- account trie: root[0x4]->ext(62)->leaf(1) ---
     const Key kX = key_with(0x4, 9, 7);
     const Bytes accX = account_leaf_value(3, storage_root);
     const LeafNode leafX = make_leaf(&kX.nib[63], 1, ByteView{accX});
@@ -1140,10 +1187,7 @@ TEST_CASE("HashState build_state_from_trie decodes one-nibble leaf paths, hashed
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// A build whose account root is missing leaves the HashState ready for the next build: the
-// sweep's frame stack is a member, cleared at every entry, and the counters are reset by
-// build_state_from_trie, so a later build from a present root derives accounts and storage
-// cleanly on the same instance.
+// Frame stack and counters reset per build.
 TEST_CASE("HashState build_state_from_trie after a missing-root build derives the next root",
           "[hash_state]") {
     HashState hs;
@@ -1187,10 +1231,7 @@ TEST_CASE("HashState build_state_from_trie after a missing-root build derives th
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// An account leaf is decoded straight into its arena slot, which is given back when the
-// value is not an account. A hash-referenced leaf whose value is a 40-byte string (slot 0x2)
-// precedes two real accounts: it is counted as reached and not cached, and the accounts
-// swept after it land intact, so the returned slot neither leaks nor shifts them.
+// Its arena slot must be given back.
 TEST_CASE("HashState build_state_from_trie caches nothing for an undecodable hashed leaf",
           "[hash_state]") {
     HashState hs;
@@ -1447,17 +1488,7 @@ TEST_CASE("HashState get_storage on empty or absent account reads zero without c
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// ---------------------------------------------------------------------------
-// The confirmation walk reads one child slot per branch, skipped to with the strict child
-// grammar, and compares an extension's or leaf's HP path in place against the probe. These
-// fixtures pin its decision table along every kind of path a read miss can take.
-// See docs/hashstate.md, "Partial-witness reads".
-// ---------------------------------------------------------------------------
-
-// Root-branch slots 0 and 1 are the two items the walk classifies the node by; slot 15 is
-// reached only after every sibling before it was skipped. A diverging leaf at each of them
-// proves the probe absent, as does an empty slot right after the classified items (0x2) and
-// one after fourteen skipped siblings (0xE), with no unconfirmed read recorded.
+// Slots 0 and 1 classify the node.
 TEST_CASE("HashState confirm_absent reads the probe's root-branch slot, first to last",
           "[hash_state]") {
     HashState hs;
@@ -1488,22 +1519,18 @@ TEST_CASE("HashState confirm_absent reads the probe's root-branch slot, first to
     expect_account(hs.get_account(k0.hash()), a0, "0");
     expect_account(hs.get_account(k15.hash()), a15, "15");
 
-    // A probe under each present slot that diverges from its leaf at nibble 40.
     for (const Key& present : {k0, k1, k7, k15}) {
         Key probe = present;
         probe.nib[40] = static_cast<uint8_t>((present.nib[40] + 1) & 0xF);
         CHECK(hs.get_account(probe.hash()) == nullptr);
     }
-    // Empty slots: 0x2, right after the classified items, and 0xE, after 14 skipped siblings.
+    // 0x2 follows 0,1; 0xE needs 14 skips.
     CHECK(hs.get_account(key_with(0x2, 4, 3).hash()) == nullptr);
     CHECK(hs.get_account(key_with(0xE, 6, 1).hash()) == nullptr);
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// The same walk down a storage trie through get_storage, with a pruned child at slot 15: a
-// probe that diverges from the leaf at slot 0 and one into the empty slot 9 are proven; the
-// pruned slot, reached after its 15 siblings were skipped, leaves the read unconfirmed, and
-// so does a second read of it.
+// Pruned slot 0xF: reached after 15 skips.
 TEST_CASE("HashState confirm_absent skips to a pruned storage slot and records the read",
           "[hash_state]") {
     HashState hs;
@@ -1543,17 +1570,12 @@ TEST_CASE("HashState confirm_absent skips to a pruned storage slot and records t
     CHECK(hs.unconfirmed_read_count() == 2u);
 }
 
-// A proven-absent storage slot is remembered for the build: a second read of it (a block
-// often reads a cold slot more than once) is answered from the memo without another walk, and
-// the counter stays where the first read left it. A slot the walk could not prove is not
-// remembered, so every repeat of it is recorded again; a slot under an account the cache
-// lacks, or whose storage trie is empty, is answered before the memo and enters nothing. The
-// memo is scoped to one build: the next build_state_from_trie clears it.
+// Blocks often reread cold slots.
 TEST_CASE("HashState get_storage memoizes a proven-absent slot until the next build",
           "[hash_state]") {
     HashState hs;
 
-    // X's storage trie: a leaf at slot 0x2 and a pruned child at slot 0x5. Y's is empty.
+    // X: sroot[0x2]->leaf, sroot[0x5] pruned; Y empty.
     evmc::bytes32 vv{};
     vv.bytes[31] = 0x11;
     const Key sPresent = key_with(0x2, 3, 5);
@@ -1584,7 +1606,7 @@ TEST_CASE("HashState get_storage memoizes a proven-absent slot until the next bu
     REQUIRE(hs.account_count() == 2u);
     REQUIRE(hs.absent_slot_count() == 0u);
 
-    // Proven once, then answered from the memo: one entry, the counter untouched.
+    // Second read: memo hit, no walk.
     const Key sEmpty = key_with(0x9, 4, 3);
     CHECK(eq32(hs.get_storage(kX.hash(), sEmpty.hash()), evmc::bytes32{}));
     CHECK(hs.absent_slot_count() == 1u);
@@ -1592,14 +1614,14 @@ TEST_CASE("HashState get_storage memoizes a proven-absent slot until the next bu
     CHECK(hs.absent_slot_count() == 1u);
     CHECK(hs.unconfirmed_read_count() == 0u);
 
-    // A second proven slot is a second entry; the present slot is a cache hit, no entry.
+    // A cache hit enters nothing.
     Key sDiverge = sPresent;
     sDiverge.nib[63] = static_cast<uint8_t>((sPresent.nib[63] + 1) & 0xF);
     CHECK(eq32(hs.get_storage(kX.hash(), sDiverge.hash()), evmc::bytes32{}));
     CHECK(eq32(hs.get_storage(kX.hash(), sPresent.hash()), vv));
     CHECK(hs.absent_slot_count() == 2u);
 
-    // Unprovable (the pruned slot): never entered, recorded on every read.
+    // The pruned slot: unprovable, so never memoized.
     const Key sMiss = key_with(0x5, 7, 3);
     CHECK(eq32(hs.get_storage(kX.hash(), sMiss.hash()), evmc::bytes32{}));
     CHECK(hs.unconfirmed_read_count() == 1u);
@@ -1607,14 +1629,12 @@ TEST_CASE("HashState get_storage memoizes a proven-absent slot until the next bu
     CHECK(hs.unconfirmed_read_count() == 2u);
     CHECK(hs.absent_slot_count() == 2u);
 
-    // Answered before the memo: the same slot_hash under Y (empty storage) and under an
-    // account the cache lacks enters nothing and records nothing.
+    // Y (empty storage), uncached account: answered pre-memo.
     CHECK(eq32(hs.get_storage(kY.hash(), sEmpty.hash()), evmc::bytes32{}));
     CHECK(eq32(hs.get_storage(key_with(0xB, 7, 4).hash(), sEmpty.hash()), evmc::bytes32{}));
     CHECK(hs.absent_slot_count() == 2u);
     CHECK(hs.unconfirmed_read_count() == 2u);
 
-    // A rebuild clears the memo with the counter; the first read after it walks again.
     REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kOk);
     CHECK(hs.absent_slot_count() == 0u);
     CHECK(hs.unconfirmed_read_count() == 0u);
@@ -1622,11 +1642,7 @@ TEST_CASE("HashState get_storage memoizes a proven-absent slot until the next bu
     CHECK(hs.absent_slot_count() == 1u);
 }
 
-// An embedded child is followed in place. root[0x8] -> ext(60) -> branch -> embedded leaf(2),
-// the account-sweep fixture's E subtree, whose leaf value is no account, so the build cached
-// nothing under it. Probes that diverge inside the extension, land on an empty slot of the
-// deep branch, or reach the embedded leaf and diverge on its first or second nibble are all
-// proven absent; the leaf's own key is met exactly, which refutes absence: an unconfirmed read.
+// root[0x8]->ext(60)->branch->embedded-leaf(2); its value is no account.
 TEST_CASE("HashState confirm_absent follows an embedded child in place", "[hash_state]") {
     HashState hs;
 
@@ -1665,18 +1681,12 @@ TEST_CASE("HashState confirm_absent follows an embedded child in place", "[hash_
     CHECK(hs.get_account(second.hash()) == nullptr);
     CHECK(hs.unconfirmed_read_count() == 0u);
 
-    // The embedded leaf's own key: present in the trie, not in the cache -> refuted.
+    // Own key: in the trie, uncached, refuted.
     CHECK(hs.get_account(kE.hash()) == nullptr);
     CHECK(hs.unconfirmed_read_count() == 1u);
 }
 
-// The 64-nibble bounds. root[0x2] -> ext(62) -> branch at depth 63 (the deepest a well-formed
-// branch can sit) with empty-path leaves: a probe into one of its empty slots is proven absent
-// at nibble 63, one that diverges inside the 62-nibble extension earlier. root[0x8] -> ext(60)
-// -> leaf(10) is 71 nibbles: a probe matching the leaf's first three nibbles is proven absent
-// because the path outlasts the key. Two malformed subtrees cannot confirm: root[0x5] ->
-// ext(63) -> branch (a branch at depth 64 has no nibble to index it) and a hand-built leaf
-// under root[0x9] whose HP path is 66 nibbles.
+// D: root[0x2]->ext(62)->branch->leaf(0)x2; X, Y, Z malformed.
 TEST_CASE("HashState confirm_absent at a branch at depth 63 and past 64 nibbles",
           "[hash_state]") {
     HashState hs;
@@ -1709,7 +1719,7 @@ TEST_CASE("HashState confirm_absent at a branch at depth 63 and past 64 nibbles"
     const ExtensionNode extX = make_ext(&kX.nib[1], 63, ByteView{hBranch64.bytes, 32});
     const evmc::bytes32 hExtX = hs.add_node(ByteView{zilkworm::encode_ext(extX)});
 
-    // Y: 1 + 60 + 10 = 71 nibbles; the leaf's path starts with kY's last three nibbles.
+    // Y: 1+60+10 = 71 nibbles.
     std::array<uint8_t, 10> ypath{};
     for (std::size_t i = 0; i < 3; ++i) ypath[i] = kY.nib[61 + i];
     for (std::size_t i = 3; i < 10; ++i) ypath[i] = static_cast<uint8_t>(i);
@@ -1718,7 +1728,7 @@ TEST_CASE("HashState confirm_absent at a branch at depth 63 and past 64 nibbles"
     const ExtensionNode extY = make_ext(&kY.nib[1], 60, ByteView{hY.bytes, 32});
     const evmc::bytes32 hExtY = hs.add_node(ByteView{zilkworm::encode_ext(extY)});
 
-    // Z: a hand-built leaf whose HP path is 0x20 followed by 33 bytes: 66 nibbles.
+    // Z: hand-built leaf, 66-nibble HP path.
     Bytes zpath;
     zpath.push_back(0x20);
     for (int i = 0; i < 33; ++i) zpath.push_back(static_cast<uint8_t>(0x11 * (i % 15 + 1)));
@@ -1735,7 +1745,6 @@ TEST_CASE("HashState confirm_absent at a branch at depth 63 and past 64 nibbles"
     root.set_child(0x9, ByteView{hZ.bytes, 32});
     const evmc::bytes32 root_hash = hs.add_node(ByteView{zilkworm::encode_branch(root)});
 
-    // The build reports the malformed X, Y and Z; the confirmation walk is exercised on what it cached.
     REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kMalformed);
     REQUIRE(hs.account_count() == 2u);  // D1, D2; X, Y and Z stop before a leaf is keyed
     expect_account(hs.get_account(kD1.hash()), aD1, "D1");
@@ -1756,11 +1765,7 @@ TEST_CASE("HashState confirm_absent at a branch at depth 63 and past 64 nibbles"
     CHECK(hs.unconfirmed_read_count() == 2u);
 }
 
-// One-nibble (odd, a single HP byte below 0x80) and even paths. Account X sits at root[0x4] ->
-// ext(62) -> leaf(1), its one storage slot at root[0x7] -> ext(61) -> branch -> embedded
-// leaf(1). Probes that diverge on either one-nibble leaf, on the last nibble of the even
-// extension, on the first nibble of the odd one, and at an empty slot of the deep storage
-// branch are all proven absent.
+// X: root[0x4]->ext(62)->leaf(1); slot: root[0x7]->ext(61)->branch->embedded-leaf(1).
 TEST_CASE("HashState confirm_absent compares one-nibble and even HP paths", "[hash_state]") {
     HashState hs;
 
@@ -1813,9 +1818,6 @@ TEST_CASE("HashState confirm_absent compares one-nibble and even HP paths", "[ha
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// A leaf at the probe's exact key whose value the build did not decode (not an account): the
-// key is present in the trie, so absence is refuted and every such read is recorded, while a
-// probe one nibble off is proven absent by the same leaf.
 TEST_CASE("HashState confirm_absent refutes a leaf at the key the build did not cache",
           "[hash_state]") {
     HashState hs;
@@ -1842,11 +1844,7 @@ TEST_CASE("HashState confirm_absent refutes a leaf at the key the build did not 
     CHECK(hs.unconfirmed_read_count() == 2u);
 }
 
-// A malformed child item (a 1-byte string at slot 2) stops the walk where it stops the sweep:
-// a probe into any slot from 2 on cannot be confirmed, not even into the empty marker right
-// after it (slot 3) or the present leaf past it (slot 5), while the slots before it are read
-// exactly as the sweep swept them. The node is built by hand because the encoders cannot
-// emit it.
+// Hand-built: the encoders cannot emit this shape.
 TEST_CASE("HashState confirm_absent stops at a malformed sibling before the probe's slot",
           "[hash_state]") {
     HashState hs;
@@ -1877,7 +1875,7 @@ TEST_CASE("HashState confirm_absent stops at a malformed sibling before the prob
     REQUIRE(hs.build_state_from_trie(root_hash) == HashState::BuildStatus::kMalformed);
     REQUIRE(hs.account_count() == 2u);
 
-    // Before the malformed item: proven, as the sweep swept these slots.
+    // Before the malformed item: proven.
     Key a_div = kA;
     a_div.nib[20] = static_cast<uint8_t>((kA.nib[20] + 1) & 0xF);
     CHECK(hs.get_account(a_div.hash()) == nullptr);
@@ -1901,7 +1899,7 @@ TEST_CASE("HashState confirm_absent stops at a malformed sibling before the prob
 
 namespace {
 
-// xorshift64: a small deterministic generator for the random-path cross-check.
+// Deterministic, so failures reproduce.
 struct Xorshift64 {
     uint64_t s;
     uint64_t next() noexcept {
@@ -1914,13 +1912,7 @@ struct Xorshift64 {
 
 }  // namespace
 
-// The in-place HP compare, cross-checked against hp_decode on 1,000 random single-node tries:
-// a leaf (with a value no account decodes from, so the build caches nothing) or an extension
-// (with a child the store lacks) whose path holds 0..64 random nibbles, probed with a key that
-// shares a random-length prefix with the path and then differs. The expected answer comes from
-// hp_decode over the node's own HP string and nibbles64::from_bytes32 over the probe: a
-// mismatch inside the overlap proves absence; a fully matched leaf is absent unless it consumed
-// all 64 nibbles, which refutes it; a fully matched extension needs its missing child.
+// Garbage values and dangling children: nothing cached.
 TEST_CASE("HashState confirm_absent HP compare matches hp_decode on random paths",
           "[hash_state]") {
     HashState hs;
@@ -1946,7 +1938,7 @@ TEST_CASE("HashState confirm_absent HP compare matches hp_decode on random paths
             ? Bytes{zilkworm::encode_leaf(make_leaf(path.data(), plen8, ByteView{garbage}))}
             : Bytes{zilkworm::encode_ext(make_ext(path.data(), plen8, ByteView{dangling.bytes, 32}))};
 
-        // Expected, from hp_decode over the node's own HP string.
+        // The oracle: hp_decode on the node itself.
         ByteView items{node};
         auto oh = silkworm::rlp::decode_header(items);
         REQUIRE(oh);
@@ -2448,8 +2440,7 @@ void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
     return out;
 }
 
-// schema_id||SSZ StatelessInput around already-encoded state and codes list blobs, with
-// empty new_payload_request/headers.
+// StatelessInput around pre-encoded list blobs; headers empty.
 [[nodiscard]] Bytes encode_stateless_input_lists(const Bytes& state_blob, const Bytes& codes_blob,
                                                  std::uint64_t chain_id) {
     // SszExecutionWitness: [off_state=12][off_codes][off_headers] + state++codes++headers.
@@ -2673,11 +2664,7 @@ TEST_CASE("slib rejects malformed StatelessInputBytes blobs", "[hash_state][slib
     }
 }
 
-// The state and code lists are streamed into the stores as they are validated, so a
-// malformed element part-way through stops the feed there: parse returns std::nullopt, the
-// elements before the violation have been fed (the caller discards the HashState), and
-// nothing at or past it was. Element 2's offset is forced below element 1's, which the
-// monotonicity check catches while validating element 1 (its end offset).
+// A failed parse leaves HashState partly fed.
 TEST_CASE("slib stops the streamed feed at a non-monotone state-list offset",
           "[hash_state][slib]") {
     const Key kA = key_with(0x1, 3, 5);
@@ -2699,9 +2686,7 @@ TEST_CASE("slib stops the streamed feed at a non-monotone state-list offset",
         CHECK(hs.node_count() == 3u);
     }
 
-    // The state list begins at blob offset 2 (marker) + 16 (top-level fixed) + 12 (witness
-    // fixed); its 3-entry offset table holds element i's start at +4*i. Element 1 starts
-    // right after element 0; element 2's entry is forced one byte before that.
+    // marker(2)+top-fixed(16)+witness-fixed(12); entry i at +4i.
     Bytes b = good;
     const std::size_t state_at = 2 + 16 + 12;
     const std::uint32_t off1 = 3u * 4u + static_cast<std::uint32_t>(leafA_rlp.size());
@@ -2717,11 +2702,7 @@ TEST_CASE("slib stops the streamed feed at a non-monotone state-list offset",
     CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{b}).has_value());
 }
 
-// A state list whose first offset announces more elements than kMaxWitnessStateNodes is
-// rejected by the count check before any store is sized or fed. For that check, and not the
-// bounds check on the first offset, to be the one that rejects it, the offset table has to
-// really be (cap + 1) * 4 bytes long: the blob carries a 4 MB table whose every entry is the
-// table end, i.e. cap + 1 empty elements, well-formed in every other respect.
+// (cap+1)*4-byte table: count check rejects, not bounds.
 TEST_CASE("slib rejects a state list announcing more than the node count cap",
           "[hash_state][slib]") {
     const std::uint32_t n = zilkworm::kMaxWitnessStateNodes + 1u;
@@ -2735,8 +2716,7 @@ TEST_CASE("slib rejects a state list announcing more than the node count cap",
     CHECK(hs.node_count() == 0u);  // rejected at the count: nothing was fed
     CHECK_FALSE(zilkworm::decode_stateless_input(ByteView{blob}).has_value());
 
-    // The same shape at a small count is well-formed, so the rejection above was the count:
-    // three empty elements parse, are counted as fed, and dedupe to one stored entry.
+    // Control: the same shape at count 3.
     Bytes small(3u * 4u, 0);
     for (std::uint32_t i = 0; i < 3u; ++i) put_u32_at(small, i * 4u, 12u);
     const Bytes small_blob = encode_stateless_input_lists(small, /*codes_blob=*/{}, /*chain_id=*/1);
@@ -3161,17 +3141,13 @@ TEST_CASE("HashState apply_code_diff wipes storage on contract creation (diverge
     CHECK_FALSE(hs.has_storage(addr));
 }
 
-// read_storage returns before the built cache for a wiped account (divergence b), so the memo
-// of proven-absent slots is neither consulted nor fed for one. Before the wipe a cold slot is
-// proven and entered and a pruned slot is recorded; after it the memoized slot, the pruned
-// slot and a fresh cold slot all read zero with no walk: no entry and no record is added.
+// Wiped accounts return before the built cache.
 TEST_CASE("HashState read_storage of a wiped account never reaches the absent-slot memo",
           "[hash_state]") {
     HashState hs;
     const evmc::address addr = s2_addr(0xB4);
 
-    // Slot keys by the first nibble of their trie path: `present_key` hashes to nibble p; the
-    // other keys are searched for at the nibbles after it (a pruned child, then empty slots).
+    // p: present, p+1: pruned, p+2, p+3: empty.
     evmc::bytes32 present_key{};
     present_key.bytes[31] = 0xAB;
     const auto ppath = nibbles_of(keccak_slot(present_key));
@@ -3207,7 +3183,7 @@ TEST_CASE("HashState read_storage of a wiped account never reaches the absent-sl
     REQUIRE(hs.build_state_from_trie(root) == HashState::BuildStatus::kOk);
     REQUIRE(hs.missing_count() == 0u);
 
-    // Before the wipe: the built slot, a proven cold slot (entered), the pruned one (recorded).
+    // Before the wipe: cold entered, pruned recorded.
     CHECK(eq32(hs.read_storage(addr, present_key), slot_val));
     CHECK(eq32(hs.read_storage(addr, cold_key), evmc::bytes32{}));
     CHECK(hs.absent_slot_count() == 1u);
@@ -3220,7 +3196,7 @@ TEST_CASE("HashState read_storage of a wiped account never reaches the absent-sl
     hs.apply_code_diff(addr, *pa, evmc::bytes(code.data(), code.size()));
     REQUIRE(hs.storage_wiped(addr));
 
-    // After it: every pre-state slot reads zero, and no read reaches the memo or the walk.
+    // After: nothing reaches the memo or walk.
     CHECK(eq32(hs.read_storage(addr, present_key), evmc::bytes32{}));
     CHECK(eq32(hs.read_storage(addr, cold_key), evmc::bytes32{}));
     CHECK(eq32(hs.read_storage(addr, pruned_key), evmc::bytes32{}));
@@ -3706,16 +3682,12 @@ TEST_CASE("check_root_hashstate gather overload rejects when a read was left unc
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, manual, expected_root));  // span (agrees)
 }
 
-// Gather overload skip of the built accounts the block only READ. A built account enters the
-// overlay on its first read (HashStateView::get_account -> find_or_create_account's copy-on-write)
-// with modified == false, a verbatim copy of its pre-state leaf: the gather does not fold it, and
-// the recomputed root is the one a run without the read gives. Once mutated (set_nonce) it is
-// folded, so only the new root is accepted.
+// Reads enter the overlay unmodified (copy-on-write).
 TEST_CASE("check_root_hashstate gather overload skips a built account the block only read",
           "[hash_state][accept]") {
     HashState hs;
 
-    // --- pre-state: ONE built account R with empty storage, a single-leaf account trie. ---
+    // Pre-state: a single-leaf trie holding R.
     const evmc::address aR = s2_addr(0x71);
     const uint64_t seedR = 71;
     const Account accR = make_test_account(seedR, silkworm::kEmptyRoot);
@@ -3728,7 +3700,6 @@ TEST_CASE("check_root_hashstate gather overload skips a built account the block 
     REQUIRE(hs.missing_count() == 0u);
     REQUIRE(hs.created_accounts().empty());  // nothing loaded yet
 
-    // The block reads R through the evmone view: R enters the overlay unmodified, not deleted.
     HashStateView view{hs};
     const auto seen = view.get_account(aR);
     REQUIRE(seen.has_value());
@@ -3739,20 +3710,20 @@ TEST_CASE("check_root_hashstate gather overload skips a built account the block 
         REQUIRE(it != hs.created_accounts().end());
         CHECK_FALSE(it->second.modified);
         CHECK_FALSE(it->second.deleted);
-        // The invariant the skip rests on: a read-only record carries no wipe and no slot writes.
+        // Skip premise: no wipe, no slot writes.
         CHECK_FALSE(hs.storage_wiped(aR));
         CHECK((hs.overflow_slots_for(aR) == nullptr || hs.overflow_slots_for(aR)->empty()));
     }
     REQUIRE(hs.unconfirmed_read_count() == 0u);
 
-    // (a) Read only: nothing is folded, the root is the pre-state's; a tampered root rejects.
+    // (a) Read only: nothing folded.
     CHECK(zilkworm::check_root_hashstate(hs, prev_root, prev_root));
     evmc::bytes32 bad_root = prev_root;
     bad_root.bytes[0] = static_cast<uint8_t>(bad_root.bytes[0] ^ 0xFF);
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, bad_root));
     CHECK(hs.unconfirmed_read_count() == 0u);
 
-    // (b) Then mutated: the record is folded, so the new root and only the new root is accepted.
+    // (b) Mutated: the record is folded.
     const uint64_t newNonceR = 710;
     hs.set_nonce(aR, newNonceR);
     CHECK(hs.created_accounts().find(aR)->second.modified);
@@ -3766,10 +3737,7 @@ TEST_CASE("check_root_hashstate gather overload skips a built account the block 
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, prev_root));
 }
 
-// The skip's premise, mutator by mutator: a built account, read and then changed through any
-// HashState mutator, leaves its overlay record modified or deleted, so the gather folds it. A
-// mutator that changed a leaf field without setting either flag would let the gather accept a
-// wrong root.
+// The gather's skip rests on these flags.
 TEST_CASE("every HashState mutator that changes a built account sets modified or deleted",
           "[hash_state][accept]") {
     const evmc::address addr = s2_addr(0x7A);
@@ -3853,15 +3821,12 @@ TEST_CASE("every HashState mutator that changes a built account sets modified or
     });
 }
 
-// A built account the block read and then destructed still emits its 0x80 leaf delete: the
-// deleted branch of the gather runs ahead of the read-only skip. A second built account read
-// alongside it is skipped, and the recomputed root is the trie with only that leaf left.
+// The delete branch precedes the read-only skip.
 TEST_CASE("check_root_hashstate gather overload deletes a built account read then destructed",
           "[hash_state][accept]") {
     HashState hs;
 
-    // --- pre-state: a root branch over two built accounts on different first nibbles: R (read
-    // only) and D (read, then destructed). ---
+    // Pre-state: R, D under different root slots.
     const evmc::address aR = s2_addr(0x72);
     const uint8_t nibR0 = static_cast<uint8_t>(keccak_addr(aR).bytes[0] >> 4);
     evmc::address aD{};
@@ -3895,7 +3860,6 @@ TEST_CASE("check_root_hashstate gather overload deletes a built account read the
     REQUIRE(hs.build_state_from_trie(prev_root) == HashState::BuildStatus::kOk);
     REQUIRE(hs.missing_count() == 0u);
 
-    // Both read through the view, then D destructed.
     HashStateView view{hs};
     REQUIRE(view.get_account(aR).has_value());
     REQUIRE(view.get_account(aD).has_value());
@@ -3906,7 +3870,7 @@ TEST_CASE("check_root_hashstate gather overload deletes a built account read the
     CHECK(hs.read_account(aD) == nullptr);
     REQUIRE(hs.unconfirmed_read_count() == 0u);
 
-    // Oracle: D's leaf deleted, the branch collapses to R alone, a single full-path leaf.
+    // Oracle: the branch collapses to R alone.
     const LeafNode leafR_post = make_leaf(aR_path.data(), 64, ByteView{leafR_val});
     const evmc::bytes32 expected_root = keccak32(ByteView{zilkworm::encode_leaf(leafR_post)});
     REQUIRE_FALSE(eq32(expected_root, prev_root));

@@ -1301,7 +1301,13 @@ The sweep's frames and shared path buffer have their own fixtures:
   is not a list, a branch with a non-empty, missing or over-long 17th item, a leaf with no
   value or an oversized one, an extension with a short-string or inline-list child, a list
   where a path belongs, an item running past its node), each expected to give `kMalformed`,
-  plus a well-formed branch with its last slot present as the control. Two sections pin the
+  plus a well-formed branch with its last slot present as the control. Four sections
+  hand-build a branch whose slot 15 holds a leaf, so the 17th item is checked on the way
+  back up: the lone `0x80` is the control; a non-empty item, trailing bytes and a missing
+  item give `kMalformed` with the leaf under slot 15 already cached. Three sections put an
+  embedded item at slot 3 of a branch with hash refs at slots 0, 1 and 5: a well-formed
+  33-byte leaf (over the 31-byte payload cap) and an item running past the branch give
+  `kMalformed` with only slots 0 and 1 swept; the 32-byte twin is the control. Two sections pin the
   tests-zkevm `witness_state_overlength` leaves, hashed under root slot 1: a 64-nibble leaf
   path at depth 1 and a 67-nibble one, both `kMalformed`; a 64-nibble path at depth 0 and a
   63-nibble one at depth 1 are the controls.

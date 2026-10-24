@@ -44,9 +44,7 @@ namespace {
     return a;
 }
 
-// A 64-byte storage key addr_hash || slot_hash. storage_key8 is the XOR of the two
-// halves' first 8 bytes, so keys whose (addr_prefix ^ slot_prefix) agree share a key8 and
-// a home bucket; `fill` varies the other 48 bytes.
+// storage_key8 XORs the halves' first 8 bytes.
 [[nodiscard]] std::array<uint8_t, 64> make_key64(uint64_t addr_prefix, uint64_t slot_prefix,
                                                  uint8_t fill) {
     std::array<uint8_t, 64> k{};
@@ -66,10 +64,7 @@ namespace {
     return reinterpret_cast<const uint8_t (&)[64]>(*a.data());
 }
 
-// Every bucket starts 8-aligned, so sizeof pads the key + value up to a multiple of 8:
-// 36 -> 40 for the account index's 32-byte key and u32 offset, 68 -> 72 for the storage
-// index's 64-byte key, 24 for a 20-byte address key, and 48 unchanged for the node and
-// code stores' 32-byte key with a 16-byte view value.
+// Buckets are 8-aligned, so sizeof pads key+value.
 struct View16 {
     const uint8_t* data = nullptr;
     uint32_t size = 0;
@@ -142,8 +137,7 @@ TEST_CASE("HashIndex forced collision resolved by probe + full-key compare", "[h
     CHECK_FALSE(idx.find(ref32(k3)).has_value());
     CHECK_FALSE(idx.find_ptr(k3.data()).has_value());
 
-    // Re-inserting an existing key overwrites its offset in place (no duplicate): insert's
-    // own full-key compare found the occupied bucket rather than claiming a new one.
+    // insert's own full-key compare finds the bucket.
     REQUIRE(idx.insert(ref32(k1), 999u));
     CHECK(idx.size() == 2u);
     CHECK(*idx.find(ref32(k1)) == 999u);
@@ -201,7 +195,6 @@ TEST_CASE("HashIndex probing wraps around the table end", "[hash_index]") {
     REQUIRE(idx.insert(ref32(c), 3u));  // wraps to bucket 1
     CHECK(idx.size() == 3u);
 
-    // Each still resolves to its own offset across the wrap, by array or by pointer.
     CHECK(*idx.find(ref32(a)) == 1u);
     CHECK(*idx.find(ref32(b)) == 2u);
     CHECK(*idx.find(ref32(c)) == 3u);
@@ -210,9 +203,6 @@ TEST_CASE("HashIndex probing wraps around the table end", "[hash_index]") {
     CHECK(*idx.find_ptr(c.data()) == 3u);
 }
 
-// find_ptr reads the key in place from the caller's bytes at any alignment: from offsets
-// 1, 3, 5 and 7 of an 8-aligned buffer it gives the same hit (and value) or miss as the
-// array-reference find does from the key's own storage.
 TEST_CASE("HashIndex find_ptr through an unaligned pointer", "[hash_index]") {
     HashIndex<32, &hash_key8_at> idx{16};
     const auto present = make_key32(0xA11CE000ULL, 0x5A);
@@ -243,9 +233,7 @@ TEST_CASE("HashIndex find_ptr through an unaligned pointer", "[hash_index]") {
     }
 }
 
-// The full-key gate compares every byte of the key, not only the words that feed the
-// key8: a probe key differing from a stored key in any single bit, at any byte position,
-// misses, by array and by pointer; the unchanged key hits.
+// A skipped compare word would show here.
 TEST_CASE("HashIndex full-key compare covers every byte of a 32-byte key", "[hash_index]") {
     HashIndex<32, &hash_key8_at> idx{16};
     const auto base = make_key32(0xF00DF00DULL, 0x3C);
@@ -260,7 +248,7 @@ TEST_CASE("HashIndex full-key compare covers every byte of a 32-byte key", "[has
             flipped[pos] = static_cast<uint8_t>(flipped[pos] ^ bit);
             CHECK_FALSE(idx.find(ref32(flipped)).has_value());
             CHECK_FALSE(idx.find_ptr(flipped.data()).has_value());
-            // Nor does insert mistake it for the stored key: it claims its own bucket.
+            // Nor may insert mistake it for base.
             HashIndex<32, &hash_key8_at> two{16};
             REQUIRE(two.insert(ref32(base), 5u));
             REQUIRE(two.insert(ref32(flipped), 6u));
@@ -271,10 +259,7 @@ TEST_CASE("HashIndex full-key compare covers every byte of a 32-byte key", "[has
     }
 }
 
-// The storage index's 64-byte keys under storage_key8 (the XOR of the two halves' first 8
-// bytes). Two keys with the same XOR share a key8 and a home bucket while their leading
-// word differs, so a hit here proves the gate compares the stored key against the probe
-// key (word by word, all eight words), never the stored key's first word against the key8.
+// Same key8, different first word: must hit.
 TEST_CASE("HashIndex 64-byte storage keys", "[hash_index]") {
     HashIndex<64, &storage_key8_at> idx{16};
 
@@ -295,13 +280,13 @@ TEST_CASE("HashIndex 64-byte storage keys", "[hash_index]") {
     CHECK(*idx.find_ptr(k1.data()) == 11u);
     CHECK(*idx.find_ptr(k2.data()) == 22u);
 
-    // A third key on the same home bucket, never inserted, misses at the sentinel.
+    // Never inserted: misses at the sentinel.
     const auto k3 = make_key64(0x1111ULL ^ 0xAAULL, 0x2222ULL ^ 0xAAULL, 0x01);
     REQUIRE(idx.index_of(storage_key8(ref64(k3))) == idx.index_of(storage_key8(ref64(k1))));
     CHECK_FALSE(idx.find(ref64(k3)).has_value());
     CHECK_FALSE(idx.find_ptr(k3.data()).has_value());
 
-    // A single flipped bit anywhere in the 64 bytes (the slot half included) misses.
+    // Every byte, the slot half included.
     for (std::size_t pos = 0; pos < 64; ++pos) {
         CAPTURE(pos);
         auto flipped = k1;
@@ -364,11 +349,7 @@ TEST_CASE("HashIndex grows past the size hint and keeps every entry", "[hash_ind
     CHECK_FALSE(idx.find(ref32(make_key32(0x50000ULL + kEntries, 0xAB))).has_value());
 }
 
-// reserve pre-sizes an EMPTY table by the constructor's rule (a power of two, at least
-// kMinCapacity and at least 2x the expected count, exactly the capacity the constructor
-// would pick for that count), so the `expected` inserts that follow trigger no growth and
-// end at load factor <= 0.5. It never shrinks, and it is a no-op once the table holds an
-// entry.
+// The constructor's rule; no-op once populated.
 TEST_CASE("HashIndex reserve pre-sizes an empty table", "[hash_index]") {
     using Idx = HashIndex<32, &hash_key8_at>;
     for (uint32_t expected : {0u, 1u, 2u, 3u, 5u, 8u, 17u, 100u, 1000u, 5000u}) {
@@ -382,8 +363,7 @@ TEST_CASE("HashIndex reserve pre-sizes an empty table", "[hash_index]") {
         if (expected != 0u) CHECK(cap >= 2u * expected);  // ~2x entries
         CHECK(cap == Idx{expected}.capacity());  // the constructor's rule exactly
 
-        // The `expected` inserts fit without a single growth: the table never shrinks, so
-        // an unchanged capacity at the end proves no doubling happened on the way.
+        // Never shrinks: unchanged capacity means no growth.
         for (uint32_t i = 0; i < expected; ++i)
             REQUIRE(idx.insert(ref32(make_key32(0x50000ULL + i, 0xEE)), i + 1u));
         CHECK(idx.capacity() == cap);
@@ -396,7 +376,7 @@ TEST_CASE("HashIndex reserve pre-sizes an empty table", "[hash_index]") {
         }
     }
 
-    // Never shrinks: a smaller (or equal) reserve on an empty table keeps the capacity.
+    // A smaller reserve never shrinks.
     Idx big{1};
     big.reserve(1000u);
     const uint32_t cap1000 = big.capacity();
@@ -408,8 +388,7 @@ TEST_CASE("HashIndex reserve pre-sizes an empty table", "[hash_index]") {
     big.reserve(0u);
     CHECK(big.capacity() == cap1000);
 
-    // A no-op once the table holds an entry, even for a much larger count: the entry stays
-    // where it is and findable.
+    // No-op once the table holds an entry.
     Idx used{1};
     const auto k = make_key32(0x7777ULL, 0x01);
     REQUIRE(used.insert(ref32(k), 1u));
@@ -421,9 +400,7 @@ TEST_CASE("HashIndex reserve pre-sizes an empty table", "[hash_index]") {
     CHECK(*used.find(ref32(k)) == 1u);
 }
 
-// try_insert is first-wins: one probe either claims an empty bucket (kInserted) or finds
-// the key present and leaves its value alone (kExisted), where insert overwrites. It keeps
-// insert's sentinel rejection and growth backstop.
+// Keeps insert's sentinel rejection and growth backstop.
 TEST_CASE("HashIndex try_insert is first-wins where insert overwrites", "[hash_index]") {
     using Idx = HashIndex<32, &hash_key8_at>;
     Idx idx{16};
@@ -439,8 +416,7 @@ TEST_CASE("HashIndex try_insert is first-wins where insert overwrites", "[hash_i
     REQUIRE(idx.find(ref32(k1)).has_value());
     CHECK(*idx.find(ref32(k1)) == 111u);
 
-    // The colliding neighbour is a distinct key: claimed by probing past k1, never taken
-    // for it, and its own repeat is first-wins too.
+    // Colliding k2 is never taken for k1.
     CHECK(idx.try_insert(ref32(k2), 222u) == Idx::Insert::kInserted);
     CHECK(idx.size() == 2u);
     CHECK(*idx.find(ref32(k1)) == 111u);
@@ -449,22 +425,19 @@ TEST_CASE("HashIndex try_insert is first-wins where insert overwrites", "[hash_i
     CHECK(idx.size() == 2u);
     CHECK(*idx.find(ref32(k2)) == 222u);
 
-    // insert on a present key overwrites in place (its documented semantics, unchanged),
-    // and try_insert afterwards still leaves that value alone.
+    // insert still overwrites; try_insert keeps that value.
     REQUIRE(idx.insert(ref32(k1), 555u));
     CHECK(idx.size() == 2u);
     CHECK(*idx.find(ref32(k1)) == 555u);
     CHECK(idx.try_insert(ref32(k1), 777u) == Idx::Insert::kExisted);
     CHECK(*idx.find(ref32(k1)) == 555u);
 
-    // The empty sentinel is rejected and nothing is placed.
     const auto k3 = make_key32(0x7E5702ULL, 0x33);
     CHECK(idx.try_insert(ref32(k3), Idx::kEmpty) == Idx::Insert::kFull);
     CHECK(idx.size() == 2u);
     CHECK_FALSE(idx.find(ref32(k3)).has_value());
 
-    // Growth backstop: filling past the hint doubles the table and every key stays
-    // findable, with a repeat of each still reported as present.
+    // Growth backstop: filling past the hint.
     Idx small{1};  // kMinCapacity buckets
     const uint32_t cap0 = small.capacity();
     for (uint32_t i = 0; i < 20; ++i)
@@ -483,13 +456,7 @@ TEST_CASE("HashIndex try_insert is first-wins where insert overwrites", "[hash_i
     CHECK(small.size() == 20u);
 }
 
-// A bucket is claimed word by word from the probe key, and insert, try_insert and the
-// growth rehash all go through that one claim: whatever the probe's alignment, the stored
-// key must come out byte-exact in every word and the value whole. For the node store's
-// shape (32-byte key, 16-byte view value) and the storage index's (64-byte key, u32
-// value), every key claimed from an odd offset hits afterwards by array and by unaligned
-// pointer with the value it was claimed with, a one-bit change in any word misses, and
-// all of it survives a doubling of the table.
+// insert, try_insert and rehash share one claim.
 TEST_CASE("HashIndex claims a bucket byte-exact from an unaligned probe key", "[hash_index]") {
     SECTION("32-byte key, 16-byte view value") {
         using Idx = HashIndex<32, &hash_key8_at, View16>;
@@ -524,8 +491,7 @@ TEST_CASE("HashIndex claims a bucket byte-exact from an unaligned probe key", "[
             CHECK(*idx.find_ptr(buf.data() + 3) == want);
             CHECK(idx.try_insert(ref32(keys[i]), View16{payload, 0xFFu}) == Idx::Insert::kExisted);
             CHECK(*idx.find(ref32(keys[i])) == want);
-            // One bit off in the second, third or last word (none of which feeds the key8,
-            // so the probe lands on the same home bucket) misses: the stored tail is exact.
+            // Outside the key8: same home bucket.
             for (const std::size_t byte : {std::size_t{8}, std::size_t{16}, std::size_t{31}}) {
                 CAPTURE(byte);
                 auto flipped = keys[i];
@@ -563,8 +529,7 @@ TEST_CASE("HashIndex claims a bucket byte-exact from an unaligned probe key", "[
             std::memcpy(buf.data() + 5, keys[i].data(), 64);
             REQUIRE(idx.find_ptr(buf.data() + 5).has_value());
             CHECK(*idx.find_ptr(buf.data() + 5) == 1000u + i);
-            // Bytes 8, 24, 40 and 63 sit in words that do not feed storage_key8 (which
-            // folds bytes 0..7 and 32..39), so the flipped probe shares the home bucket.
+            // Outside storage_key8 (bytes 0..7, 32..39): same bucket.
             for (const std::size_t byte :
                  {std::size_t{8}, std::size_t{24}, std::size_t{40}, std::size_t{63}}) {
                 CAPTURE(byte);
@@ -603,7 +568,7 @@ TEST_CASE("HashIndex 20-byte address keys", "[hash_index]") {
     CHECK(*idx.find(ref20(c2)) == 502u);
 }
 
-// The sizing rule must not wrap its doubling for counts at or above 2^30.
+// 2 * count wraps from 2^30 up.
 TEST_CASE("HashIndex capacity_for clamps instead of overflowing", "[hash_index]") {
     using Idx = HashIndex<32, &hash_key8_at>;
     CHECK(Idx::capacity_for(0) == Idx::kMinCapacity);
@@ -652,9 +617,7 @@ TEST_CASE("HashIndex key functions match hand-assembled keys at any alignment", 
     CHECK(storage_key8(ref64(k)) == want_storage);
 }
 
-// clear empties the table in place: every key misses afterwards, the count is zero, the
-// capacity is what it was (no reallocation), and the table takes keys again from empty. A
-// clear of an empty table is a no-op. The value type is the memo's (uint8_t, entries of 1).
+// The memo's shape: 64-byte keys, uint8_t values.
 TEST_CASE("HashIndex clear empties the table in place", "[hash_index]") {
     using Idx = HashIndex<64, &storage_key8_at, uint8_t>;
     Idx idx{16};
@@ -676,8 +639,7 @@ TEST_CASE("HashIndex clear empties the table in place", "[hash_index]") {
         CHECK_FALSE(idx.find(ref64(make_key64(0x40000ULL + i, 0x50000ULL + i, 0xAA))).has_value());
     }
 
-    // Refilled from empty: 15 of the same keys and a new one land (16 entries, the count the
-    // table was sized for), with no growth.
+    // Refilled to the sized count: no growth.
     for (uint32_t i = 0; i < 15; ++i)
         REQUIRE(idx.insert(ref64(make_key64(0x40000ULL + i, 0x50000ULL + i, 0xAA)), 1u));
     REQUIRE(idx.insert(ref64(make_key64(0x40100ULL, 0x50100ULL, 0xBB)), 1u));
