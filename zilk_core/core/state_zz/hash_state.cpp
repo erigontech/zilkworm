@@ -134,7 +134,7 @@ enum class ChildKind : std::uint8_t { kEmpty, kHash, kEmbedded, kBad };
 // Avoids unpacking all 64 nibbles per walk.
 [[gnu::always_inline]] inline unsigned target_nibble(const evmc::bytes32& key,
                                                      unsigned c) noexcept {
-    return (key.bytes[c >> 1] >> ((c & 1u) ? 0 : 4)) & 0xFu;
+    return (static_cast<unsigned>(key.bytes[c >> 1]) >> ((c & 1u) ? 0u : 4u)) & 0xFu;
 }
 
 }  // namespace

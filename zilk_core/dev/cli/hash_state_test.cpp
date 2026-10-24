@@ -823,11 +823,11 @@ TEST_CASE("HashState build_state_from_trie sweeps a branch at depth 63 and stops
     aD1.build(51); aD2.build(52); aD3.build(53); aE.build(54); aX.build(55); aY.build(56);
 
     // Depth-63 branch with three empty-path leaves.
-    const LeafNode leafD1 = make_leaf(&kD1.nib[64], 0, ByteView{aD1.leaf_value});
+    const LeafNode leafD1 = make_leaf(kD1.nib.data() + 64, 0, ByteView{aD1.leaf_value});
     const evmc::bytes32 hD1 = hs.add_node(ByteView{zilkworm::encode_leaf(leafD1)});
-    const LeafNode leafD2 = make_leaf(&kD2.nib[64], 0, ByteView{aD2.leaf_value});
+    const LeafNode leafD2 = make_leaf(kD2.nib.data() + 64, 0, ByteView{aD2.leaf_value});
     const evmc::bytes32 hD2 = hs.add_node(ByteView{zilkworm::encode_leaf(leafD2)});
-    const LeafNode leafD3 = make_leaf(&kD3.nib[64], 0, ByteView{aD3.leaf_value});
+    const LeafNode leafD3 = make_leaf(kD3.nib.data() + 64, 0, ByteView{aD3.leaf_value});
     const evmc::bytes32 hD3 = hs.add_node(ByteView{zilkworm::encode_leaf(leafD3)});
     BranchNode branch63;
     branch63.set_child(kD1.nib[63], ByteView{hD1.bytes, 32});
@@ -838,13 +838,13 @@ TEST_CASE("HashState build_state_from_trie sweeps a branch at depth 63 and stops
     const evmc::bytes32 hExtD = hs.add_node(ByteView{zilkworm::encode_ext(extD)});
 
     // E: ext(63)->leaf(0), exactly 64 nibbles.
-    const LeafNode leafE = make_leaf(&kE.nib[64], 0, ByteView{aE.leaf_value});
+    const LeafNode leafE = make_leaf(kE.nib.data() + 64, 0, ByteView{aE.leaf_value});
     const evmc::bytes32 hE = hs.add_node(ByteView{zilkworm::encode_leaf(leafE)});
     const ExtensionNode extE = make_ext(&kE.nib[1], 63, ByteView{hE.bytes, 32});
     const evmc::bytes32 hExtE = hs.add_node(ByteView{zilkworm::encode_ext(extE)});
 
     // Malformed X: a branch at depth 64.
-    const LeafNode leafX = make_leaf(&kX.nib[64], 0, ByteView{aX.leaf_value});
+    const LeafNode leafX = make_leaf(kX.nib.data() + 64, 0, ByteView{aX.leaf_value});
     const evmc::bytes32 hX = hs.add_node(ByteView{zilkworm::encode_leaf(leafX)});
     BranchNode branch64;
     branch64.set_child(0x0, ByteView{hX.bytes, 32});
@@ -1699,9 +1699,9 @@ TEST_CASE("HashState confirm_absent at a branch at depth 63 and past 64 nibbles"
     TestAccount aD1, aD2, aX, aY;
     aD1.build(91); aD2.build(92); aX.build(93); aY.build(94);
 
-    const LeafNode leafD1 = make_leaf(&kD1.nib[64], 0, ByteView{aD1.leaf_value});
+    const LeafNode leafD1 = make_leaf(kD1.nib.data() + 64, 0, ByteView{aD1.leaf_value});
     const evmc::bytes32 hD1 = hs.add_node(ByteView{zilkworm::encode_leaf(leafD1)});
-    const LeafNode leafD2 = make_leaf(&kD2.nib[64], 0, ByteView{aD2.leaf_value});
+    const LeafNode leafD2 = make_leaf(kD2.nib.data() + 64, 0, ByteView{aD2.leaf_value});
     const evmc::bytes32 hD2 = hs.add_node(ByteView{zilkworm::encode_leaf(leafD2)});
     BranchNode branch63;
     branch63.set_child(kD1.nib[63], ByteView{hD1.bytes, 32});
@@ -1711,7 +1711,7 @@ TEST_CASE("HashState confirm_absent at a branch at depth 63 and past 64 nibbles"
     const evmc::bytes32 hExtD = hs.add_node(ByteView{zilkworm::encode_ext(extD)});
 
     // X: a branch at depth 64.
-    const LeafNode leafX = make_leaf(&kX.nib[64], 0, ByteView{aX.leaf_value});
+    const LeafNode leafX = make_leaf(kX.nib.data() + 64, 0, ByteView{aX.leaf_value});
     const evmc::bytes32 hX = hs.add_node(ByteView{zilkworm::encode_leaf(leafX)});
     BranchNode branch64;
     branch64.set_child(0x0, ByteView{hX.bytes, 32});
