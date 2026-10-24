@@ -33,10 +33,11 @@ What `make slib-benchmark` does:
    `test-fixtures-cache/zkevm_benchmark/`.
 2. `z6m_guest_slib` — configures/builds the guest with `-DZ6M_HASH_STATE=ON` in a
    **dedicated** build tree (`prover/guest_hypercube/build-slib`) so the normal
-   OFF build cache is never contaminated, then stages the ELF at the path
-   `prover_hypercube/build.rs` embeds (`prover/guest_hypercube/build/z6m_guest.elf`).
-3. `z6m_prover_slib` — builds the prover (via `cargo` directly, so it embeds the
-   staged slib ELF rather than rebuilding the OFF guest).
+   OFF build cache is never contaminated.
+3. `z6m_prover_slib` — builds the prover with `Z6M_GUEST_ELF` naming that tree's
+   ELF; `prover_hypercube/build.rs` embeds it in place of
+   `prover/guest_hypercube/build/z6m_guest.elf`, which is left untouched, so the
+   next `make z6m_prover` relinks and embeds the DirectState guest as usual.
 4. Splits each multi-case fixture JSON into one-case-per-file
    (`tools/scripts/slib_split_fixtures.py`) — necessary because
    `execute --is-test --file-name` **sums cycles across all cases in a file**, so
