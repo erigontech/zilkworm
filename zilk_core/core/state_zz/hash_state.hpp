@@ -37,7 +37,7 @@ class HashState : public BlockState {
   public:
     // Outcome of build_state_from_trie: kMissingNode iff the seeding account root was absent.
     // See docs/hashstate.md, "Fail-closed policy".
-    // kMalformed: a trie path longer than the 64-nibble key; the witness is rejected (tests-zkevm v21.0.6).
+    // kMalformed (tests-zkevm): over-64-nibble path or undecodable node.
     enum class BuildStatus : std::uint8_t { kOk, kMissingNode, kMalformed };
 
     // Sizes are best-effort hints for the open-addressed tables (~2x -> load factor
@@ -414,7 +414,7 @@ class HashState : public BlockState {
     // homonym (mpt.hpp:235): every referenced node absent from an included trie is counted,
     // so an incomplete witness is observable rather than silently skipped.
     std::uint32_t missing_count_{0};
-    bool malformed_witness_{false};  // a sweep met a trie path longer than the key
+    bool malformed_witness_{false};  // over-64-nibble path or undecodable node
     std::uint32_t leaf_count_{0};
     std::uint32_t storage_slot_count_{0};
     // Read-miss confirmations that could not prove absence (a needed node was missing).

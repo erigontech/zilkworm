@@ -367,7 +367,7 @@ namespace {
             return {};
         }
         if (slib->status == ::zilkworm::HashState::BuildStatus::kMalformed) {
-            sys_println("ERROR: malformed witness: a trie path longer than its key");
+            sys_println("ERROR: malformed witness: a trie path over 64 nibbles or a node that does not decode");
             return {};
         }
         if (slib->status != ::zilkworm::HashState::BuildStatus::kOk) {

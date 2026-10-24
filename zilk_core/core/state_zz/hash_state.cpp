@@ -61,9 +61,7 @@ void HashState::reserve_stores(std::uint32_t nodes, std::uint32_t codes,
 
 namespace {
 
-// Inverse of nibbles64::from_bytes32 (mpt.hpp:50): pack a full 64-nibble path back into
-// its 32-byte key. A well-formed account/storage leaf always accumulates exactly 64
-// nibbles (fixed-length keys), so p.len == 64 here.
+// Inverse of nibbles64::from_bytes32; short paths arrive pre-zeroed.
 [[gnu::always_inline]] inline evmc::bytes32 path_to_bytes32(const nibbles64& p) noexcept {
     evmc::bytes32 out{};
     for (unsigned i = 0; i < 32; ++i) {
@@ -198,7 +196,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
     // A loop, so extension chains don't recurse.
     const auto descend = [&](ByteView node_rlp) {
         while (true) {
-            // decode_header: the fast path misreads <8-byte nodes.
+            // rlp::decode_header: fast_decode_header misreads <8-byte nodes.
             auto oh = rlp::decode_header(node_rlp);
             if (!oh || !oh->list) {
                 malformed_witness_ = true;
@@ -243,12 +241,12 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             const std::uint8_t* const second = items.data();
             const std::size_t second_len = h1->payload_length;
 
-            // Both bounds keep writes inside nibbles64.
+            // Keeps writes inside nibbles64.
             const std::uint8_t flag = hp[0] >> 4;
             const bool is_leaf = (flag & 0x2) != 0;
             const bool odd = (flag & 0x1) != 0;
             const std::size_t n = (odd ? 1u : 0u) + 2u * (hp_len - 1);
-            if (n > 64 || path.len + n > 64) {
+            if (path.len + n > 64) {
                 malformed_witness_ = true;
                 return;
             }

@@ -75,7 +75,7 @@ inline bool for_each_byte_list(ByteView blob, uint32_t elem_cap, uint32_t count_
     uint32_t off = first;
     for (uint32_t i = 0; i < n; ++i) {
         const uint32_t next = i + 1 < n ? rd_u32(blob, (i + 1) * 4u) : static_cast<uint32_t>(blob.size());
-        if (off < first || off > next || next > blob.size()) return false;
+        if (off > next || next > blob.size()) return false;
         if (next - off > elem_cap) return false;
         if (!sink(subv(blob, off, next - off))) return false;
         off = next;
