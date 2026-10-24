@@ -284,13 +284,10 @@ zkevm-benchmark-fixtures:
 	    echo "  zkevm-benchmark fixtures ready at $$dst"; \
 	fi
 
-# The prover embeds a fixed ELF path (prover_hypercube/build.rs -> include_elf!
-# ".../guest_hypercube/build/z6m_guest.elf"), so the slib guest ELF must land
-# there. We build the flag-ON guest in a DEDICATED tree ($(GUEST_SLIB_BUILD)) so
-# the normal OFF build cache is never contaminated with Z6M_HASH_STATE=ON. (A
-# fresh tree also re-applies the blst SP1 patch via its PATCH_COMMAND.)
+# The flag-ON guest is built in a DEDICATED tree ($(GUEST_SLIB_BUILD)) so the
+# normal OFF build cache is never contaminated with Z6M_HASH_STATE=ON. (A fresh
+# tree also re-applies the blst SP1 patch via its PATCH_COMMAND.)
 GUEST_SLIB_BUILD := prover/guest_hypercube/build-slib
-GUEST_EMBED_ELF  := prover/guest_hypercube/build/z6m_guest.elf
 
 z6m_guest_slib:
 	cmake -S prover/guest_hypercube -B $(GUEST_SLIB_BUILD) \
@@ -300,13 +297,10 @@ z6m_guest_slib:
 		-DZ6M_HASH_STATE=ON
 	cmake --build $(GUEST_SLIB_BUILD) -j$$(nproc)
 
-# Build the prover embedding the slib guest ELF, staged at the embed path first. Uses
-# cargo directly rather than the z6m_prover target, because z6m_prover depends on
-# z6m_guest, which would rebuild the OFF (DirectState) ELF over the staged slib one.
+# Z6M_GUEST_ELF: staging a copy blocks z6m_guest relinks.
 z6m_prover_slib: z6m_guest_slib
-	@mkdir -p $(dir $(GUEST_EMBED_ELF))
-	cp $(GUEST_SLIB_BUILD)/z6m_guest.elf $(GUEST_EMBED_ELF)
-	cd prover && cargo build --release --manifest-path prover_hypercube/Cargo.toml
+	cd prover && Z6M_GUEST_ELF=$(CURDIR)/$(GUEST_SLIB_BUILD)/z6m_guest.elf \
+		cargo build --release --manifest-path prover_hypercube/Cargo.toml
 
 # slib benchmark run knobs. (Comments kept on their own lines: a trailing inline
 # comment would leave whitespace in the value and corrupt the paths.)
