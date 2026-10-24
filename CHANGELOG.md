@@ -44,6 +44,7 @@ SP1 does not change the guest ELF bytes, only the key derived from them. This re
 - The release publishes the ERE guest as `stateless-validator-zilkworm-sp1-v6.9.0.{elf,vk}`, the name ere-hosts loads under ere v0.19.5.
 - The `zilkworm` entry of the ere-guests fork's `artifact-registry.json` still names the alpha.6 SP1 v6.6.0 assets. After the release it moves to the alpha.7 assets and their sha256, and the workload fork's `[patch]` to that ere-guests commit.
 - Under ere v0.19.5 the ere-guests registry, as in eth-act/ere-guests#103, keeps no SP1 guest for Reth or Ethrex (theirs target SP1 v6.6.0), so the Reth leg of `make ere-compare` fails until Reth publishes an SP1 v6.9.0 guest; `make ere-validate` is unaffected. The ERE benchmark that `release.yml` runs after publishing therefore has `compare` off for this release: it validates the Zilkworm guest without the cost comparison against Reth.
+- The ERE benchmark estimates the Zilkworm guest's SP1 cost on every run (`make ere-cost`) and its job summary prints it: total estimated cost and its prover-gas equivalent, the opcode/syscall/system components, test families and the heaviest fixtures. Only Reth's cost and the comparison stay behind `compare`.
 
 ### Contributors
 
