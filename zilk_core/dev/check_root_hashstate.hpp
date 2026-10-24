@@ -162,6 +162,9 @@ struct HashStateAccountWrite {
             continue;
         }
 
+        // Unmodified built record: its leaf is unchanged.
+        if (!acc.modified && hash_state.find_built_account(addr_hash) != nullptr) continue;
+
         // Live account: gather its storage writes, sorted by slot_hash.
         auto& storage = storage_pool.emplace_back();
         if (const auto* slots = hash_state.overflow_slots_for(addr)) {

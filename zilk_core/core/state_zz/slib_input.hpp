@@ -55,9 +55,7 @@ struct StatelessInputView {
     std::uint32_t code_count = 0;
 };
 
-// Decodes `blob` and feeds every node and code to `hs` (each keyed by its own keccak). `hs` keeps
-// views into `blob`, so `blob` outlives every use of `hs`. Does not build the state: the caller
-// supplies the anchoring root to build_state_from_trie.
+// hs borrows blob; on nullopt discard hs.
 std::optional<StatelessInputView> parse_stateless_input(ByteView blob, HashState& hs);
 
 // parse_stateless_input, then hs.build_state_from_trie(prev_root).

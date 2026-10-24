@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -36,7 +37,7 @@ class HashState : public BlockState {
   public:
     // Outcome of build_state_from_trie: kMissingNode iff the seeding account root was absent.
     // See docs/hashstate.md, "Fail-closed policy".
-    // kMalformed: a trie path longer than the 64-nibble key; the witness is rejected (tests-zkevm v21.0.6).
+    // kMalformed (tests-zkevm): over-64-nibble path or undecodable node.
     enum class BuildStatus : std::uint8_t { kOk, kMissingNode, kMalformed };
 
     // Sizes are best-effort hints for the open-addressed tables (~2x -> load factor
@@ -52,6 +53,13 @@ class HashState : public BlockState {
     HashState(const HashState&) = delete;
     HashState& operator=(const HashState&) = delete;
 
+    // Bounds zero-fill a hostile count can force.
+    static constexpr std::uint32_t kMaxReserve = 1u << 16;
+
+    // Hints only; each is capped at kMaxReserve.
+    void reserve_stores(std::uint32_t nodes, std::uint32_t codes,
+                        std::uint32_t accounts, std::uint32_t storage_slots);
+
     // Store a copy of `rlp` under its real keccak256 and return that hash. A repeated node
     // is deduped (no second copy) and the same hash is returned. Defined in the .cpp
     // because it computes keccak.
@@ -66,12 +74,17 @@ class HashState : public BlockState {
     evmc::bytes32 add_node_borrowed(ByteView rlp);
     evmc::bytes32 add_code_borrowed(ByteView code);
 
-    // Hot lookup: EXACT DirectState::find_node_rlp seam shape — hit -> ByteView over
-    // the stored RLP, miss -> std::nullopt (NOT an empty ByteView).
+    // Caller guarantees 32 readable bytes; any alignment.
+    [[gnu::always_inline]] inline std::optional<ByteView>
+    find_node_rlp(const uint8_t* hash32) const noexcept {
+        if (auto v = node_index_.find_ptr(hash32)) return ByteView{v->data, v->size};
+        return std::nullopt;
+    }
+
+    // DirectState::find_node_rlp seam shape.
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
-        if (auto v = node_index_.find(node_hash.bytes)) return ByteView{v->data, v->size};
-        return std::nullopt;
+        return find_node_rlp(node_hash.bytes);
     }
 
     // GridMPT's keccak-prefix seam (DirectState::find_node_rlp(hash, request) / take_walk_state()):
@@ -85,7 +98,7 @@ class HashState : public BlockState {
     template <class SnapRequestFn>
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const uint8_t (&node_hash)[32], SnapRequestFn&&) const noexcept {
-        return find_node_rlp(std::bit_cast<evmc::bytes32>(node_hash));
+        return find_node_rlp(static_cast<const uint8_t*>(node_hash));
     }
     kprefix::Resume take_walk_state(const uint8_t*, unsigned) const noexcept { return {nullptr, 0}; }
 
@@ -99,6 +112,11 @@ class HashState : public BlockState {
 
     std::uint32_t node_count() const noexcept { return node_index_.size(); }
     std::uint32_t code_count() const noexcept { return code_index_.size(); }
+    // Node, code, account, storage; for sizing tests.
+    std::array<std::uint32_t, 4> index_capacities() const noexcept {
+        return {node_index_.capacity(), code_index_.capacity(), account_index_.capacity(),
+                storage_index_.capacity()};
+    }
 
     // Derive the account and storage caches from prev_root in one read-only trie sweep.
     // See docs/hashstate.md, "Building state from the trie".
@@ -119,7 +137,8 @@ class HashState : public BlockState {
     // See docs/hashstate.md, "Account and storage caches".
     [[gnu::always_inline]] inline evmc::bytes32
     get_storage(const evmc::bytes32& addr_hash, const evmc::bytes32& slot_hash) const noexcept {
-        std::uint8_t key[64];
+        // 8-aligned: note_storage_miss_ casts the slot half.
+        alignas(8) std::uint8_t key[64];
         std::memcpy(key, addr_hash.bytes, 32);
         std::memcpy(key + 32, slot_hash.bytes, 32);
         if (auto off = storage_index_.find(key)) {
@@ -127,7 +146,7 @@ class HashState : public BlockState {
             std::memcpy(v.bytes, storage_arena_.data() + *off, 32);
             return v;
         }
-        note_storage_miss_(addr_hash, slot_hash);
+        note_storage_miss_(key);
         return {};
     }
 
@@ -151,6 +170,8 @@ class HashState : public BlockState {
     // same way as missing_count(): the accept gate accepts only when BOTH are zero, i.e.
     // every read either hit the cache or was confirmed genuinely empty (fail-closed).
     std::uint32_t unconfirmed_read_count() const noexcept { return unconfirmed_read_count_; }
+    // Memoized proven-absent slots (diagnostic).
+    std::uint32_t absent_slot_count() const noexcept { return absent_slots_.size(); }
 
     // --- silkworm::BlockState interface + BLOCKHASH store ------------------------------
     // See docs/hashstate.md, "Block headers and BLOCKHASH".
@@ -262,7 +283,7 @@ class HashState : public BlockState {
     [[gnu::always_inline]] inline bool
     find_built_storage(const evmc::bytes32& addr_hash,
                        const evmc::bytes32& slot_hash) const noexcept {
-        std::uint8_t key[64];
+        alignas(8) std::uint8_t key[64];
         std::memcpy(key, addr_hash.bytes, 32);
         std::memcpy(key + 32, slot_hash.bytes, 32);
         return storage_index_.find(key).has_value();
@@ -298,6 +319,14 @@ class HashState : public BlockState {
     template <class EmitLeaf>
     bool sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf);
 
+    // See docs/hashstate.md, "Building state from the trie".
+    struct SweepFrame {
+        const std::uint8_t* cur;
+        const std::uint8_t* end;
+        std::uint8_t next_slot;
+        std::uint8_t path_len;
+    };
+
     // Single-path walk toward target_hash; true only when it proves the key absent below root.
     // See docs/hashstate.md, "Read-miss confirmation".
     bool confirm_absent(const evmc::bytes32& root, const evmc::bytes32& target_hash) const noexcept;
@@ -305,8 +334,7 @@ class HashState : public BlockState {
     // Miss handlers for get_account / get_storage: count a miss that cannot be proven empty.
     // See docs/hashstate.md, "Read-miss confirmation".
     void note_account_miss_(const evmc::bytes32& addr_hash) const noexcept;
-    void note_storage_miss_(const evmc::bytes32& addr_hash,
-                            const evmc::bytes32& slot_hash) const noexcept;
+    void note_storage_miss_(const std::uint8_t (&key)[64]) const noexcept;
 
     // Decode `leaf_value` (an account-leaf RLP) and cache it under `addr_hash`. Bumps
     // leaf_count_ for every leaf reached; on a successful decode also inserts into the
@@ -342,12 +370,12 @@ class HashState : public BlockState {
         return {bytes.data() != nullptr ? bytes.data() : &kNoBytes,
                 static_cast<std::uint32_t>(bytes.size())};
     }
-    // Dedupe on the real keccak256, then index `bytes` (which must already be stable).
-    evmc::bytes32 add_view_(HashIndex<32, &hash_key8, StoredBytes>& index, ByteView bytes);
+    // `bytes` must already be stable; first wins.
+    evmc::bytes32 add_view_(HashIndex<32, &hash_key8_at, StoredBytes>& index, ByteView bytes);
 
     std::deque<Bytes> owned_bytes_;
-    HashIndex<32, &hash_key8, StoredBytes> node_index_;
-    HashIndex<32, &hash_key8, StoredBytes> code_index_;
+    HashIndex<32, &hash_key8_at, StoredBytes> node_index_;
+    HashIndex<32, &hash_key8_at, StoredBytes> code_index_;
 
     // Account cache — the "recovered" pre-state bucket the design (§1.1) calls for: the
     // accounts build_state_from_trie unfolds out of the node trie. Arena entry layout is a bare
@@ -355,7 +383,7 @@ class HashState : public BlockState {
     // 32-byte addr_hash (the trie path) to that offset. Front-padded 8 bytes in the ctor
     // so the first real offset is >= 8 (never the HashIndex empty-bucket sentinel, 0).
     std::vector<std::uint8_t> accounts_arena_;
-    HashIndex<32, &hash_key8> account_index_;
+    HashIndex<32, &hash_key8_at> account_index_;
 
     // Storage cache — the recovered per-account slot overlay (the role DirectState fills
     // with overflow_slots_ + inline blob slots). One combined store rather than a table
@@ -364,7 +392,7 @@ class HashState : public BlockState {
     // 8). Front-padded 8 bytes in the ctor so the first real offset is >= 8 (never the
     // HashIndex empty-bucket sentinel, 0).
     std::vector<std::uint8_t> storage_arena_;
-    HashIndex<64, &storage_key8> storage_index_;
+    HashIndex<64, &storage_key8_at> storage_index_;
 
     // The headers the witness carries and the chain's genesis, keyed by their hash: read_header()
     // and the BLOCKHASH walk resolve through it.
@@ -386,7 +414,7 @@ class HashState : public BlockState {
     // homonym (mpt.hpp:235): every referenced node absent from an included trie is counted,
     // so an incomplete witness is observable rather than silently skipped.
     std::uint32_t missing_count_{0};
-    bool malformed_witness_{false};  // a sweep met a trie path longer than the key
+    bool malformed_witness_{false};  // over-64-nibble path or undecodable node
     std::uint32_t leaf_count_{0};
     std::uint32_t storage_slot_count_{0};
     // Read-miss confirmations that could not prove absence (a needed node was missing).
@@ -394,12 +422,19 @@ class HashState : public BlockState {
     // Reset by build_state_from_trie so it scopes to the reads following one build.
     mutable std::uint32_t unconfirmed_read_count_{0};
 
+    // Proven misses only; cleared per build.
+    mutable HashIndex<64, &storage_key8_at, std::uint8_t> absent_slots_{1024};
+
+    // Reserved once in the ctor; not reentrant.
+    std::vector<SweepFrame> sweep_stack_;
+
     // --- Write overlay (S2): copy-on-write over the pristine built caches ---------------
     // Reuses DirectState's container TYPES exactly (direct_state.hpp:82-89) so the later
     // DirectState->ActiveState retype is a drop-in. Keyed by the 20-byte address (as
     // DirectState is), while the built caches above are keyed by the 32-byte addr_hash;
     // reads consult the overlay first, the built cache second.
-    FlatHashMap<evmc::address, Account> created_accounts_;                                  // every written account
+    // Leaf changes must set modified (gather skip).
+    FlatHashMap<evmc::address, Account> created_accounts_;                                  // every loaded account, read or written
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;  // every storage write (zeros RETAINED — divergence a)
     FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;                                  // in-block created code (fills the old TODO)
     FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;              // key8-collision spill

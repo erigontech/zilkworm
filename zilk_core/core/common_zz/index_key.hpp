@@ -20,6 +20,13 @@
 
 namespace zilkworm {
 
+/// hash_key8 of the bytes at `hash`, unaligned.
+[[gnu::always_inline]] inline uint64_t hash_key8_at(const uint8_t* hash) noexcept {
+    uint64_t k;
+    std::memcpy(&k, hash, 8);
+    return k;
+}
+
 /// Index key of a 32-byte keccak hash: its first 8 bytes, loaded in native byte order.
 ///
 /// Used for code hashes (code store), trie node hashes (node store) and account hashes
@@ -28,16 +35,14 @@ namespace zilkworm {
 ///
 /// @param hash  the full 32-byte hash
 [[gnu::always_inline]] inline uint64_t hash_key8(const uint8_t (&hash)[32]) noexcept {
-    uint64_t k;
-    std::memcpy(&k, hash, 8);
-    return k;
+    return hash_key8_at(hash);
 }
 
 /// Index key of a 32-byte keccak hash; see hash_key8(const uint8_t (&)[32]).
 ///
 /// @param hash  the full 32-byte hash
 [[gnu::always_inline]] inline uint64_t hash_key8(const evmc::bytes32& hash) noexcept {
-    return hash_key8(hash.bytes);
+    return hash_key8_at(hash.bytes);
 }
 
 /// Index key of a 20-byte account address: its first 7 bytes as the low 7 bytes of the key,
@@ -48,7 +53,7 @@ namespace zilkworm {
 /// byte 19 in place of byte 7 keeps them apart.
 ///
 /// @param addr  the full 20-byte address
-[[gnu::always_inline]] inline uint64_t addr_key8(const uint8_t (&addr)[20]) noexcept {
+[[gnu::always_inline]] inline uint64_t addr_key8_at(const uint8_t* addr) noexcept {
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
     // The same key from two word loads: with strict alignment the memcpy below is eight byte
     // loads through a stack temporary, and the callers' addresses are word-aligned.
@@ -62,11 +67,25 @@ namespace zilkworm {
     k = (k & 0x00FFFFFFFFFFFFFFull) | (uint64_t(addr[19]) << 56); return k;
 }
 
+/// See addr_key8_at.
+[[gnu::always_inline]] inline uint64_t addr_key8(const uint8_t (&addr)[20]) noexcept {
+    return addr_key8_at(addr);
+}
+
 /// Index key of a 20-byte account address; see addr_key8(const uint8_t (&)[20]).
 ///
 /// @param addr  the full 20-byte address
 [[gnu::always_inline]] inline uint64_t addr_key8(const evmc::address& addr) noexcept {
-    return addr_key8(addr.bytes);
+    return addr_key8_at(addr.bytes);
+}
+
+/// storage_key8 of the bytes at `key`, unaligned.
+[[gnu::always_inline]] inline uint64_t storage_key8_at(const uint8_t* key) noexcept {
+    uint64_t addr_prefix;
+    uint64_t slot_prefix;
+    std::memcpy(&addr_prefix, key, 8);
+    std::memcpy(&slot_prefix, key + 32, 8);
+    return addr_prefix ^ slot_prefix;
 }
 
 /// Index key of a storage slot in HashState's storage index, whose full key is the 64-byte
@@ -78,11 +97,7 @@ namespace zilkworm {
 ///
 /// @param key  the full 64-byte key: keccak256(address) followed by keccak256(slot key)
 [[gnu::always_inline]] inline uint64_t storage_key8(const uint8_t (&key)[64]) noexcept {
-    uint64_t addr_prefix;
-    uint64_t slot_prefix;
-    std::memcpy(&addr_prefix, key, 8);
-    std::memcpy(&slot_prefix, key + 32, 8);
-    return addr_prefix ^ slot_prefix;
+    return storage_key8_at(key);
 }
 
 }  // namespace zilkworm
