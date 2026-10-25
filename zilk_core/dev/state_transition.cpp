@@ -132,6 +132,12 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         const bool expect_invalid =
             i < bundle.block_flags.size() &&
             (bundle.block_flags[i] & ::zilkworm::kBlockFlagExpectInvalid);
+        // Nothing undoes a rejected block, so a block expected invalid has to be the bundle's last.
+        if (expect_invalid && i + 1 < bundle.block_rlps.size()) [[unlikely]] {
+            sys_println("ERROR: a block expected invalid is not the last of its bundle");
+            failed_ = true;
+            return {0, false};
+        }
         // The witness headers anchor the first block only.
         if (i == 0 && !headers_valid) {
             if (expect_invalid) {

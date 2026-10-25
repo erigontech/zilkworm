@@ -207,8 +207,8 @@ void merge_nodes(NodeMap& sink, std::vector<CapturedNode>&& src) {
     }
 }
 
-std::vector<uint8_t> build_subtest(const nlohmann::json& test,
-                                  const std::string& subtest_name) {
+std::vector<std::vector<uint8_t>> build_subtest(const nlohmann::json& test,
+                                               const std::string& subtest_name) {
     if (!test.contains("blocks") || test["blocks"].empty()) {
         return {};
     }
@@ -227,7 +227,6 @@ std::vector<uint8_t> build_subtest(const nlohmann::json& test,
 
     std::vector<Bytes> block_rlps_owned;
     std::vector<uint8_t> block_flags;
-    bool any_invalid = false;
     block_rlps_owned.reserve(test["blocks"].size());
     for (const auto& blk : test["blocks"]) {
         if (!blk.contains("rlp")) continue;
@@ -248,7 +247,6 @@ std::vector<uint8_t> build_subtest(const nlohmann::json& test,
             }
         }
         block_flags.push_back(expect_invalid ? ::zilkworm::kBlockFlagExpectInvalid : 0);
-        any_invalid |= expect_invalid;
         block_rlps_owned.push_back(std::move(*r));
     }
     if (block_rlps_owned.empty()) {
@@ -403,27 +401,40 @@ std::vector<uint8_t> build_subtest(const nlohmann::json& test,
         }
     }
 
-    std::vector<ByteView> block_views;
-    block_views.reserve(block_rlps_owned.size());
-    for (const auto& b : block_rlps_owned) {
-        block_views.emplace_back(b);
-    }
     std::string network;
     if (test.contains("network") && test["network"].is_string()) {
         network = test["network"].get<std::string>();
     } else {
         network = "Mainnet";
     }
-    auto bundle = build_flat_bundle(
-        ByteView{*genesis_rlp},
-        std::span<const ByteView>{block_views.data(), block_views.size()},
-        /*ancestors_rlp=*/ByteView{},
-        direct_blob,
-        node_store_blob,
-        std::string_view{network},
-        any_invalid ? std::span<const uint8_t>{block_flags}
-                    : std::span<const uint8_t>{});
-    return bundle;
+    std::vector<std::vector<uint8_t>> bundles;
+    std::vector<ByteView> chain_views;
+    std::vector<uint8_t> chain_flags;
+    const auto emit = [&]() {
+        const bool any_invalid = std::any_of(chain_flags.begin(), chain_flags.end(),
+                                             [](uint8_t f) { return f != 0; });
+        bundles.push_back(build_flat_bundle(
+            ByteView{*genesis_rlp},
+            std::span<const ByteView>{chain_views.data(), chain_views.size()},
+            /*ancestors_rlp=*/ByteView{},
+            direct_blob,
+            node_store_blob,
+            std::string_view{network},
+            any_invalid ? std::span<const uint8_t>{chain_flags}
+                        : std::span<const uint8_t>{}));
+    };
+    for (size_t i = 0; i < block_rlps_owned.size(); ++i) {
+        chain_views.emplace_back(block_rlps_owned[i]);
+        chain_flags.push_back(block_flags[i]);
+        // The guest never undoes a rejected block, so a rejected block ends its bundle.
+        if ((block_flags[i] & ::zilkworm::kBlockFlagExpectInvalid) && i + 1 < block_rlps_owned.size()) {
+            emit();
+            chain_views.pop_back();
+            chain_flags.pop_back();
+        }
+    }
+    emit();
+    return bundles;
 }
 
 auto align8 = [](size_t v) noexcept { return (v + 7u) & ~size_t{7u}; };
@@ -482,13 +493,13 @@ int run_emit(const std::string& json_path, size_t index) {
                   << json_path << "\n";
         return 1;
     }
-    auto bundle = build_subtest(subs[index].second, subs[index].first);
-    if (bundle.empty()) {
+    auto bundles = build_subtest(subs[index].second, subs[index].first);
+    if (bundles.empty()) {
         std::cerr << "[eest_to_flat_bundle] subtest produced empty bundle: "
                   << subs[index].first << "\n";
         return 1;
     }
-    auto env = wrap_mfbd({std::move(bundle)});
+    auto env = wrap_mfbd(bundles);
     std::cout.write(reinterpret_cast<const char*>(env.data()),
                     static_cast<std::streamsize>(env.size()));
     return 0;
@@ -520,8 +531,7 @@ FileResult convert_one_file(const fs::path& src, const fs::path& dst) {
         std::vector<std::vector<uint8_t>> bundles;
         bundles.reserve(subs.size());
         for (auto& [name, body] : subs) {
-            auto b = build_subtest(body, name);
-            if (!b.empty()) bundles.push_back(std::move(b));
+            for (auto& b : build_subtest(body, name)) bundles.push_back(std::move(b));
         }
         if (bundles.empty()) {
             r.ok = true;

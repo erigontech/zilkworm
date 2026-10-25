@@ -6,13 +6,3 @@
 # WILL_FAIL, so one that passes again fails until it is taken off this list. The Airbender EEST job
 # adds this list to its own, and the HyperCube job's failure threshold covers them. Measured against
 # tests@v21.0.1 (test-fixtures.json).
-
-# A rejected block leaves its changes to the blocks after it: the runner executes a test's blocks one
-# after another on the witness in place, and nothing undoes a block it rejects. Here the block whose
-# first transaction is invalid has already run its block-start system calls (EIP-4788, EIP-2935), so
-# the valid block after it writes the same values to those slots again, the block access list
-# (EIP-7928) records them as reads instead of writes, and its hash no longer matches the header.
-# Before Amsterdam the leak does not show. The guest validates a single block, so the fix belongs in
-# the EEST conversion: one bundle per block, on the state the accepted blocks before it leave.
-# Postponed; until then the fixture is expected to fail.
-for_amsterdam/frontier/validation/transaction/tx_invalid_first_in_block.json
