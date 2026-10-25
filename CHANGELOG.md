@@ -1,5 +1,107 @@
 # Changelog
 
+## v0.1.0-alpha.7 - SP1 v6.9.0 and a leaner HashState guest
+
+### Highlights
+
+This release moves Zilkworm from SP1 v6.6.0 to SP1 v6.9.0 (#137). The prover builds on `erigontech/sp1` `erigon/patches-v6.9.0`: v6.9.0 plus `prove_with_cycles`, the one commit `erigon/patches-v6.6.0` carried, cherry-picked unchanged. The ERE leg (`derive_vk` and the published ERE guest) builds on the upstream `v6.9.0` tag, the SP1 that ere v0.19.5 resolves.
+
+SP1 v6.9.0 does not change what the guests execute. The C++ guest issues its own `ecall`s and links no SP1 crate, and nothing it depends on in SP1 moved between v6.6.0 and v6.9.0: the same guest ELF runs the same cycles, prover gas and ERE estimated cost on both. The verifying keys did change: SP1 v6.9.0 loads a guest ELF's initial memory correctly where v6.6.0 zeroed up to four bytes of it (succinctlabs/sp1#2981), and both Zilkworm guests hit the case. Keys published for alpha.6 do not verify alpha.7 proofs.
+
+The HashState guest, the one the ERE benchmark runs on `statelessInputBytes`, gets cheaper (#95). It probes its indexes in place, sizes its stores from the SSZ counts, sweeps the witness trie and walks absence proofs with less copying, and no longer folds accounts the block only read. On the Sepolia batch 11982400..11982499, fed raw `statelessInputBytes`, its ERE estimated cost falls 1.70%. The DirectState guest (`z6m_guest_hypercube_mfbd`) is unchanged.
+
+The ERE benchmark now estimates the Zilkworm guest's SP1 cost on every run and opens its job summary with a per-client table (#138). `make z6m_prover` no longer embeds the HashState guest after a `make z6m_prover_slib` (#136).
+
+### SP1 v6.9.0
+
+#### No guest ABI change
+
+The 26 syscall codes the guest emits are byte-identical in v6.6.0, v6.9.0 and the erigontech fork, as are the ecall handlers (`executor/src/vm`, `minimal/ecall.rs`), the core machine circuits, `crates/zkvm` (entrypoint, memory layout) and the linker script. The guest's own constants (stack top `0x78000000`, 2^37 bytes of memory, the 2^34 input region, public values on fd 13) still hold. The fork's commit touches the SDK, prover and verifier only, none of the syscall surface.
+
+#### Same execution, same cost
+
+Prover gas (`3 * trace area + complexity` per chunk, normalised by 191), SP1's per-opcode and per-syscall cost table and the gas chunk threshold are unchanged between v6.6.0 and v6.9.0, so a guest ELF costs the same on both:
+
+- The DirectState guest is the same ELF as in alpha.6. On the 200-block mainnet corpus it runs 17,749,454,974 cycles and 40,911,325,384 prover gas on both versions, equal on every block in cycles, prover gas, gas used and syscall count.
+- The alpha.6 release's HashState guest asset, run through ERE on Sepolia 11968700..11968799, has an estimated cost of 6,855,925,077,780 under ere v0.18.1 and SP1 v6.6.0 (the alpha.6 release run) and under ere v0.19.5 and SP1 v6.9.0, equal on every fixture and in every component.
+
+#### Verifying keys (succinctlabs/sp1#2981)
+
+When a loadable segment's file bytes end in the middle of an 8-byte word and the segment runs on past them (`memsz > filesz`, the `.data`/`.bss` boundary), v6.6.0 zeroed that whole word while laying out the `.bss` tail, dropping the last file bytes before it; v6.9.0 keeps them. The same ELF therefore has a different initial memory image, and a different program vkey, on the two versions. In both Zilkworm guests the dropped bytes are newlib's `numempty` locale sentinel (`{CHAR_MAX, 0}`). Zeroing those two bytes in the ELF gives the same key on v6.6.0 and v6.9.0, so the loader fix is the whole difference.
+
+SP1 does not change the guest ELF bytes, only the key derived from them. The DirectState guest's key changes through the loader fix alone; the HashState guest's through the loader fix and #95. This release's keys are its published `z6m_guest_hypercube_mfbd.vk` and `stateless-validator-zilkworm-sp1-v6.9.0.vk`, which the release workflow derives from the ELFs it builds; a build with another toolchain has different ELF bytes and so different keys.
+
+#### Pins
+
+| Where | v0.1.0-alpha.6 | v0.1.0-alpha.7 |
+|---|---|---|
+| `prover/prover_hypercube` (sp1-sdk, sp1-prover, sp1-cuda, sp1-core-executor, sp1-zkvm, sp1-build) | `erigontech/sp1` `erigon/patches-v6.6.0` (`e4fa2f0`) | `erigontech/sp1` `erigon/patches-v6.9.0` (`d6eb0ae`) |
+| `prover/stateless_validator` sp1-sdk (`derive_vk`) | `succinctlabs/sp1` `v6.6.0` | `succinctlabs/sp1` `v6.9.0` |
+| `Dockerfile` SP1 GPU server | `erigon/patches-v6.6.0` | `erigon/patches-v6.9.0` |
+| ERE guest assets | `stateless-validator-zilkworm-sp1-v6.6.0.{elf,vk}` | `stateless-validator-zilkworm-sp1-v6.9.0.{elf,vk}` |
+
+`prover/Cargo.lock` moves the 49 SP1 crates and `Cargo.lock` the 47 SP1 crates to 6.9.0; no other dependency changes. `make ere-bin-link` refuses a workload whose ere still resolves SP1 v6.6.0 (ere v0.18.1): the ERE workload needs ere v0.19.5.
+
+### HashState guest performance (#95)
+
+Five changes to the HashState backend, the read side of the `statelessInputBytes` path:
+
+- **Indexes probed in place.** `HashIndex::find_ptr` looks a key up from the caller's pointer with an inline word-wise full-key compare, so the trie sweep and the absence walk no longer copy each 32-byte child hash ref before probing. The capacity rule is computed in 64 bits and clamped to 2^31.
+- **Stores sized from the SSZ counts.** `parse_stateless_input` reads the witness's state and code list counts, sizes the four indexes and two arenas up front (`reserve_stores`, hints clamped to 65,536), and streams each list into its store with one probe per entry.
+- **A leaner trie sweep.** `build_state_from_trie` keeps a 24-byte cursor frame per branch and one path buffer instead of a decoded 784-byte frame per level, and reads a branch's children lazily. Every node shape `decode_node` rejects still makes the witness malformed.
+- **One child slot per branch in the absence walk.** `confirm_absent` reads only the target slot of each branch and compares hex-prefix paths in place; slots proven absent are memoised per build.
+- **Read-only accounts left out of the root fold.** `check_root_hashstate` no longer gathers a built account the block neither modified nor deleted: its leaf is the one the sweep already bound to the parent's state root. Every state mutator sets `modified` or `deleted`, and the tests check each one.
+
+The HashState unit tests go from 58 to 95 cases. They pin the malformed-witness shapes (paths over 64 nibbles, a 17th branch item, the embedded-child cap), the reserve caps and the gather skip on the tests-zkevm sample. `docs/hashstate.md` carries the design notes. The accept-time absence claims of #94 are not part of this release.
+
+HashState: ERE estimated cost -1.70% on Sepolia 11982400..11982499 (7,362,834,844,333 → 7,237,939,231,288; raw statelessInputBytes input). Both are local builds of the guest with the same toolchain (xPack GCC 14.2.0), costed on SP1 v6.9.0 and ere v0.19.5; the syscall component is the same on both.
+
+### ERE integration
+
+- The erigontech forks of `ere-guests` and `zkevm-benchmark-workload` move to ere v0.19.5 (SP1 v6.9.0) on `som/ere-v0.19.5` (ere-guests `9fc7e71`, workload `61dfd2d`). The ere-guests fork takes the Ere bump of eth-act/ere-guests#103 without that PR's Nethermind guest; the workload fork's `[patch]` takes the ere-guests catalog, common and downloader crates from the ere-guests fork at one rev.
+- The `ERE Benchmark` workflow's `workload_ref` and `ere_guests_ref` default to `som/ere-v0.19.5`, whose ere resolves the SP1 v6.9.0 that `derive_vk` builds against, as `make ere-bin-link` requires (#137).
+- The release publishes the ERE guest as `stateless-validator-zilkworm-sp1-v6.9.0.{elf,vk}`, the name ere-hosts loads under ere v0.19.5 (#137).
+- The `zilkworm` entry of the ere-guests fork's `artifact-registry.json` still names the alpha.6 SP1 v6.6.0 assets. After the release it moves to the alpha.7 assets and their sha256, and the workload fork's `[patch]` to that ere-guests commit.
+- Under ere v0.19.5 the ere-guests registry, as in eth-act/ere-guests#103, keeps no SP1 guest for Reth or Ethrex (theirs target SP1 v6.6.0), so the Reth leg of `make ere-compare` fails until Reth publishes an SP1 v6.9.0 guest; `make ere-validate` is unaffected. The ERE benchmark that `release.yml` runs after publishing therefore has `compare` off for this release: it validates the Zilkworm guest without the cost comparison against Reth (#137).
+- The ERE benchmark estimates the Zilkworm guest's SP1 cost on every run (`make ere-cost`) and its job summary prints it: a table with one column per client, the Zilkworm one headed `zilkworm-<PROJECT_VERSION>` (ere version, completed, output_matched, incomplete, estimated cost in G), total estimated cost and its prover-gas equivalent, the opcode/syscall/system components, test families and the heaviest fixtures. Only Reth's cost and the comparison stay behind `compare` (#138).
+
+### Fixes and improvements
+
+#### Build
+
+- `make z6m_prover_slib` no longer copies the HashState guest over the ELF that `z6m_guest`'s CMake build owns. The copy was newer than its inputs, so the next `make z6m_prover` did not relink and embedded the HashState guest, which `make sp1-benchmark` then measured without an error. `build.rs` embeds the ELF that `Z6M_GUEST_ELF` names (by default `build/z6m_guest.elf`) and reruns when it changes, and `z6m_prover_slib` sets it. A tree that ran the old recipe keeps the stale copy until a guest source changes: remove `prover/guest_hypercube/build/z6m_guest.elf` once (#136)
+
+### Validation
+
+On the release commit, with the guests built locally by xPack GNU RISC-V Embedded GCC 14.2.0. The release workflow builds with GCC 15.2.0, so its ELF bytes, keys, cycle counts and costs differ from these.
+
+- `make eest-blockchain-tests`: 12742/12742
+- `tools/scripts/release_state_root_check.sh` on the 200-block mainnet corpus: 200/200, 0 state-root mismatches
+- SP1 benchmark on the same corpus (`z6m_prover` on the v6.9.0 fork): 200/200 blocks; 17.75B cycles, 40.91B prover gas, every block equal in cycles, prover gas and gas used to alpha.6 built the same way
+- Unit tests in the three CI configurations: Debug 476/476, Debug with `Z6M_HASH_STATE=ON` 375/375, rv32 paths with ASan+UBSan 505/505
+- `make ere-cost` on Sepolia 11982400..11982499: 100/100 output_matched, estimated cost 7,237,939,231,288
+
+### Contributors
+
+| Author | Commits |
+|---|---|
+| Somnath Banerjee @somnergy | 4 |
+
+### Commit Log by Category (4 non-merge commits since v0.1.0-alpha.6)
+
+#### HashState
+
+- `fd35f48` HashState: in-place index probe, store sizing, lean trie sweep and absence walk, read-only gather skip (#95) (Somnath Banerjee @somnergy)
+
+#### SP1
+
+- `ee3d6b5` prover: move SP1 to v6.9.0 and the ERE benchmark to ere v0.19.5 (#137) (Somnath Banerjee @somnergy)
+
+#### ERE, Build, CI/CD & Release
+
+- `b025b52` make: embed the slib guest from its own tree instead of copying it over z6m_guest's ELF (#136) (Somnath Banerjee @somnergy)
+- `03f2030` ci: estimate the Zilkworm guest's SP1 cost and table it on every ERE benchmark run (#138) (Somnath Banerjee @somnergy)
+
 ## v0.1.0-alpha.6 - Native statelessInputBytes with the HashState backend
 
 ### Highlights
