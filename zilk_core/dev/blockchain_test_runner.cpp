@@ -617,23 +617,49 @@ namespace {
         }
 
         // blob must outlive direct.
-        auto blob = read_genesis_allocation(json_test["pre"]);
-        DirectState direct{std::span<uint8_t>{blob.data(), blob.size()}};
-        if (!direct.sanitize()) {
-            sys_println("ERROR: blockchain_test sanitize failed (identity↔hash mismatch)");
+        std::vector<uint8_t> blob;
+        std::optional<DirectState> direct;
+        std::optional<Blockchain> blockchain;
+        const auto load_pre_state = [&]() -> bool {
+            blockchain.reset();
+            direct.reset();
+            blob = read_genesis_allocation(json_test["pre"]);
+            direct.emplace(std::span<uint8_t>{blob.data(), blob.size()});
+            if (!direct->sanitize()) {
+                sys_println("ERROR: blockchain_test sanitize failed (identity↔hash mismatch)");
+                return false;
+            }
+            blockchain.emplace(*direct, config_it->second, genesis_block);
+            return true;
+        };
+        if (!load_pre_state()) {
             return Status::kFailed;
         }
-        Blockchain blockchain{direct, config_it->second, genesis_block};
 
-        for (const auto& json_block : json_test["blocks"]) {
-            Status status{run_json_block(json_block, blockchain, direct)};
+        const auto& blocks = json_test["blocks"];
+        std::vector<size_t> accepted;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            Status status{run_json_block(blocks[i], *blockchain, *direct)};
             if (status != Status::kPassed) {
                 return status;
+            }
+            if (!blocks[i].contains("expectException")) {
+                accepted.push_back(i);
+            } else if (i + 1 < blocks.size()) {
+                // Nothing undoes a rejected block, so the accepted blocks rerun on a fresh pre-state.
+                if (!load_pre_state()) {
+                    return Status::kFailed;
+                }
+                for (const size_t j : accepted) {
+                    if (const Status s{run_json_block(blocks[j], *blockchain, *direct)}; s != Status::kPassed) {
+                        return s;
+                    }
+                }
             }
         }
 
         if (json_test.contains("postStateHash")) {
-            const auto state_root = direct.state_root_hash();
+            const auto state_root = direct->state_root_hash();
             if (!state_root) {
                 sys_println("ERROR: state_root_hash failed (witness incomplete)");
                 return Status::kFailed;

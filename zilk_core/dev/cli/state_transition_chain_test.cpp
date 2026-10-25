@@ -14,7 +14,9 @@
 //   3. in one bundle, B's execution re-parented onto genesis after A is rejected (it was accepted
 //      before the check: its root still matches), while two independent bundles are accepted in
 //      either order and return the hash of the last one's block.
+//   4. a block rejected after it ran ends its bundle: A after it in a bundle of its own is accepted.
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
@@ -117,10 +119,10 @@ Chain make_chain_ab() {
 
 /// One flat bundle: `parent_rlp` is its "genesis" block, whose header anchors the first block.
 std::vector<uint8_t> bundle(const Bytes& parent_rlp, std::initializer_list<ByteView> blocks,
-                            const Prestate& pre) {
+                            const Prestate& pre, std::span<const uint8_t> flags = {}) {
     std::vector<uint8_t> flat = build_flat_bundle(
         ByteView{parent_rlp}, std::span<const ByteView>{blocks.begin(), blocks.size()},
-        /*ancestors_rlp=*/ByteView{}, pre.blob, pre.nodestore, "Shanghai");
+        /*ancestors_rlp=*/ByteView{}, pre.blob, pre.nodestore, "Shanghai", flags);
     REQUIRE_FALSE(flat.empty());
     return flat;
 }
@@ -219,4 +221,28 @@ TEST_CASE("independent bundles return the last bundle's block hash",
     const Outcome aa = run(envelope({bundle_a, bundle_a}));
     REQUIRE_FALSE(aa.failed);
     CHECK(aa.r.block_hash == c.a.header.hash());
+}
+
+TEST_CASE("a rejected block ends its bundle", "[state_transition][public_output][soundness]") {
+    const Chain c = make_chain_ab();
+    // A with a wrong gas used: rejected only once its transfer has run.
+    silkworm::Block r = c.a;
+    r.header.gas_used += 1;
+    const Bytes r_rlp = encode(r);
+    const std::array<uint8_t, 1> rejected{kBlockFlagExpectInvalid};
+    const Outcome split = run(envelope({bundle(c.genesis_rlp, {ByteView{r_rlp}}, c.pre_a, rejected),
+                                        bundle(c.genesis_rlp, {ByteView{c.a_rlp}}, c.pre_a)}));
+    REQUIRE_FALSE(split.failed);
+    CHECK(split.log.find("block 0 rejected as expected: kWrongBlockGas") != std::string::npos);
+    CHECK(split.r.gas_used == kTransferGas);
+    CHECK(split.r.block_hash == c.a.header.hash());
+    CHECK(split.r.post_state_root == c.a.header.state_root);
+
+    // In one bundle, A would run on the state the rejected transfer left.
+    const std::array<uint8_t, 2> first_rejected{kBlockFlagExpectInvalid, 0};
+    const Outcome o = run(envelope(
+        {bundle(c.genesis_rlp, {ByteView{r_rlp}, ByteView{c.a_rlp}}, c.pre_a, first_rejected)}));
+    CHECK(o.failed);
+    CHECK(o.r.gas_used == StateTransition::kRunFailure);
+    CHECK(o.log.find("not the last of its bundle") != std::string::npos);
 }
