@@ -29,8 +29,8 @@ below assume the three repos sit as siblings in one parent directory:
 | Repo | Branch | Based on | Carries |
 |---|---|---|---|
 | `erigontech/zilkworm` | `release/0.1.0-alpha.4` | `v0.1.0-alpha.3` | Guest (`zilk_core` + ZVM1 submodule `34cc5a71`, zvm1 `release/0.1.0-alpha.4`) with the stateless new-payload and witness checks, and the host adapter `prover/stateless_validator` (SIOB→MFBD): tests-zkevm v21.0.1 schema, EIP-8282 builder-requests fix, chain id 1 → Amsterdam, Sepolia network config, ERE make targets/docs/fetch script, `eest_runner` cycle metrics, the `ERE Benchmark` workflow and its release hookup. |
-| `erigontech/ere-guests` | `som/ere-v0.19.5` | `main` (`2aeab37`, after v0.18.1) | The Zilkworm guest, mirroring the Nimbus addition (upstream PR #88): `StatelessValidatorKind::Zilkworm` (catalog ID 4), the `zilkworm` entry in `artifact-registry.json`, the catalog/downloader/test-crate tests, and the README. On top, the Ere v0.19.5 bump of eth-act/ere-guests#103 (`2f2fb9a`), without that PR's Nethermind guest (also catalog ID 4); as there, Reth and Ethrex stay registered with their OpenVM artifacts only. Until the post-release update ([release.md](release.md)) the `zilkworm` entry still names the v0.1.0-alpha.6 assets (sp1, `zkvm_version` v6.6.0, `stateless-validator-zilkworm-sp1-v6.6.0.{elf,vk}`), so the fork's SDK-version test fails for zilkworm-sp1; the update moves it to the alpha.7 `v6.9.0` assets. The guest runs on the fixtures' `statelessInputBytes` like every other guest. |
-| `erigontech/zkevm-benchmark-workload` | `som/ere-v0.19.5` | `master` (`26bb531`, ere v0.18.1, ere-guests v0.18.1) | The `zilkworm` execution client (`ExecutionClient::Zilkworm`, on the raw `statelessInputBytes` path), ere v0.19.5, and the `[patch]` taking the ere-guests catalog, common and downloader crates from the erigontech fork at `9fc7e71` (the head of its `som/ere-v0.19.5`). |
+| `erigontech/ere-guests` | `som/ere-v0.19.5` (`8244f06`, the head of eth-act/ere-guests#98) | eth-act/ere-guests#103 (`5c7e147`, on `main`) | The Zilkworm guest, mirroring the Nimbus addition (upstream PR #88): `StatelessValidatorKind::Zilkworm` (catalog ID 5), the `zilkworm` entry in `artifact-registry.json`, the catalog/downloader/test-crate tests, and the README. Stacked on #103, which it includes whole: Ere v0.19.5, Nethermind at catalog ID 4, Reth 0.1.0-rc.6 and Ethrex 30.0.1 on SP1 v6.9.0. The `zilkworm` entry names the v0.1.0-alpha.7 assets (sp1, `zkvm_version` v6.9.0, `stateless-validator-zilkworm-sp1-v6.9.0.{elf,vk}`, sha256 from the release's `SHA256SUMS.txt`), the post-release update of [release.md](release.md). The guest runs on the fixtures' `statelessInputBytes` like every other guest. |
+| `erigontech/zkevm-benchmark-workload` | `som/ere-v0.19.5` (`85b33fc`) | `master` (`26bb531`, ere v0.18.1, ere-guests v0.18.1) | The `zilkworm` execution client (`ExecutionClient::Zilkworm`, on the raw `statelessInputBytes` path), ere v0.19.5, and the `[patch]` taking the ere-guests catalog, common and downloader crates from the erigontech fork at `8244f06` (the head of its `som/ere-v0.19.5`). |
 
 The benchmark's workspace `[patch]` takes all three ere-guests crates from the
 erigontech fork at one rev; patching the catalog alone leaves a second `ere-catalog`
@@ -44,7 +44,7 @@ in the build.
 | Container engine | Docker 29.4.0 |
 | Rust | 1.95.0 (pinned in `rust-toolchain.toml`) |
 | ERE harness | `eth-act/ere` tag `v0.19.5` (rev `fba5601`), image `ghcr.io/eth-act/ere/ere-server-sp1:fba5601` |
-| ere-guests | erigontech fork `som/ere-v0.19.5` (`9fc7e71`, via the benchmark `[patch]`) |
+| ere-guests | erigontech fork `som/ere-v0.19.5` (`8244f06`, via the benchmark `[patch]`) |
 | SP1 | v6.9.0 (ere v0.19.5) |
 | Guest artifacts | zilkworm `local-dev`, reth `0.1.0-rc.4`, ethrex `29.0.0` (all sp1 v6.6.0) |
 | Fixtures | Sepolia block export (Amsterdam since timestamp 1791294816), chainId `0xaa36a7` (11155111), 100-block batches |
@@ -237,8 +237,8 @@ Zilkworm guest in place of the EEST spec guest.
   `z6m_guest_hypercube_mfbd` (DirectState, MFBD bundles) and the handbook-named
   `stateless-validator-zilkworm-sp1-<SP1 SDK version>` (HashState, the ERE guest).
 - **Inputs:** `guest_source`, `release_tag`, `catalog_url` (default Sepolia),
-  `batch_count` (default 1), `compare` (Reth's cost and the comparison; default off; also off for releases
-  while ere-guests registers no Reth SP1 v6.9.0 guest),
+  `batch_count` (default 1), `compare` (Reth's cost and the comparison; default off, and off in
+  `release.yml`; Reth's SP1 v6.9.0 guest is now available via the fork registry, so it runs on the forks),
   `workload_ref` / `ere_guests_ref` (default `som/ere-v0.19.5` on the
   erigontech forks).
 - **Layout:** `z6m/`, `zkevm-benchmark-workload_fork/` and `ere-guests_fork/` are

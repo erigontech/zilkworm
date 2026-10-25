@@ -61,8 +61,18 @@ The 30M tarball holds 122 fixture files, 1203 cases (one block each). The run
 is `make slib-benchmark`'s per-case command (`z6m_prover execute --is-test`)
 over `slib_split_fixtures.py`'s cases; the loop was run 8-wide with `xargs -P`
 instead of sequentially (the per-case cycle count is deterministic, the
-sequential loop takes ~1 min per 30M case). Guest: HashState, the
-`statelessInputBytes` path of this tree.
+sequential loop takes ~1 min per 30M case). Guest: HashState.
+
+These totals are not the production `statelessInputBytes` path. `execute
+--is-test` ships the whole fixture JSON to the guest (`build_stdin_from_eth_tests`,
+`prover/prover_hypercube/src/stdin_builders.rs:16-28`), which `run_ejsn` parses
+with nlohmann (`zilk_core/dev/blockchain_test_runner.cpp:676`) before
+hex-decoding each block's `statelessInputBytes`. Production input is the raw SSZ
+`statelessInputBytes`, dispatched to `run_sib`
+(`zilk_core/dev/state_transition.cpp:760-766`) with no JSON in the guest. On
+main the in-guest JSON parse is about 45% of sampled cycles, so a per-case
+number here is roughly half harness; the ERE estimator run below measures the
+production path.
 
 **1200 of 1203 cases report cycles.** The other three are zero-gas blocks
 (`test_empty_block`, and the two `test_contract_creation[contract_size_max-*]`
