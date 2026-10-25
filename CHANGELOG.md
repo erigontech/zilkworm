@@ -9,15 +9,17 @@ A small release: the SP1 and ERE bumps, one HashState performance PR, an ERE ben
 - **HashState guest performance** (#95). Indexes probed in place, stores sized from the SSZ counts, a leaner trie sweep and absence walk, and read-only accounts left out of the root fold. ERE estimated cost −1.70% on Sepolia 11982400..11982499, raw `statelessInputBytes` input. The DirectState guest is unchanged.
 - **ERE benchmark job** estimates the Zilkworm guest's SP1 cost on every run and opens its summary with a per-client cost / prover-gas table (#138).
 - **Build fix** (#136). `make z6m_prover` no longer embeds the HashState guest after a `make z6m_prover_slib`. A tree that ran the old recipe removes `prover/guest_hypercube/build/z6m_guest.elf` once.
+- **Blocks after a rejected block** (#141). The DirectState runner no longer runs a test's later blocks on the system-call writes of a block it rejected, which broke the Amsterdam access-list hash in `tx_invalid_first_in_block`. The `z6m_guest_hypercube_mfbd` and Airbender guests and their keys change with it; the ERE guest does not.
 
 ### Commits
 
-4 non-merge commits since v0.1.0-alpha.6, all by Somnath Banerjee @somnergy:
+5 non-merge commits since v0.1.0-alpha.6, all by Somnath Banerjee @somnergy:
 
 - `fd35f48` HashState: in-place index probe, store sizing, lean trie sweep and absence walk, read-only gather skip (#95)
 - `b025b52` make: embed the slib guest from its own tree instead of copying it over z6m_guest's ELF (#136)
 - `ee3d6b5` prover: move SP1 to v6.9.0 and the ERE benchmark to ere v0.19.5 (#137)
 - `03f2030` ci: estimate the Zilkworm guest's SP1 cost and table it on every ERE benchmark run (#138)
+- `a55c368` eest: run the blocks after a rejected block without its changes (#141)
 
 ## v0.1.0-alpha.6 - Native statelessInputBytes with the HashState backend
 
