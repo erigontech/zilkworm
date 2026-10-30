@@ -18,6 +18,7 @@
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common/util.hpp>
+#include <zilk_core/core/common_zz/bytes_cmp.hpp>
 #include <zilk_core/core/common_zz/keccak_prefix.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/print.hpp>
@@ -293,7 +294,7 @@ struct TrieNodeFlat {
     }
 
     bool operator<(const TrieNodeFlat& other) const {
-        return std::memcmp(key.bytes, other.key.bytes, 32) < 0;
+        return lt_bytes32(key.bytes, other.key.bytes);  // TrieNodeFlat is 4-aligned, key first
     }
 };
 
@@ -327,7 +328,7 @@ inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
     }
     for (size_t i = 0; i < n; ++i) idx[i] = static_cast<uint32_t>(i);
     const auto less = [data](uint32_t a, uint32_t b) noexcept {
-        return std::memcmp(data[a].key.bytes, data[b].key.bytes, 32) < 0;
+        return lt_bytes32(data[a].key.bytes, data[b].key.bytes);
     };
     if (n <= 16) {
         for (size_t i = 1; i < n; ++i) {
