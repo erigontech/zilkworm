@@ -571,6 +571,8 @@ inline bool decode_ext_or_leaf(ByteView payload, bool& is_leaf,
 }
 
 // Single-pass node decode
+inline uint32_t g_full_branch_decodes = 0;  // MEASUREMENT ONLY
+inline uint32_t g_other_branch_decodes = 0;  // MEASUREMENT ONLY
 inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                             bool& is_leaf, std::array<uint8_t, 64>& path,
                             uint8_t& plen, ByteView& second) {
@@ -597,6 +599,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
             std::memcpy(out_branch.child_len.data(), kAllHashLens, 16);  // 4 word stores
             out_branch.mask = 0xffff;
             out_branch.value = {};
+            ++g_full_branch_decodes;
             return kBranch;
         }
     }
@@ -643,6 +646,7 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
     }
 
     // Elements 0 and 1 are already decoded; fill them, then decode slots 2..15.
+    ++g_other_branch_decodes;
     out_branch.mask = 0;
     if (!fill_branch_child(out_branch, 0, e0_start, e0_payload.data(), h0->payload_length)) return kInvalid;
     if (!fill_branch_child(out_branch, 1, e1_start, e1_payload.data(), h1->payload_length)) return kInvalid;

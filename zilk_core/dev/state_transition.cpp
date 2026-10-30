@@ -30,6 +30,7 @@
 #include <zilk_core/core/trie/hash_builder.hpp>
 #include <zilk_core/core/trie/nibbles.hpp>
 #include <zilk_core/core/trie_zz/mpt.hpp>
+#include <zilk_core/core/trie_zz/rlp_sw.hpp>  // MEASUREMENT ONLY
 #include <zilk_core/core/types/address.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/core/types_zz/flat_bundle.hpp>
@@ -865,6 +866,8 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     mpt::GridMPT<true> acc_trie(direct_state, prev_root);
     auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
     sys_println(("New Root: " + to_hex(new_root)).c_str());
+    sys_println(("COUNT full_branch_decodes=" + std::to_string(::zilkworm::g_full_branch_decodes) +
+                 " other_branch_decodes=" + std::to_string(::zilkworm::g_other_branch_decodes)).c_str());
     // A failed walk returns a zero root, which would match a header committing to one.
     const bool ok = !acc_trie.failed() && new_root == header.state_root;
     // Walked: every record's list was taken in the walks above (a deleted record's with its wiped storage).
