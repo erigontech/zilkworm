@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <variant>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 
 #include <evmone/evmone.h>
 #include <evmone/vm.hpp>
@@ -138,6 +141,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
 
     const auto gas_used = static_cast<uint64_t>(evm1_receipt.gas_used);
     cumulative_gas_used_ += gas_used;
+    if (std::getenv("ZDBG_TX")) std::fprintf(stderr, "ZDBG tx %u gas_used %llu status %d cum %llu\n", static_cast<unsigned>(tx_index_), static_cast<unsigned long long>(gas_used), static_cast<int>(evm1_receipt.status), static_cast<unsigned long long>(cumulative_gas_used_));
     if (rev >= EVMC_AMSTERDAM) {
         sum_regular_block_gas_ += evm1_receipt.regular_block_gas;
         sum_state_block_gas_ += evm1_receipt.state_block_gas;
@@ -156,6 +160,14 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     for (auto& [addr, data, topics] : evm1_receipt.logs)
         receipt.logs.emplace_back(Log{addr, std::move(topics), std::move(data)});
     logs_bloom(receipt.bloom, receipt.logs);
+    if (std::getenv("ZDBG_LOGS")) {
+        for (const auto& l : receipt.logs) {
+            std::string t;
+            for (const auto& tp : l.topics) { t += evmc::hex(tp); t += ","; }
+            std::fprintf(stderr, "ZDBG log %u %s %s %s\n", static_cast<unsigned>(tx_index_ - 1),
+                         evmc::hex(l.address).c_str(), t.c_str(), evmc::hex(evmc::bytes_view{l.data.data(), l.data.size()}).c_str());
+        }
+    }
 
     apply_state_diff(evm1_receipt.state_diff);
 }

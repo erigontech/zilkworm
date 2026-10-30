@@ -7,6 +7,8 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <span>
@@ -642,6 +644,13 @@ class DirectStateView final : public evmone::state::StateView {
 
     std::optional<Account> get_account(const evmc::address& addr) const noexcept override {
         auto* pa = state_.find_or_create_account(addr);
+        if (const char* w = std::getenv("ZDBG_ADDR"); w && evmc::hex(addr) == w) {
+            intx::uint256 b; std::memcpy(&b, pa->balance, 32);
+            std::fprintf(stderr, "ZDBG get_account %s deleted=%d nonce=%llu balance=%s code_hash=%s storage_root=%s has_storage=%d\n",
+                w, static_cast<int>(pa->deleted), static_cast<unsigned long long>(pa->nonce), intx::to_string(b, 16).c_str(),
+                evmc::hex(std::bit_cast<evmc::bytes32>(pa->code_hash)).c_str(),
+                evmc::hex(evmc::bytes_view{pa->storage_root, 32}).c_str(), static_cast<int>(state_.has_storage(addr, *pa)));
+        }
         if (pa->deleted) return std::nullopt;
         intx::uint256 balance_v;
         std::memcpy(&balance_v, pa->balance, 32);

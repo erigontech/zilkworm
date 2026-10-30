@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 // Copyright 2026 The Zilkworm Authors (modifications)
 // Copyright 2025 The Original Silkworm Authors
 // SPDX-License-Identifier: Apache-2.0
@@ -861,6 +863,13 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     if (!pre_root_set_) {
         pre_state_root_ = prev_root;
         pre_root_set_ = true;
+    }
+    if (std::getenv("ZDBG_UPD")) {
+        for (const auto& u : acc_updates) {
+            const auto cv = u.current_value();
+            std::fprintf(stderr, "ZDBG upd %s %s\n", evmc::hex(u.key).c_str(),
+                         u.current_len ? evmc::hex(evmc::bytes_view{cv.data(), cv.size()}).c_str() : "none");
+        }
     }
     mpt::GridMPT<true> acc_trie(direct_state, prev_root);
     auto new_root = acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
