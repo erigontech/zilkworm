@@ -94,6 +94,10 @@ class DirectState : public BlockState {
     MphfMap pre_state_map_;
     MphfMap node_store_map_;
     MphfMap code_store_map_;
+  public:
+    const MphfMap& scratch_node_store_map() const noexcept { return node_store_map_; }
+    const MphfMap& scratch_code_store_map() const noexcept { return code_store_map_; }
+  private:
 
     std::span<const AddrHashEntry> addr_hashes_;
     std::span<const BlockHashEntry> block_hashes_;

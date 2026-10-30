@@ -959,6 +959,15 @@ void HashState::set_storage_slot(const evmc::address& addr, Account& pa,
 void HashState::apply_code_diff(const evmc::address& addr, Account& pa,
                                 const evmc::bytes& code) {
     const ByteView code_view{code.data(), code.size()};
+    if (code.empty()) {
+        // SCRATCH FIX: a cleared EIP-7702 delegation; the authority's storage survives it
+        // (as DirectState::apply_code_diff on main, zilkworm #159).
+        std::memcpy(pa.code_hash, silkworm::kEmptyHash.bytes, 32);
+        pa.code_store_len = 0;
+        pa.code_store_offset = 0;
+        pa.modified = true;
+        return;
+    }
     const bool is_delegated = eip7702::is_code_delegated(code_view);
 
     // Wipe storage on contract creation unless the new code is a delegation or the address

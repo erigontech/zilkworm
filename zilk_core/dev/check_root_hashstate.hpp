@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -131,6 +133,13 @@ struct HashStateAccountWrite {
     }
 
     // Account-trie fold from prev_root (check_root: state_transition.cpp:618-619).
+    if (std::getenv("ZDBG_UPD")) {
+        for (const auto& u : acc_updates) {
+            const auto cv = u.current_value();
+            std::fprintf(stderr, "ZDBG upd %s %s\n", evmc::hex(u.key).c_str(),
+                         u.current_len ? evmc::hex(evmc::bytes_view{cv.data(), cv.size()}).c_str() : "none");
+        }
+    }
     GridMPT<true, HashState> acc_trie(hash_state, prev_root);
     const evmc::bytes32 new_root =
         acc_trie.calc_root_from_updates({acc_updates.data(), acc_updates.size()});
