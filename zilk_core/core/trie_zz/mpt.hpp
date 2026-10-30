@@ -316,6 +316,28 @@ struct TrieNodeFlat {
 /// Sorts n nodes by key. A node is 155 bytes, so a sort that moves nodes (n^2/4 moves for the
 /// insertion sort below 17, n log n for std::sort) spends most of its time copying; this sorts
 /// indices and then applies the permutation, moving each node at most once (cycle following).
+/// Sorts n pointers to nodes by the nodes' keys: a walk that reads the nodes through them leaves
+/// the nodes in place (sort_trie_nodes() moves each out-of-place node once).
+inline void sort_trie_node_ptrs(const TrieNodeFlat** order, size_t n) {
+    if (n < 2) return;
+    const auto less = [](const TrieNodeFlat* a, const TrieNodeFlat* b) noexcept {
+        return std::memcmp(a->key.bytes, b->key.bytes, 32) < 0;
+    };
+    if (n <= 16) {
+        for (size_t i = 1; i < n; ++i) {
+            const TrieNodeFlat* const k = order[i];
+            size_t j = i;
+            while (j > 0 && less(k, order[j - 1])) {
+                order[j] = order[j - 1];
+                --j;
+            }
+            order[j] = k;
+        }
+    } else {
+        std::sort(order, order + n, less);
+    }
+}
+
 inline void sort_trie_nodes(TrieNodeFlat* data, size_t n) {
     if (n < 2) return;
     uint32_t local_idx[64];
@@ -478,6 +500,10 @@ class GridMPT {
 
     // Main algorithm
     bytes32 calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted);
+    // The same walk over an order of pointers (see sort_trie_node_ptrs()): the nodes stay where they are.
+    bytes32 calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted);
+    template <typename It>
+    bytes32 calc_root_impl(It updates_it, It updates_end);
 
     template <typename NodeType>
     bool insert_line(unsigned parent_slot, unsigned parent_depth, NodeType&& node);
