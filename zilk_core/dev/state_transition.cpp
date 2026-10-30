@@ -592,6 +592,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
     auto end_created_hashes = created_acc_hashes.end();
 
     std::vector<mpt::TrieNodeFlat> storage_spill;
+    std::vector<const mpt::TrieNodeFlat*> storage_order_spill;
     const auto absent_reads = direct_state.absent_reads();
     std::vector<uint64_t> absent_order;
     std::vector<bytes32> absent_keys;
@@ -733,14 +734,18 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                 }
             }
 #endif
-            // Raw-key order != keccak(key) order; sort required.
-            zilkworm::sort_trie_nodes(storage_updates.data(), storage_updates.size());
+            // Raw-key order != keccak(key) order; sort required. Pointers are sorted: the walk only
+            // reads the nodes, which are 155 bytes each.
+            const std::size_t n_updates = storage_updates.size();
+            zilkworm::InlineVec<const mpt::TrieNodeFlat*, 32> order(n_updates, storage_order_spill);
+            for (std::size_t i = 0; i < n_updates; ++i) order.emplace_back(&storage_updates[i]);
+            zilkworm::sort_trie_node_ptrs(order.data(), n_updates);
             if (mpt::is_zero_quick(storage_root)) {  // new account
                 storage_root = kEmptyRoot;
             }
             storage_trie.reset(storage_root);
             const bytes32 walked = storage_trie.calc_root_from_updates(
-                {storage_updates.data(), storage_updates.size()});
+                std::span<const mpt::TrieNodeFlat* const>{order.data(), order.size()});
             // A failed walk binds none of the slots.
             if (storage_trie.failed()) [[unlikely]] {
                 sys_println("ERROR: storage trie walk failed");

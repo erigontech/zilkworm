@@ -615,7 +615,7 @@ void DirectState::apply_code_diff(const evmc::address& addr, Account& pa,
         if (auto [it, inserted] = created_code_.try_emplace(k8); inserted) {
             it->second.full_hash = h;
             it->second.bytes.assign(code.begin(), code.end());
-        } else if (std::memcmp(it->second.full_hash.bytes, h.bytes, 32) == 0) {
+        } else if (bytes_equal<32>(it->second.full_hash.bytes, h.bytes)) {
             // Exact dedup hit (same hash, possibly different addr). Skip insert.
         } else {
             if (auto [cit, cins] = created_code_collisions_.try_emplace(h);

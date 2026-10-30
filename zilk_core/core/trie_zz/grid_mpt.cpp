@@ -195,16 +195,22 @@ template <bool DeletionEnabled>
     return false;
 }
 
+namespace {
+[[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat& u) noexcept { return u; }
+[[gnu::always_inline]] inline const TrieNodeFlat& deref_update(const TrieNodeFlat* u) noexcept { return *u; }
+}  // namespace
+
 template <bool DeletionEnabled>
-bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
+template <typename It>
+bytes32 GridMPT<DeletionEnabled>::calc_root_impl(It updates_it, const It updates_end) {
     if (failed_) [[unlikely]] {
         return {};  // the root node could not be read: there is no trie to walk
     }
     // The update search_nibbles_ was last expanded from: the seek compares the keys themselves, and expanding
     // the new key straight into search_nibbles_ skips a zeroed temporary and its copy.
     const TrieNodeFlat* prev = nullptr;
-    for (auto updates_it = updates_sorted.begin(); updates_it != updates_sorted.end(); ++updates_it) {
-        const auto& trie_upd = *updates_it;
+    for (; updates_it != updates_end; ++updates_it) {
+        const TrieNodeFlat& trie_upd = deref_update(*updates_it);
 
         search_nib_cursor_ = 0;
         snap_writes_ = false;  // for the folds of the seek below
@@ -540,6 +546,16 @@ void GridMPT<DeletionEnabled>::init_from_root(bytes32 previous_root_hash) {
 }
 
 // Explicit template instantiations
+template <bool DeletionEnabled>
+bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat> updates_sorted) {
+    return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
+}
+
+template <bool DeletionEnabled>
+bytes32 GridMPT<DeletionEnabled>::calc_root_from_updates(std::span<const TrieNodeFlat* const> updates_sorted) {
+    return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
+}
+
 template class GridMPT<false>;
 template class GridMPT<true>;
 
