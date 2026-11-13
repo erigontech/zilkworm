@@ -69,6 +69,7 @@ Commands:
 Options:
       --service                                      
       --rpc-url <RPC_URL>                            
+      --ws-url <WS_URL>                              Opt-in ws://|wss:// EL endpoint; newHeads tip watermark, fetch RPCs over same connection
       --data-dir <DATA_DIR>                          [default: temp]
       --save-all-responses                           
       --prove-every <PROVE_EVERY>                    
