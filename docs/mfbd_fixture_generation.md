@@ -22,7 +22,7 @@ make sp1-benchmark             # rebuild guest+prover, run the 200-block prover 
 
 **The one rule you must never break:** if you change the byte layout of any
 `reinterpret_cast`'d wire POD (see §6.1), bump `kFlatBundleVersion`
-(`zilk_core/core/types_zz/flat_bundle.hpp:54`, currently **13**) **in the same
+(`zilk_core/core/types_zz/flat_bundle.hpp:53`, currently **15**) **in the same
 commit** AND regenerate **both** fixture sets. Skipping this is the iter03
 silent-corruption bug (§6.1).
 
@@ -191,7 +191,7 @@ Expect the known-failing test set to shift with a new release — re-baseline th
 From `tools/claude/AGENTS.md`:
 > if your patch reorders fields of a `reinterpret_cast`'d POD inside the flat
 > bundle (PreAccount, MphfKvMeta, FlatWithdrawal, etc.), you MUST bump
-> `kFlatBundleVersion` in `zilk_core/types_zz/flat_bundle.hpp` in the SAME commit
+> `kFlatBundleVersion` in `zilk_core/core/types_zz/flat_bundle.hpp` in the SAME commit
 > AND regenerate the 200 bundles via `legacy_to_flat_bundle`. The iter03
 > silent-corruption bug (2026-05) was exactly this failure mode: a layout change
 > without a version bump caused every bench bundle on disk to mis-decode,
@@ -218,7 +218,7 @@ requires a version bump + regen):
 **Procedure for a wire-format change:**
 ```bash
 # 1. In the SAME commit as the layout change:
-#    edit zilk_core/core/types_zz/flat_bundle.hpp  ->  kFlatBundleVersion = 15 (next)
+#    edit zilk_core/core/types_zz/flat_bundle.hpp  ->  kFlatBundleVersion = 16 (next)
 # 2. Regenerate EEST (auto, since the converter binary changed):
 make eest-mfbd-build
 # 3. Regenerate the benchmark corpus (MANUAL — it has no staleness check):
@@ -271,8 +271,8 @@ as state-root / gas mismatches.
 
 | Thing | Path |
 | --- | --- |
-| Version constant | `zilk_core/core/types_zz/flat_bundle.hpp:54` (`kFlatBundleVersion`) |
-| Version write / check | `flat_bundle.cpp:74` / `flat_bundle.cpp:123-125` |
+| Version constant | `zilk_core/core/types_zz/flat_bundle.hpp:53` (`kFlatBundleVersion`) |
+| Version write / check | `flat_bundle.cpp:73` / `flat_bundle.cpp:134` |
 | Encoders | `zilk_core/dev/cli/{legacy_to,eest_to,json_witness_to}_flat_bundle.cpp` |
 | Make targets | `Makefile`: `test-fixtures` (44), `eest-mfbd-build` (84), `eest-blockchain-tests` (99), `sp1-benchmark-corpus` (132), `sp1-benchmark` (146) |
 | Benchmark raw source | `temp/200_benchmark_blocks/<N>/unifiedBlockAndStateRlp<N>.bin` |
