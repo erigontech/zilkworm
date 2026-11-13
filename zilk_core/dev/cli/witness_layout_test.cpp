@@ -17,6 +17,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -181,6 +182,30 @@ std::vector<uint8_t> forged_code_overlap(const StopPair& p, const DirectState::A
     return blob;
 }
 
+void add_addr_hash_entry(std::vector<uint8_t>& blob, const AddrHashEntry& e) {
+    const uint32_t n = reinterpret_cast<const PreStateMeta*>(blob.data())->n_accounts;
+    const uint32_t at = reinterpret_cast<const PreStateMeta*>(blob.data())->addr_hashes_offset;
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&e);
+    blob.insert(blob.begin() + at + n * sizeof(AddrHashEntry), bytes, bytes + sizeof(e));
+    auto* meta = reinterpret_cast<PreStateMeta*>(blob.data());
+    meta->n_accounts = n + 1;
+    meta->block_hashes_offset += sizeof(AddrHashEntry);
+    meta->code_store_offset += sizeof(AddrHashEntry);
+    auto* entries = reinterpret_cast<AddrHashEntry*>(blob.data() + at);
+    std::sort(entries, entries + n + 1);
+}
+
+void replace_addr_hash_entry(std::vector<uint8_t>& blob, const evmc::address& a, const AddrHashEntry& e) {
+    const auto* meta = reinterpret_cast<const PreStateMeta*>(blob.data());
+    auto* entries = reinterpret_cast<AddrHashEntry*>(blob.data() + meta->addr_hashes_offset);
+    auto* end = entries + meta->n_accounts;
+    auto* old = std::find_if(entries, end,
+                             [&](const AddrHashEntry& x) { return std::memcmp(x.addr, a.bytes, 20) == 0; });
+    REQUIRE(old != end);
+    *old = e;
+    std::sort(entries, end);
+}
+
 }  // namespace
 
 // THE HOLE: a code-store entry overlapping a record's own writable storage slot. Before the fix the
@@ -283,4 +308,55 @@ TEST_CASE("the guest rejects a witness whose address-map records overlap",
 
     expect_rejected(run_guest(chain, sr, forged, ps.nodestore),
                     "sanitize: witness MphfMap entries overlap or leave gaps");
+}
+
+// An address-hash entry pointing inside C's record, added to the entries or in place of D's.
+TEST_CASE("the guest rejects a witness with an address-hash entry inside a record",
+          "[witness][layout][addr_hashes]") {
+    const evmc::address kD = make_addr(0x22, 0x02);
+    const auto tx = make_legacy_txn(kD, 1'000'000, 0);
+    const evmc::address sender = recover_sender(tx);
+    REQUIRE(sender != evmc::address{});
+
+    Bytes d_code;  // storage[0] = BALANCE(C) + 1
+    push20(d_code, kC);
+    d_code.push_back(0x31);
+    push1(d_code, 1);
+    d_code.push_back(0x01);
+    store_observation(d_code);
+    d_code.push_back(0x00);
+    Bytes c_code(35, 0x00);  // PUSH32 0; POP; STOP
+    c_code[0] = 0x7f;
+    c_code[33] = 0x50;
+    // Balance bytes 4, 5 and 7 are the entry's deleted, acc_rlp_len and modified bytes.
+    const intx::uint256 c_balance = 5000 + (intx::uint256{1} << 32) + (intx::uint256{7} << 56);
+    const std::vector<AcctSpec> state = {
+        AcctSpec{.addr = sender, .nonce = 0, .balance = intx::uint256{1} << 64},
+        AcctSpec{.addr = kD, .nonce = 1, .balance = 0, .code = d_code},
+        AcctSpec{.addr = kC, .nonce = 1, .balance = c_balance, .code = c_code},
+    };
+    const Prestate ps = build_prestate(state);
+    ChainSetup chain = make_chain(ps.prev_root, tx, sender);
+    ShadowRun sr = shadow_execute(ps.blob, ps.nodestore, ps.prev_root, chain.base.header, tx);
+    REQUIRE(sr.sanitize_ok);
+    REQUIRE(sr.all_succeeded());
+    expect_accepted(run_guest(chain, sr, ps.blob, ps.nodestore), sr);
+
+    std::vector<uint8_t> sanitized = ps.blob;
+    uint32_t data_off_abs = 0;
+    AddrHashEntry extra{};
+    extra.entry_offset = record_offset(sanitized, kC, data_off_abs) + 16u;
+    {
+        DirectState ds{std::span<uint8_t>{sanitized}};
+        REQUIRE(ds.sanitize());
+        REQUIRE(extra.entry_offset + 8u + sizeof(Account) <= ds.mphf()->data_size);
+    }
+    std::memcpy(extra.addr, sanitized.data() + data_off_abs + extra.entry_offset + 8u, 20);
+    std::memcpy(extra.addr_hash, keccak_bytes(ByteView{extra.addr, 20}).bytes, 32);
+    std::vector<uint8_t> forged = ps.blob;
+    SECTION("added to the entries") { add_addr_hash_entry(forged, extra); }
+    SECTION("in place of D's entry") { replace_addr_hash_entry(forged, kD, extra); }
+
+    ShadowRun forged_sr = shadow_execute(forged, ps.nodestore, ps.prev_root, chain.base.header, tx);
+    expect_rejected(run_guest(chain, forged_sr, forged, ps.nodestore), "Witness sanitize failed");
 }
