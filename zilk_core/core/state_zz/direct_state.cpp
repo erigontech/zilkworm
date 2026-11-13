@@ -1253,13 +1253,17 @@ bool DirectState::sanitize() {
             for (size_t i = 0; i < 8; ++i) to[i] = from[i];
         }
     };
+    size_t n_records = 0;
     if (pre_state_meta_->n_accounts > 0) {
         pre_state_map_.for_each<20>(
             [&](const uint8_t* /*key_ptr*/, std::span<uint8_t> body) {
                 handle_account_body(body);
+                ++n_records;
             });
     }
     if (!acc_walk_ok) return false;
+    // One address-hash entry per record: an extra one could point inside a record.
+    if (addr_hashes_.size() != n_records) return false;
 
     const uint32_t data_size = pre_state_map_.valid() ? pre_state_map_.header()->data_size : 0u;
     const uint8_t* prev_hash = nullptr;
