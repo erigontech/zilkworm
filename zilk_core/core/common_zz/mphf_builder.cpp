@@ -18,6 +18,11 @@ inline constexpr uint32_t kLambda = 4u;
 inline constexpr uint32_t kMaxDisplacement = 1u << 20;
 inline constexpr uint32_t kMaxSeedRetries = 32u;
 inline constexpr uint32_t kNoKey = UINT32_MAX;  // slot_owner: slot holds no key
+// slot_owner: slot must stay empty forever. A sidecar key probes it, so placing
+// anything here would re-occupy the index that key resolves through. Distinct
+// from kNoKey so the occupancy test rejects it, and outside the key-index range
+// of any table this builder can represent.
+inline constexpr uint32_t kBlocked = UINT32_MAX - 1u;
 
 // Returns true even with non-empty spill; spilled keys resolve via sidecar.
 bool chd_solve(std::span<const uint64_t> distinct_keys,
@@ -44,12 +49,36 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
     n_buckets_out = n_buckets;
 
     std::vector<std::vector<uint32_t>> buckets;
-    // slot_owner[pos] = key placed at pos, kNoKey when pos is free. Doubles as
-    // the occupancy map the displacement search probes.
+    // slot_owner[pos] = <key placed at pos>, or <kNoKey> when pos is free, kBlocked
+    // when pos is reserved empty for a sidecar key. Doubles as the occupancy map
+    // the displacement search probes: only kNoKey accepts a placement.
     std::vector<uint32_t> slot_owner;
+    // Positions the bucket's keys map to, parallel to the bucket's key order:
+    // trial_positions for the candidate under test, best_positions for the
+    // cheapest candidate seen so far.
     std::vector<uint32_t> trial_positions;
+    std::vector<uint32_t> best_positions;
 
     std::vector<uint64_t> z1_cache(n_keys);
+
+    // Visit each distinct position once, at its first occurrence, as
+    // fn(first_index, pos, multiplicity). Walking the bucket in key order groups
+    // duplicates deterministically without an order-dependent hash container.
+    auto for_each_distinct_pos = [](const std::vector<uint32_t>& positions, auto&& fn) {
+        for (size_t pi = 0; pi < positions.size(); ++pi) {
+            const uint32_t pos = positions[pi];
+            bool first = true;
+            for (size_t pj = 0; pj < pi; ++pj) {
+                if (positions[pj] == pos) { first = false; break; }
+            }
+            if (!first) continue;
+            uint32_t multiplicity = 1;
+            for (size_t pj = pi + 1; pj < positions.size(); ++pj) {
+                if (positions[pj] == pos) ++multiplicity;
+            }
+            fn(pi, pos, multiplicity);
+        }
+    };
 
     struct Attempt {
         bool set = false;
@@ -88,70 +117,73 @@ bool chd_solve(std::span<const uint64_t> distinct_keys,
         for (uint32_t bi : order) {
             const auto& bucket = buckets[bi];
             if (bucket.empty()) {
-                displacement_factors[bi] = 0;
+                displacement_factors[bi] = 0;  // no key maps here
                 continue;
             }
 
-            bool placed = false;
+            // Score every displacement by the number of keys it forces into the
+            // sidecar — the bucket keys that cannot place, plus the placed key a
+            // taken slot has to give up — and keep the cheapest. Ties go to the
+            // lowest d, and a zero-cost candidate wins outright, so a bucket that
+            // places cleanly still takes the first displacement that fits it.
             const uint32_t max_d = max_displacement_override ? max_displacement_override : kMaxDisplacement;
+            uint32_t best_cost = UINT32_MAX;
+            uint64_t best_d_factor = 0;
+            best_positions.clear();
             for (uint32_t d = 0; d <= max_d; ++d) {
                 const uint64_t d_factor =
                     ((seed_try ^ uint64_t(d) ^ kMphfGoldenRatio) - seed_try) * kMphfGoldenRatio;
 
                 trial_positions.clear();
-                bool collision = false;
                 for (uint32_t key_idx : bucket) {
                     const uint64_t h2  = mix64_body(z1_cache[key_idx] + d_factor);
                     const uint32_t pos = fast_mod_u32(static_cast<uint32_t>(h2), n_keys);
-                    if (slot_owner[pos] != kNoKey) { collision = true; break; }
-                    bool dup = false;
-                    for (uint32_t p : trial_positions) {
-                        if (p == pos) { dup = true; break; }
-                    }
-                    if (dup) { collision = true; break; }
                     trial_positions.push_back(pos);
                 }
-                if (!collision) {
-                    for (size_t pi = 0; pi < trial_positions.size(); ++pi) {
-                        slot_owner[trial_positions[pi]] = bucket[pi];   // key_idx assigned to the new absolute pos after mix
-                        idx_for_key[bucket[pi]] = trial_positions[pi];
-                    }
-                    displacement_factors[bi] = d_factor;
-                    placed = true;
-                    break;
+
+                uint32_t cost = 0;
+                for_each_distinct_pos(trial_positions, [&](size_t, uint32_t pos, uint32_t multiplicity) {
+                    const uint32_t owner = slot_owner[pos];
+                    if (owner == kNoKey && multiplicity == 1) return;   // places, costs nothing
+                    cost += multiplicity;                               // the whole group spills
+                    if (owner != kNoKey && owner != kBlocked) ++cost;   // and evicts the slot's owner
+                });
+
+                if (cost < best_cost) {
+                    best_cost = cost;
+                    best_d_factor = d_factor;
+                    best_positions = trial_positions;
                 }
+                if (cost == 0) break;
             }
-            if (!placed) {
-                // Bucket overflow: spill its keys; runtime resolves via sidecar memcmp fallback.
-                displacement_factors[bi] = 0;
-                for (uint32_t key_idx : bucket) {
-                    const uint64_t h2 = mix64_body(z1_cache[key_idx]);  // d_factor=0
-                    const uint32_t pos = fast_mod_u32(static_cast<uint32_t>(h2), n_keys);
-                    idx_for_key[key_idx] = pos;
-                    spilled_this_try.push_back(key_idx);
+
+            // Always a factor the search validated against slot_owner.
+            displacement_factors[bi] = best_d_factor;
+            for_each_distinct_pos(best_positions, [&](size_t pi, uint32_t pos, uint32_t multiplicity) {
+                const uint32_t owner = slot_owner[pos];
+                if (owner == kNoKey && multiplicity == 1) {
+                    slot_owner[pos] = bucket[pi];   // key_idx assigned to the new absolute pos after mix
+                    idx_for_key[bucket[pi]] = pos;
+                    return;
                 }
-            }
+                // Every bucket key landing here spills, and so does the placed
+                // key it displaces, so they reach the sidecar together. Spilled
+                // keys keep idx_for_key == UINT32_MAX so a stray use is loud.
+                for (size_t pj = pi; pj < best_positions.size(); ++pj) {
+                    if (best_positions[pj] == pos) spilled_this_try.push_back(bucket[pj]);
+                }
+                if (owner != kNoKey && owner != kBlocked) spilled_this_try.push_back(owner);
+                // Block rather than free: a later bucket claiming pos would
+                // re-occupy the very index these sidecar keys probe.
+                slot_owner[pos] = kBlocked;
+            });
         }
 
         // Sidecar invariant: slot_offsets[index_lookup(key)] == 0 for every key
-        // whose body lives in the sidecar.
-        //
-        // A spilled bucket keeps displacement factor 0, so its keys probe the
-        // very index index_lookup() reproduces at runtime — an index a placed
-        // key may already own. MphfMap::find() treats an occupied slot whose
-        // embedded key fails memcmp as a definitive miss and consults the
-        // sidecar only from an empty slot, so such a spilled key would be
-        // unreachable. Spill the slot's owner as well: finalize() writes no
-        // slot for a sidecar body, so the slot stays 0 and both keys resolve
-        // through the sidecar. Placement is injective (slot_owner rejects
-        // taken positions), so clearing the owner frees the index for good.
-        for (size_t si = 0; si < spilled_this_try.size(); ++si) {
-            const uint32_t pos = idx_for_key[spilled_this_try[si]];
-            const uint32_t owner = slot_owner[pos];
-            if (owner == kNoKey) continue;  // free slot, or its owner already co-spilled
-            slot_owner[pos] = kNoKey;
-            spilled_this_try.push_back(owner);
-        }
+        // whose body lives in the sidecar. A CHD-spilled key probes the index the
+        // bucket loop just blocked, which no placed key owns and none can claim
+        // later; a duplicate-key8 key probes the index of the distinct key whose
+        // body add() emptied, and finalize() writes no slot for an empty body.
 
         if (spilled_this_try.empty()) {
             displacement_factors_out = std::move(displacement_factors);
@@ -290,9 +322,9 @@ std::vector<uint8_t> MphfBuilder<KeySize>::finalize() && {
     uint32_t data_cur = 8;
 
     for (uint32_t i = 0; i < n_keys; ++i) {
-        const uint32_t idx = idx_for_key[i];
         const auto& body = unique_kv_entries_.at(distinct_keys[i]);
         if (body.empty()) continue;  // sidecar-resolved; leave slot zero-init
+        const uint32_t idx = idx_for_key[i];  // read after the guard: spilled keys hold UINT32_MAX
         const uint64_t body_len = body.size();
         slot_offsets[idx] = data_cur;
         std::memcpy(data + data_cur, &body_len, 8);
