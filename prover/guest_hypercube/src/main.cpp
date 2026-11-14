@@ -62,6 +62,11 @@ extern "C" int main()
         return 1;
     }
 
+    if (r.gas_used == cmd::state_transition::StateTransition::kRunSkipped) {
+        sys_println("[state_transition] run skipped");
+        return 1;
+    }
+
     if (r.block_hash != kZeroHash) {
         sys_println(std::format(
             "[state_transition] run successful, gas used: {}, block hash: {}, pre-state root: {}, post-state root: {}",
