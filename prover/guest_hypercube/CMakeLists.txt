@@ -17,6 +17,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_definitions(SP1)
 
+set(Z6M_CHAIN "" CACHE STRING "Chain config to compile in; the network named by an MFBD input is then ignored")
+if(Z6M_CHAIN)
+    add_compile_definitions(Z6M_CHAIN="${Z6M_CHAIN}")
+endif()
+
 # Read-side state backend for the guest; set here because the top-level option does not reach
 # this separate project. See docs/hashstate.md, "Build flag and test targets".
 option(Z6M_HASH_STATE "Build the guest with the HashState/slib (StatelessInputBytes) backend" OFF)

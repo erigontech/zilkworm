@@ -115,7 +115,11 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
         bundle.direct.insert_header(h);
     }
 
+#ifdef Z6M_CHAIN
+    const auto cfg_it = test::kNetworkConfig.find(Z6M_CHAIN);
+#else
     const auto cfg_it = test::kNetworkConfig.find(std::string{bundle.network});
+#endif
     if (cfg_it == test::kNetworkConfig.end()) [[unlikely]] {
         sys_println("ERROR: unknown network in flat bundle");
         failed_ = true;

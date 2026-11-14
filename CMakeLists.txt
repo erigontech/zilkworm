@@ -50,6 +50,11 @@ option(SILKWORM_FUZZER_SANITIZERS "CLang sanitizer options for fuzzers" OFF)
 option(SILKWORM_USE_MIMALLOC "Enable using mimalloc for dynamic memory management" ON)
 option(SILKWORM_ALLOW_UNUSED_VAR_WARNINGS "Turn unused variable errors into warnings" OFF)
 
+set(Z6M_CHAIN "" CACHE STRING "Chain config to compile in; the network named by an MFBD input is then ignored")
+if(Z6M_CHAIN)
+  add_compile_definitions(Z6M_CHAIN="${Z6M_CHAIN}")
+endif()
+
 # Compile-time selection of the trie fold's read-side state backend. OFF (default) =>
 # ActiveState is DirectState and the build is byte/behaviour-identical to today. ON =>
 # ActiveState is HashState (the SSZ/slib input path). Defines the Z6M_HASH_STATE macro
