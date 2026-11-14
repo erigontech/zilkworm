@@ -201,8 +201,8 @@ Every node the sweep reads is bound to the root by keccak: it was fetched from
 the node store by its hash (the store keys a node by its real keccak, and every
 hit is confirmed against all 32 bytes) or sits embedded inside such a node. A
 root taken from a real chain therefore never leads to a malformed shape, but a
-hand-built or hostile witness can. Every shape `decode_node` rejects sets
-`malformed_witness_` where the sweep meets it: a referenced node that is not a
+hand-built or hostile witness can. Every shape the sweep treats as malformed
+sets `malformed_witness_` where it meets it: a referenced node that is not a
 list, a truncated or list-typed path or value item, a path past 64 nibbles (a
 branch at depth 64, or an extension or leaf that would pass it), a leaf with no
 value or one over `kMaxLeafValueSize`, an extension whose child is not a 32-byte
@@ -355,8 +355,9 @@ never a silent wrong-empty.
 
 The handlers are defined in the .cpp, so the hot lookups in the header stay
 small and the confirm and counter logic sits next to `sweep`. They are `const`,
-and `unconfirmed_read_count_` is `mutable`: a read never mutates the caches,
-only this diagnostic.
+and `unconfirmed_read_count_` is `mutable`: a read never mutates a built cache;
+besides entering a proven storage miss in `absent_slots_`, it records only this
+diagnostic.
 
 `confirm_absent(root, target_hash)` is a single-path descent through the node
 store, starting at `root`, toward `target_hash`, a 32-byte trie path (an
@@ -828,7 +829,8 @@ is compiled out for the `HashState` instantiation
 witness-completeness counters that the `HashState` build and reads accumulate:
 
 ```
-accept  <=>  new_root == header_state_root
+accept  <=>  !acc_trie.failed()
+             && new_root == header_state_root
              && hash_state.missing_count()          == 0
              && hash_state.unconfirmed_read_count() == 0
 ```
@@ -841,11 +843,11 @@ In words, a block is accepted only when all of these hold:
   references, and the build treats those as legitimate boundaries.
 - Every read either hit the cache or was proven genuinely empty (fail-closed;
   see the read path in `hash_state.hpp`).
+- The account fold did not fail (`!acc_trie.failed()`).
 
-A write whose fold has to descend into a pruned boundary is still caught
-without a fourth condition: `GridMPT` cannot unfold the absent node, so it
-recomputes a non-matching (zero) root and `new_root == header_state_root`
-fails.
+A write whose fold has to descend into a pruned boundary is caught: the fold
+fails on the absent node (`GridMPT` sets its failure flag), and a failed
+storage walk is rejected on the spot.
 
 ### Supplying the write set
 
