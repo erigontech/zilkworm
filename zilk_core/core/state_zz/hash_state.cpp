@@ -246,7 +246,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             const bool is_leaf = (flag & 0x2) != 0;
             const bool odd = (flag & 0x1) != 0;
             const std::size_t n = (odd ? 1u : 0u) + 2u * (hp_len - 1);
-            if (path.len + n > 64) {
+            if (flag > 3 || (!odd && (hp[0] & 0x0F) != 0) || path.len + n > 64) {
                 malformed_witness_ = true;
                 return;
             }
@@ -460,7 +460,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
         const bool is_leaf = (flag & 0x2) != 0;
         const bool odd = (flag & 0x1) != 0;
         const unsigned plen = (odd ? 1u : 0u) + 2u * static_cast<unsigned>(hp_len - 1);
-        if (plen > 64) return false;
+        if (flag > 3 || (!odd && (hp[0] & 0x0F) != 0) || plen > 64) return false;
         if (is_leaf && second_len == 0) return false;
 
         // Never reads past the path string.
