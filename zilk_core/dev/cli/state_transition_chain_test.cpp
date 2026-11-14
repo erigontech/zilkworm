@@ -174,6 +174,32 @@ TEST_CASE("a single-block run returns its block hash and both state roots",
     CHECK(o.r.post_state_root == c.a.header.state_root);
 }
 
+TEST_CASE("the network named in a bundle chooses its rules only without Z6M_CHAIN",
+          "[state_transition][public_output][soundness]") {
+    const Chain c = make_chain_ab();
+    const auto labelled = [&](std::string_view network) {
+        const std::array<ByteView, 1> blocks{ByteView{c.a_rlp}};
+        return run(envelope({build_flat_bundle(ByteView{c.genesis_rlp}, blocks, ByteView{}, c.pre_a.blob,
+                                               c.pre_a.nodestore, network)}));
+    };
+    const Outcome shanghai = labelled("Shanghai");
+    const Outcome unknown = labelled("NoSuchNetwork");
+#ifdef Z6M_CHAIN
+    const Outcome paris = labelled("Paris");
+    CHECK(paris.failed == shanghai.failed);
+    CHECK(paris.r.block_hash == shanghai.r.block_hash);
+    CHECK(paris.r.chain_id == shanghai.r.chain_id);
+    CHECK(unknown.failed == shanghai.failed);
+    CHECK(unknown.r.block_hash == shanghai.r.block_hash);
+    CHECK(unknown.log.find("unknown network") == std::string::npos);
+#else
+    REQUIRE_FALSE(shanghai.failed);
+    CHECK(shanghai.r.block_hash == c.a.header.hash());
+    CHECK(unknown.failed);
+    CHECK(unknown.log.find("unknown network in flat bundle") != std::string::npos);
+#endif
+}
+
 TEST_CASE("a run whose blocks extend each other returns the last block's hash",
           "[state_transition][public_output]") {
     const Chain c = make_chain_ab();
