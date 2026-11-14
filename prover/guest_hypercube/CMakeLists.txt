@@ -24,6 +24,11 @@ if(Z6M_HASH_STATE)
     add_compile_definitions(Z6M_HASH_STATE)
 endif()
 
+option(Z6M_SINGLE_BUNDLE "Reject an MFBD input that holds more than one bundle" OFF)
+if(Z6M_SINGLE_BUNDLE)
+    add_compile_definitions(Z6M_SINGLE_BUNDLE)
+endif()
+
 include(GNUInstallDirs)
 
 set(SILKWORM_MAIN_DIR "${Z6M_ROOT}")
