@@ -34,7 +34,11 @@ inline ValidationResult MergeRuleSet::validate_block_header(const BlockHeader& h
 }
 
 ValidationResult MergeRuleSet::validate_difficulty_and_seal(const BlockHeader& header, const BlockHeader&) {
-    // SILKWORM_ASSERT(header.difficulty == 0);
+    const bool merged{!pre_merge_rule_set_ || chain_config_.terminal_total_difficulty == 0 ||
+                      chain_config_.withdrawals_activated(header.timestamp)};
+    if (merged && header.difficulty != 0) {
+        return ValidationResult::kPoWBlockAfterMerge;
+    }
     return header.nonce == BlockHeader::NonceType{} ? ValidationResult::kOk : ValidationResult::kInvalidNonce;
 }
 

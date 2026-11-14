@@ -272,7 +272,11 @@ RuleSetPtr rule_set_factory(const ChainConfig& chain_config) {
     //     rule_set = std::make_unique<MergeRuleSet>(std::move(rule_set), chain_config);
     // }
     // return rule_set;
+#ifdef Z6M_POST_MERGE_ONLY
+    return std::make_unique<MergeRuleSet>(nullptr, chain_config);
+#else
     return std::make_unique<MergeRuleSet>(std::make_unique<EthashRuleSet>(chain_config), chain_config);
+#endif
 }
 
 std::ostream& operator<<(std::ostream& out, const BlockReward& reward) {
