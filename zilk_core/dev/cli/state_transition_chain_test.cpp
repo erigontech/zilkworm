@@ -181,10 +181,12 @@ TEST_CASE("a run whose blocks extend each other returns the last block's hash",
     SECTION("one bundle") {
         env = envelope({bundle(c.genesis_rlp, {ByteView{c.a_rlp}, ByteView{c.b_rlp}}, c.pre_a)});
     }
+#ifndef Z6M_SINGLE_BUNDLE
     SECTION("two bundles") {
         env = envelope({bundle(c.genesis_rlp, {ByteView{c.a_rlp}}, c.pre_a),
                         bundle(c.a_rlp, {ByteView{c.b_rlp}}, c.pre_b)});
     }
+#endif
     const Outcome o = run(env);
     REQUIRE_FALSE(o.failed);
     CHECK(o.r.gas_used == 2 * kTransferGas);
@@ -208,6 +210,28 @@ TEST_CASE("a block that does not extend the previous one in its bundle is reject
     CHECK(o.log.find("does not extend the previous block") != std::string::npos);
 }
 
+TEST_CASE("an input with more than one bundle is rejected before any bundle runs only with Z6M_SINGLE_BUNDLE",
+          "[state_transition][public_output][soundness]") {
+    const Chain c = make_chain_ab();
+    const Outcome two = run(envelope({bundle(c.genesis_rlp, {ByteView{c.a_rlp}}, c.pre_a),
+                                      bundle(c.a_rlp, {ByteView{c.b_rlp}}, c.pre_b)}));
+#ifdef Z6M_SINGLE_BUNDLE
+    CHECK(two.failed);
+    CHECK(two.r.gas_used == StateTransition::kRunFailure);
+    CHECK(two.r.pre_state_root == evmc::bytes32{});
+    CHECK(two.r.block_hash == evmc::bytes32{});
+    CHECK(two.log.find("more than one bundle") != std::string::npos);
+#else
+    REQUIRE_FALSE(two.failed);
+    CHECK(two.r.gas_used == 2 * kTransferGas);
+    CHECK(two.r.block_hash == c.b.header.hash());
+#endif
+    const Outcome none = run(envelope({}));
+    CHECK_FALSE(none.failed);
+    CHECK(none.r.gas_used == StateTransition::kRunSkipped);
+}
+
+#ifndef Z6M_SINGLE_BUNDLE
 TEST_CASE("independent bundles return the last bundle's block hash",
           "[state_transition][public_output]") {
     const Chain c = make_chain_ab();
@@ -222,6 +246,7 @@ TEST_CASE("independent bundles return the last bundle's block hash",
     REQUIRE_FALSE(aa.failed);
     CHECK(aa.r.block_hash == c.a.header.hash());
 }
+#endif
 
 TEST_CASE("a rejected block ends its bundle", "[state_transition][public_output][soundness]") {
     const Chain c = make_chain_ab();
@@ -229,6 +254,7 @@ TEST_CASE("a rejected block ends its bundle", "[state_transition][public_output]
     silkworm::Block r = c.a;
     r.header.gas_used += 1;
     const Bytes r_rlp = encode(r);
+#ifndef Z6M_SINGLE_BUNDLE
     const std::array<uint8_t, 1> rejected{kBlockFlagExpectInvalid};
     const Outcome split = run(envelope({bundle(c.genesis_rlp, {ByteView{r_rlp}}, c.pre_a, rejected),
                                         bundle(c.genesis_rlp, {ByteView{c.a_rlp}}, c.pre_a)}));
@@ -237,6 +263,7 @@ TEST_CASE("a rejected block ends its bundle", "[state_transition][public_output]
     CHECK(split.r.gas_used == kTransferGas);
     CHECK(split.r.block_hash == c.a.header.hash());
     CHECK(split.r.post_state_root == c.a.header.state_root);
+#endif
 
     // In one bundle, A would run on the state the rejected transfer left.
     const std::array<uint8_t, 2> first_rejected{kBlockFlagExpectInvalid, 0};

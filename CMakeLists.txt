@@ -59,6 +59,11 @@ if(Z6M_HASH_STATE)
   add_compile_definitions(Z6M_HASH_STATE)
 endif()
 
+option(Z6M_SINGLE_BUNDLE "Reject an MFBD input that holds more than one bundle" OFF)
+if(Z6M_SINGLE_BUNDLE)
+  add_compile_definitions(Z6M_SINGLE_BUNDLE)
+endif()
+
 get_filename_component(SILKWORM_MAIN_DIR . ABSOLUTE)
 set(SILKWORM_MAIN_SRC_DIR "${SILKWORM_MAIN_DIR}/zilk_core")
 
