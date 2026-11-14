@@ -289,9 +289,6 @@ extern "C" void __start() {
     /* 2. Initialise the public-values buffer (hashed at halt time). */
     pv_buf_init();
 
-    /* 3. Call the guest program. */
-    main();
-
-    /* 4. Halt with success (never returns). */
-    syscall_halt(0);
+    /* 3. Call the guest program and halt with its result (never returns). */
+    syscall_halt(static_cast<uint8_t>(main()));
 }
