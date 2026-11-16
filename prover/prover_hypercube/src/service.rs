@@ -1335,3 +1335,17 @@ fn matches_interval(interval: Option<u64>, block_number: u64) -> bool {
         None => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::run_failed;
+
+    /// `2^64-1` is the failure sentinel and `2^64-2` the skipped one.
+    #[test]
+    fn run_failed_sees_both_sentinels_as_not_executed() {
+        assert!(run_failed(0));
+        assert!(run_failed(u64::MAX));
+        assert!(run_failed(u64::MAX - 1));
+        assert!(!run_failed(21_000));
+    }
+}
