@@ -197,6 +197,14 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
+        // A recovery walk that hit a missing or malformed node left the block run on an account or slot
+        // the node store does not resolve: the witness is broken whatever the block's verdict would be.
+        if (bundle.direct.walk_missed()) {
+            sys_println(("ERROR: block " + std::to_string(i) +
+                         " reads a node the witness's node store does not resolve").c_str());
+            failed_ = true;
+            return {0, false};
+        }
         if (err != ValidationResult::kOk) {
             if (expect_invalid) {
                 sys_println(("block " + std::to_string(i) + " rejected as expected: "

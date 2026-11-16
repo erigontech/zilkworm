@@ -189,12 +189,17 @@ class DirectState : public BlockState {
     bool require_block_hash_headers_{false};
     // Set when execution reads code the witness lacks; the block is then invalid.
     mutable bool witness_incomplete_{false};
+    // Set when the node-store recovery walk hits a missing or malformed node: the witness cannot resolve
+    // its own recovery root, so the run is refused (run_one_bundle's walk_missed() checks). Never cleared:
+    // a walk that missed leaves the state wrong for every later block, and an expected-invalid block is
+    // not spared either — the witness is broken whatever the block's verdict was going to be.
+    mutable bool walk_missed_{false};
     // Keeps sizeof(DirectState) a multiple of 16 on the rv32 guest (528 with USE_HASH_KEY, 464 without): 8 bytes
     // off that moved the buffers placed after it off their phase, and the guest's CSR copies of them took about
     // 1k more BigInt calls and 30-40k more cycles a block on nearly every mainnet block (504 bytes against
     // 512 or 528). A member added here should keep the size a multiple of 16 (the static_assert after the
-    // class checks it), or be measured. The two flags above take 2 of its 8 bytes.
-    [[maybe_unused]] uint8_t ancestors_pad_[6]{};
+    // class checks it), or be measured. The three flags above take 3 of its 8 bytes.
+    [[maybe_unused]] uint8_t ancestors_pad_[5]{};
 
     bool multi_block_{false};
     // Journal only used for multi-block cases
@@ -228,7 +233,7 @@ class DirectState : public BlockState {
     };
     mutable FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, RecoveredSlot>> recovered_slots_;
     bool recovery_ended_{false};  // see end_recovery()
-    enum class WalkMiss : uint8_t { kAbsent, kInvalid };  // kInvalid halts; see fatal()
+    enum class WalkMiss : uint8_t { kAbsent, kInvalid };  // kInvalid sets walk_missed(): the run is refused (it used to halt, see fatal())
     std::expected<ByteView, WalkMiss> walk_nodestore_leaf(const evmc::bytes32& root, const nibbles64& want,
                                                           std::array<uint8_t, 32>& embedded_scratch) const;
     const RecoveredSlot* recover_slot_from_nodestore(const Account& pa, const evmc::address& addr,
@@ -279,6 +284,8 @@ class DirectState : public BlockState {
     void require_block_hash_headers(bool on) noexcept { require_block_hash_headers_ = on; }
     // True once execution has read code the witness does not supply.
     bool witness_incomplete() const noexcept { return witness_incomplete_; }
+    // True once the node-store recovery walk hit a missing or malformed node; see walk_missed_.
+    bool walk_missed() const noexcept { return walk_missed_; }
     // Clears witness_incomplete() and ancestor_missing() before a block runs.
     void reset_witness_incomplete() noexcept {
         witness_incomplete_ = false;
