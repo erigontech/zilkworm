@@ -7,7 +7,7 @@ mod stdin_builders;
 use z6m_common::EthProofsConfig;
 use z6m_common::{fetch_block_and_witness, FetchRequest};
 use crate::service::{
-    AppConfig, ExecuteOptions, ProveOptions, ServiceConfig,
+    run_failed, AppConfig, ExecuteOptions, ProveOptions, ServiceConfig,
     Z6mProverService,
 };
 use clap::{Parser, Subcommand};
@@ -372,7 +372,7 @@ async fn main() -> Result<()> {
             };
             let log = Z6mProverService::execute_block_static(opts).await.unwrap();
 
-            if log.gas_used == 0 {
+            if run_failed(log.gas_used) {
                 // execute_block_static already emitted the FAILED block + error! line.
                 std::process::exit(1);
             }
