@@ -270,18 +270,25 @@ void expect_rejected(const Outcome& o, std::string_view why) {
 #if USE_HASH_KEY
 // With USE_HASH_KEY a block that reads an account or slot the witness carries no record of recovers it from
 // the node store, along its trie path, which binds it to the parent's state root. Where the witness leaves out
-// a node of that path too, the guest halts (fatal()) with one of these lines.
-constexpr std::string_view kAccountWalkHalt = "USE_HASH_KEY: account walk hit missing/malformed node";
-constexpr std::string_view kSlotWalkHalt = "USE_HASH_KEY: slot walk hit missing/malformed node";
+// a node of that path too — or carries an extra ancestor whose root no node holds — the run is refused
+// (walk_missed()): the block-level line below, not the halt this walk ended with before the fix.
+constexpr std::string_view kNodeStoreMiss = "reads a node the witness's node store does not resolve";
 
-/// The guest halts on `s`'s block with `blob` and `nodestore` as its witness, and `why`, the line it prints
-/// then, is in its log. fatal() ends the process, so the guest runs in a child.
-void expect_halted(const Sealed& s, const std::vector<uint8_t>& blob, const std::vector<uint8_t>& nodestore,
-                   std::string_view why) {
-    const ChildRun r = run_envelope_in_child(make_envelope(s.chain, s.sr, blob, nodestore, s.network));
+/// The guest refuses the run on the envelope `env`, and the refusal's line is in its log. The run used to
+/// halt here (fatal()); the child run asserts it no longer does. A run that did not halt is repeated in this
+/// process, where the guest must report it as failed.
+void expect_refused_walk_miss(const std::vector<uint8_t>& env) {
+    const ChildRun r = run_envelope_in_child(env);
     CAPTURE(r.log);
-    CHECK(r.halted);
-    CHECK(r.log.find(why) != std::string::npos);
+    CHECK_FALSE(r.halted);
+    CHECK(r.log.find(kNodeStoreMiss) != std::string::npos);
+    if (!r.halted) expect_rejected(run_envelope(env), kNodeStoreMiss);
+}
+
+/// The guest refuses `s`'s block on `blob` and `nodestore` as its witness.
+void expect_refused_walk_miss(const Sealed& s, const std::vector<uint8_t>& blob,
+                              const std::vector<uint8_t>& nodestore) {
+    expect_refused_walk_miss(make_envelope(s.chain, s.sr, blob, nodestore, s.network));
 }
 #endif
 
@@ -385,10 +392,10 @@ TEST_CASE("check_root rejects a witness that omits a pre-state root node",
             node_store_omitting(state, [&](const bytes32& h, bool) { return h == sroot; });
 #if USE_HASH_KEY
         // kCaller's writes read the slots first, which the witness does not carry, and their recovery
-        // starts from the root it leaves out: the guest halts. (The block is sealed on the whole node
-        // store: a run on this one halts too.)
+        // starts from the root it leaves out: the guest refuses the run. (The block is sealed on the whole
+        // node store: a run on this one refuses too.)
         const Sealed s = seal(t, ps.prev_root, ps.blob, ps.nodestore);
-        expect_halted(s, ps.blob, nodestore, kSlotWalkHalt);
+        expect_refused_walk_miss(s, ps.blob, nodestore);
 #else
         const Sealed s = seal(t, ps.prev_root, ps.blob, nodestore);
         expect_rejected(run_guest(s, ps.blob, nodestore), "no_rlp");
@@ -1770,10 +1777,10 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
         REQUIRE(honest.sr.post.root == after(word(1000)));
         expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 #if USE_HASH_KEY
-        // The block that stored the balance is accepted from the witness without kOmitted, and halts the
-        // guest once the witness leaves out its leaf too.
+        // The block that stored the balance is accepted from the witness without kOmitted, and the guest
+        // refuses the run once the witness leaves out its leaf too.
         expect_accepted(run_guest(honest, blob, ps.nodestore), honest);
-        expect_halted(honest, blob, node_store_without_leaf_of(state, kOmitted), kAccountWalkHalt);
+        expect_refused_walk_miss(honest, blob, node_store_without_leaf_of(state, kOmitted));
 #endif
     }
     SECTION("a contract a transaction calls, which then runs no code") {
@@ -1804,11 +1811,11 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
         expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 #if USE_HASH_KEY
         // With kHolder's code in the code store, the block that ran it is accepted from the witness without
-        // kHolder's record, and halts the guest once the witness leaves out its leaf too.
+        // kHolder's record, and the guest refuses the run once the witness leaves out its leaf too.
         const std::vector<uint8_t> with_code =
             witness_blob(state, without(state, kHolder), {}, {AcctSpec{.addr = kHolder, .code = write_slot(word(1))}});
         expect_accepted(run_guest(honest, with_code, ps.nodestore), honest);
-        expect_halted(honest, with_code, node_store_without_leaf_of(state, kHolder), kAccountWalkHalt);
+        expect_refused_walk_miss(honest, with_code, node_store_without_leaf_of(state, kHolder));
 #endif
     }
     SECTION("the sender, whose nonce the block writes") {
@@ -1836,12 +1843,126 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
         const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
         expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 #if USE_HASH_KEY
-        // The honest block is accepted from the witness without the sender, and halts the guest once the
-        // witness leaves out its leaf too.
+        // The honest block is accepted from the witness without the sender, and the guest refuses the run
+        // once the witness leaves out its leaf too.
         expect_accepted(run_guest(honest, blob, ps.nodestore), honest);
-        expect_halted(honest, blob, node_store_without_leaf_of(state, t.sender), kAccountWalkHalt);
+        expect_refused_walk_miss(honest, blob, node_store_without_leaf_of(state, t.sender));
 #endif
     }
+}
+
+#if USE_HASH_KEY
+namespace {
+
+/// BALANCE of `a` in storage[0], a CALL to `b`, then the sentinel.
+Bytes store_balance_then_call(const evmc::address& a, const evmc::address& b) {
+    Bytes k;
+    push20(k, a);
+    k.push_back(0x31);  // BALANCE
+    store_observation(k);
+    push1(k, 0x00);  // retSize
+    push1(k, 0x00);  // retOffset
+    push1(k, 0x00);  // argsSize
+    push1(k, 0x00);  // argsOffset
+    push1(k, 0x00);  // value
+    push20(k, b);
+    k.push_back(0x5a);  // GAS
+    k.push_back(0xf1);  // CALL
+    k.push_back(0x50);  // POP
+    append_sentinel_and_stop(k);
+    return k;
+}
+
+/// `s`'s block as the one block of a bundle that expects it invalid, with `blob` and `nodestore` as its
+/// witness.
+std::vector<uint8_t> expected_invalid_envelope(const Sealed& s, const std::vector<uint8_t>& blob,
+                                               const std::vector<uint8_t>& nodestore) {
+    Bytes block_rlp;
+    silkworm::rlp::encode(block_rlp, sealed_block(s));
+    const std::array<ByteView, 1> blocks{ByteView{block_rlp}};
+    const std::array<uint8_t, 1> rejected{kBlockFlagExpectInvalid};
+    const std::vector<uint8_t> flat =
+        build_flat_bundle(ByteView{s.chain.genesis_rlp}, std::span<const ByteView>{blocks},
+                          /*ancestors_rlp=*/ByteView{}, blob, nodestore, s.network, rejected);
+    REQUIRE_FALSE(flat.empty());
+    return wrap_mfbd(flat);
+}
+
+}  // namespace
+
+// A block its bundle expects invalid is refused like any other once a recovery walk of its run misses. The
+// block here also calls a contract whose code the witness leaves out, which by itself makes it the invalid
+// block the bundle expects: the run must be refused for the walk miss, not end well with the block set aside.
+TEST_CASE("the guest refuses an expected-invalid block whose recovery walk misses",
+          "[witness][binding][omitted]") {
+    const Tx t = tx_to(kCaller);
+    const std::vector<AcctSpec> state = {
+        sender_of(t),
+        AcctSpec{.addr = kCaller, .nonce = 1, .code = store_balance_then_call(kOmitted, kHolder)},
+        AcctSpec{.addr = kHolder, .nonce = 1, .code = write_slot(word(1))},
+        AcctSpec{.addr = kOmitted, .nonce = 0, .balance = 1000},
+    };
+    const Prestate ps = build_prestate(state);
+    const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+    // The witness carries no record of kOmitted or of kHolder, and not kHolder's code.
+    const std::vector<uint8_t> blob = witness_blob(state, without(without(state, kOmitted), kHolder));
+
+    // The guest recovers both accounts along their trie paths, which the witness holds, but not kHolder's
+    // code: the block is rejected as its bundle expects, and the run succeeds.
+    const Outcome expected = run_envelope(expected_invalid_envelope(honest, blob, ps.nodestore));
+    CAPTURE(expected.log);
+    CHECK_FALSE(expected.failed);
+    CHECK(expected.log.find("block 0 rejected as expected: witness incomplete") != std::string::npos);
+
+    // The guest refuses the run once the witness leaves out kOmitted's leaf too.
+    expect_refused_walk_miss(expected_invalid_envelope(honest, blob, node_store_without_leaf_of(state, kOmitted)));
+}
+#endif
+
+// The recovery pick is the highest-numbered header the bundle holds (direct_state.cpp:1001-1008), so one
+// extra ancestor header whose state root no node holds moves the pick and the walk of an account the block
+// reads misses (a recovery-walk key that resolves to no leaf; the block must be refused, not halt). The block reads
+// the balance of an account whose record the witness's blob leaves out, so the guest's lookup misses and the
+// recovery walk runs; the run is refused with a message. It used to halt the guest.
+TEST_CASE("the guest refuses an extra ancestor whose root no node holds",
+          "[witness][binding][ancestor]") {
+    const Tx t = tx_to(kCaller);
+        const std::vector<AcctSpec> state = {
+        sender_of(t),
+        AcctSpec{.addr = kCaller, .nonce = 1, .code = store_balance(kOmitted)},
+        AcctSpec{.addr = kOmitted, .nonce = 0, .balance = 1000},
+    };
+    const Prestate ps = build_prestate(state);
+    const std::vector<uint8_t> blob = witness_blob(state, without(state, kOmitted));
+
+    const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+    expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
+#if USE_HASH_KEY
+    silkworm::BlockHeader h = honest.chain.genesis.header;
+    h.number += 1000;
+    for (size_t i = 0; i < 32; ++i) {
+        h.state_root.bytes[i] = static_cast<uint8_t>(0xa5 ^ i);
+        h.parent_hash.bytes[i] = static_cast<uint8_t>(0x5a ^ i);
+    }
+    Bytes r;
+    silkworm::rlp::encode(r, h);
+    Bytes ancestors;
+    silkworm::rlp::encode_header(ancestors, {true, r.size()});
+    ancestors.insert(ancestors.end(), r.begin(), r.end());
+    silkworm::Block b = honest.chain.base;
+    b.header.gas_used = honest.sr.gas_used;
+    b.header.receipts_root = honest.sr.receipts_root;
+    b.header.logs_bloom = honest.sr.logs_bloom;
+    b.header.state_root = honest.sr.post.root;
+    Bytes brlp;
+    silkworm::rlp::encode(brlp, b);
+    const std::array<ByteView, 1> brlps{ByteView{brlp.data(), brlp.size()}};
+    std::vector<uint8_t> flat = build_flat_bundle(
+        ByteView{honest.chain.genesis_rlp.data(), honest.chain.genesis_rlp.size()},
+        std::span<const ByteView>{brlps}, ancestors, blob, ps.nodestore, honest.network);
+    REQUIRE_FALSE(flat.empty());
+    expect_refused_walk_miss(wrap_mfbd(flat));
+#endif
 }
 
 TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
@@ -1859,14 +1980,14 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
 #if USE_HASH_KEY
             // The producer's run and the guest's recover the slot along its trie path, which the witness holds:
             // the block reads the value the storage root binds, and is accepted. A witness that leaves out the
-            // path too halts the guest.
+            // path too — the guest refuses the run.
             const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
             REQUIRE(s.sr.storage(kCaller, 0) == word(5));
             REQUIRE(s.sr.post.root == root_after(state, [&](std::vector<AcctSpec>& post) {
                         after_read_through_call(post, t, word(5));
                     }));
             expect_accepted(run_guest(s, blob, ps.nodestore), s);
-            expect_halted(s, blob, node_store_without_storage(state), kSlotWalkHalt);
+            expect_refused_walk_miss(s, blob, node_store_without_storage(state));
 #else
             Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
             REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
@@ -1908,7 +2029,7 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
         REQUIRE(s.sr.ds->read_storage(kHolder, word(kCopyTarget)) == word(5));
         REQUIRE(s.sr.post.root == after(word(5)));
         expect_accepted(run_guest(s, blob, ps.nodestore), s);
-        expect_halted(s, blob, node_store_without_storage(state), kSlotWalkHalt);
+        expect_refused_walk_miss(s, blob, node_store_without_storage(state));
 #else
         Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
         REQUIRE(s.sr.ds->read_storage(kHolder, word(kCopyTarget)) == evmc::bytes32{});
@@ -1941,7 +2062,7 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
         REQUIRE(s.sr.ds->is_deleted(kHolder));
         REQUIRE(s.sr.post.root == after(word(5)));
         expect_accepted(run_guest(s, blob, ps.nodestore), s);
-        expect_halted(s, blob, node_store_without_storage(state), kSlotWalkHalt);
+        expect_refused_walk_miss(s, blob, node_store_without_storage(state));
 #else
         Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
         REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
@@ -1977,7 +2098,7 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
         REQUIRE_FALSE(s.sr.ds->is_deleted(r.holder));
         REQUIRE(s.sr.post.root == after(word(5)));
         expect_accepted(run_guest(s, blob, ps.nodestore), s);
-        expect_halted(s, blob, node_store_without_storage(r.state), kSlotWalkHalt);
+        expect_refused_walk_miss(s, blob, node_store_without_storage(r.state));
 #else
         Sealed s = seal(r.txs, ps.prev_root, blob, ps.nodestore);
         REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
@@ -1991,6 +2112,39 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
         expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
     }
 }
+
+#if USE_HASH_KEY
+// The blocks above are sealed on the whole node store: their headers commit to the value the storage root
+// binds, and a run that read zero instead would miss the header's gas. A producer seals its own run: without
+// the slot's trie path that run reads zero, and the header commits to the zero. check_root walks no storage of
+// a holder the block only reads and the witness carries no slot of, so the refusal alone keeps the guest from
+// accepting a value the storage root does not bind.
+TEST_CASE("the guest refuses a block sealed on a zero read of a slot whose trie nodes the witness leaves out",
+          "[witness][binding][omitted]") {
+    const Tx t = tx_to(kCaller);
+    const std::vector<AcctSpec> state = read_through_call(t, word(1), {{word(1), word(5)}, {word(2), word(6)}});
+    const Prestate ps = build_prestate(state);
+    std::vector<AcctSpec> witness = state;
+    spec_of(witness, kHolder).storage = {};
+    const std::vector<uint8_t> blob = witness_blob(state, witness);
+    const std::vector<uint8_t> nodestore = node_store_without_storage(state);
+
+    // The producer's run misses the slot's trie path and goes on with zero: it seals the block that read zero.
+    const Sealed s = seal(t, ps.prev_root, blob, nodestore);
+    REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
+    REQUIRE(s.sr.post.root == root_after(state, [&](std::vector<AcctSpec>& post) {
+                after_read_through_call(post, t, evmc::bytes32{});
+            }));
+    expect_refused_walk_miss(s, blob, nodestore);
+    // It is not the block of this state: with the trie path the guest reads 5, and the header's gas is wrong.
+    expect_rejected(run_guest(s, blob, ps.nodestore), "kWrongBlockGas");
+
+    // The block that read 5, sealed on the whole node store, is accepted.
+    const Sealed honest = seal(t, ps.prev_root, blob, ps.nodestore);
+    REQUIRE(honest.sr.storage(kCaller, 0) == word(5));
+    expect_accepted(run_guest(honest, blob, ps.nodestore), honest);
+}
+#endif
 
 // The absent reads of honest blocks: the witness carries no record or slot for the key, and the node store
 // holds the trie nodes along its path, down to where it leaves the trie.
@@ -2073,10 +2227,10 @@ TEST_CASE("check_root rejects the read of an absent slot whose trie nodes the wi
     const std::vector<uint8_t> nodestore =
         node_store_omitting(state, [&](const bytes32& h, bool in_trie) { return !in_trie && h != sroot; });
 #if USE_HASH_KEY
-    // The read of c walks its trie path to show it absent, and halts the guest at the leaf of a the witness
-    // leaves out. (Sealed on the whole node store: a run on this one halts too.)
+    // The read of c walks its trie path to show it absent, and the guest refuses the run at the leaf of a
+    // the witness leaves out. (Sealed on the whole node store: a run on this one refuses too.)
     const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
-    expect_halted(s, blob, nodestore, kSlotWalkHalt);
+    expect_refused_walk_miss(s, blob, nodestore);
 #else
     const Sealed s = seal(t, ps.prev_root, blob, nodestore);
     CHECK(s.sr.post.rejected);
