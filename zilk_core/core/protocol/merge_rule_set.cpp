@@ -6,6 +6,7 @@
 
 #include <optional>
 #include <utility>
+#include <variant>
 
 #include <zilk_core/core/common/assert.hpp>
 
@@ -34,7 +35,8 @@ inline ValidationResult MergeRuleSet::validate_block_header(const BlockHeader& h
 }
 
 ValidationResult MergeRuleSet::validate_difficulty_and_seal(const BlockHeader& header, const BlockHeader&) {
-    const bool merged{!pre_merge_rule_set_ || chain_config_.terminal_total_difficulty == 0 ||
+    const bool merged{!pre_merge_rule_set_ || std::holds_alternative<NoPreMergeConfig>(chain_config_.rule_set_config) ||
+                      chain_config_.terminal_total_difficulty == 0 ||
                       chain_config_.withdrawals_activated(header.timestamp)};
     if (merged && header.difficulty != 0) {
         return ValidationResult::kPoWBlockAfterMerge;
