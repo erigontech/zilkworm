@@ -184,6 +184,14 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
 
         bundle.direct.reset_witness_incomplete();
         const ValidationResult err{blockchain.insert_block(block, false)};
+        // A recovery walk that hit a missing or malformed node left the block run on an account or slot
+        // the node store does not resolve: the witness is broken whatever the block's verdict would be.
+        if (bundle.direct.walk_missed()) {
+            sys_println(("ERROR: block " + std::to_string(i) +
+                         " reads a node the witness's node store does not resolve").c_str());
+            failed_ = true;
+            return {0, false};
+        }
         // Execution that read data the witness omits (code, or the hash of an ancestor its headers do not
         // lead to) is invalid whatever its outcome.
         if (bundle.direct.witness_incomplete() || bundle.direct.ancestor_missing()) {
@@ -194,14 +202,6 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             sys_println(("ERROR: block " + std::to_string(i) +
                          (bundle.direct.ancestor_missing() ? " read the hash of an ancestor the witness does not hold"
                                                            : " needs data the witness omits")).c_str());
-            failed_ = true;
-            return {0, false};
-        }
-        // A recovery walk that hit a missing or malformed node left the block run on an account or slot
-        // the node store does not resolve: the witness is broken whatever the block's verdict would be.
-        if (bundle.direct.walk_missed()) {
-            sys_println(("ERROR: block " + std::to_string(i) +
-                         " reads a node the witness's node store does not resolve").c_str());
             failed_ = true;
             return {0, false};
         }
