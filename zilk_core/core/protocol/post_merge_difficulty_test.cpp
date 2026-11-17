@@ -64,6 +64,14 @@ TEST_CASE("a post-merge header with a non-zero difficulty is rejected", "[merge_
     CHECK(validate_header(test::kShanghaiConfig, 1000, 1) == ValidationResult::kPoWBlockAfterMerge);
 }
 
+TEST_CASE("a config with no pre-merge rules is merged at genesis without a terminal total difficulty",
+          "[merge_rule_set]") {
+    ChainConfig config{test::kLondonConfig};
+    config.rule_set_config = NoPreMergeConfig{};
+    CHECK(validate_header(config, 1000, 0) == ValidationResult::kOk);
+    CHECK(validate_header(config, 1000, 1) == ValidationResult::kPoWBlockAfterMerge);
+}
+
 #ifdef Z6M_POST_MERGE_ONLY
 TEST_CASE("without the pre-merge rules every non-zero difficulty is rejected", "[merge_rule_set]") {
     const uint64_t mainnet_shanghai{*kMainnetConfig.shanghai_time};
