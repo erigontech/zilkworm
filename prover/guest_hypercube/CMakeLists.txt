@@ -30,6 +30,11 @@ set(SILKWORM_MAIN_DIR "${Z6M_ROOT}")
 
 set(SW_BIN "${CMAKE_BINARY_DIR}/zilkworm")
 
+option(Z6M_POST_MERGE_ONLY "Leave out the pre-merge rules: reject every block with a non-zero difficulty" OFF)
+if(Z6M_POST_MERGE_ONLY)
+    add_compile_definitions(Z6M_POST_MERGE_ONLY)
+endif()
+
 add_subdirectory("${Z6M_ROOT}/third_party" "${SW_BIN}/third_party")
 
 add_subdirectory("${Z6M_ROOT}/zilk_core"   "${SW_BIN}/zilk_core")
