@@ -2113,6 +2113,39 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
     }
 }
 
+#if USE_HASH_KEY
+// The blocks above are sealed on the whole node store: their headers commit to the value the storage root
+// binds, and a run that read zero instead would miss the header's gas. A producer seals its own run: without
+// the slot's trie path that run reads zero, and the header commits to the zero. check_root walks no storage of
+// a holder the block only reads and the witness carries no slot of, so the refusal alone keeps the guest from
+// accepting a value the storage root does not bind.
+TEST_CASE("the guest refuses a block sealed on a zero read of a slot whose trie nodes the witness leaves out",
+          "[witness][binding][omitted]") {
+    const Tx t = tx_to(kCaller);
+    const std::vector<AcctSpec> state = read_through_call(t, word(1), {{word(1), word(5)}, {word(2), word(6)}});
+    const Prestate ps = build_prestate(state);
+    std::vector<AcctSpec> witness = state;
+    spec_of(witness, kHolder).storage = {};
+    const std::vector<uint8_t> blob = witness_blob(state, witness);
+    const std::vector<uint8_t> nodestore = node_store_without_storage(state);
+
+    // The producer's run misses the slot's trie path and goes on with zero: it seals the block that read zero.
+    const Sealed s = seal(t, ps.prev_root, blob, nodestore);
+    REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
+    REQUIRE(s.sr.post.root == root_after(state, [&](std::vector<AcctSpec>& post) {
+                after_read_through_call(post, t, evmc::bytes32{});
+            }));
+    expect_refused_walk_miss(s, blob, nodestore);
+    // It is not the block of this state: with the trie path the guest reads 5, and the header's gas is wrong.
+    expect_rejected(run_guest(s, blob, ps.nodestore), "kWrongBlockGas");
+
+    // The block that read 5, sealed on the whole node store, is accepted.
+    const Sealed honest = seal(t, ps.prev_root, blob, ps.nodestore);
+    REQUIRE(honest.sr.storage(kCaller, 0) == word(5));
+    expect_accepted(run_guest(honest, blob, ps.nodestore), honest);
+}
+#endif
+
 // The absent reads of honest blocks: the witness carries no record or slot for the key, and the node store
 // holds the trie nodes along its path, down to where it leaves the trie.
 TEST_CASE("check_root accepts a block that reads an account or slot the trie does not have",
