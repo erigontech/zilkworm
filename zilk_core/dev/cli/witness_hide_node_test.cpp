@@ -645,17 +645,20 @@ void MissingAccountNode_RejectedByValidator() {
     direct.insert_header(h.parent);
 
 #if USE_HASH_KEY
-    // fatal() exits; observe from a child.
+    // The recovery walk refuses the run now: it sets walk_missed() (read in run_one_bundle, which fails
+    // the run) and returns, so the read completes instead of halting. The walk must not silently succeed
+    // either: the flag is what separates the refusal (exit 0) from a read that completes without it
+    // (exit 3). Observed from a child, so a regression back to the halt is still an exit-status failure.
     std::fflush(stdout);
     const pid_t pid = fork();
     if (pid == 0) {
         (void)direct.read_account(h.A);
-        _exit(0);  // only if fatal() did not fire
+        _exit(direct.walk_missed() ? 0 : 3);
     }
     int status = 0;
     const bool reaped = pid > 0 && waitpid(pid, &status, 0) == pid;
-    expect_true(reaped && WIFEXITED(status) && WEXITSTATUS(status) == 1,
-                "G9[SECURITY]: recovery walk halts (exit 1) on missing account leaf");
+    expect_true(reaped && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                "G9[SECURITY]: recovery walk on missing account leaf refuses the run (walk_missed), no halt");
 #else
     expect_true(!DirectStateView{direct}.get_account(h.A).has_value(), "M3: account A reads as absent");
     expect_true(!check_root_accepts(direct, h.parent, h.trie.root),
