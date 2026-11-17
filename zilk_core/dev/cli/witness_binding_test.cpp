@@ -274,14 +274,21 @@ void expect_rejected(const Outcome& o, std::string_view why) {
 // (walk_missed()): the block-level line below, not the halt this walk ended with before the fix.
 constexpr std::string_view kNodeStoreMiss = "reads a node the witness's node store does not resolve";
 
-/// The guest refuses `s`'s block on `blob` and `nodestore` as its witness, and the refusal's line is in its
-/// log. The run used to halt here (fatal()); the child run asserts it no longer does.
-void expect_refused_walk_miss(const Sealed& s, const std::vector<uint8_t>& blob,
-                              const std::vector<uint8_t>& nodestore) {
-    const ChildRun r = run_envelope_in_child(make_envelope(s.chain, s.sr, blob, nodestore, s.network));
+/// The guest refuses the run on the envelope `env`, and the refusal's line is in its log. The run used to
+/// halt here (fatal()); the child run asserts it no longer does. A run that did not halt is repeated in this
+/// process, where the guest must report it as failed.
+void expect_refused_walk_miss(const std::vector<uint8_t>& env) {
+    const ChildRun r = run_envelope_in_child(env);
     CAPTURE(r.log);
     CHECK_FALSE(r.halted);
     CHECK(r.log.find(kNodeStoreMiss) != std::string::npos);
+    if (!r.halted) expect_rejected(run_envelope(env), kNodeStoreMiss);
+}
+
+/// The guest refuses `s`'s block on `blob` and `nodestore` as its witness.
+void expect_refused_walk_miss(const Sealed& s, const std::vector<uint8_t>& blob,
+                              const std::vector<uint8_t>& nodestore) {
+    expect_refused_walk_miss(make_envelope(s.chain, s.sr, blob, nodestore, s.network));
 }
 #endif
 
@@ -1844,6 +1851,74 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
     }
 }
 
+#if USE_HASH_KEY
+namespace {
+
+/// BALANCE of `a` in storage[0], a CALL to `b`, then the sentinel.
+Bytes store_balance_then_call(const evmc::address& a, const evmc::address& b) {
+    Bytes k;
+    push20(k, a);
+    k.push_back(0x31);  // BALANCE
+    store_observation(k);
+    push1(k, 0x00);  // retSize
+    push1(k, 0x00);  // retOffset
+    push1(k, 0x00);  // argsSize
+    push1(k, 0x00);  // argsOffset
+    push1(k, 0x00);  // value
+    push20(k, b);
+    k.push_back(0x5a);  // GAS
+    k.push_back(0xf1);  // CALL
+    k.push_back(0x50);  // POP
+    append_sentinel_and_stop(k);
+    return k;
+}
+
+/// `s`'s block as the one block of a bundle that expects it invalid, with `blob` and `nodestore` as its
+/// witness.
+std::vector<uint8_t> expected_invalid_envelope(const Sealed& s, const std::vector<uint8_t>& blob,
+                                               const std::vector<uint8_t>& nodestore) {
+    Bytes block_rlp;
+    silkworm::rlp::encode(block_rlp, sealed_block(s));
+    const std::array<ByteView, 1> blocks{ByteView{block_rlp}};
+    const std::array<uint8_t, 1> rejected{kBlockFlagExpectInvalid};
+    const std::vector<uint8_t> flat =
+        build_flat_bundle(ByteView{s.chain.genesis_rlp}, std::span<const ByteView>{blocks},
+                          /*ancestors_rlp=*/ByteView{}, blob, nodestore, s.network, rejected);
+    REQUIRE_FALSE(flat.empty());
+    return wrap_mfbd(flat);
+}
+
+}  // namespace
+
+// A block its bundle expects invalid is refused like any other once a recovery walk of its run misses. The
+// block here also calls a contract whose code the witness leaves out, which by itself makes it the invalid
+// block the bundle expects: the run must be refused for the walk miss, not end well with the block set aside.
+TEST_CASE("the guest refuses an expected-invalid block whose recovery walk misses",
+          "[witness][binding][omitted]") {
+    const Tx t = tx_to(kCaller);
+    const std::vector<AcctSpec> state = {
+        sender_of(t),
+        AcctSpec{.addr = kCaller, .nonce = 1, .code = store_balance_then_call(kOmitted, kHolder)},
+        AcctSpec{.addr = kHolder, .nonce = 1, .code = write_slot(word(1))},
+        AcctSpec{.addr = kOmitted, .nonce = 0, .balance = 1000},
+    };
+    const Prestate ps = build_prestate(state);
+    const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
+    // The witness carries no record of kOmitted or of kHolder, and not kHolder's code.
+    const std::vector<uint8_t> blob = witness_blob(state, without(without(state, kOmitted), kHolder));
+
+    // The guest recovers both accounts along their trie paths, which the witness holds, but not kHolder's
+    // code: the block is rejected as its bundle expects, and the run succeeds.
+    const Outcome expected = run_envelope(expected_invalid_envelope(honest, blob, ps.nodestore));
+    CAPTURE(expected.log);
+    CHECK_FALSE(expected.failed);
+    CHECK(expected.log.find("block 0 rejected as expected: witness incomplete") != std::string::npos);
+
+    // The guest refuses the run once the witness leaves out kOmitted's leaf too.
+    expect_refused_walk_miss(expected_invalid_envelope(honest, blob, node_store_without_leaf_of(state, kOmitted)));
+}
+#endif
+
 // The recovery pick is the highest-numbered header the bundle holds (direct_state.cpp:1001-1008), so one
 // extra ancestor header whose state root no node holds moves the pick and the walk of an account the block
 // reads misses (a recovery-walk key that resolves to no leaf; the block must be refused, not halt). The block reads
@@ -1886,10 +1961,7 @@ TEST_CASE("the guest refuses an extra ancestor whose root no node holds",
         ByteView{honest.chain.genesis_rlp.data(), honest.chain.genesis_rlp.size()},
         std::span<const ByteView>{brlps}, ancestors, blob, ps.nodestore, honest.network);
     REQUIRE_FALSE(flat.empty());
-    const ChildRun refused = run_envelope_in_child(wrap_mfbd(flat));
-    CAPTURE(refused.log);
-    CHECK_FALSE(refused.halted);
-    CHECK(refused.log.find(kNodeStoreMiss) != std::string::npos);
+    expect_refused_walk_miss(wrap_mfbd(flat));
 #endif
 }
 
