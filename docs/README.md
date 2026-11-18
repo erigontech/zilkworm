@@ -131,7 +131,7 @@ compile time with the CMake option `Z6M_HASH_STATE`: [hashstate.md](hashstate.md
 - **`z6m_prover_airbender`** — simulator, GPU prover, verification key, service — [`../prover/prover_airbender/README.md`](../prover/prover_airbender/README.md) — `prover/prover_airbender/src/`
 - **Airbender proving pipeline, proof and key formats** — [airbender_architecture.md](airbender_architecture.md#5-proving-airbender-v3)
 - **Airbender image and proving service** — configuration, host requirements, behavior, known limitations — [airbender-docker-service.md](airbender-docker-service.md) — `prover/Dockerfile`, `prover/docker/airbender-entrypoint.sh` — CI `airbender-image.yml`
-- **Agent skills** — fetch blocks, execute blocks, run the SP1 benchmark — `.claude/skills/`
+- **Agent skills** — fetch blocks, execute blocks, run the SP1 benchmark — `.agents/skills/`
 - **Witness checks against a node** — `tools/witness/`
 
 ## ERE integration
