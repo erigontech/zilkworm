@@ -4,7 +4,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo_224_80_white.svg">
     <source media="(prefers-color-scheme: light)" srcset="assets/logo_224_80.svg">
-    <img alt="Project Logo" src="docs/assets/logo-light.png" width="320">
+    <img alt="Project Logo" src="assets/logo_224_80.svg" width="320">
   </picture>
 </p>
 
@@ -16,114 +16,60 @@
 🚧 [ALPHA STAGE: This is in pre-release. Functional for block execution and proof generation, but not yet production-ready.] 🚧
 
 
-Zilkworm is a prototype implementation of a ZKEVM (Zero-Knowledge Ethereum Virtual Machine) generating ZK proofs that an        
-Ethereum block was executed correctly, without requiring re-execution of the block itself.
+Zilkworm is a prototype ZKEVM (Zero-Knowledge Ethereum Virtual Machine): it generates ZK proofs
+that an Ethereum block was executed correctly, so the block can be verified without re-executing it.
 
-Zilkworm is written in C++ (with a Rust orchestration layer) building on past works within Silkworm and EVMOne to run on
-zkVM provers with native support for RISC-V targets (e.g. rv32im).
-At the moment, the zkVM integrated is Succint's SP1 Hypercube.
-                                                                                                                                                                                            
+Zilkworm is written in C++, with a Rust orchestration layer, building on Silkworm and evmone. The
+block validator is compiled to bare-metal RISC-V and runs as the guest of a zkVM: Succinct's SP1
+Hypercube (rv64im) and zksync-airbender (rv32im).
+
+## Documentation
+
+**Start at [docs/README.md](docs/README.md)**, the index of the repository: the two state backends,
+their inputs, code paths, guests, make targets, tests, corpora and benchmarks, then the shared
+parts, the build, the provers, the ERE integration and the release process.
+
+Two state backends ship today:
+
+| Backend | Input | Guests |
+|---|---|---|
+| **DirectState** (default) | MFBD flat witness bundles | the SP1 guest that `z6m_prover` embeds, and the Airbender guest |
+| **HashState** (`-DZ6M_HASH_STATE=ON`) | the EIP-8025 SSZ `statelessInputBytes` | the SP1 guest the ERE benchmark runs |
+
 ## High-Level Workflow
 
-1. _Fetch_ — Retrieve a block + its execution witness from an Ethereum RPC node (Reth/Geth)
-2. _Execute_ (dry-run) — Run the EVM inside the zkVM without proof generation (for testing)
-3. _Prove_ — Generate a full ZK proof of correct block execution
+1. _Fetch_ — Retrieve a block and its execution witness from an Ethereum RPC node (Reth/Geth)
+2. _Execute_ (dry-run) — Run the block validator inside the zkVM without proof generation
+3. _Prove_ — Generate a ZK proof of correct block execution
 4. _Verify_ — Verify a previously generated proof
 5. _Service_ — Continuously poll a node and prove blocks as they arrive
 
-## Architecture
-
-For a high-level overview of the system, see [here](docs/architecture.md).
-
-### How ZK Ethereum Provers Work Generally
-
-The broader idea: a ZK prover takes an Ethereum block + pre-state witness, re-executes all transactions inside a zkVM
-and produces a cryptographic proof that the execution was done correctly. This proof can be verified cheaply by anyone
-on a lighter hardware without re-executing the block. This also enables other applications like light clients,
-bridges, and rollup verification.
-
-Zilkworm sits alongside other ZKEVM provers in this ecosystem, differentiated by its approach of running a C++ EVM
-inside the zkVM rather than a Rust one.
-
+A ZK prover takes an Ethereum block and its pre-state witness, re-executes all transactions inside a
+zkVM and produces a proof that the execution was done correctly. Anyone can verify the proof cheaply
+without re-executing the block, which also enables light clients, bridges and rollup verification.
+Zilkworm differs from other ZKEVM provers by running a C++ EVM inside the zkVM instead of a Rust one.
 
 ## How to Run
 
-At the moment building from source requires elaborate setup with conan, linux packages and SP1 Turbo SDK pre-requisites. It's recommended to use the pre-built docker image.
-
-To run with pre-built docker
+Building from source needs the RISC-V GCC toolchain and the SP1 toolchain (see
+[docs/README.md](docs/README.md#build-and-toolchain)). The pre-built docker image is the quick way:
 
 ```
 $ docker run somnergy/z6m_prover --help
 ```
-```
-Usage: z6m_prover [OPTIONS] [COMMAND]
 
-Commands:
-  setup    Run setup to generate proving and verifying keys
-  fetch    Fetch block and witness from RPC
-  execute  Execute the guest program without proving
-  prove    Generate a proof for a block
-  verify   Verify a proof using a verification key
-  help     Print this message or the help of the given subcommand(s)
+`z6m_prover` is the SP1 host. Every subcommand and option has `--help`.
 
-Options:
-      --service                                      
-      --rpc-url <RPC_URL>                            
-      --data-dir <DATA_DIR>                          [default: temp]
-      --save-all-responses                           
-      --prove-every <PROVE_EVERY>                    
-      --execute-every <EXECUTE_EVERY>                
-      --post-every <POST_EVERY>                      
-      --start-block <START_BLOCK>                    
-      --end-block <END_BLOCK>                        
-      --pk-path <PK_PATH>                            [default: pk.bin]
-      --proof-type <PROOF_TYPE>                      [default: compressed]
-      --ethproofs-endpoint <ETHPROOFS_ENDPOINT>      
-      --ethproofs-token <ETHPROOFS_TOKEN>            
-      --ethproofs-cluster-id <ETHPROOFS_CLUSTER_ID>  
-  -h, --help  
-```
-
-### First Fetch the block
-```
-Usage: z6m_prover fetch [OPTIONS]
-
-Options:
-      --rpc-url <RPC_URL>            RPC endpoint URL
-      --block-number <BLOCK_NUMBER>  Block number to fetch
-      --data-dir <DATA_DIR>          Output directory
-      --save-all-responses           Whether to save all the json files to disk after download
-      --build-eth-test               Whether to create an ethereum/tests format json file too
-  -h, --help                         Print help
-
-```
-### Dry run execute - just use --block-number for this
-
-```
-Usage: z6m_prover execute [OPTIONS]
-
-Options:
-      --block-number <BLOCK_NUMBER>  Block number to execute [default: 0]
-      --file-name <FILE_NAME>        Whether the input file is an Ethereum/tests file
-      --is-test                      
-      --data-dir <DATA_DIR>          Data directory
-  -h, --help                         Print help
-
-```
-### Fire up the prover
-```
-Usage: z6m_prover prove [OPTIONS]
-Options:
-      --block-number <BLOCK_NUMBER>  JSON file to load ethereum/tests format test from [default: 0]
-      --file-name <FILE_NAME>        Whether the input file is an Ethereum/tests file
-      --is-test                      
-      --data-dir <DATA_DIR>          Data directory
-      --pk-path <PK_PATH>            Proving key path [default: pk.bin]
-      --proof-path <PROOF_PATH>      Proof output path
-      --proof-type <PROOF_TYPE>      Proof type: core, compressed, groth16, plonk [default: compressed]
-  -h, --help                         Print help
-
-```
+| Command | Does |
+|---|---|
+| `z6m_prover fetch --rpc-url <URL> --block-number <N> --data-dir <dir>` | Fetch a block and its witness; writes `<dir>/blocks/<N>/flatWitnessBundle<N>.mfbd` |
+| `z6m_prover execute --block-number <N> --data-dir <dir>` | Execute the guest on a fetched block, without proving |
+| `z6m_prover execute --file-name <bundle.mfbd>` | Execute the guest on a bundle file (`--is-test` for an EEST JSON fixture) |
+| `z6m_prover setup` | Generate the proving and verifying keys |
+| `z6m_prover prove --block-number <N> --data-dir <dir>` | Prove a block (`--proof-type core, compressed, groth16, plonk`) |
+| `z6m_prover verify` | Verify a proof against a verifying key |
+| `z6m_prover --service --rpc-url <URL>` | Follow the chain: fetch, execute and prove as blocks arrive |
+| `z6m_prover --test-service ...` | Execute a range of blocks, or a fixture tree, from disk |
 
 ### Test service (offline batch execution)
 
@@ -136,13 +82,7 @@ z6m_prover --test-service \
   --execute-every 1
 ```
 
-Blocks are read from `<data-dir>/blocks/<block_number>/unifiedBlockAndStateRlp<block_number>.bin`. Missing blocks are skipped with a warning. Results are appended to `<data-dir>/executionLogs.log`.
-
-### Single block execute from disk
-
-```bash
-z6m_prover execute --file-name /path/to/unifiedBlockAndStateRlp24490786.bin --data-dir /path/to/output
-```
+Blocks are read from `<data-dir>/blocks/<block_number>/flatWitnessBundle<block_number>.mfbd`. Missing blocks are skipped with a warning. Results are appended to `<data-dir>/executionLogs.log`.
 
 ### Cycle stats
 
@@ -155,46 +95,48 @@ pip install -r requirements.txt
 Plot execution metrics from the log file:
 
 ```bash
-python3 prover/prover_hypercube/src/stats/cycle_stats.py \
+python3 tools/stats/cycle_stats.py \
   -i /path/to/executionLogs.log \
   -o /path/to/results_plot.png \
   --no-display
 ```
 
 ## NVIDIA CUDA Accelerated proving
-First make sure to install NVIDIA drivers and the NVIDIA Container Toolkit https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
-```
-$ user@machine-with-gpu
-docker run --gpus all --rm --network host -v "$PWD:/work:rw" -v /var/run/docker.sock:/var/run/docker.sock  -w /work -it --entrypoint bash somnergy/z6m_prover
 
-root@instance-20250919-091229:/work# 
-SP1_PROVER=cuda RUST_BACKTRACE=full RUST_LOG=info --prove --n 1 --file-name test.json
+Install the NVIDIA drivers and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), then:
+
 ```
+docker run --gpus all --rm --network host \
+  -v "$PWD:/work:rw" -v /var/run/docker.sock:/var/run/docker.sock \
+  -e SP1_PROVER=cuda \
+  somnergy/z6m_prover prove --file-name /work/flatWitnessBundle<N>.mfbd
+```
+
+The Airbender prover has its own image and service; see
+[docs/airbender-docker-service.md](docs/airbender-docker-service.md).
 
 ## Testing
 
-### Native build
+```bash
+# Unit tests
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build --target zilkworm.tests
+ctest --test-dir build --output-on-failure --parallel
 
-1. Download and unpack the latest stable [EEST release](https://github.com/ethereum/execution-specs/releases) (`tests@<ver>`), or just `make test-fixtures` to fetch the pinned one.
-2. Compiles the C++ EVM natively and runs tests directly with CTest:
-   ```bash
-   cmake -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DTESTS_DIR=/path/to/fixtures/blockchain_tests
-   cmake --build build/release
-   ```
-3. Run all tests with CTest:
-   ```bash
-   ctest --test-dir build/release --parallel
-   ```
-4. Run specific unified RLP-encoded block file:
-    ```bash
-    build/release/zilk_core/dev/cli/state_transition temp/blocks/23519000/unifiedBlockAndStateRlp23519000.bin
-    ```
+# EEST blockchain tests, native (downloads the pinned fixtures and converts them to MFBD)
+make eest-blockchain-tests
+
+# One bundle or one EEST JSON fixture through the native runner
+build/zilk_core/dev/cli/state_transition path/to/flatWitnessBundle<N>.mfbd
+```
+
+Every test target, with its corpus and what it checks, is in [docs/README.md](docs/README.md).
 
 ## Acknowledgements
 We thank the hard work done by the teams and people behind
 1. Silkworm
 2. EVMOne (especially @chfast)
-3. Succicnt (for SP1 and rsp)
+3. Succinct (for SP1 and rsp)
 4. RISCV
 5. C++ Conglomerate
 6. The Rust community

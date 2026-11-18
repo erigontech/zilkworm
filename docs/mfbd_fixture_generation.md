@@ -95,7 +95,6 @@ same directory). To force a regeneration, delete `manifest.json`.
 | --- | --- | --- |
 | `make eest-blockchain-tests` | native `state_transition` on every `.mfbd`, one ctest case each (`-DEEST_MFBD_DIR`) | `eest-blockchain-tests.yml` |
 | `make eest-prover-test` | `z6m_prover --test-service --test-dir $(EEST_MFBD_DIR)` under the SP1 executor | `hypercube-eest.yml` (the same command, sharded by `tools/scripts/eest_runner.py`) |
-| `make tests TESTS_SUBDIR=<dir>` | the same for one subdirectory, logs in `target/logs/` | |
 | `make selftest` | one fixture (`add11`) converted with `emit` and executed | |
 | `cd qemu_runner && make rerun-ctest` | the fixtures on rv32im or rv64im (`ARCH=rv64`) under QEMU | `qemu-eest-blockchain.yml`, `qemu-eest-blockchain-rv64.yml` |
 | `cd prover/prover_airbender && make eest` | the JSON fixtures on the Airbender simulator | `airbender-eest.yml` |
