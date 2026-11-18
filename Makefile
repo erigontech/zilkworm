@@ -158,7 +158,7 @@ tests-json: z6m_prover
 # ethereum/execution-specs release `tests-zkevm@$(ZKEVM_RELEASE_VERSION)` (asset
 # fixtures_zkevm.tar.gz, ~595 MiB), the release ere-guests tests against. The
 # cache directory carries the version, so a bump never runs on a stale corpus.
-ZKEVM_RELEASE_VERSION := v21.0.6
+ZKEVM_RELEASE_VERSION := v21.0.7
 ZKEVM_RELEASE_TAG  := tests-zkevm@$(ZKEVM_RELEASE_VERSION)
 ZKEVM_RELEASE_REPO := ethereum/execution-specs
 ZKEVM_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_stateless-$(ZKEVM_RELEASE_VERSION)/fixtures
