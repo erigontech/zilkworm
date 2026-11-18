@@ -10,7 +10,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(LINKER_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/link.x")
 set(MEMORY_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/memory.x")
 
-# memcpy, memmove, memset and memcmp, shared with the SP1 guest.
 set(MEM_BUILTINS_SRC "${CMAKE_CURRENT_LIST_DIR}/../guest_common/src/mem_builtins.cpp")
 
 add_executable(z6m_guest
@@ -23,19 +22,16 @@ add_executable(z6m_guest
     src/start.S
 )
 
-# zilk_core headers (print.hpp, mphf_map.hpp, ...) dispatch on AIRBENDER;
-# without it they fall back to the iostream host implementation.
+# zilk_core headers (print.hpp, mphf_map.hpp, ...) dispatch on AIRBENDER, else fall back to the iostream host implementation.
 target_compile_definitions(z6m_guest PRIVATE AIRBENDER)
 
 option(USE_HASH_KEY "Enable node-store account recovery for witness preimage gaps" ON)
 if(USE_HASH_KEY)
-  # Must match the zilkworm subbuild: the flag gates header code compiled
-  # into both the static libs and this target's TUs.
+  # Must match the zilkworm subbuild: the flag gates header code compiled into both the static libs and this target.
   target_compile_definitions(z6m_guest PRIVATE USE_HASH_KEY=1)
 endif()
 
 
-# ====== For Zilkworm project at .. ===============
 set(SW_INSTALL_DIR ${CMAKE_BINARY_DIR}/zilkworm-install CACHE PATH "")
 set(SW_INCLUDE_DIR ${SW_INSTALL_DIR}/include)
 set(SW_BIN         "${CMAKE_BINARY_DIR}/zilkworm")
@@ -53,8 +49,7 @@ set_target_properties(silkworm_dev PROPERTIES
 if (EXISTS "${SW_INC_INSTALL}")
   target_include_directories(z6m_guest PRIVATE "${SW_INC_INSTALL}")
 endif()
-# evmc headers are no longer exported by the subbuild install (EVMC folded
-# into evmone); include them straight from the submodule.
+# evmc headers come straight from the submodule (EVMC folded into evmone).
 target_include_directories(z6m_guest PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../../third_party/evmone/evmc/include")
 # FetchContent deps live in the zilkworm build tree, not the install prefix.
@@ -62,35 +57,24 @@ target_include_directories(z6m_guest SYSTEM PRIVATE
   "${SW_BIN}/_deps/nlohmann_json-src/include"
   "${SW_BIN}/_deps/magic_enum-src/include"
 )
-# ======================================
 
 
-# Prevent GCC/LTO from pattern-matching the mem builtins' loops back into library calls. Also
-# compile without LTO so the strong symbol definitions survive into the final link and override
-# newlib. -fno-toplevel-reorder keeps the functions in source order: memcpy_rest() is memcpy()'s
-# callee and GCC would emit it first, moving memcpy() and the functions after it kilobytes up, which
-# pushes the call sites at the end of their jal range out of it (each then costs an auipc + jalr).
+# -fno-builtin and no LTO keep the mem builtins' loops from becoming library calls and let the strong symbols override newlib; -fno-toplevel-reorder keeps memcpy() ahead of memcpy_rest() so call sites stay within jal range.
 set_source_files_properties(${MEM_BUILTINS_SRC} PROPERTIES
     COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto;-fno-toplevel-reorder"
 )
 
-# src/hashtable_policy.cpp defines the __wrap_ target of the --wrap below. Like mem_builtins.cpp it
-# is compiled without LTO, so the link-time renaming applies to an ordinary object, and its code
-# lands next to mem_builtins.cpp, within jal range of the LTO code that calls it.
+# hashtable_policy.cpp defines the --wrap target below; like mem_builtins.cpp it is compiled without LTO and lands within jal range of its callers.
 set_source_files_properties(src/hashtable_policy.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
 target_compile_options(z6m_guest PRIVATE
-    # -ffreestanding
     -fno-exceptions
     -fno-rtti
     -fno-unwind-tables
     -fno-asynchronous-unwind-tables
     -fno-stack-protector
-    # The frame pointer is the toolchain file's choice: cmake/riscv32im.cmake omits it (a frame
-    # record in memcpy, memset, memcmp and operator new/delete was 7 of their instructions per
-    # call). A profiling build whose flamegraph unwinder needs -fno-omit-frame-pointer sets it
-    # there, for the whole guest, rather than for these sources alone.
+    # The frame pointer is the toolchain file's choice (omitted in cmake/riscv32im.cmake); a profiling build sets -fno-omit-frame-pointer there.
     -fdata-sections
     -ffunction-sections
 )
@@ -101,8 +85,7 @@ target_link_options(z6m_guest PRIVATE
     -Wl,-T,${LINKER_SCRIPT}
     -Wl,-e,_start
     -Wl,--gc-sections
-    # libstdc++'s unordered-container growth check computes in double, soft-float on rv32im;
-    # src/hashtable_policy.cpp answers it in integers for the default load factor.
+    # libstdc++'s unordered-container growth check is soft-float double on rv32im; hashtable_policy.cpp answers it in integers.
     -Wl,--wrap=_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEjjj
 )
 
@@ -113,8 +96,7 @@ target_link_libraries(z6m_guest PRIVATE
     "${CMAKE_BINARY_DIR}/zilkworm/zilk_core/core/types_zz/libsilkworm_types_zz.a"
     "${CMAKE_BINARY_DIR}/zilkworm/third_party/libevmone.a"
     "${CMAKE_BINARY_DIR}/zilkworm/deps/src/blst/libblst.a"
-    # evmc loader/instructions libs no longer produced by the subbuild
-    # (EVMC folded into evmone); the baremetal guest never dlopens VMs.
+    # The subbuild no longer produces evmc loader/instructions libs (EVMC folded into evmone); the guest never dlopens VMs.
     c m gcc nosys stdc++
     -Wl,--end-group
 )

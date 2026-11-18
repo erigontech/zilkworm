@@ -17,7 +17,6 @@ def parse_execution_log(filename):
         'cycle_count': []
     }
     
-    # Pattern to match log entries
     pattern = r'block (\d+) executed, gas_used=(\d+), cycle_count=(\d+)'
     
     try:
@@ -29,7 +28,6 @@ def parse_execution_log(filename):
                     gas_used = int(match.group(2))
                     cycles = int(match.group(3))
                     
-                    # Skip entries where gas_used is 0 (avoid division by zero)
                     if gas_used > 0:
                         data['block'].append(block_num)
                         data['gas_used'].append(gas_used)
@@ -59,11 +57,9 @@ def create_visualizations(data):
     cycles = np.array(data['cycle_count'])
     cycles_per_gas = cycles / gas
     
-    # Create figure with subplots
     fig = plt.figure(figsize=(16, 12))
     gs = GridSpec(3, 2, figure=fig, height_ratios=[1, 1, 1], hspace=0.3, wspace=0.3)
     
-    # 1. Cycles vs Block
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.plot(blocks, cycles, color='blue', alpha=0.7, linewidth=1, marker='o', markersize=3)
     ax1.set_xlabel('Block Number')
@@ -72,7 +68,6 @@ def create_visualizations(data):
     ax1.grid(True, alpha=0.3)
     ax1.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
     
-    # 2. Gas vs Block
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.plot(blocks, gas, color='red', alpha=0.7, linewidth=1, marker='o', markersize=3)
     ax2.set_xlabel('Block Number')
@@ -81,10 +76,8 @@ def create_visualizations(data):
     ax2.grid(True, alpha=0.3)
     ax2.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
     
-    # 3. Combined plot: Cycles and Gas vs Block (normalized)
     ax3 = fig.add_subplot(gs[1, :])
     
-    # Normalize the data for better comparison
     cycles_norm = (cycles - cycles.min()) / (cycles.max() - cycles.min())
     gas_norm = (gas - gas.min()) / (gas.max() - gas.min())
     
@@ -96,7 +89,6 @@ def create_visualizations(data):
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-    # 4. Cycles per Gas ratio vs Block
     ax4 = fig.add_subplot(gs[2, :])
     ax4.plot(blocks, cycles_per_gas, color='green', alpha=0.7, linewidth=1, marker='o', markersize=3)
     ax4.set_xlabel('Block Number')
@@ -114,7 +106,6 @@ def calculate_statistics(data, cycles_per_gas):
     gas = np.array(data['gas_used'])
     cycles = np.array(data['cycle_count'])
     
-    # Calculate statistics
     avg_cycles_per_gas = np.mean(cycles_per_gas)
     max_cycles_per_gas = np.max(cycles_per_gas)
     min_cycles_per_gas = np.min(cycles_per_gas)
@@ -130,8 +121,7 @@ def calculate_statistics(data, cycles_per_gas):
     print(f"Total Gas Used: {gas.sum():,}")
     print(f"Total Cycles: {cycles.sum():,}")
     
-    # Find top 10 worst (highest) cycles per gas blocks
-    worst_indices = np.argsort(cycles_per_gas)[-10:][::-1]  # Top 10, descending
+    worst_indices = np.argsort(cycles_per_gas)[-10:][::-1]
     
     print(f"\nTop 10 Worst Cycles per Gas Blocks:")
     print("-" * 70)
@@ -152,7 +142,6 @@ def create_summary_chart(data, cycles_per_gas, worst_indices):
     
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
-    # Chart 1: Worst blocks - Cycles per Gas
     worst_ratios = cycles_per_gas[worst_indices]
     worst_blocks = blocks[worst_indices]
     
@@ -165,16 +154,13 @@ def create_summary_chart(data, cycles_per_gas, worst_indices):
                        rotation=45, ha='right', fontsize=8)
     ax1.grid(True, alpha=0.3)
     
-    # Add value labels on bars
     for i, (bar, ratio) in enumerate(zip(bars, worst_ratios)):
         ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
                 f'{ratio:.2f}', ha='center', va='bottom', fontsize=8)
     
-    # Chart 2: Cycles vs Gas scatter plot for all blocks
     ax2.scatter(gas, cycles, c=cycles_per_gas, cmap='viridis', 
                s=30, alpha=0.6, edgecolors='none')
     
-    # Highlight worst performing blocks
     worst_gas = gas[worst_indices]
     worst_cycles = cycles[worst_indices]
     ax2.scatter(worst_gas, worst_cycles, c='red', s=100, alpha=0.8, 
@@ -185,7 +171,6 @@ def create_summary_chart(data, cycles_per_gas, worst_indices):
     ax2.set_title('Cycles vs Gas (All Blocks)')
     ax2.legend()
     
-    # Add colorbar
     scatter = ax2.scatter(gas, cycles, c=cycles_per_gas, cmap='viridis', 
                          s=30, alpha=0.6, edgecolors='none')
     plt.colorbar(scatter, ax=ax2, label='Cycles per Gas')
@@ -198,7 +183,6 @@ def create_summary_chart(data, cycles_per_gas, worst_indices):
 def main():
     """Main function to run the analysis"""
     
-    # Set up command line argument parsing
     parser = argparse.ArgumentParser(
         description='Analyze blockchain execution logs and generate performance statistics',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -212,7 +196,7 @@ Examples:
     
     parser.add_argument(
         '--filename', '-i',
-        nargs='?',  # Make it optional
+        nargs='?',
         default='../../temp/executionLogs.log',
         help='Path to the execution log file (default: ../temp/executionLogs.log)'
     )
@@ -229,11 +213,9 @@ Examples:
         help='Don\'t display plots (useful when saving to file)'
     )
     
-    # Parse arguments
     args = parser.parse_args()
     filename = args.filename
     
-    # Check if file exists
     if not os.path.exists(filename):
         print(f"Error: File '{filename}' not found")
         print(f"Current working directory: {os.getcwd()}")
@@ -248,17 +230,13 @@ Examples:
         print("No data found. Please check the file path and format.")
         return 1
     
-    # Create main visualizations
     print("\nCreating visualizations...")
     cycles_per_gas = create_visualizations(data)
     
-    # Calculate and display statistics
     worst_indices = calculate_statistics(data, cycles_per_gas)
     
-    # Create summary chart
     create_summary_chart(data, cycles_per_gas, worst_indices)
     
-    # Handle output options
     if args.output:
         print(f"\nSaving plots to: {args.output}")
         plt.savefig(args.output, dpi=300, bbox_inches='tight')

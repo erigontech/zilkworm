@@ -1,9 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Statically linked C++ witness converter (zilk_core/dev/witness_converter):
-//! witness JSON in, MFBD envelope (16-byte header + FBND FlatBundle) out.
-//! Replaces spawning the json_witness_to_flat_bundle CLI.
+//! Statically linked C++ witness converter: witness JSON in, MFBD envelope out.
 
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
@@ -21,12 +19,10 @@ extern "C" {
     fn z6m_mfbd_free(p: *mut c_void);
 }
 
-/// The converter was tuned for a large stack (the CLI linked with
-/// `-z stack-size=0x1000000`); run it on a dedicated 64 MiB-stack thread.
+/// The converter needs a large stack; run it on a dedicated 64 MiB-stack thread.
 const STACK_SIZE: usize = 64 * 1024 * 1024;
 
-/// Convert a witness JSON document (object with `block`, `headers` and
-/// optional `state`/`codes`/`keys`/`fork`/`expect_invalid`) into MFBD bytes.
+/// Converts witness JSON (block, headers, optional state/codes/keys/fork/expect_invalid) to MFBD bytes.
 pub fn json_witness_to_flat_bundle(json: &[u8]) -> Result<Vec<u8>> {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
@@ -44,9 +40,7 @@ fn convert(json: &[u8]) -> Result<Vec<u8>> {
     let mut len: usize = 0;
     let mut err: *mut c_char = ptr::null_mut();
 
-    // SAFETY: json is a live slice for the duration of the call; the out
-    // pointers are valid locals. The C side never throws across the boundary
-    // and returns malloc'd buffers we free below.
+    // SAFETY: json outlives the call, the out pointers are valid locals, and the C side returns malloc'd buffers freed below.
     let rc = unsafe {
         z6m_json_witness_to_mfbd(json.as_ptr(), json.len(), &mut data, &mut len, &mut err)
     };

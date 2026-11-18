@@ -17,8 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_definitions(SP1)
 
-# Read-side state backend for the guest; set here because the top-level option does not reach
-# this separate project. See docs/hashstate.md, "Build flag and test targets".
+# Read-side state backend for the guest; set here because the top-level option does not reach this separate project.
 option(Z6M_HASH_STATE "Build the guest with the HashState/slib (StatelessInputBytes) backend" OFF)
 if(Z6M_HASH_STATE)
     add_compile_definitions(Z6M_HASH_STATE)
@@ -34,8 +33,7 @@ add_subdirectory("${Z6M_ROOT}/third_party" "${SW_BIN}/third_party")
 
 add_subdirectory("${Z6M_ROOT}/zilk_core"   "${SW_BIN}/zilk_core")
 
-# memcpy, memmove, memset and memcmp, shared with the Airbender guest; here the __wrap_ targets of
-# the -Wl,--wrap flags below.
+# Shared with the Airbender guest; here the __wrap_ targets of the -Wl,--wrap flags below.
 set(MEM_BUILTINS_SRC "${Z6M_ROOT}/prover/guest_common/src/mem_builtins.cpp")
 
 add_executable(z6m_guest
@@ -46,8 +44,7 @@ add_executable(z6m_guest
     ${MEM_BUILTINS_SRC}
 )
 
-# -fno-builtin: the copy and fill loops must not become the calls that -Wl,--wrap makes recurse.
-# -O3: these are the guest's hot path whatever the build type is set to.
+# -fno-builtin: the copy and fill loops must not become the calls -Wl,--wrap makes recurse; -O3 as they are the hot path.
 set_source_files_properties(${MEM_BUILTINS_SRC} PROPERTIES COMPILE_OPTIONS "-fno-builtin;-O3")
 
 target_include_directories(z6m_guest PRIVATE
@@ -69,8 +66,7 @@ target_link_options(z6m_guest PRIVATE
     -Wl,--wrap=memset
 )
 
-# Library search path: use the toolchain's rv64im/lp64 sysroot libraries.
-# With -nostdlib the linker won't search them automatically.
+# -nostdlib: add the toolchain's rv64im/lp64 sysroot libraries to the search path by hand.
 execute_process(
     COMMAND ${CMAKE_C_COMPILER} -march=rv64im -mabi=lp64 -print-sysroot
     OUTPUT_VARIABLE _SYSROOT OUTPUT_STRIP_TRAILING_WHITESPACE

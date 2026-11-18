@@ -1,17 +1,10 @@
-/*
-    Entry point of all programs (_start).
-
-    It initializes DWARF call frame information, the stack pointer, the
-    frame pointer (needed for closures to work in start_rust) and the global
-    pointer. Then it calls _start_rust.
-*/
+/* Entry point (_start): sets up DWARF CFI, sp, fp and gp, then calls _start_rust. */
 
 .section .init, "ax"
 .global _start
 
 _start:
     /* Jump to the absolute address defined by the linker script. */
-    // for 32bit
     # lui ra, %hi(_abs_start)
     # jr %lo(_abs_start)(ra)
 
@@ -30,16 +23,13 @@ _abs_start:
     // Assume single core, and put SP to the very top address of the stack region
     la sp, _sstack
 
-    // Set frame pointer
     add s0, sp, zero
 
     jal zero, _start_rust
 
     .cfi_endproc
 
-/*
-    Machine trap entry point (_machine_start_trap)
-*/
+/* Machine trap entry point (_machine_start_trap). */
 .section .trap, "ax"
 .global machine_default_start_trap
 .align 4
@@ -49,7 +39,6 @@ machine_default_start_trap:
     // so we swap it with x31
 	csrrw x31, mscratch, x31
 
-    // write to exception stack
     # sw x31, -4(sp)
     sw x30, -8(x31)
     sw x29, -12(x31)
@@ -89,24 +78,18 @@ machine_default_start_trap:
     mv a0, x31
     csrrw x31, mscratch, x0
     sw x31, -4(a0)
-    // restore sp
     mv sp, a0
-    // sp is valid now
     
     addi sp, sp, -128
-    // pass pointer as first argument
     add a0, sp, zero
 
     jal ra, _machine_start_trap_rust
 
-    // set return address into mepc
     csrw mepc, a0
 
     // save original SP to mscratch for now
     lw a0, 8(sp) // it's original sp that we saved in the stack
     csrw mscratch, a0 // save it for now
-
-    // restore everything we saved
 
     // it's illegal instruction, so we skip. Anyway can not overwrite x0
     # lw x0, 0(sp)
@@ -144,7 +127,6 @@ machine_default_start_trap:
     lw x31, 124(sp)
 
     addi sp, sp, 128
-    // we popped everything from the stack
     // now save current exception SP to mscratch,
     // and put original SP back
     csrrw	sp, mscratch, sp

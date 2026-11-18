@@ -14,25 +14,9 @@ set(CMAKE_RANLIB       riscv-none-elf-ranlib)
 set(BUILD_SHARED_LIBS OFF)
 
 set(common_flags "-march=rv64im -mabi=lp64 -ffunction-sections -fdata-sections -fno-PIC")
-# SP1 charges one cycle per instruction retired, so the only optimizations that
-# pay here are the ones that remove instructions. GCC's inlining defaults trade
-# instruction count away for compile time and I-cache pressure, neither of which
-# this target has, so they are widened (defaults: inline-unit-growth 40,
-# max-inline-insns-auto 30, large-function-growth 100 -- each roughly doubled,
-# deliberately modest since -flto showed maximum inlining loses badly here).
-# Measured -2.298% guest cycles on the 200-block corpus; see the commit message
-# for the full flag sweep.
+# SP1 charges one cycle per retired instruction, so only instruction-removing optimizations pay: GCC's inlining limits are widened (roughly doubled; -flto loses here).
 #
-# -mtune=size swaps GCC's default cost table (rocket's) for one that prices a
-# branch, a mul and a div at one instruction, as SP1 does, instead of 3, 4 and
-# 33/65. GCC then stops if-converting short branches and evaluating both sides
-# of && and ||, and stops expanding multiplication and division by a constant
-# into longer shift/add and multiply-high sequences. -mstrict-align is
-# required: the size table also allows unaligned access, and then GCC merges
-# byte loads into an `ld` on pointers it cannot prove aligned, which SP1
-# rejects on every block ("LD must be aligned to 8 bytes"). With rocket's
-# table the flag changes nothing. Measured -0.470% guest cycles on the
-# 200-block corpus; see the commit message for the share of each price.
+# -mtune=size prices a branch, mul and div at one instruction as SP1 does; -mstrict-align is required with it: that cost table allows unaligned access, so GCC merges byte loads into an `ld` that SP1 rejects (LD must be aligned to 8 bytes).
 set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap \
 -funroll-loops \
 --param inline-unit-growth=100 --param max-inline-insns-auto=60 \
@@ -46,8 +30,7 @@ set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags} ${bswap_inc}" CACHE STRING "" 
 set(CMAKE_CXX_FLAGS "${common_flags} ${opt_flags} ${no_cxx} ${bswap_inc}" CACHE STRING "" FORCE)
 set(CMAKE_ASM_FLAGS "${common_flags}" CACHE STRING "" FORCE)
 
-# Override CMake's default Release flags (-O3 -DNDEBUG) so that the opt_flags
-# above are the sole source of optimization level.
+# Release flags are cleared so opt_flags alone set the optimization level.
 set(CMAKE_C_FLAGS_RELEASE   "" CACHE STRING "" FORCE)
 set(CMAKE_CXX_FLAGS_RELEASE "" CACHE STRING "" FORCE)
 

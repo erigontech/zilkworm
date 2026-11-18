@@ -18,7 +18,6 @@ use guest::{Guest, GuestFiles};
 use prove::{BlockProver, ProverSettings, MAX_PROVABLE_CYCLES};
 use vk::VerificationKey;
 
-/// Default path to the airbender guest binary, relative to the project root.
 const DEFAULT_GUEST_BIN: &str = "prover/guest_airbender/build/z6m_guest";
 
 /// Default maximum cycles for the simulator. Proving clamps it to MAX_PROVABLE_CYCLES.
@@ -226,8 +225,7 @@ enum Command {
 #[derive(Clone, Debug, Serialize)]
 struct ExecutionLog {
     block_number: u64,
-    /// The input's gas used, once the guest's public output has matched the input; 0 when the
-    /// guest did not finish successfully.
+    /// The input's gas used once the guest's output matched the input; 0 if the guest did not finish successfully.
     gas_used: u64,
     /// The block hash the guest committed (checked against the input), if it finished successfully.
     block_hash: Option<alloy_primitives::B256>,
@@ -235,30 +233,22 @@ struct ExecutionLog {
     exec_time_secs: f64,
     freq_cycles_per_sec: u64,
     reached_end: bool,
-    /// The run parked at the guest's exit point (finish_success). Every other way the guest
-    /// stops (finish_error, fatal(), abort, the trap handler) is also a self-loop, which the
-    /// VM reports as reached_end too.
+    /// The run parked at finish_success; every other guest stop (finish_error, fatal(), abort, trap handler) is also a self-loop reported as reached_end.
     succeeded: bool,
     final_pc: u32,
     input_path: PathBuf,
 }
 
-/// Build the oracle data the guest reads from CSR 0x7C0.
-///
-/// Protocol:
-///   word 0: num_bytes (u32, little-endian byte count)
-///   words 1..N: input bytes packed into u32 words (LE, zero-padded tail)
-// Mirrors zilk_core/core/types_zz/flat_bundle.hpp.
-const INPUT_MAGIC_EJSN: u32 = 0x4E534A45; // "EJSN"
+/// Oracle for CSR 0x7C0: word 0 is the byte count (u32 LE), then the input bytes packed into LE u32 words, zero-padded.
+// Must match types_zz/flat_bundle.hpp.
+const INPUT_MAGIC_EJSN: u32 = 0x4E534A45;
 const INPUT_VERSION_EJSN: u32 = 1;
 
 pub(crate) fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>> {
     let bytes = fs::read(input_file)
         .map_err(|e| eyre!("failed to read input file '{}': {}", input_file.display(), e))?;
 
-    // The guest dispatches on the envelope's leading 4-byte magic (MFBD/EJSN).
-    // MFBD files are already enveloped on disk by the flat-bundle converter;
-    // EEST JSON test fixtures are minified and wrapped in an EJSN envelope here.
+    // The guest dispatches on the leading 4-byte magic: MFBD files are enveloped on disk, EEST JSON is minified and EJSN-wrapped here.
     let bytes = if is_test {
         let value: serde_json::Value = serde_json::from_str(
             std::str::from_utf8(&bytes).map_err(|e| eyre!("invalid UTF-8 in test file: {}", e))?,
@@ -277,7 +267,6 @@ pub(crate) fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>>
 
     let num_bytes = bytes.len() as u32;
     let num_words = (bytes.len() + 3) / 4;
-    // +1 capacity: byte count + data words
     let mut oracle = Vec::with_capacity(1 + num_words);
     oracle.push(num_bytes);
     for chunk in bytes.chunks(4) {
@@ -288,7 +277,6 @@ pub(crate) fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>>
     Ok(oracle)
 }
 
-/// Resolve the input file path from the CLI arguments.
 fn resolve_input_path(
     block_number: u64,
     file_name: Option<PathBuf>,
@@ -305,11 +293,9 @@ fn resolve_input_path(
     if mfbd.exists() {
         return Ok(mfbd);
     }
-    // Legacy pre-MFBD layout.
     Ok(block_dir.join(format!("unifiedBlockAndStateRlp{}.bin", block_number)))
 }
 
-/// The guest's files: --guest-bin, or the default build output under the project root.
 fn guest_files(cli_override: Option<&Path>) -> Result<GuestFiles> {
     let base = cli_override.unwrap_or(Path::new(DEFAULT_GUEST_BIN));
     let files = GuestFiles::at(base).map_err(|e| {
@@ -329,7 +315,6 @@ fn format_timestamp() -> String {
         .to_string()
 }
 
-/// Run the simulator on a single block and return the execution log.
 fn execute_block(
     guest: &Guest,
     input_path: &Path,
@@ -350,9 +335,7 @@ fn execute_block(
     let run = guest.run(oracle, max_cycles, flamegraph_path)?;
     let succeeded = run.succeeded(guest.exit_pc);
 
-    // A successful run parks in the exit sequence's self-loop with its public output in a0..a7;
-    // a failed one parks in finish_error's loop and commits nothing. The gas used is the input's,
-    // which the guest checks against the header; it is no longer read from the output registers.
+    // A successful run parks in the exit self-loop with its public output in a0..a7; a failed one parks in finish_error's loop and commits nothing.
     let expected = if succeeded {
         let expected = public_output::expected_for_file(input_path, is_test)?;
         public_output::check(&expected.block_hash, &run.output)?;
@@ -402,13 +385,11 @@ fn persist_execution_log(log_file: &Path, log: &ExecutionLog) -> Result<()> {
     Ok(())
 }
 
-/// Extract block number from an input file name like "flatWitnessBundle24522000.mfbd".
 fn block_number_from_filename(path: &Path) -> u64 {
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    // Try to extract the trailing digits from the stem.
     let digits: String = stem.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
     let digits: String = digits.chars().rev().collect();
     digits.parse().unwrap_or(0)
@@ -482,7 +463,6 @@ fn run_test_service(
     Ok(())
 }
 
-/// Where the prover loads the recursion verifier programs from, for the logs.
 fn fsv_dir_note() -> String {
     match std::env::var("FSV_DIR") {
         Ok(dir) => format!("FSV_DIR={dir}"),
@@ -490,17 +470,10 @@ fn fsv_dir_note() -> String {
     }
 }
 
-/// The variable that controls the prover JIT's fusion of word load/store runs.
 const MERGE_WINDOW_VAR: &str = "RISCV_MERGE_WINDOW";
 
 fn main() -> Result<()> {
-    // Airbender v3's JIT fuses runs of consecutive same-base word loads or stores (immediate
-    // stride +4) into groups of RISCV_MERGE_WINDOW (default 4), on the assumption that no jump
-    // lands inside a run. The guest breaks that assumption: keccak.c's buf_zero_state_from
-    // (evmone) and mem_builtins.cpp's memset jump into the middle of runs of `sw`, and a jump past
-    // a group's head would run the group from its head, storing below the target. 0 turns the
-    // fusion off. The JIT reads the variable once, from any thread, so it is set here, before
-    // the runtime or any other thread starts.
+    // Airbender's JIT fuses runs of same-base word loads/stores assuming no jump lands inside a run; keccak.c's buf_zero_state_from and mem_builtins.cpp's memset do, so fusion is off (0). Set before any other thread starts, as the JIT reads it once.
     if std::env::var_os(MERGE_WINDOW_VAR).is_none() {
         std::env::set_var(MERGE_WINDOW_VAR, "0");
     }
@@ -529,7 +502,6 @@ async fn run() -> Result<()> {
 
     let args = Args::parse();
 
-    // ── Service mode ────────────────────────────────────────────────────
     if args.service {
         let guest = guest_files(args.guest_bin.as_deref())?;
         let rpc_url = args
@@ -575,7 +547,6 @@ async fn run() -> Result<()> {
         return svc.run().await;
     }
 
-    // ── Test-service mode (batch execution from disk) ───────────────────
     if args.test_service {
         let start = args
             .start_block
@@ -706,9 +677,7 @@ async fn run() -> Result<()> {
                 args.replay_threads,
             )?;
 
-            // The prover proves whatever the run did, wherever it stopped: a run that parked in
-            // finish_error, or ran into the cycle bound, would yield a proof that commits no
-            // block. Run it on the simulator first, as the service's preflight does.
+            // Run on the simulator first, as the service's preflight does: the prover proves wherever the run stopped (even finish_error or the cycle bound), yielding a proof that commits no block.
             let preflight = execute_block(
                 &guest,
                 &input_path,
@@ -717,8 +686,7 @@ async fn run() -> Result<()> {
                 is_test,
                 None,
             )?;
-            // The simulator bounds its steps, the prover the timestamp, which a delegation call
-            // advances by more than one cycle: check the cycle count as well.
+            // The simulator bounds steps, the prover the timestamp (a delegation call advances it by more than one cycle): check the cycle count too.
             if !preflight.succeeded || preflight.cycle_count >= settings.cycles_bound as u64 {
                 bail!(
                     "preflight: block {} did not finish successfully within {} cycles (final_pc=0x{:08x} reached_end={} cycles={}); not proving",
@@ -838,13 +806,10 @@ async fn run() -> Result<()> {
             println!("Verifier accepted in {:.2?}", started.elapsed());
             println!("verifier output[0..8]  = {:08x?}", &output[..8]);
             println!("verifier output[8..16] = {:08x?}", &output[8..]);
-            // output[0..8] are the guest's x10..x17 (its own output), output[8..16] the
-            // recursion chain over the end parameters: the setups, which include the guest
-            // binary, and the final PC. Only the latter binds the proof to this guest.
+            // output[0..8] is the guest's own output; output[8..16] is the recursion chain over the setups and final PC, which alone binds the proof to this guest.
             println!("CHAIN BINDING OK: output[8..16] is a chain hash of the key");
 
-            // output[0..8] is the guest's public output: the hash of the last block the run
-            // validated. The proof binds its block only through it.
+            // output[0..8] is the last validated block's hash; the proof binds its block only through it.
             let expected = match (file_name, block_hash) {
                 (Some(path), _) => public_output::expected_for_file(&path, false)?.block_hash,
                 (None, Some(hash)) => hash,

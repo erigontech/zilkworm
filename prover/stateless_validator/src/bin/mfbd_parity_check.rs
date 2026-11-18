@@ -1,22 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Byte-equality check: drive the pure-Rust MFBD encoder and the C++
-//! `json_witness_to_flat_bundle` binary on the same input and assert their
-//! output matches. Proves the determinism both sides buy (C++ `std::map` +
-//! `std::stable_sort`, matching Rust `BTreeMap` + input-order).
-//!
-//! Two input modes:
-//!   mfbd_parity_check <dir|fixture.json> [--cpp-bin <path>]
-//!       ERE BenchmarkFixture(s) ({stateless_input, success}); a directory is
-//!       swept, a single file is checked. Block RLP + fork are derived from the
-//!       fixture.
-//!   mfbd_parity_check --block-rlp <hex|@path> --witness <exec.json>
-//!                     [--fork <Mainnet|Osaka|...>] [--expect-invalid] [--cpp-bin <path>]
-//!       One ad-hoc input: raw block RLP + an alloy ExecutionWitness JSON
-//!       (RPC envelope {"result":{...}} or bare).
-//!
-//! Exits 0 on byte-equal (all fixtures), 1 otherwise.
+//! Asserts the Rust MFBD encoder and the C++ `json_witness_to_flat_bundle` emit identical bytes; exits 0 iff all inputs match.
 
 use std::fs;
 use std::io::Write;
@@ -33,7 +18,6 @@ use z6m_stateless_validator::build_mfbd_from_parts;
 
 const DEFAULT_CPP_BIN: &str = "../../build/zilk_core/dev/cli/json_witness_to_flat_bundle";
 
-/// Everything the two encoders need for one comparison.
 struct Parts {
     block_rlp: Vec<u8>,
     state: Vec<Bytes>,
@@ -43,8 +27,6 @@ struct Parts {
     fork: String,
     expect_invalid: bool,
 }
-
-// ---------- ERE BenchmarkFixture mode ----------
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -81,8 +63,6 @@ fn parts_from_fixture(path: &Path) -> Result<Parts> {
         expect_invalid: !fx.success,
     })
 }
-
-// ---------- ad-hoc RPC-witness mode ----------
 
 #[derive(Deserialize)]
 struct WitnessRpc {
@@ -131,8 +111,6 @@ fn parts_from_adhoc(
     })
 }
 
-// ---------- comparison ----------
-
 fn cpp_bundle(cpp_bin: &Path, p: &Parts) -> Result<Vec<u8>> {
     let to_hex = |v: &[u8]| format!("0x{}", hex::encode(v));
     let payload = serde_json::json!({
@@ -176,7 +154,6 @@ fn main() -> Result<()> {
             .unwrap_or(default)
     };
 
-    // Mode select: a leading non-flag arg is a fixture path (dir or file).
     let fixtures: Vec<(String, Parts)> = match args.first() {
         Some(a) if !a.starts_with("--") => {
             let path = PathBuf::from(a);

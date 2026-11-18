@@ -1,34 +1,23 @@
-//! The guest's public output, and the host's check of it against the input.
-//!
-//! The guest commits one 32-byte value in its output registers a0..a7: the hash of the last
-//! block it validated, its bytes in order as little-endian words, or zero when it validated
-//! none (EJSN tests, envelopes without a valid block). StateTransition anchors a bundle's
-//! pre-state at the state root of the header that its first block's parent hash names,
-//! requires every later block of the bundle to extend the one before it, and checks each
-//! header's state root and gas used against the execution, so that hash binds the state
-//! transition of its bundle. The host derives the expected value from the input alone and
-//! refuses any run or proof that commits another.
+//! The guest commits one 32-byte value in a0..a7 (LE words): the last validated block's hash, zero if none. The host derives it from the input alone and refuses any run or proof that commits another.
 
 use alloy_primitives::{keccak256, B256};
 use eyre::{bail, eyre, Result};
 use std::fs;
 use std::path::Path;
 
-/// What an honest run of the guest commits for an input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Expected {
     /// Hash of the last block the guest validates; zero when it validates none.
     pub block_hash: B256,
-    /// Gas used by the validated blocks together: their header values, summed as the guest
-    /// sums them for its "gas used" line.
+    /// Gas used by the validated blocks together (header values, summed as the guest does).
     pub gas_used: u64,
 }
 
-// The envelope and flat-bundle layout of zilk_core/core/types_zz/flat_bundle.{hpp,cpp}.
-const INPUT_MAGIC_MFBD: u32 = 0x4442_464D; // "MFBD"
+// Mirrors types_zz/flat_bundle.{hpp,cpp}.
+const INPUT_MAGIC_MFBD: u32 = 0x4442_464D;
 const INPUT_VERSION_MFBD: u32 = 1;
 const INPUT_HEADER_SIZE_MFBD: usize = 16;
-const FLAT_BUNDLE_MAGIC: u32 = 0x444E_4246; // "FBND"
+const FLAT_BUNDLE_MAGIC: u32 = 0x444E_4246;
 const FLAT_BUNDLE_VERSION: u32 = 14;
 const FLAT_BUNDLE_HEADER_SIZE: usize = 56;
 /// Byte offsets of the blocks section's (offset, size) pair in the flat-bundle header.
@@ -37,7 +26,6 @@ const BLOCK_FLAG_EXPECT_INVALID: u8 = 0x01;
 /// Position of gas_used in an RLP block header, the same in every fork.
 const HEADER_GAS_USED: usize = 10;
 
-/// The expected public output for an input file, read as `build_oracle` reads it.
 pub fn expected_for_file(input_file: &Path, is_test: bool) -> Result<Expected> {
     if is_test {
         // EJSN tests run through blockchain_test, which validates no block of the run.
@@ -48,9 +36,7 @@ pub fn expected_for_file(input_file: &Path, is_test: bool) -> Result<Expected> {
     expected_for_mfbd(&bytes)
 }
 
-/// Walks an MFBD envelope as StateTransition::run_mfbd does. A successful run validated every
-/// block without the expect-invalid flag (and rejected the flagged ones), so the committed
-/// hash is that of the last unflagged block.
+/// Walks an MFBD envelope as StateTransition::run_mfbd does: the committed hash is that of the last block without the expect-invalid flag.
 pub fn expected_for_mfbd(envelope: &[u8]) -> Result<Expected> {
     if read_u32(envelope, 0)? != INPUT_MAGIC_MFBD || read_u32(envelope, 4)? != INPUT_VERSION_MFBD {
         bail!("input is not an MFBD v{} envelope", INPUT_VERSION_MFBD);
@@ -69,7 +55,6 @@ pub fn expected_for_mfbd(envelope: &[u8]) -> Result<Expected> {
     Ok(expected)
 }
 
-/// Folds one flat bundle's blocks into `expected` and returns the bundle's size.
 fn add_bundle_blocks(bundle: &[u8], expected: &mut Expected) -> Result<usize> {
     if read_u32(bundle, 0)? != FLAT_BUNDLE_MAGIC || read_u32(bundle, 4)? != FLAT_BUNDLE_VERSION {
         bail!("bad flat bundle magic or version");
@@ -98,7 +83,6 @@ fn add_bundle_blocks(bundle: &[u8], expected: &mut Expected) -> Result<usize> {
         blocks.push(&section[cursor..cursor + item.len]);
         cursor = align8(cursor + item.len);
     }
-    // Optional trailing flag bytes, one per block.
     let flags = if n_blocks > 0 && cursor + n_blocks <= section_end {
         &section[cursor..cursor + n_blocks]
     } else {
@@ -135,13 +119,11 @@ fn block_hash_and_gas(block: &[u8]) -> Result<(B256, u64)> {
     Ok((keccak256(&body[..header.len]), gas_used))
 }
 
-/// The output words an honest guest leaves in a0..a7 for `hash`.
 #[cfg(test)]
 fn words(hash: &B256) -> [u32; 8] {
     std::array::from_fn(|i| u32::from_le_bytes(hash[4 * i..4 * i + 4].try_into().unwrap()))
 }
 
-/// The 32-byte value that output words a0..a7 commit.
 pub fn committed(output: &[u32; 8]) -> B256 {
     let mut bytes = [0u8; 32];
     for (chunk, word) in bytes.chunks_exact_mut(4).zip(output) {
@@ -150,7 +132,6 @@ pub fn committed(output: &[u32; 8]) -> B256 {
     B256::from(bytes)
 }
 
-/// Fails unless the guest's output words commit exactly `block_hash`.
 pub fn check(block_hash: &B256, output: &[u32; 8]) -> Result<()> {
     let got = committed(output);
     if got != *block_hash {
@@ -179,11 +160,9 @@ fn read_u64(buf: &[u8], off: usize) -> Result<u64> {
         .ok_or_else(|| eyre!("input truncated at byte {}", off))
 }
 
-/// One RLP item at the start of a buffer.
 struct RlpItem<'a> {
     is_list: bool,
     payload: &'a [u8],
-    /// Encoded length: prefix plus payload.
     len: usize,
 }
 
@@ -248,21 +227,21 @@ mod tests {
     /// A 15-field (pre-London) header; `tag` makes headers of equal number and gas distinct.
     fn header(number: u64, gas_used: u64, tag: u8) -> Vec<u8> {
         rlp_list(&[
-            rlp_bytes(&[tag; 32]),         // parent_hash
-            rlp_bytes(&[0x1d; 32]),        // ommers_hash
-            rlp_bytes(&[0xbe; 20]),        // beneficiary
-            rlp_bytes(&[0x5a; 32]),        // state_root
-            rlp_bytes(&[0x7a; 32]),        // transactions_root
-            rlp_bytes(&[0x4e; 32]),        // receipts_root
-            rlp_bytes(&[0u8; 256]),        // logs_bloom
-            rlp_uint(0),                   // difficulty
-            rlp_uint(number),              // number
-            rlp_uint(30_000_000),          // gas_limit
-            rlp_uint(gas_used),            // gas_used
-            rlp_uint(1_000 + number),      // timestamp
-            rlp_bytes(b"z6m"),             // extra_data
-            rlp_bytes(&[0u8; 32]),         // mix_hash
-            rlp_bytes(&[0u8; 8]),          // nonce
+            rlp_bytes(&[tag; 32]),
+            rlp_bytes(&[0x1d; 32]),
+            rlp_bytes(&[0xbe; 20]),
+            rlp_bytes(&[0x5a; 32]),
+            rlp_bytes(&[0x7a; 32]),
+            rlp_bytes(&[0x4e; 32]),
+            rlp_bytes(&[0u8; 256]),
+            rlp_uint(0),
+            rlp_uint(number),
+            rlp_uint(30_000_000),
+            rlp_uint(gas_used),
+            rlp_uint(1_000 + number),
+            rlp_bytes(b"z6m"),
+            rlp_bytes(&[0u8; 32]),
+            rlp_bytes(&[0u8; 8]),
         ])
     }
 
@@ -287,9 +266,9 @@ mod tests {
         let sections = [
             (genesis_off, genesis.len()),
             (blocks_off, blocks_section.len()),
-            (rest_off, 0), // ancestors
-            (rest_off, 0), // direct state
-            (rest_off, 0), // node store
+            (rest_off, 0),
+            (rest_off, 0),
+            (rest_off, 0),
             (rest_off, network.len()),
         ];
         let mut out = vec![0u8; align8(rest_off + network.len())];
@@ -416,8 +395,7 @@ mod tests {
         assert!(expected_for_mfbd(&two_bundles).is_err());
     }
 
-    /// Mainnet block 24,491,136 from the 200-block corpus: its RLP header, its hash as a separate
-    /// keccak implementation computes it, and the output words the guest commits for that block.
+    /// Mainnet block 24,491,136 from the 200-block corpus: its RLP header, an independent keccak of it, and the output words the guest commits.
     #[test]
     fn mainnet_header_hash() {
         let header = alloy_primitives::hex::decode(MAINNET_24491136_HEADER).unwrap();

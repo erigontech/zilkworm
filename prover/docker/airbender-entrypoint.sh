@@ -3,15 +3,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Entrypoint of the Airbender prover image (prover/Dockerfile, target airbender).
-#
-# With arguments it runs the prover with them, as `docker run IMAGE prove --file-name ...` or
-# `docker run IMAGE verify --proof ... --vk ...`.
-#
-# Without arguments it runs the proving service, configured from the environment, and starts it
-# again whenever it exits. That makes the image usable as is where there is no restart policy,
-# such as vast.ai's Entrypoint launch mode (pass the variables with -e). In vast.ai's SSH and
-# Jupyter modes, which replace the entrypoint, run this script from the onstart script instead.
+# Entrypoint of the Airbender prover image: with arguments runs the prover (`prove --file-name ...`, `verify --proof ... --vk ...`); without, runs the proving service from the environment and restarts it whenever it exits, for launchers with no restart policy.
 #
 #   RPC_URL               execution client JSON-RPC serving debug_executionWitness (required)
 #   WS_URL                its WebSocket endpoint, for newHeads (optional; polls without it)
@@ -44,10 +36,7 @@ DATA_DIR=${DATA_DIR:-/data}
 PROVE_EVERY=${PROVE_EVERY:-100}
 RESTART_DELAY=${RESTART_DELAY:-30}
 
-# The verification key (EVKEY001) that the service's proofs verify against: a function of the
-# guest and the prover's recursion programs, so it is computed once for each of them, and a
-# volume reused by another image (or a local build of another guest) gets its own. Publish it
-# next to the proofs (the Ethproofs verifier and `verify --vk` take it).
+# The verification key (EVKEY001) the proofs verify against is a function of the guest and recursion programs, so it is computed once per pair; a volume reused by another image gets its own.
 VK_ID=$(cat "$GUEST.bin" "$GUEST.text" "${FSV_DIR:?FSV_DIR is required}"/fsv_*.bin "$FSV_DIR"/fsv_*.text \
         | sha256sum | cut -c1-16)
 VK_DIR=${VK_DIR:-$DATA_DIR/vk-${ZILKWORM_REVISION:-local}-$VK_ID}

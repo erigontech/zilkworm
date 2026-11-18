@@ -1,9 +1,4 @@
-//! Proving with Airbender v3's prover_pipeline: a `ProgramProver` that proves the guest up to the
-//! final unified recursion layer, at 100-bit security.
-//!
-//! The prover lives on a thread of its own with a 1 GiB stack (the pipeline runs the recursion
-//! verifiers natively, which needs it). A panic while proving is not unwind safe: it ends that
-//! thread and the prover with it, so the block fails and a new prover is built for the next one.
+//! Proves the guest via Airbender v3's prover_pipeline to the final unified recursion layer at 100-bit security, on a thread with a 1 GiB stack; a panic ends that thread, fails the block, and a new prover is built.
 //!
 //! Adapted from matter-labs/airbender-platform crates/airbender-host/src/prover/gpu_prover.rs and
 //! matter-labs/ethereum-prover ethereum_prover/src/prover/gpu_prover.rs (MIT OR Apache-2.0).
@@ -21,7 +16,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 
-/// Stack of the prover thread.
 const PROVER_STACK_SIZE: usize = 1 << 30;
 
 /// The cycle limit the prover can take: its JIT encodes timestamps in 32 bits.
@@ -33,8 +27,7 @@ pub struct ProverSettings {
     pub backend: ProverBackend,
     /// The proved run stops here; a longer one does not reach the guest's exit point.
     pub cycles_bound: u32,
-    /// CPU threads replaying the guest's execution into circuit traces; `None` keeps the
-    /// backend's default (8 on the GPU).
+    /// CPU threads replaying the guest into circuit traces; `None` keeps the backend default.
     pub replay_threads: Option<usize>,
 }
 
@@ -78,11 +71,9 @@ impl ProverSettings {
     }
 }
 
-/// A proof of one block.
 pub struct ProvedBlock {
     pub artifact: ProofArtifact,
-    /// The prover's time on the block: from handing it the input to the proof (the pipeline's
-    /// trace generation and the GPU's proving, through the recursion layers).
+    /// Prover time on the block, from handing it the input to the proof.
     pub elapsed: Duration,
 }
 
@@ -109,8 +100,7 @@ pub fn output_words(artifact: &ProofArtifact) -> [u32; 8] {
     std::array::from_fn(|i| artifact.proof.register_final_values[10 + i].value)
 }
 
-/// Accepts a proof only if it commits the input's block: an output of all zeroes means the
-/// block execution failed inside the guest (unless no block is expected, as for EEST tests).
+/// Accepts a proof only if it commits the input's block; all-zero output means the guest failed (unless no block is expected, as for EEST).
 pub fn check_output(expected: &Expected, output: &[u32; 8]) -> Result<()> {
     if expected.block_hash != B256::ZERO && output.iter().all(|w| *w == 0) {
         bail!("the proof's output is all zeroes: the block execution failed inside the guest");
@@ -118,7 +108,6 @@ pub fn check_output(expected: &Expected, output: &[u32; 8]) -> Result<()> {
     public_output::check(&expected.block_hash, output)
 }
 
-/// A reusable prover that rebuilds itself after a panic.
 pub struct BlockProver {
     settings: ProverSettings,
     worker: Option<Worker>,
@@ -126,7 +115,6 @@ pub struct BlockProver {
 }
 
 impl BlockProver {
-    /// Builds the prover (the guest's and the recursion programs' precomputations).
     pub fn new(settings: ProverSettings) -> Result<Self> {
         let started = Instant::now();
         let worker = Worker::spawn(&settings)?;
@@ -146,8 +134,7 @@ impl BlockProver {
         })
     }
 
-    /// Proves the guest on `input_words`. On a panic the prover is replaced before returning
-    /// the block's error, outside the block's proving time.
+    /// On a panic the prover is replaced before returning the block's error, outside its proving time.
     pub fn prove(&mut self, input_words: Vec<u32>) -> Result<ProvedBlock> {
         if self.worker.is_none() {
             // An earlier rebuild failed.
@@ -194,7 +181,6 @@ struct Request {
     reply: mpsc::Sender<Result<ProofArtifact, String>>,
 }
 
-/// The thread that owns one `ProgramProver`.
 struct Worker {
     requests: Option<mpsc::Sender<Request>>,
     handle: Option<JoinHandle<()>>,
@@ -209,8 +195,7 @@ impl Worker {
             .name("airbender-prover".to_string())
             .stack_size(PROVER_STACK_SIZE)
             .spawn(move || {
-                // All prover state stays on this thread, so a panic never unwinds through the
-                // caller.
+                // All prover state stays on this thread, so a panic never unwinds through the caller.
                 let mut prover = match settings.build() {
                     Ok(prover) => prover,
                     Err(err) => {
@@ -263,7 +248,6 @@ impl Worker {
         }
     }
 
-    /// Joins the thread, which has ended, and returns its panic message.
     fn panic_message(&mut self) -> String {
         self.requests = None;
         match self.handle.take().map(JoinHandle::join) {
@@ -275,7 +259,6 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        // Closing the channel ends the thread's loop.
         self.requests = None;
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();

@@ -11,10 +11,7 @@ edition = "2021"
 name = "z6m_prover_airbender"
 path = "src/main.rs"
 
-# Airbender v3: matter-labs/zksync-airbender bd0d5153, which no upstream branch head contains;
-# somnergy/zksync-airbender's v3/bd0d5153 branch keeps the commit fetchable. The rev pins it.
-#
-# prover_pipeline's default `deterministic_pow` feature must stay off for production proofs.
+# Airbender v3: zksync-airbender bd0d5153, which no upstream branch contains; somnergy/zksync-airbender's v3/bd0d5153 branch keeps it fetchable. Keep prover_pipeline's `deterministic_pow` feature off for production proofs.
 [dependencies]
 prover_pipeline = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff", default-features = false }
 full_statement_verifier = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff", default-features = false, features = ["host_utils", "unified_verifier_only"] }
@@ -22,18 +19,14 @@ riscv_transpiler = { git = "https://github.com/somnergy/zksync-airbender", rev =
 setups = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff" }
 field = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff" }
 
-# Shared z6m prover infrastructure (block fetching, RLP encoding)
 z6m_common = { path = "../common" }
 
-# keccak256 / B256 for the guest's public output (the committed block hash)
 alloy-primitives = "1.0"
 
-# Async runtime + networking
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 url = "2.5"
 
-# CLI + serialization
 clap = { version = "4.0", features = ["derive", "env"] }
 eyre = "0.6"
 chrono = "0.4"
@@ -44,7 +37,6 @@ bincode2 = { package = "bincode", version = "2", features = ["serde"] }
 flate2 = "1"
 log = "0.4"
 
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 

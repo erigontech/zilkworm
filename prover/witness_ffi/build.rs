@@ -1,16 +1,12 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Builds the C++ witness converter (silkworm_dev + deps) with CMake and
-//! links it statically. The C++ tree needs a C++23 compiler: the project
-//! standard is g++-15 (g++ >= 14 is the minimum that works) on Linux, the
-//! default AppleClang on macOS. The probe prefers the newest g++ available.
+//! Builds the C++ witness converter with CMake and links it statically; needs a C++23 g++ (>= 14, newest probed first) on Linux, AppleClang on macOS.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Major version of a gcc-style compiler, if it runs.
 fn compiler_major(compiler: &str) -> Option<u32> {
     let out = Command::new(compiler).arg("-dumpversion").output().ok()?;
     if !out.status.success() {
@@ -20,7 +16,6 @@ fn compiler_major(compiler: &str) -> Option<u32> {
     text.trim().split('.').next()?.parse().ok()
 }
 
-/// Environment variable value, treating empty/whitespace as unset.
 fn env_nonempty(name: &str) -> Option<String> {
     env::var(name)
         .ok()
@@ -28,14 +23,7 @@ fn env_nonempty(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Pick a (cc, cxx) pair: honor $CXX/$CC, else the default g++ if it is
-/// >= 14 (the C++23 capability floor), else probe versioned g++-NN binaries
-/// newest-first so the project-standard g++-15 (or newer) wins whenever it
-/// is present.
-///
-/// Linux/GNU only. On macOS the default `g++` is a clang shim whose
-/// -dumpversion is meaningless here; the caller lets CMake pick the default
-/// AppleClang instead (the CMake tree has if(APPLE) branches for it).
+/// Honors $CXX/$CC, else the default g++ if >= 14, else the newest versioned g++-NN (GNU/Linux only; macOS lets CMake pick AppleClang).
 fn pick_compilers() -> Option<(String, String)> {
     if let Some(cxx) = env_nonempty("CXX") {
         let cc = env_nonempty("CC").unwrap_or_else(|| {
@@ -76,10 +64,7 @@ fn main() {
         .to_path_buf();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Custom rerun-if-changed lines disable the default "any package file"
-    // rule, so list build.rs explicitly too. Directory watches are recursive:
-    // the merged archive embeds evmone/blst objects and the CMake helper
-    // modules shape every compile, so watch those trees as well.
+    // A custom rerun-if-changed disables the default rule, so list build.rs and the recursively watched C++ trees explicitly.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", repo_root.join("zilk_core").display());
     println!("cargo:rerun-if-changed={}", repo_root.join("cmake").display());
@@ -102,8 +87,7 @@ fn main() {
         .define("BUILD_TESTING", "OFF")
         .define("CMAKE_CXX_SCAN_FOR_MODULES", "OFF")
         .build_target("silkworm_dev");
-    // On macOS let CMake pick the default AppleClang toolchain (the CMake
-    // tree carries if(APPLE) branches for it); elsewhere require GNU g++ >= 14.
+    // macOS: CMake picks AppleClang; elsewhere require GNU g++ >= 14.
     let cxx = if cfg!(target_os = "macos") {
         None
     } else {
@@ -121,7 +105,6 @@ fn main() {
 
     let build_dir = out_dir.join("build");
 
-    // Archives needed to resolve the converter (same set the CLI links).
     let archives = [
         "zilk_core/dev/libsilkworm_dev.a",
         "zilk_core/core/libsilkworm_core.a",
@@ -130,8 +113,6 @@ fn main() {
         "deps/src/blst/libblst.a",
     ];
 
-    // silkworm_dev's target-level deps normally build all of these; build
-    // stragglers explicitly if a generator skipped them.
     for (rel, target) in [
         ("third_party/libevmone.a", "evmone"),
         ("deps/src/blst/libblst.a", "blst"),
@@ -150,9 +131,7 @@ fn main() {
         );
     }
 
-    // Merge everything into one archive. This sidesteps the
-    // silkworm_core <-> silkworm_types_zz cycle (the CLI links with
-    // --start-group) without fragile link ordering.
+    // Merge into one archive to sidestep the silkworm_core <-> silkworm_types_zz link-order cycle.
     let merged_dir = out_dir.join("merged");
     std::fs::create_dir_all(&merged_dir).unwrap();
     let merged = merged_dir.join("libz6m_witness_bundle.a");
@@ -193,10 +172,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", merged_dir.display());
     println!("cargo:rustc-link-lib=static=z6m_witness_bundle");
 
-    // Z6M_STATIC_LIBSTDCXX=1 links the selected compiler's libstdc++.a
-    // instead of the system libstdc++.so. Used by the Docker build, where
-    // the converter is compiled with the xpack gcc-15 toolchain whose
-    // libstdc++ is newer than what the ubuntu:24.04 runtime image ships.
+    // Z6M_STATIC_LIBSTDCXX=1 links libstdc++.a (the Docker build uses gcc-15, newer than the runtime image's libstdc++.so).
     let static_libstdcxx = env_nonempty("Z6M_STATIC_LIBSTDCXX").is_some_and(|v| v != "0");
     match (&cxx, static_libstdcxx) {
         (Some(cxx), true) => {

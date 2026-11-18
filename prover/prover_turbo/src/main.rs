@@ -155,34 +155,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // // Set up tracing with info level by default
-    // let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-
-    // fmt().with_env_filter(filter).init();
-
-    // dotenv::dotenv().ok();
-
     let args = Args::parse();
-
-    // let ethproofs = match (
-    //     args.ethproofs_endpoint.clone(),
-    //     args.ethproofs_token.clone(),
-    //     args.ethproofs_cluster_id,
-    // ) {
-    //     (Some(endpoint), Some(token), Some(cluster_id)) => Some(EthProofsConfig {
-    //         endpoint,
-    //         token,
-    //         cluster_id,
-    //     }),
-    //     _ => None,
-    // };
-
-    // let app_config = AppConfig {
-    //     data_dir: args.data_dir.clone(),
-    //     rpc_url: args.rpc_url.clone(),
-    //     save_all_responses: args.save_all_responses,
-    //     ethproofs,
-    // };
 
     let app = Z6mProverService::new(app_config)?;
 

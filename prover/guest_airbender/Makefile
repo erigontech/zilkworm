@@ -1,9 +1,6 @@
 BUILD_DIR := $(CURDIR)/build
-# CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im-clang.cmake
 CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im.cmake
-# Node-store account recovery, on by default: mainnet witnesses lack the address of an account
-# that the block deletes (see docs/airbender-docker-service.md). `make z6m_guest USE_HASH_KEY=OFF`
-# (or `make z6m_guest_airbender USE_HASH_KEY=OFF` from the root) builds without it.
+# Node-store account recovery is on by default (mainnet witnesses lack the address of a block-deleted account); USE_HASH_KEY=OFF builds without it.
 USE_HASH_KEY ?= ON
 LINKER_SCRIPT := $(CURDIR)/link.x
 START_ASM := start.S

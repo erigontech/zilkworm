@@ -5,7 +5,6 @@ use pkg_config;
 use std::{env, path::Path};
 
 fn main() {
-    // Tell rustc to use our custom linker script.
     let manifest_root = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let templib_dir = manifest_root + "/../prelibs";
 
@@ -27,7 +26,7 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={templib_dir}");
     let dst = cmake::Config::new("../silkworm")
-        .build_arg("-j16") // Use 4 parallel jobs, adjust as needed
+        .build_arg("-j16")
         .define("SP1", "ON")
         .define("SP1TURBO", "ON")
         .define("CMAKE_BUILD_TYPE", "Release")
@@ -69,7 +68,6 @@ fn main() {
 
     let include_dir = dst.join("include");
 
-    // Compile the C++ code and generate bindings
     let mut binding = cxx_build::bridge("src/main.rs");
     let mut builder = binding
         .include(include_dir)
@@ -93,7 +91,7 @@ fn main() {
         .flag("-Wno-attributes")
         .flag("-Wno-register")
         .flag("-Wno-unused-function")
-        .flag("-Wno-cpp") // optional noise suppressors
+        .flag("-Wno-cpp")
         .flag("-Wno-int-in-bool-context")
         .flag("-fno-exceptions")
         .flag("-fno-rtti")

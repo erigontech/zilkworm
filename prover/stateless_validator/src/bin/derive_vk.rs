@@ -1,10 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Derive the SP1 program verifying key for a guest ELF and write its 32-byte `bytes32_raw` digest,
-//! the program VK form ere checks and ere-guests publishes.
-//!
-//! Usage: derive_vk <input.elf> <output.vk>
+//! Derives a guest ELF's SP1 program VK (32-byte `bytes32_raw` digest). Usage: derive_vk <input.elf> <output.vk>
 
 use std::env;
 use std::fs;

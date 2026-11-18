@@ -4,36 +4,10 @@ PROVIDE(_max_hart_id = 0);
 PROVIDE(_hart_stack_size = 64M);
 PROVIDE(_heap_size = 896M);
 
-/*
-PROVIDE(UserSoft = DefaultHandler);
-PROVIDE(SupervisorSoft = DefaultHandler);
-PROVIDE(MachineSoft = DefaultHandler);
-PROVIDE(UserTimer = DefaultHandler);
-PROVIDE(SupervisorTimer = DefaultHandler);
-PROVIDE(MachineTimer = DefaultHandler);
-PROVIDE(UserExternal = DefaultHandler);
-PROVIDE(SupervisorExternal = DefaultHandler);
-PROVIDE(MachineExternal = DefaultHandler);
-
-PROVIDE(DefaultHandler = DefaultInterruptHandler);
-PROVIDE(ExceptionHandler = DefaultExceptionHandler);
-*/
-
-/* # Pre-initialization function */
-/* If the user overrides this using the `#[pre_init]` attribute or by creating a `__pre_init` function,
-   then the function this points to will be called before the RAM is initialized. */
+/* Called before RAM is initialized; a user `__pre_init` overrides it. */
 PROVIDE(__pre_init = default_pre_init);
 
-/* A PAC/HAL defined routine that should initialize custom interrupt controller if needed. */
-/*
-PROVIDE(_setup_interrupts = default_setup_interrupts);
-*/
-
-
-/* # Start trap function override
-  By default uses the riscv crates default trap handler
-  but by providing the `_start_trap` symbol external crates can override.
-*/
+/* Start trap override: external crates may provide `_start_trap`. */
 PROVIDE(_start_trap = default_start_trap);
 PROVIDE(_machine_start_trap = machine_default_start_trap);
 
@@ -80,11 +54,7 @@ SECTIONS
     _sirodata = LOADADDR(.rodata);
     _srodata = .;
 
-    /* The gp window. ld rewrites an auipc+addi/lw/sw pair to a single gp-relative addi/lw/sw
-       when the target lies within the reach of gp's 12-bit offset, less this output section's
-       alignment (here 256, from the keccak buffer) and the object's size. The objects with the
-       most executed address formations are gathered on both sides of __global_pointer$; below
-       it the farthest come first. */
+    /* The gp window: ld relaxes an auipc pair to one gp-relative access when the target lies within gp's 12-bit reach less this section's alignment (256) and the object's size; the hottest objects sit on both sides of __global_pointer$, the farthest first below it. */
     *(.rodata._ZN8silkworm10kEmptyHashE)
     *(.rodata._ZN6evmone6crypto9secp256k112_GLOBAL__N_1L6FP_ONEE)
     *(.rodata._ZN6evmone6crypto5bn2549Fq6Config3ksiE)
@@ -112,9 +82,7 @@ SECTIONS
     *(.rodata._bls_p_lo)
     *(.rodata._bls_np_lo)
     *(.rodata._bls_p_hi)
-    /* ld relaxes an object above gp only if its end (one past its last byte) is at most
-       gp + 1791 (2047 less the 256-byte section alignment): a window object ending at gp + 1792
-       would silently keep its auipc pair. */
+    /* ld relaxes an object above gp only if it ends at most gp + 1791 (2047 less the 256-byte section alignment). */
     ASSERT(. < __global_pointer$ + 1792, "the gp window overflows above gp");
 
     *(.srodata .srodata.*);
@@ -126,9 +94,7 @@ SECTIONS
     _erodata = .;
   } > REGION_RODATA AT > REGION_RODATAINIT :rodata
 
-  /* C++ global constructors / destructors (init_array style).
-     Read-only function-pointer arrays kept directly in ROM (VMA = LMA)
-     so they are available immediately — no copy required. */
+  /* C++ global constructors/destructors: read-only function-pointer arrays kept in ROM (VMA = LMA), no copy needed. */
   .preinit_array : ALIGN(4)
   {
     PROVIDE_HIDDEN(__preinit_array_start = .);
@@ -194,7 +160,6 @@ SECTIONS
   }
 }
 
-/* Do not exceed this mark in the error messages above                                    | */
 ASSERT(ORIGIN(REGION_TEXT) % 4 == 0, "
 ERROR(riscv-rt): the start of the REGION_TEXT must be 4-byte aligned");
 
@@ -240,22 +205,16 @@ BUG(riscv-rt): .bss is not 4-byte aligned");
 ASSERT(_sheap % 4 == 0, "
 BUG(riscv-rt): start of .heap is not 4-byte aligned");
 
-/* The gp window assumes .rodata is aligned to at most 256 bytes: an input section aligned
-   above that shrinks the reach left to gp-relative accesses and silently disables relaxations. */
+/* The gp window assumes .rodata is aligned to at most 256 bytes: a more aligned input section shrinks the reach left to gp-relative accesses. */
 ASSERT(ALIGNOF(.rodata) <= 256, "
 ERROR(z6m): .rodata is aligned above 256 bytes, which breaks the gp window");
-/* simple_allocator.cpp rounds its heap pointer up to alignments of up to 2 MiB and relies on the
-   result never passing _eheap. */
+/* simple_allocator.cpp rounds its heap pointer up to alignments of up to 2 MiB and relies on it never passing _eheap. */
 ASSERT(_sheap % 2097152 == 0 && _eheap % 2097152 == 0, "
 BUG: the heap bounds are not 2 MiB aligned");
 
 ASSERT(_stext + SIZEOF(.text) < ORIGIN(REGION_TEXT) + LENGTH(REGION_TEXT), "
 ERROR(riscv-rt): The .text section must be placed inside the REGION_TEXT region.
 Set _stext to an address smaller than 'ORIGIN(REGION_TEXT) + LENGTH(REGION_TEXT)'");
-
-/* ASSERT(_sirodata + SIZEOF(.rodata) < ORIGIN(REGION_RODATAINIT) + LENGTH(REGION_RODATAINIT), "
-ERROR(riscv-rt): The init data for .rodata section must be placed inside the REGION_RODATAINIT region.
-Set _sirodata to an address smaller than 'ORIGIN(REGION_RODATAINIT) + LENGTH(REGION_RODATAINIT)'"); */
 
 ASSERT(_sidata + SIZEOF(.data) < ORIGIN(REGION_DATAINIT) + LENGTH(REGION_DATAINIT), "
 ERROR(riscv-rt): The init data for .data section must be placed inside the REGION_DATAINIT region.
@@ -264,5 +223,3 @@ Set _sidata to an address smaller than 'ORIGIN(REGION_DATAINIT) + LENGTH(REGION_
 ASSERT(SIZEOF(.stack) >= (_max_hart_id + 1) * _hart_stack_size, "
 ERROR(riscv-rt): .stack section is too small for allocating stacks for all the harts.
 Consider changing `_max_hart_id` or `_hart_stack_size`.");
-
-/* Do not exceed this mark in the error messages above                                    | */

@@ -26,7 +26,6 @@ use url::Url;
 
 pub const SILK_ST_ELF: &[u8] = include_elf!("z6m_guest");
 
-// Dynamic prover enum to handle both CPU and CUDA provers
 enum DynamicProver {
     Env(EnvProver),
     Cuda(sp1_sdk::CudaProver),
@@ -56,7 +55,6 @@ impl DynamicProver {
     ) -> Result<(SP1ProofWithPublicValues, u64)> {
         match self {
             DynamicProver::Env(prover) => {
-                // Pre-execute to get cycle count
                 let (mut output, report) = prover
                     .execute(SILK_ST_ELF, stdin)
                     .run()
@@ -64,7 +62,6 @@ impl DynamicProver {
                 let _gas_used = output.read::<u64>();
                 let cycle_count = report.total_instruction_count();
 
-                // Now prove
                 let proof_result = match mode {
                     SP1ProofMode::Core => prover.prove(pk, stdin).core().run(),
                     SP1ProofMode::Compressed => prover.prove(pk, stdin).compressed().run(),
@@ -303,7 +300,6 @@ impl Z6mProverService {
             bincode::serde::decode_from_std_read(&mut r, cfg)?
         };
 
-        // Lock the client for exclusive proving access
         let client = self.client.lock().await;
 
         let start = Instant::now();
@@ -318,7 +314,6 @@ impl Z6mProverService {
         let proving_millis = start.elapsed().as_millis() as u64;
         let gas_used = proof.public_values.read::<u64>();
 
-        // Drop the client lock here so other operations can proceed
         drop(client);
 
         let proof_path = self.write_proof(&opts, &proof)?;
@@ -335,7 +330,6 @@ impl Z6mProverService {
         Ok(log)
     }
 
-    // Static version of prove_block that takes client as parameter for concurrent use
     async fn prove_block_with_client(
         opts: &ProveOptions,
         client_arc: Arc<Mutex<DynamicProver>>,
@@ -374,7 +368,6 @@ impl Z6mProverService {
             bincode::serde::decode_from_std_read(&mut r, cfg)?
         };
 
-        // Write proof to file
         let proof_path = opts
             .data_dir
             .join(opts.block_number.to_string())
@@ -384,15 +377,13 @@ impl Z6mProverService {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Call proving hook
         if let Some(client) = eth_client {
             client.proving(opts.block_number).await;
         }
 
         let mut start = Instant::now();
-        // Lock the client for exclusive proving access and prove with timeout
         let proof_result = tokio::time::timeout(
-            Duration::from_secs(1800), // 30 minutes timeout
+            Duration::from_secs(1800),
             async {
                 let client = client_arc.lock().await;
                 let proof_mode = match opts.proof_type.as_str() {
@@ -426,11 +417,8 @@ impl Z6mProverService {
                 let mut fp = BufWriter::new(File::create(&proof_path)?);
                 bincode::serde::encode_into_std_write(&proof, &mut fp, cfg)?;
 
-                // Call proved hook
                 if let Some(client) = eth_client {
-                    // Read proof bytes back from file
                     let proof_bytes = std::fs::read(&proof_path)?;
-                    // Get vk from pk
                     let vk = &pk.vk;
                     client
                         .proved(
@@ -453,12 +441,10 @@ impl Z6mProverService {
                     message: String::from("Success"),
                 };
 
-                // Write log to file
                 Self::persist_proving_logs_static(&opts.data_dir, &log)?;
                 Ok(log)
             }
             Ok(Err(err)) => {
-                // Proving operation failed
                 println!(
                     "[{}] Error trying to prove block {}: {}",
                     Self::format_timestamp(),
@@ -480,7 +466,6 @@ impl Z6mProverService {
                 bail!("Proving failed: {}", err)
             }
             Err(_timeout_err) => {
-                // Timeout occurred
                 let err_msg = format!("Proving timed out after {} seconds", 1800);
                 println!("[{}] {}", Self::format_timestamp(), err_msg);
 
@@ -542,15 +527,6 @@ impl Z6mProverService {
         info!("Service starting from block: {}", next_block);
 
         loop {
-            // let mut latest = match Self::get_block_number_with_retry(&provider, 3).await {
-            //     Ok(latest) => latest,
-            //     Err(err) => {
-            //         error!(error = %err, "Failed to get latest block number after retries, will retry in 30 seconds");
-            //         sleep(Duration::from_secs(30)).await;
-            //         continue;
-            //     }
-            // };
-
             if service.end_block.is_some() {
                 let end = service.end_block.unwrap();
                 if next_block > end {
@@ -561,12 +537,10 @@ impl Z6mProverService {
                 }
             }
 
-            // Collect blocks to process
             let blocks_to_process: Vec<u64> = (next_block..=latest).collect();
 
-            // Process all blocks concurrently
             let data_dir = self.config.data_dir.clone();
-            let client_arc = self.client.clone(); // Clone the Arc<Mutex<DynamicProver>>
+            let client_arc = self.client.clone();
             let eth_client = self.eth_client.clone();
             let tasks: Vec<_> = blocks_to_process
                 .into_iter()
@@ -592,7 +566,6 @@ impl Z6mProverService {
                 .collect();
 
             if !tasks.is_empty() {
-                // Wait for all spawned tasks to complete
                 for task in tasks {
                     let _ = task.await;
                 }
@@ -603,7 +576,6 @@ impl Z6mProverService {
         }
     }
 
-    // Helper method to get block number with retry logic
     async fn get_block_number_with_retry<P>(provider: &P, max_retries: u32) -> Result<u64>
     where
         P: Provider,
@@ -619,7 +591,7 @@ impl Z6mProverService {
                         return Err(err.into());
                     }
 
-                    let delay = Duration::from_secs(2_u64.pow(attempts.min(5))); // Exponential backoff, max 32 seconds
+                    let delay = Duration::from_secs(2_u64.pow(attempts.min(5)));
                     warn!(
                         attempt = attempts,
                         max_retries = max_retries,
@@ -633,7 +605,6 @@ impl Z6mProverService {
         }
     }
 
-    // Process block using shared client for proper synchronization
     async fn process_block_static(
         block_number: u64,
         service: &ServiceConfig,
@@ -689,7 +660,6 @@ impl Z6mProverService {
                 block_number
             );
 
-            // Call queued hook
             if let Some(client) = eth_client {
                 client.queued(block_number).await;
             }
@@ -707,12 +677,12 @@ impl Z6mProverService {
                 is_test: false,
                 data_dir: data_dir.clone(),
                 pk_path: pk_path.clone(),
-                proof_path: None, // Will be generated by prove_block method
+                proof_path: None,
                 proof_type: service.proof_type.clone(),
             };
 
             match tokio::time::timeout(
-                Duration::from_secs(1800), // 30 minutes timeout
+                Duration::from_secs(1800),
                 Self::prove_block_with_client(&prove_opts, client.clone(), eth_client),
             )
             .await
@@ -747,7 +717,6 @@ impl Z6mProverService {
 
         let stdin = build_stdin_from_mfbd(input_path)?;
 
-        // Use CPU executor for the service
         let client = ProverClient::from_env();
 
         let (mut output, report) = client.execute(SILK_ST_ELF, &stdin).run().unwrap();

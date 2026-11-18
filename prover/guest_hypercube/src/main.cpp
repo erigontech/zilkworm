@@ -25,7 +25,6 @@ extern "C" int main()
     auto st = cmd::state_transition::StateTransition(envelope);
     const auto r = st.run();
 
-    // Committed Public Values (see docs/architecture.md for details)
     auto syscall_write_u64_le = [](uint64_t value) {
         uint8_t le_bytes8[8];
         for (int i = 0; i < 8; i++)

@@ -15,7 +15,6 @@ if(_RISCV_GCC)
   get_filename_component(RISCV_GCC_ROOT "${_RISCV_BIN}" DIRECTORY)
   set(RISCV_SYSROOT "${RISCV_GCC_ROOT}/riscv-none-elf")
 
-  # Detect GCC version for C++ header paths
   execute_process(
     COMMAND "${_RISCV_GCC}" -dumpversion
     OUTPUT_VARIABLE _RISCV_GCC_VERSION
@@ -29,8 +28,7 @@ endif()
 
 set(COMMON_FLAGS "-target ${RISCV_TRIPLE} -march=rv32im -mabi=ilp32 -mrelax")
 if(RISCV_SYSROOT)
-  # Explicit include paths in the correct order for #include_next chains.
-  # Do NOT use --sysroot here: it conflicts with -isystem ordering.
+  # Explicit include paths in #include_next order; no --sysroot, it conflicts with -isystem ordering.
   set(COMMON_FLAGS "${COMMON_FLAGS} -isystem ${RISCV_SYSROOT}/include/c++/${_RISCV_GCC_VERSION}")
   set(COMMON_FLAGS "${COMMON_FLAGS} -isystem ${RISCV_SYSROOT}/include/c++/${_RISCV_GCC_VERSION}/riscv-none-elf")
   set(COMMON_FLAGS "${COMMON_FLAGS} -isystem ${RISCV_GCC_ROOT}/lib/gcc/riscv-none-elf/${_RISCV_GCC_VERSION}/include")
@@ -42,9 +40,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMMON_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_FLAGS}")
 set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} ${COMMON_FLAGS}")
 
-# --- Linker selection ---
-# Prefer lld, fall back to the GCC toolchain's ld.
-# Use CACHE FORCE to prevent CMake's auto-detected /usr/bin/ld from overriding.
+# Prefer lld, else the GCC toolchain's ld; CACHE FORCE stops CMake's auto-detected /usr/bin/ld from winning.
 find_program(_LLD ld.lld)
 if(_LLD)
   set(CMAKE_LINKER "${_LLD}" CACHE FILEPATH "RISC-V linker" FORCE)
