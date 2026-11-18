@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// GENERATED (do not hand-edit): a tests-zkevm v21.0.1 statelessInputBytes and the values the
+// GENERATED (do not hand-edit): a tests-zkevm v21.0.7 statelessInputBytes and the values the
 // fixture commits to. Source: for_amsterdam/shanghai/eip4895_withdrawals/withdrawals/newly_created_contract.json,
 // test_newly_created_contract[fork_Amsterdam-blockchain_test_engine-without_tx_value].
 #pragma once
@@ -19,7 +19,7 @@ inline constexpr std::size_t kTransactions = 1;
 inline constexpr std::size_t kWithdrawals = 1;
 
 // statelessOutputBytes: hash_tree_root(new_payload_request), successful_validation, chain_id, schema_id.
-inline constexpr char kExpectedOutputHex[] = "f3a65debae226584b7143cad9d5e11805e20f9949d238c3dd5ce69c9fd0757f30101000000000000000115";
+inline constexpr char kExpectedOutputHex[] = "c3bee9fcb651806a08ba0f6ce0ff66a9b758479d5f84657d0320656c5ab183260101000000000000000115";
 // execution_payload.block_hash, which the block the request describes must hash to.
 inline constexpr char kBlockHashHex[] = "eb1ab589b77bec5677542269d9773891045f791ecbd48b669adb97988bca48b5";
 

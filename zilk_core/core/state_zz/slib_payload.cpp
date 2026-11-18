@@ -40,6 +40,8 @@ namespace {
     constexpr std::array<size_t, kRequestTypes> kRequestsOffsets{0, 4, 8, 12, 16};
     constexpr std::array<size_t, kRequestTypes> kRequestItemSize{192, 76, 116, 184, 68};
 
+    constexpr size_t MAX_BLOB_COMMITMENTS_PER_BLOCK = 4096;
+
     // The lists the schema leaves unbounded, bounded against a hostile input.
     constexpr uint32_t kMaxTransactionBytes = 1u << 23;
     constexpr uint32_t kMaxTransactions = 1u << 16;
@@ -103,7 +105,9 @@ std::optional<SlibPayload> decode_slib_payload(ByteView request) {
     const ByteView payload = f[0];
     SlibPayload p;
     p.versioned_hashes = f[1];
-    if (p.versioned_hashes.size() % 32 != 0) return std::nullopt;
+    if (p.versioned_hashes.size() % 32 != 0 || p.versioned_hashes.size() / 32 > MAX_BLOB_COMMITMENTS_PER_BLOCK) {
+        return std::nullopt;
+    }
     p.parent_beacon_block_root = bytes32_at(request, kBeaconRootAt);
     const ByteView requests = f[2];
 
@@ -193,11 +197,11 @@ ssz::Node slib_payload_root(const SlibPayload& p) {
 
     const std::array<Node, 4> request{
         ssz::root_progressive_container(payload),
-        ssz::root_progressive_list(hashes),
+        ssz::root_list(hashes, MAX_BLOB_COMMITMENTS_PER_BLOCK),
         ssz::root_bytes_fixed(ByteView{p.parent_beacon_block_root.bytes, 32}),
         ssz::root_progressive_container(lists),
     };
-    return ssz::root_container(request);
+    return ssz::root_progressive_container(request);
 }
 
 std::optional<silkworm::Block> slib_payload_block(const SlibPayload& p) {

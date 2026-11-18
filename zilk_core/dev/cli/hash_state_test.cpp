@@ -33,8 +33,9 @@
 #include <zilk_core/core/trie_zz/rlp_sw.hpp>     // encode_leaf/branch/ext + node types
 #include <zilk_core/core/types_zz/account.hpp>   // Account (leaf-value encode/decode target)
 #include <zilk_core/dev/check_root_hashstate.hpp>  // check_root_hashstate + HashStateAccountWrite
+#include <zilk_core/dev/state_transition.hpp>
 
-#include "slib_sample_fixture.hpp"  // a tests-zkevm v21.0.1 statelessInputBytes sample
+#include "slib_sample_fixture.hpp"  // a tests-zkevm v21.0.7 statelessInputBytes sample
 
 using zilkworm::Account;
 using zilkworm::BranchNode;
@@ -2478,7 +2479,7 @@ void put_u32_at(Bytes& b, std::size_t off, std::uint32_t v) {
 
 }  // namespace
 
-// The cross-check on real wire bytes: a tests-zkevm v21.0.1 statelessInputBytes decodes, its
+// The cross-check on real wire bytes: a tests-zkevm v21.0.7 statelessInputBytes decodes, its
 // NewPayloadRequest hashes to the root the fixture's statelessOutputBytes commits to, the block it
 // describes hashes to the payload's block_hash, and the witness builds against the parent's state root.
 TEST_CASE("slib decodes the real StatelessInputBytes sample: request root, block hash, pre-state",
@@ -2530,6 +2531,140 @@ TEST_CASE("slib decodes the real StatelessInputBytes sample: request root, block
     CHECK(hs.node_count() == slib_sample::kExpectedNodes);
     CHECK(hs.code_count() == slib_sample::kExpectedCodes);
     CHECK(hs.account_count() > 0u);
+}
+
+namespace {
+
+constexpr char kKnownAnswerInputHex[] =
+    "1501100000002006000001000000000000002c000000400300003169b3bb8a53f3bdabd1e89cec2294a7b4dd6c1388fc5cb2fadf547bf9c28b3e8003"
+    "0000295bb57e557363c971f99042d28a38931575ec557fe931020c2747ce9788b1be7a5fb1770b22aa713d234eec20ef70f661b2291c60ac9409542d"
+    "f96a46a6882ef81b0dc2c2dcb5d7875f5a263a7d1b6dfc6bd87074e49d79ecbff4d0be3a768dfb01622727d75d863856e8d62ff4bbded6a561ae3e16"
+    "fc51f8d25cf3bbc8b6bba0940eb2978992f4da8b871b925f1f86bb4b7d20d77a09916753e918bd36a536d950e09162656cba6893dffdc781cb406679"
+    "cba7a05d45e389e8e12c5a0fe9be02136bda7e7ca18c3fdedc00ca7e6d5ab97e362beb45fbe0f3d1ed2c4e0ed791ff97b27481d93f5e2dda1a016c0b"
+    "3e4ca75776697a84e9a28b46859104544f16f6b2cfa208ac5f86f7493f257dd52d484a7d3e37ffb9c962197fa0c38efaf486261ee67c5e7ee7b0c99c"
+    "060893a91ad6c4af5e827c070719ab23b7f5c8df11eef8724aa661846337cb9a1e6a9e59ce45dee8733a64e22a623adfb143eea8cc98be6e1705db66"
+    "4bc4f3f6df690f6ecfe2ee5c4ab21139aca6964117841ba7b9028f6eb4cbda8250055f42734a2fbb248c4020e904fec755900000000080c3c9010000"
+    "00005bfb7e0000000000aa020433000000001c020000ccfe850200000000000000000000000000000000000000000000000000000000ca75b5f1c119"
+    "ebc8f194fe8ee216094377d234e9189328efd5490c8a2b300ec63c02000004030000ac72000000000000abe600000000000004030000878873b80000"
+    "000003dc912d2ae005b7836c6c3ea320fc0901ec02c6804ea50d75bf740bd8465f580800000048000000226ed184fff7ecb9a511bfee0fd237cf29dd"
+    "56755ace2db6d9df39dae0e8183406ad3f2b690db6610fc58aee966f4c7eb72e2d8d2ad12748ac34a465cd7fafcf2106fc9a498ca4d77b86187f3bd4"
+    "986b38da0cab70b6dd2328dee89c2e1f876781b7ab0c766edc93f861c3bf3e59e03f7c630fd9b8713e3f9d2e8c8a4216197e41e152b3a18df504b26c"
+    "3ce024f76e7016e7b66494921fe156130bb9f631c6c9e3f18484340b7c0f5f57020752edaa72b5fba02328e50abeeae0d31af4705a5690e6e544a30d"
+    "ccac723fe66a978ed2f7046d78e699ee6de49c60bac5a0fdf77754655db1ab68b9ecd2d861b682a94446fe40f9402d855063227c695192ef947921f3"
+    "ffedad85012764a9b08c2d9af04c140000009401000094010000940100004c02000019c91339234c9b0ec63075bb88318d0d0ae82fbd0c9aa895cc30"
+    "58907a3a462953256e8d91cd3f9e32d6148de27603f17adbc66d3aeda8f758e733d2ae37962ebc14d32f1738373b848f04dfb69121cdc19970cbe025"
+    "24969fdf0138ced0ef1648fc21f43925d74292998bd6d66908b41b2dd234a412f4d0dc6390a2274bfd027bedcbd8f80aa7bcbd2b88f5444797bf1916"
+    "bad7db2cb6fedd952341ff2c6ff6cb3cf804bca4899aeb8b7edd200199c0d36453a6097870b3ecbce0e48773ae046468ab2cbaacf4c3618dfa2688ee"
+    "0af1b061649bbbbca61063940b90472f1fbe8fbc9397fcb3051f26e89f2d50c90ffece79fb166801063fe884368173fb99f8acf5e4197a5e4f16e6f9"
+    "01ddc2e37a90938c38dab96f5123fae03da9292d601e1feb192ff9b1933ba104b44bf0731d268b63c7213e950e6a35a4e106e988454bde86b44ec987"
+    "79f45557b40ea4ee8c516b39f396fe2bcb37a9537d855e21da72b05fc0a43076a27bbb738b2edbd25ed55de156b2dddbba97f4f0ea45fc777ad43b33"
+    "b09ce4d238463a51f7322596a65cac331069f3c133c35b8b1eaf9ff87061dcf524ba19014b33c91161e4338a4d5fbcafe5089b15b90b27b7a669e033"
+    "b75aa0669e074f36558febf2117227114f68d6e8f372387bbda5b39468d07d6a9998c8a21eff49e872ce1759ffd1ce8ed79dbaad4145f8b325d958f2"
+    "3df0fe3b63b0ff74dbac5854048f67a14b8fbbcbc3851f5b670d7475e58c811d4e70cbc505b50950747f40d31beb404fe3abbc6624f2f8dfe42d6479"
+    "da981c269d1290ccad1005e24f9e28c3a9dd7bc2039c69f958659b01761e5db9e47b5d3cd7debb189f315715e61fe7a70d513f70dbc1d64de72ce58a"
+    "03c941dc4b07d57930dc0c000000b8000000500100000c0000004c0000008c000000630b4cdcc84d9cab54fb8b72e90826a066d1a71c552c3c2dd7d5"
+    "03f8c30b25671838785ba14cb5212597d56dc389fa21f6b717a01dfdb2e2cecc34f87956fba5d0f2f80553f9107bad48876a108c4fcdc0c3029a6a39"
+    "2a74c0a03a8f4664edd7616834025a3d489b827454e3bbebe1a923d608827fdf17156f0c5a795bca8e82f01cbaee304ce82fdbe5957cfc1e7c38a04a"
+    "0e5d93523a3846617f0eda3031cc0800000038000000f6ffb988368c9e76c7c41f9da8f8abfa56fc8b2b64eace6f705d0817e5123b0461c14dc73b82"
+    "5a86367bf534a9d1911fe820dbf67425e6a7b3635cc8f43ca084fa72eb4a08d1d18f052a3d378c54f6cd4dd20b09e926706d12381d77ab64c38bbf4d"
+    "a86be0e01e67e7efe96b794e31a43b82985f43ef6bdd3742b7876919952a628638700104e8aeeea99639f886e2730800000008020000bbae52dd1994"
+    "41648cd090ed556ba52e51b7ed1f3a8bb7f172af9f24586eda5cd8281d90809b2bdc4210c2d2ea44fde9897a3004ccf8862c11f90579586a2ecf29c6"
+    "61563c99def7d51b1a7fa61c9d6ded1b6173801c433cc20997d76c855cfdb969f7bc9c0a56623b1654ce187f85eeee691df0b6eb4a4bda6dceb0c103"
+    "be682df59e954cbc22ee4ada89080edf4e55b174080063ebb8df97e2dd93827251059077b80dc4ddb7c2164854fe2a36cde9cce4b098a11e200e3371"
+    "7046b3e0248988436c822193f7786e1065425af0d8fbe790ea09df0d6b18a2e21dacf2669b65eb288285cf222f05cdc159cbe4c58646f6e26c88dd69"
+    "34433532ce5c82ed81c0cc5382f75b1c53cc48a1f2679f9ce1d624f9bf45096eeb3537a2bdfdf00ca2e551930d6206a32adc17b46a9c0e5d1b6a631c"
+    "8a1054b34a2845348fa4d4994cb319f0c84db1490eb46a38deed546dd9eff31b545c9b7cf1ca48ac16afdc1255841487ba24f350fcb09cf298d9dd31"
+    "8d84240d0e553af83a9adeb661cc1688832f6892a643b08446b74d57b6b70bcc453ca4e3933153255dd2b4eb8ea9c5784a6636b862dae76ab3578fb4"
+    "3a7db7fde23bb203d0eee5dab5079ab60621280ca845e3ce57fc4c8f48f4f0b5ef56ca1f16d24e2ab1951bea677d3c00f877c39c9851ab9c1effb08f"
+    "02f697ed5ebcd27d26d722d05ce9383c68120c7cb6745a38e5a929a8dbaa76f985915a2624c4995534c79a0df0ffbf9fcb9f57bd41e0e744d953a803"
+    "02fd3f0750895004637c584adc191552a9ee68c66a5e924bb3e54a55619779f0f860219d3aee6c191aebe2ec118ce925cbffc90e8d6178917ed5e49e"
+    "7d7a67fa00201730a09beb9ff3084704e044264e20cd79506bbb583771cb1e2c73c8f2a66475140d41d22a1f48912dd9ed9601c9dba13a8689f60972"
+    "e4bc851d7cbe6ba77f56af2b9f219ae6e93a2ebb032342b033772e936f7ba588c674b2c0d12a3e41985484683fc06e4c5175c5c7598bb5416196b86c"
+    "6d2a237ac26641f13735910b3ef731813b0add7ebfe62959f1eeccd92ae5f4c467419ee14c6caeb18ef8a871a4099efcdf1d375eaab9ccae00a84360"
+    "343e87f29669afbc216eb868198eaf38898c31d47841f9b7c1211f439f39c0eb7d22fdffa31d9fc3ec98ef33dc94b3119c31614f5071954b9c5b230a"
+    "aada71f46191382d4f8d6497721f48cda288cb63631a6a26479bae7f6fb0666deb0c028b273d46882753c0e906c93b0b48f5829abbd7d756d1e58d72"
+    "3cffb0ad22826930136efe57c0d62866eb7c60a84d12a66da9d46202d87c81316988f7c4e02dbf20d38bcb0616d1f6a65de9d6587b2b02400dd194db"
+    "59beae00668ac06b83ac926f0db1c236eae145d5e977849cf19f01ac8a3548c22c9279cdc7a7188f17655065adbfd2bf23815958a3e0db1bb49d";
+
+// The sample with its versioned_hashes replaced by n hashes, hash i being 32 bytes of i % 256.
+[[nodiscard]] Bytes sample_with_versioned_hashes(std::size_t n) {
+    const Bytes blob = hex_to_bytes(slib_sample::kBlobHex);
+    const ByteView body = ByteView{blob}.substr(2);
+    const std::uint32_t npr_at = zilkworm::ssz::rd_u32(body, 0);
+    const std::uint32_t witness_at = zilkworm::ssz::rd_u32(body, 4);
+    const ByteView npr = body.substr(npr_at, witness_at - npr_at);
+    const std::uint32_t payload_at = zilkworm::ssz::rd_u32(npr, 0);
+    const std::uint32_t hashes_at = zilkworm::ssz::rd_u32(npr, 4);
+    const std::uint32_t requests_at = zilkworm::ssz::rd_u32(npr, 40);
+    const ByteView payload = npr.substr(payload_at, hashes_at - payload_at);
+
+    Bytes new_npr;
+    put_u32(new_npr, 44);
+    put_u32(new_npr, static_cast<std::uint32_t>(44 + payload.size()));
+    new_npr.append(npr.substr(8, 32));
+    put_u32(new_npr, static_cast<std::uint32_t>(44 + payload.size() + 32 * n));
+    new_npr.append(payload);
+    for (std::size_t i = 0; i < n; ++i) new_npr.append(32, static_cast<std::uint8_t>(i));
+    new_npr.append(npr.substr(requests_at));
+
+    Bytes out = blob.substr(0, 6);
+    put_u32(out, static_cast<std::uint32_t>(npr_at + new_npr.size()));
+    out.append(body.substr(8, npr_at - 8));
+    out.append(new_npr);
+    out.append(body.substr(witness_at));
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("slib hashes the execution-specs known-answer input to its tests-zkevm v21.0.7 request root",
+          "[hash_state][slib]") {
+    const Bytes blob = hex_to_bytes(kKnownAnswerInputHex);
+    REQUIRE(blob.size() == 2938);
+    const auto dec = zilkworm::decode_stateless_input(ByteView{blob});
+    REQUIRE(dec.has_value());
+    const auto payload = zilkworm::decode_slib_payload(dec->new_payload_request);
+    REQUIRE(payload.has_value());
+    CHECK(payload->versioned_hashes.size() == 2 * 32);
+    const auto root = zilkworm::slib_payload_root(*payload);
+    CHECK(silkworm::to_hex(ByteView{root.data(), root.size()}) ==
+          "43afdcfa2792c3fb237ddbf271fc3675e3dc06ec37283f7f6956c2da6e917dd7");
+}
+
+TEST_CASE("slib decodes 4096 versioned hashes and answers 4097 with the all-zero validation result",
+          "[hash_state][slib]") {
+    constexpr char kAtCapRoot[] = "2a6d39e96feaa7f1f2eaf59ba312c8c5daf7d5148dc42b355ec2fdd8d710e2f9";
+    const Bytes at_cap = sample_with_versioned_hashes(4096);
+    const Bytes over_cap = sample_with_versioned_hashes(4097);
+
+    const auto dec_at = zilkworm::decode_stateless_input(ByteView{at_cap});
+    REQUIRE(dec_at.has_value());
+    const auto payload = zilkworm::decode_slib_payload(dec_at->new_payload_request);
+    REQUIRE(payload.has_value());
+    CHECK(payload->versioned_hashes.size() == 4096 * 32);
+    const auto root = zilkworm::slib_payload_root(*payload);
+    CHECK(silkworm::to_hex(ByteView{root.data(), root.size()}) == kAtCapRoot);
+
+    const auto dec_over = zilkworm::decode_stateless_input(ByteView{over_cap});
+    REQUIRE(dec_over.has_value());
+    CHECK_FALSE(zilkworm::decode_slib_payload(dec_over->new_payload_request).has_value());
+
+#ifdef Z6M_HASH_STATE
+    // The 43 bytes the guest commits (prover/guest_hypercube/src/main.cpp) for a run of `blob`.
+    auto committed = [](Bytes blob) {
+        silkworm::cmd::state_transition::StateTransition st{std::span<std::uint8_t>{blob.data(), blob.size()}};
+        const auto r = st.run();
+        REQUIRE(r.sib);
+        Bytes out{r.new_payload_request_root.bytes, 32};
+        out.push_back(r.successful_validation ? 1 : 0);
+        put_u64(out, r.chain_id);
+        out.push_back(static_cast<std::uint8_t>(r.schema_id));
+        out.push_back(static_cast<std::uint8_t>(r.schema_id >> 8));
+        return out;
+    };
+    CHECK(silkworm::to_hex(committed(at_cap)) == std::string{kAtCapRoot} + "00" + "0100000000000000" + "0115");
+    CHECK(committed(over_cap) == Bytes(43, 0));
+#endif
 }
 
 

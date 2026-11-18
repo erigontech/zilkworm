@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The NewPayloadRequest of a statelessInputBytes blob (execution-specs amsterdam/stateless.py,
-// tests-zkevm v21.0.1, the Gloas shape): decoded into views, hashed for the validation result, and
+// tests-zkevm v21.0.7, the Gloas shape): decoded into views, hashed for the validation result, and
 // turned into the block the guest executes.
 
 #pragma once
