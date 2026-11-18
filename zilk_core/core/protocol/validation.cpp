@@ -56,7 +56,6 @@ ValidationResult pre_validate_transaction(const Transaction& txn, const evmc_rev
             return ValidationResult::kMaxFeeLessThanBase;
         }
 
-        // https://github.com/ethereum/EIPs/pull/3594
         if (txn.max_priority_fee_per_gas > txn.max_fee_per_gas) {
             return ValidationResult::kMaxPriorityFeeGreaterThanMax;
         }
@@ -89,16 +88,12 @@ ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::
         return ValidationResult::kWrongNonce;
     }
 
-    // See YP, Eq (61) in Section 6.2 "Execution"
     const intx::uint512 v0{txn.maximum_gas_cost() + txn.value};
     if (state.get_balance(*sender) < v0) {
         return ValidationResult::kInsufficientFunds;
     }
 
     if (available_gas < txn.gas_limit) { 
-        // Corresponds to the final condition of Eq (58) in Yellow Paper Section 6.2 "Execution".
-        // The sum of the transaction’s gas limit and the gas utilized in this block prior
-        // must be no greater than the block’s gas limit.
         return ValidationResult::kBlockGasLimitExceeded;
     }
 
@@ -140,15 +135,11 @@ ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision 
         return ValidationResult::kUnsupportedTransactionType;
     }
 
-    // EIP-2780/8037 (Amsterdam): g0 is the regular-gas intrinsic only; the state-dependent
-    // charges are made at the top frame, not here.
+    // EIP-2780/8037 (Amsterdam): g0 is the regular-gas intrinsic only; state-dependent charges are made at the top frame.
     intx::uint128 g0;
     if (revision >= EVMC_AMSTERDAM) {
         const auto cost = amsterdam_tx_gas_cost(txn, non_zero_bytes);
-        // EIP-8037: the gas limit above TX_MAX_GAS_LIMIT is the state-gas reservoir,
-        // so min(gas_limit, TX_MAX_GAS_LIMIT) must cover the regular intrinsic and
-        // the calldata floor. With the gas limit checks below this is evmone's
-        // validate_transaction condition.
+        // EIP-8037: min(gas_limit, TX_MAX_GAS_LIMIT) must cover the regular intrinsic and the calldata floor.
         constexpr int64_t kMaxTxGasLimit = 0x1000000;  // 2**24
         if (std::max(cost.regular, cost.floor) > kMaxTxGasLimit) {
             return ValidationResult::kIntrinsicGas;
@@ -176,7 +167,6 @@ ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision 
 ValidationResult pre_validate_common_forks(const Transaction& txn, evmc_revision rev,
                                            const std::optional<intx::uint256>& blob_gas_price,
                                            size_t non_zero_bytes) noexcept {
-    // EIP-3860: Limit and meter initcode.
     // EIP-7954 (Amsterdam): MAX_INITCODE_SIZE doubles to 2 * 0x10000.
     // TODO(chfast): duplicate of evmone lib/evmone/constants.hpp.
     const bool contract_creation{!txn.to};
@@ -197,7 +187,6 @@ ValidationResult pre_validate_common_forks(const Transaction& txn, evmc_revision
                     return ValidationResult::kWrongBlobCommitmentVersion;
                 }
             }
-            // SILKWORM_ASSERT(blob_gas_price);
             if (txn.max_fee_per_blob_gas < blob_gas_price) {
                 return ValidationResult::kMaxFeePerBlobGasTooLow;
             }
@@ -210,7 +199,6 @@ ValidationResult pre_validate_common_forks(const Transaction& txn, evmc_revision
     if (rev >= EVMC_PRAGUE) {
         // EIP-7702
         if (txn.type == TransactionType::kSetCode) {
-            // Contract creation is disallowed for SetCode transactions
             if (contract_creation) {
                 return ValidationResult::kProhibitedContractCreation;
             }
@@ -314,8 +302,7 @@ evmc::bytes32 compute_transaction_root(const BlockBody& body) {
         };
         return trie::root_hash(txns, kEncoder);
     }
-    // Decoded transactions: the trie values are their own bytes, so they need no encoding
-    // (as in trie::root_hash, the builder borrows each until the next leaf).
+    // Decoded transactions' trie values are their own bytes, so they need no encoding.
     trie::HashBuilder hb;
     Bytes index_rlp;
     for (size_t j{0}; j < txns.size(); ++j) {

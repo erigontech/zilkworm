@@ -10,21 +10,17 @@
 
 namespace silkworm::protocol {
 
-// Proof of Work implementation
 class EthashRuleSet : public RuleSet {
   public:
     explicit EthashRuleSet(const ChainConfig& chain_config) : RuleSet(chain_config, /*prohibit_ommers=*/false) {}
 
     void initialize(const Block& block, ActiveState& direct) override;
 
-    //! \brief See [YP] Section 11.3 "Reward Application".
     ValidationResult finalize(ActiveState& direct, const Block& block) override;
 
     BlockReward compute_reward(const Block& block) override;
 
-    // Canonical difficulty of a Proof-of-Work block header.
-    // See Section 4.3.4 "Block Header Validity" of the Yellow Paper and also
-    // EIP-2, EIP-100, EIP-649, EIP-1234, EIP-2384, EIP-3554, EIP-4345.
+    // Canonical PoW difficulty (EIP-2, 100, 649, 1234, 2384, 3554, 4345).
     static intx::uint256 difficulty(
         uint64_t block_num,
         uint64_t block_timestamp,
@@ -39,7 +35,6 @@ class EthashRuleSet : public RuleSet {
     ValidationResult validate_difficulty_and_seal(const BlockHeader& header, const BlockHeader& parent) override;
 
   private:
-    // ethash::epoch_context_ptr epoch_context_{nullptr, ethash_destroy_epoch_context};
 };
 
 }  // namespace silkworm::protocol

@@ -31,17 +31,14 @@ ethash::hash256 BlockHeader::boundary() const {
     return intx::be::store<ethash::hash256>(result);
 }
 
-// Approximates factor*e^(numerator/denominator) using Taylor expansion.
-// See https://eips.ethereum.org/EIPS/eip-4844#helpers
+// Approximates factor*e^(numerator/denominator) by Taylor expansion (EIP-4844).
 static intx::uint256 fake_exponential(const intx::uint256& factor,
                                       const intx::uint256& numerator,
                                       const intx::uint256& denominator) {
     intx::uint256 output{0};
     intx::uint256 numerator_accum{factor * denominator};
     if (denominator <= std::numeric_limits<uint32_t>::max()) {
-        // The protocol's update fractions are ~2^23: with a 32-bit denominator, denominator * i
-        // fits in 64 bits, which avoids a uint256 multiplication and takes the fast
-        // single-word division path.
+        // Update fractions are ~2^23: a 32-bit denominator keeps denominator * i in 64 bits, avoiding a uint256 multiply.
         const auto denom64 = static_cast<uint64_t>(denominator);
         for (unsigned i{1}; numerator_accum > 0; ++i) {
             output += numerator_accum;
@@ -145,7 +142,6 @@ namespace rlp {
         encode(to, header.gas_used);
         encode(to, header.timestamp);
         if (exclude_extra_data_sig) {
-            // SILKWORM_ASSERT(header.extra_data.size() >= protocol::kExtraSealSize);
             const ByteView extra_data_no_signature{header.extra_data.data(), header.extra_data.size() - protocol::kExtraSealSize};
             encode(to, extra_data_no_signature);
         } else {

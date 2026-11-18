@@ -20,30 +20,15 @@ consteval uint32_t pad_to_words(uint32_t size) noexcept {
 std::optional<Bytes> extract_deposit(const Bytes& data) {
     Bytes requests;
 
-    // Validate the layout of the log. If it doesn't match the EIP spec,
-    // the requests' collection is failed.
+    // A log not matching the EIP-6110 layout fails the requests' collection.
     if (data.size() != 576)
         return std::nullopt;
 
-    // Deposit log definition
-    // https://github.com/ethereum/consensus-specs/blob/dev/solidity_deposit_contract/deposit_contract.sol
-    // event DepositEvent(
-    //     bytes pubkey,
-    //     bytes withdrawal_credentials,
-    //     bytes amount,
-    //     bytes signature,
-    //     bytes index
-    // );
-    //
-    // In ABI a word with its size prepends every bytes array.
-    // Skip over the first 5 words (offsets of the values) and the pubkey size.
-    // Read and validate the ABI offsets and lengths for the dynamic fields
-    // according to EIP-6110. If any check fails, collection is considered failed.
+    // DepositEvent(pubkey, withdrawal_credentials, amount, signature, index): five ABI offsets, then each bytes array prefixed by its size.
 
     const auto read_word_as_size = [&](size_t pos) -> std::optional<uint32_t> {
         assert(data.size() >= pos + 32);
         const auto v = intx::be::unsafe::load<intx::uint256>(&data[pos]);
-        // Ensure the encoded bytes fit into uint32_t.
         if (v > std::numeric_limits<uint32_t>::max())
             return std::nullopt;
         return static_cast<uint32_t>(v);
@@ -52,7 +37,6 @@ std::optional<Bytes> extract_deposit(const Bytes& data) {
     static constexpr uint32_t WORD = 32;
     assert(data.size() >= WORD * 5);
 
-    // Read the 5 offsets from the head (first 5 words).
     std::array<uint32_t, 5> offsets = {};
     for (size_t i = 0; i < offsets.size(); ++i) {
         const auto w = read_word_as_size(i * WORD);
@@ -61,7 +45,6 @@ std::optional<Bytes> extract_deposit(const Bytes& data) {
         offsets[i] = *w;
     }
 
-    // Compute expected offsets and lengths (hard-coded from the deposit ABI layout).
     static constexpr uint32_t DATA_SECTION =
         WORD * 5;  // where the dynamic data area starts
     static constexpr uint32_t PUBKEY_OFFSET = DATA_SECTION;
@@ -79,14 +62,12 @@ std::optional<Bytes> extract_deposit(const Bytes& data) {
         SIGNATURE_OFFSET + WORD + pad_to_words(SIGNATURE_SIZE);
     static constexpr uint32_t INDEX_SIZE = 8;
 
-    // Offsets in the head point to the length-word of each dynamic field.
     static constexpr std::array EXPECTED_OFFSETS{
         PUBKEY_OFFSET, WITHDRAWAL_OFFSET, AMOUNT_OFFSET, SIGNATURE_OFFSET, INDEX_OFFSET};
 
     if (offsets != EXPECTED_OFFSETS)
         return std::nullopt;  // layout does not match expected EIP-6110 deposit layout
 
-    // Validate sizes of each field encoded in the log.
     const auto validate_size_at = [&](uint32_t offset, uint32_t expected_size) -> bool {
         const auto size = read_word_as_size(offset);
         return size.has_value() && (*size == expected_size);
@@ -96,7 +77,6 @@ std::optional<Bytes> extract_deposit(const Bytes& data) {
         !validate_size_at(AMOUNT_OFFSET, AMOUNT_SIZE) ||
         !validate_size_at(SIGNATURE_OFFSET, SIGNATURE_SIZE) ||
         !validate_size_at(INDEX_OFFSET, INDEX_SIZE)) {
-        // field size does not match expected EIP-6110 deposit layout
         return std::nullopt;
     }
 
@@ -113,7 +93,6 @@ std::optional<Bytes> extract_deposit(const Bytes& data) {
 }
 
 bool FlatRequests::extract_deposits_from_logs(const std::vector<Log>& logs) {
-    // See EIP-6110: Supply validator deposits on chain
     static constexpr evmc::bytes32 kDepositEventSignatureHash = 0x649bbc62d0e31342afea4e5cd82d4049e7e1ee912fc0889aa790803be39038c5_bytes32;
     for (const auto& log : logs) {
         const auto is_deposit_event = std::size(log.topics) > 0 && log.topics[0] == kDepositEventSignatureHash;
@@ -142,7 +121,6 @@ Hash FlatRequests::calculate_sha256() const {
 
     for (const auto enum_type : magic_enum::enum_values<FlatRequestType>()) {
         const auto request_type = magic_enum::enum_integer(enum_type);
-        // Include intermediate hashes of non-empty requests only
         if (!std::empty(requests_[request_type])) {
             Bytes to_sha;
             to_sha.push_back(request_type);

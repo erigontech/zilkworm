@@ -141,15 +141,11 @@ std::optional<ChainConfig> ChainConfig::from_json(const nlohmann::json& json) no
     read_json_config_member(json, "grayGlacierBlock", config.gray_glacier_block);
 
     if (json.contains(kTerminalTotalDifficulty)) {
-        // We handle terminalTotalDifficulty serialized both as JSON string *and* as JSON number
         if (json[kTerminalTotalDifficulty].is_string()) {
-            /* This is still present to maintain compatibility with previous Silkworm format */
             config.terminal_total_difficulty =
                 intx::from_string<intx::uint256>(json[kTerminalTotalDifficulty].get<std::string>());
         } else if (json[kTerminalTotalDifficulty].is_number()) {
-            /* This is for compatibility with Erigon that uses a JSON number */
-            // nlohmann::json treats JSON numbers that overflow 64-bit unsigned integer as floating-point numbers and
-            // intx::uint256 cannot currently be constructed from a floating-point number or string in scientific notation
+            // Erigon writes a JSON number; values beyond uint64 arrive as floating point, which intx cannot construct from.
             config.terminal_total_difficulty =
                 from_string_sci<intx::uint256>(json[kTerminalTotalDifficulty].dump().c_str());
         }
@@ -160,8 +156,7 @@ std::optional<ChainConfig> ChainConfig::from_json(const nlohmann::json& json) no
     read_json_config_member(json, "cancunTime", config.cancun_time);
     read_json_config_member(json, "pragueTime", config.prague_time);
 
-    /* Note ! genesis_hash is purposely omitted. It must be loaded from db after the
-     * effective genesis block has been persisted */
+    /* genesis_hash is omitted on purpose: it is loaded from the db once the genesis block is persisted */
 
     if (!config.valid_pre_merge_config()) {
         return std::nullopt;
@@ -191,8 +186,7 @@ evmc_revision ChainConfig::revision(uint64_t block_num, uint64_t block_time) con
     if (berlin_block && block_num >= berlin_block) return EVMC_BERLIN;
     if (istanbul_block && block_num >= istanbul_block) return EVMC_ISTANBUL;
     if (petersburg_block && block_num >= petersburg_block) return EVMC_PETERSBURG;
-    // EVMC dropped the Constantinople revision (never active on Mainnet);
-    // Petersburg is its closest match (Constantinople minus EIP-1283).
+    // EVMC has no Constantinople; Petersburg (Constantinople minus EIP-1283) is the match.
     if (constantinople_block && block_num >= constantinople_block) return EVMC_PETERSBURG;
     if (byzantium_block && block_num >= byzantium_block) return EVMC_BYZANTIUM;
     if (spurious_dragon_block && block_num >= spurious_dragon_block) return EVMC_SPURIOUS_DRAGON;
@@ -234,7 +228,6 @@ BlobParams ChainConfig::blob_params(uint64_t block_time) const noexcept {
 std::vector<BlockNum> ChainConfig::distinct_fork_block_nums() const {
     std::set<BlockNum> ret;
 
-    // Add forks identified by *block number* in ascending order
     ret.insert(homestead_block.value_or(0));
     ret.insert(dao_block.value_or(0));
     ret.insert(tangerine_whistle_block.value_or(0));
@@ -257,7 +250,6 @@ std::vector<BlockNum> ChainConfig::distinct_fork_block_nums() const {
 std::vector<BlockTime> ChainConfig::distinct_fork_times() const {
     std::set<BlockTime> ret;
 
-    // Add forks identified by *block timestamp* in ascending order
     ret.insert(shanghai_time.value_or(0));
     ret.insert(cancun_time.value_or(0));
     ret.insert(prague_time.value_or(0));

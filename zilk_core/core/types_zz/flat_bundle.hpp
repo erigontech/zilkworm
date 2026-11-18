@@ -16,8 +16,7 @@ namespace zilkworm {
 
 inline constexpr uint32_t kInputMagicMFBD = 0x4442464Du;  // "MFBD"
 inline constexpr uint32_t kInputMagicEJSN = 0x4E534A45u;  // "EJSN"
-// A raw statelessInputBytes blob (EIP-8025): its 2-byte schema id, big-endian on the wire, so the first
-// byte is 0x15. No other input magic may start with it.
+// statelessInputBytes blob (EIP-8025): big-endian 2-byte schema id 0x1501; no other input magic may start with 0x15.
 inline constexpr uint16_t kInputMagicSIB = 0x1501u;
 
 inline constexpr uint32_t kInputVersionMFBD = 1u;
@@ -64,7 +63,6 @@ struct FlatBundle {
 };
 
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-// FlatBundle::direct precedes the buffers whose phase DirectState's size keeps (see DirectState::ancestors_pad_).
 static_assert(sizeof(FlatBundle) % 16 == 0, "keep the rv32 guest's FlatBundle a multiple of 16 bytes, see DirectState::ancestors_pad_");
 #endif
 

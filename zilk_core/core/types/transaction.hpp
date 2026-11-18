@@ -57,7 +57,6 @@ namespace eip7702 {
 }  // namespace eip7702
 
 // EIP-2718 transaction type
-// https://github.com/ethereum/eth1.0-specs/tree/master/lists/signature-types
 enum class TransactionType : uint8_t {
     kLegacy = 0,
     kAccessList = 1,  // EIP-2930
@@ -65,8 +64,7 @@ enum class TransactionType : uint8_t {
     kBlob = 3,        // EIP-4844
     kSetCode = 4,     // EIP-7702
 
-    // System transactions are used for internal protocol operations like storing parent beacon root (EIP-4788).
-    // They do not pay the base fee.
+    // System transactions (e.g. EIP-4788 parent beacon root) pay no base fee.
     kSystem = 0xff,
 };
 
@@ -92,7 +90,6 @@ struct UnsignedTransaction {
     // EIP-7702
     std::vector<Authorization> authorizations;
 
-    //! \brief Maximum possible cost of normal and data (EIP-4844) gas
     intx::uint512 maximum_gas_cost() const;
 
     intx::uint256 priority_fee_per_gas(const intx::uint256& base_fee_per_gas) const;  // EIP-1559
@@ -107,7 +104,6 @@ struct UnsignedTransaction {
 
 struct UnsignedTransaction2 {
     TransactionType type{TransactionType::kLegacy};
-    // int myStuff;
     std::optional<intx::uint256> chain_id{std::nullopt};  // nullopt means a pre-EIP-155 transaction
 
     uint64_t nonce{0};
@@ -118,7 +114,6 @@ struct UnsignedTransaction2 {
     intx::uint256 value{0};
     Bytes data{};
 
-    // ======================================
     std::vector<AccessListEntry> access_list{};  // EIP-2930
 
     // EIP-4844: Shard Blob Transactions
@@ -128,7 +123,6 @@ struct UnsignedTransaction2 {
     // EIP-7702
     std::vector<Authorization> authorizations;
 
-    //! \brief Maximum possible cost of normal and data (EIP-4844) gas
     intx::uint512 maximum_gas_cost() const;
 
     intx::uint256 priority_fee_per_gas(const intx::uint256& base_fee_per_gas) const;  // EIP-1559
@@ -138,7 +132,6 @@ struct UnsignedTransaction2 {
 
     void encode_for_signing(Bytes& into) const;
 
-    // friend bool operator==(const UnsignedTransaction&, const UnsignedTransaction&) = default;
 };
 
 class Transaction : public UnsignedTransaction {
@@ -151,42 +144,26 @@ class Transaction : public UnsignedTransaction {
     //! \brief Returns false if v is not acceptable (v != 27 && v != 28 && v < 35, see EIP-155)
     bool set_v(const intx::uint256& v);
 
-    //! \brief Sender recovered from the signature.
-    //! \see Yellow Paper, Appendix F "Signing Transactions",
-    //! EIP-2: Homestead Hard-fork Changes and
-    //! EIP-155: Simple replay attack protection.
-    //! If recovery fails std::nullopt is returned.
+    //! Sender recovered from the signature; std::nullopt if recovery fails.
     std::optional<evmc::address> sender() const;
 
     void set_sender(const evmc::address& sender);
 
-    /// Recovers, as one batch, the senders of the transactions not recovered yet: afterwards
-    /// sender() returns exactly what it would have computed on its own. On AIRBENDER this shares
-    /// the field inversions of all signatures, on SP1 their scalar inversions r^-1 (see
-    /// secp256k1::ecrecover_batch()).
+    /// Recovers the senders of the not-yet-recovered transactions as one batch that shares inversions; sender() then returns what it would have alone.
     static void recover_senders(std::span<const Transaction> txns);
 
     evmc::bytes32 hash() const;
 
-    //! Non-zero calldata byte count, so the gas functions need not rescan `data`.
-    //! Written once by pre_validate_transaction; execution reads it. Callers pass the value on
-    //! explicitly rather than have the gas functions reach for it.
-    //! \pre set_data_non_zero_bytes() has run, i.e. pre_validate_block_body returned kOk.
+    //! Non-zero calldata byte count, written once by pre_validate_transaction (pre_validate_block_body returned kOk).
     size_t data_non_zero_bytes() const noexcept { return data_non_zero_bytes_; }
     void set_data_non_zero_bytes(size_t n) const noexcept { data_non_zero_bytes_ = n; }
 
-    //! Reset the computed values
     void reset();
 
-    //! The bytes encode_for_signing() writes. A decoded transaction copies its own unsigned items
-    //! instead of encoding them again; a transaction built in code is encoded.
+    //! The bytes encode_for_signing() writes; a decoded transaction copies its own unsigned items.
     void signing_payload(Bytes& into) const;
 
-    //! Set by rlp decoding, empty for a transaction built in code and after reset(): views into the
-    //! decoded bytes, which must outlive this object (as `data` already requires), of the
-    //! transaction-trie value (a typed transaction's type byte and list, without any string wrapper)
-    //! and of the list items before the signature. The decoder accepts only canonical encodings, so
-    //! these are the bytes the encoders would write.
+    //! Set by rlp decoding (empty if built in code or after reset()): views into the decoded bytes, which must outlive this object.
     ByteView rlp_encoded() const noexcept { return rlp_encoded_; }
     ByteView rlp_unsigned() const noexcept { return rlp_unsigned_; }
 
@@ -202,42 +179,11 @@ class Transaction : public UnsignedTransaction {
 
     mutable size_t data_non_zero_bytes_{0};
 
-    // cached value for hash if already computed
     mutable evmc::bytes32 cached_hash_;
     mutable ResettableOnceFlag hash_computed_;
 };
 
 class Transaction2 : public UnsignedTransaction2 {
-    //   public:
-    //     bool odd_y_parity{false};
-    //     intx::uint256 r{0}, s{0};  // signature
-
-    //     intx::uint256 v() const;  // EIP-155
-
-    //     //! \brief Returns false if v is not acceptable (v != 27 && v != 28 && v < 35, see EIP-155)
-    //     bool set_v(const intx::uint256& v);
-
-    //     //! \brief Sender recovered from the signature.
-    //     //! \see Yellow Paper, Appendix F "Signing Transactions",
-    //     //! EIP-2: Homestead Hard-fork Changes and
-    //     //! EIP-155: Simple replay attack protection.
-    //     //! If recovery fails std::nullopt is returned.
-    //     std::optional<evmc::address> sender() const;
-
-    //     void set_sender(const evmc::address& sender);
-
-    //     evmc::bytes32 hash() const;
-
-    //     //! Reset the computed values
-    //     void reset();
-
-    //   private:
-    //     mutable std::optional<evmc::address> sender_{std::nullopt};
-    //     mutable ResettableOnceFlag sender_recovered_;
-
-    //     // cached value for hash if already computed
-    //     mutable evmc::bytes32 cached_hash_;
-    //     mutable ResettableOnceFlag hash_computed_;
 };
 
 namespace rlp {
@@ -247,11 +193,7 @@ namespace rlp {
     void encode(Bytes& to, const Authorization&);
     size_t length(const Authorization&);
 
-    // According to EIP-2718, serialized transactions are prepended with 1 byte containing the type
-    // (0x02 for EIP-1559 transactions); the same goes for receipts. This is true for signing and
-    // transaction root calculation. However, in block body RLP serialized EIP-2718 transactions
-    // are additionally wrapped into an RLP byte array (=string). (Refer to the geth implementation;
-    // EIP-2718 is mute on block RLP.)
+    // EIP-2718: typed transactions carry a type byte; in block body RLP they are additionally wrapped in an RLP string.
     void encode(Bytes& to, const Transaction& txn, bool wrap_eip2718_into_string = true);
 
     size_t length(const Transaction&, bool wrap_eip2718_into_string = true);

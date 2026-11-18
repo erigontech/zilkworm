@@ -35,10 +35,8 @@ intx::uint256 Authorization::v() const {
     return y_parity_and_chain_id_to_v(y_parity, chain_id);
 }
 
-// https://eips.ethereum.org/EIPS/eip-155
 intx::uint256 Transaction::v() const { return y_parity_and_chain_id_to_v(odd_y_parity, chain_id); }
 
-// https://eips.ethereum.org/EIPS/eip-155
 bool Transaction::set_v(const intx::uint256& v) {
     const std::optional<YParityAndChainId> parity_and_id{v_to_y_parity_and_chain_id(v)};
     if (parity_and_id == std::nullopt) {
@@ -413,8 +411,6 @@ namespace rlp {
             return {};
         }
 
-        // String-wrapped typed transaction
-
         if (accepted_typed_txn_wrapping == Eip2718Wrapping::kNone) {
             return std::unexpected{DecodingError::kUnexpectedEip2718Serialization};
         }
@@ -462,7 +458,6 @@ namespace rlp {
             return {};
         }
 
-        // String-wrapped typed transaction
         if (header.payload_length == 0) {
             return std::unexpected{DecodingError::kInputTooShort};
         }
@@ -493,8 +488,7 @@ void Transaction::signing_payload(Bytes& into) const {
         encode_for_signing(into);
         return;
     }
-    // The unsigned items are copied as they are: only the list header (and EIP-155's trailing
-    // chain id, 0, 0) is written.
+    // The unsigned items are copied as they are: only the list header (and EIP-155's trailing chain id, 0, 0) is written.
     const bool eip155{type == TransactionType::kLegacy && chain_id};
     const size_t payload{rlp_unsigned_.size() + (eip155 ? rlp::length(*chain_id) + 2 : 0)};
     size_t length_bytes{0};  // of the long form, in which `payload` follows the 0xf7 + length_bytes prefix
@@ -594,18 +588,14 @@ void Transaction::reset() {
 }
 
 intx::uint512 UnsignedTransaction::maximum_gas_cost() const {
-    // See https://github.com/ethereum/EIPs/pull/3594
     intx::uint512 max_gas_cost{intx::umul(intx::uint256{gas_limit}, max_fee_per_gas)};
-    // and https://eips.ethereum.org/EIPS/eip-4844#gas-accounting
-    // Only blob transactions have blob gas; for the rest the product is zero and the 512-bit
-    // multiply and add are skipped.
+    // EIP-4844 blob gas: zero for other types, so the 512-bit multiply and add are skipped.
     if (const auto blob_gas = total_blob_gas(); blob_gas != 0)
         max_gas_cost += intx::umul(intx::uint256{blob_gas}, max_fee_per_blob_gas);
     return max_gas_cost;
 }
 
 intx::uint256 UnsignedTransaction::priority_fee_per_gas(const intx::uint256& base_fee_per_gas) const {
-    // SILKWORM_ASSERT(max_fee_per_gas >= base_fee_per_gas);
     return std::min(max_priority_fee_per_gas, max_fee_per_gas - base_fee_per_gas);
 }
 

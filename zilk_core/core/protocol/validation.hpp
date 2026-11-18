@@ -17,24 +17,19 @@
 
 namespace silkworm {
 
-// Classification of invalid transactions and blocks.
-// Underlying type is fixed at `int` so consumers can safely store/forward
-// non-enumerator sentinel values (e.g. test runners that distinguish
-// pre-validate short-circuits from real ValidationResult codes).
+// Underlying type is int so consumers can store non-enumerator sentinel values.
 enum class [[nodiscard]] ValidationResult : int {
     kOk,  // All checks passed
 
     kUnknownProtocolRuleSet,  // Unsupported protocol rule set
     kFutureBlock,             // Block has a timestamp in the future
 
-    // [YP] Section 4.3.2 "Holistic Validity", Eq (31)
     kWrongStateRoot,         // wrong Hr
     kWrongOmmersHash,        // wrong Ho
     kWrongTransactionsRoot,  // wrong Ht
     kWrongReceiptsRoot,      // wrong He
     kWrongLogsBloom,         // wrong Hb
 
-    // [YP] Section 4.3.4 "Block Header Validity", Eq (50)
     kUnknownParent,                 // P(H) = ∅ ∨ Hi ≠ P(H)Hi + 1
     kUnknownParentTotalDifficulty,  // failed to look up parent's total difficulty
     kWrongDifficulty,               // Hd ≠ D(H)
@@ -48,23 +43,19 @@ enum class [[nodiscard]] ValidationResult : int {
     kMissingField,     // e.g. missing withdrawals in a post-Shanghai block
     kFieldBeforeFork,  // e.g. withdrawals present in a pre-Shanghai block
 
-    // [YP] Section 6.2 "Execution", Eq (58)
     kSenderNoEOA,            // EIP-3607: σ[S(T)]c ≠ KEC( () )
     kWrongNonce,             // Tn ≠ σ[S(T)]n
     kIntrinsicGas,           // g0 > Tg
     kInsufficientFunds,      // v0 > σ[S(T)]b
     kBlockGasLimitExceeded,  // Tg > BHl - l(BR)u
 
-    // [YP] Section 11.1 "Ommer Validation", Eq (157)
     kTooManyOmmers,       // ‖BU‖ > 2
     kInvalidOmmerHeader,  // ¬V(U)
     kNotAnOmmer,          // ¬k(U, P(BH)H, 6)
     kDuplicateOmmer,      // not well covered by the YP actually
 
-    // [YP] Section 11.2 "Transaction Validation", Eq (160)
     kWrongBlockGas,  // BHg ≠ l(BR)u
 
-    // Various other transaction validation
     kInvalidSignature,            // EIP-2 violated or otherwise invalid signature
     kWrongChainId,                // EIP-155
     kUnsupportedTransactionType,  // EIP-2718
@@ -117,7 +108,7 @@ enum class [[nodiscard]] ValidationResult : int {
     kBlockAccessListGasExceeded,   // BAL item count exceeds block.gas_limit / GAS_PER_ITEM
     kBlockAccessListHashMismatch,  // computed BAL hash != header.block_access_list_hash
 
-    // Bor validation errors. See https://github.com/erigontech/erigon/blob/main/consensus/bor/bor.go
+    // Bor validation errors
     kMissingVanity,          // Block's extra-data section is shorter than 32 bytes, which is required to store the signer vanity
     kMissingSignature,       // Block's extra-data section doesn't seem to contain a 65 byte secp256k1 signature
     kInvalidMixDigest,       // Block's mix digest is non-zero
@@ -129,20 +120,14 @@ namespace protocol {
 
     bool transaction_type_is_supported(TransactionType, evmc_revision);
 
-    //! \brief First part of transaction validation that can be done prior to sender recovery
-    //! and without access to the state.
-    //! \remarks Should sender of transaction not yet recovered a check on signature's validity is performed
-    //! \remarks These function is agnostic to whole block validity
+    //! Pre-state checks; verifies the signature if the sender is not yet recovered.
     ValidationResult pre_validate_transaction(const Transaction& txn, evmc_revision revision, uint64_t chain_id,
                                               const std::optional<intx::uint256>& base_fee_per_gas,
                                               const std::optional<intx::uint256>& blob_gas_price);
 
     ValidationResult pre_validate_transactions(const Block& block, const ChainConfig& config);
 
-    //! \brief Final part of transaction validation that requires access to the state.
-    //!
-    //! Precondition:
-    //! pre_validate_transaction(txn) must return kOk
+    //! Needs state; pre_validate_transaction(txn) must have returned kOk.
     ValidationResult validate_transaction(const Transaction& txn, const ::zilkworm::ActiveState& state,
                                           uint64_t available_gas) noexcept;
 
@@ -159,13 +144,10 @@ namespace protocol {
     //! \see EIP-4844: Shard Blob Transactions
     uint64_t calc_excess_blob_gas(const BlockHeader& header, const BlockHeader& parent, const ChainConfig& chain_config);
 
-    //! \brief Calculate the transaction root of a block body
     evmc::bytes32 compute_transaction_root(const BlockBody& body);
 
-    //! \brief Calculate the withdrawals root of a block body
     std::optional<evmc::bytes32> compute_withdrawals_root(const BlockBody& body);
 
-    //! \brief Calculate the hash of ommers of a block body
     evmc::bytes32 compute_ommers_hash(const BlockBody& body);
 
 

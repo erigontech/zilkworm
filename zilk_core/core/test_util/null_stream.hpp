@@ -8,7 +8,6 @@
 
 namespace silkworm::test_util {
 
-//! Factory function creating one null output stream (all characters are discarded)
 inline std::ostream& null_stream() {
     static struct NullBuf : public std::streambuf {
         int overflow(int c) override { return c; }

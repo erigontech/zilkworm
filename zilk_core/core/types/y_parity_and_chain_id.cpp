@@ -23,9 +23,7 @@ std::optional<YParityAndChainId> v_to_y_parity_and_chain_id(const intx::uint256&
         // EIP-155 implies v >= 35
         return std::nullopt;
     } else {
-        // https://eips.ethereum.org/EIPS/eip-155
-        // Find chain_id and y_parity ∈ {0, 1} such that
-        // v = chain_id * 2 + 35 + y_parity
+        // v = chain_id * 2 + 35 + y_parity (EIP-155)
         intx::uint256 w{v - 35};
         res.odd = static_cast<uint64_t>(w) % 2;
         res.chain_id.emplace(w >> 1);  // w / 2

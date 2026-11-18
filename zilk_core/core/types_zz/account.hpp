@@ -16,8 +16,7 @@ namespace zilkworm {
 // Max RLP encoding of list[nonce, balance, storage_root, code_hash].
 inline constexpr uint8_t kAccRlpBufSize = 112u;
 
-// Slots live inline immediately after this struct (slots_for == &acc+1).
-// Code lives in MphfCodeStore; code_offset resolved by sanitize().
+// Slots live inline right after this struct; code lives in MphfCodeStore.
 struct alignas(8) Account {
     uint8_t  addr[20];
     bool     deleted;                    // destructed this bundle; masks the record
@@ -32,8 +31,7 @@ struct alignas(8) Account {
     uint32_t code_store_len;
     uint32_t slot_count;
     mutable uint8_t  acc_rlp_buf[kAccRlpBufSize];
-    // The record's reads of slots the witness does not carry: 1 + the index of the newest one in
-    // DirectState's list, 0 for none (see DirectState::AbsentRead).
+    // 1 + the index of the newest absent-slot read in DirectState's list; 0 for none.
     mutable uint32_t absent_reads;
 
     silkworm::Bytes rlp(const evmc::bytes32& storage_root_arg) const;

@@ -9,8 +9,7 @@
 
 namespace silkworm {
 
-// Warning: this version is only suitable for protecting lazy fields in a single-threaded environment.
-// In a multi-threaded environment use the Abseil-based version above.
+// Single-threaded only; use the Abseil-based version above otherwise.
 class ResettableOnceFlag {
   public:
     constexpr ResettableOnceFlag() = default;

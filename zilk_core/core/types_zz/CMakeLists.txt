@@ -14,15 +14,7 @@
 
 include("${SILKWORM_MAIN_DIR}/cmake/common/targets.cmake")
 
-# account.{hpp,cpp} pulls evmc (for evmc::bytes32 / evmc::address types in the
-# Account API surface) and intx (for the slow RLP re-encode path). Bytes,
-# kHashLength, endian::to_big_compact, and rlp::* come from silkworm_core
-# headers, but the .cpp consumes them with explicit include paths under
-# zilk_core/core/, so silkworm_core must be available — however we can't link
-# silkworm_core here without circular deps. Account's cpp only includes
-# headers from silkworm_core that are themselves header-only-or-template
-# (bytes.hpp / base.hpp / endian.hpp / rlp/encode.hpp), so the include path
-# alone (PUBLIC -I${SILKWORM_MAIN_DIR}, set by silkworm_library) suffices.
+# silkworm_core cannot be linked here (circular); its header-only include path suffices for account.cpp.
 silkworm_library(silkworm_types_zz
   PUBLIC evmc evmone intx::intx magic_enum::magic_enum nlohmann_json::nlohmann_json
 )

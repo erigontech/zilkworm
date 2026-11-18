@@ -21,11 +21,7 @@ namespace {
 struct EncodeResult { uint8_t len; uint8_t sroot_off; };
 
 #if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
-// The generic encoder below costs about 480 instructions per account on rv32: a memcpy of the
-// balance into a uint256, a __clzdi2 call and a to_big_compact copy per integer of 0x80 or more, and memcpy
-// calls of 32 bytes or less to destinations that are rarely co-aligned with their source. Every field has
-// a fixed place in Account, so the encoding is written straight from its words instead. The
-// native test build (EVMONE_RV32_DISPATCH_TEST) compiles this encoder too, for the tests.
+// Every field has a fixed place in Account, so the encoding is written straight from its words; the generic encoder is far costlier on rv32.
 static_assert(std::endian::native == std::endian::little, "balance and hash words are read little-endian");
 
 typedef uint32_t __attribute__((may_alias)) w32;
@@ -34,8 +30,7 @@ typedef uint32_t __attribute__((may_alias)) w32;
 static_assert(offsetof(Account, nonce) % 4 == 0 && offsetof(Account, balance) % 4 == 0 &&
               offsetof(Account, code_hash) % 4 == 0 && offsetof(Account, storage_root) % 4 == 0);
 
-// The payload is [nonce (1..9 bytes), balance (1..33), 0xA0 + root, 0xA0 + hash]: 68..108 bytes,
-// so the list header is always the two bytes 0xF8, payload length.
+// Payload [nonce 1..9, balance 1..33, 0xA0+root, 0xA0+hash] is 68..108 bytes, so the list header is always 0xF8, length.
 inline constexpr size_t kAccPayloadMin = 1 + 1 + 2 * (1 + silkworm::kHashLength);
 inline constexpr size_t kAccPayloadMax = 9 + 33 + 2 * (1 + silkworm::kHashLength);
 static_assert(kAccPayloadMin >= 56 && kAccPayloadMax <= 0xFF);
@@ -45,8 +40,7 @@ static_assert(2 + kAccPayloadMax <= kAccRlpBufSize);
 [[gnu::always_inline]] inline uint8_t* put_uint_words(uint8_t* d, const w32* w, int nw) noexcept {
     int t = nw - 1;
     if (nw > 2) {
-        // Balances mostly fit in two words (a quarter are zero): test the words above those
-        // together instead of one at a time.
+        // Balances mostly fit in two words: test the words above them together.
         uint32_t high = 0;
         for (int i = 2; i < nw; ++i) high |= w[i];
         if (high == 0) t = 1;
@@ -80,8 +74,7 @@ static_assert(2 + kAccPayloadMax <= kAccRlpBufSize);
     return d;
 }
 
-// 0xA0 and the 32 bytes of the word-aligned s, at any alignment of d: the bytes up to d's next
-// word boundary, then aligned word stores of s's words shifted together, then the rest.
+// 0xA0 and the 32 bytes of the word-aligned s, at any alignment of d.
 [[gnu::always_inline]] inline uint8_t* put_hash_words(uint8_t* d, const w32* s) noexcept {
     *d++ = 0xA0;
     const unsigned off = reinterpret_cast<uintptr_t>(d) & 3;
@@ -91,8 +84,7 @@ static_assert(2 + kAccPayloadMax <= kAccRlpBufSize);
         for (int i = 0; i < 8; ++i) dw[i] = s[i];
         return d + 32;
     }
-    // The head and tail are switches: GCC's loop unrolling turns a loop of 1..3 bytes into an
-    // 8-way unrolled one behind a dispatch that costs more than the stores.
+    // The head and tail are switches: GCC unrolls a 1..3-byte loop behind a dispatch that costs more than the stores.
     const unsigned lead = 4 - off;  // bytes before d's next word boundary
     const unsigned rs = 8 * lead, ls = 32 - rs;
     uint32_t v = s[0];
@@ -123,8 +115,7 @@ EncodeResult encode_account_into(uint8_t* dst, const Account& a, const uint8_t* 
     p = put_uint_words(p, reinterpret_cast<const w32*>(a.balance), 8);
 
     const uint8_t sroot_off = static_cast<uint8_t>(p - dst);
-    // The caller's root is a bytes32, which is alignas(size_t) and so word-aligned on rv32; the check
-    // keeps the encoder correct for any pointer, should that type's alignment ever drop.
+    // bytes32 is word-aligned on rv32; the check keeps this correct should that alignment ever drop.
     if ((reinterpret_cast<uintptr_t>(storage_root) & 3) == 0) [[likely]] {
         p = put_hash_words(p, reinterpret_cast<const w32*>(storage_root));
     } else {

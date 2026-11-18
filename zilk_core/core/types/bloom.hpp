@@ -17,11 +17,9 @@ inline constexpr size_t kBloomByteLength{256};
 
 using Bloom = std::array<uint8_t, kBloomByteLength>;
 
-//! See Section 4.3.1 "Transaction Receipt" of the Yellow Paper
 void m3_2048(Bloom& bloom, ByteView x);
 
-//! Sets bloom to the bloom filter of logs. Filling the caller's bloom in place spares the 256-byte
-//! copy that assigning a returned Bloom costs.
+//! Fills the caller's bloom in place, sparing the 256-byte copy of a returned Bloom.
 void logs_bloom(Bloom& bloom, const std::vector<Log>& logs);
 
 inline Bloom logs_bloom(const std::vector<Log>& logs) {
