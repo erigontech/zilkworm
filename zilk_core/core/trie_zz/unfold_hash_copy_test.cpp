@@ -1,16 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The copy of a witness child hash that unfold_slot makes before it looks the child up. On the guest
-// the 32 bytes at any alignment go to a word-aligned buffer through copy32_to_aligned (a word funnel
-// over aligned-down loads); the native build sets -DEVMONE_RV32_DISPATCH_TEST, which compiles that
-// helper and its call in unfold_slot on the host.
-//
-// The helper is checked against memcpy, which it replaces, on every source phase, on crafted and
-// random bytes, with canaries around the destination and the source unmodified, and with the source
-// placed against an unreadable page on each side to show it reads no word that holds none of the 32
-// bytes. unfold_slot is checked on branch nodes placed in memory at every phase: the exact child hash
-// must unfold, and a hash that differs in any one byte must not, whatever the witness holds.
+// The copy of a witness child hash that unfold_slot makes before it looks the child up.
 
 #include <algorithm>
 #include <array>
@@ -70,7 +60,6 @@ void check_copy(const uint8_t* src, const char* what) {
     std::array<uint8_t, 32> kept;
     std::memcpy(kept.data(), src, 32);
     Dest d;
-    // Poison the destination so a copy that skips a word cannot pass by luck.
     std::memset(d.bytes, 0x99, sizeof d.bytes);
     copy32_to_aligned(d.bytes, src);
     INFO(what << ", source phase " << (reinterpret_cast<uintptr_t>(src) & 7));
@@ -82,8 +71,6 @@ void check_copy(const uint8_t* src, const char* what) {
 }  // namespace
 
 TEST_CASE("copy32_to_aligned equals memcpy on crafted bytes at every source phase", "[trie][gridmpt][unfold][copy32]") {
-    // The window is surrounded by bytes that differ from every window byte, so a copy that shifts by
-    // one byte, or takes a neighbour's, differs.
     for (size_t phase = 0; phase < 16; ++phase) {
         for (int pattern = 0; pattern < 8; ++pattern) {
             alignas(16) uint8_t buf[96];
@@ -95,8 +82,8 @@ TEST_CASE("copy32_to_aligned equals memcpy on crafted bytes at every source phas
                     case 1: src[i] = 0xFF; break;
                     case 2: src[i] = static_cast<uint8_t>(i + 1); break;
                     case 3: src[i] = static_cast<uint8_t>(0x80 | i); break;
-                    case 4: src[i] = i == 0 ? 0xFF : 0; break;  // only the first byte
-                    case 5: src[i] = i == 31 ? 0xFF : 0; break;  // only the last byte
+                    case 4: src[i] = i == 0 ? 0xFF : 0; break;
+                    case 5: src[i] = i == 31 ? 0xFF : 0; break;
                     case 6: src[i] = (i & 1) ? 0x55 : 0xAA; break;
                     default: src[i] = static_cast<uint8_t>(i * 37 + 11); break;
                 }
@@ -116,7 +103,6 @@ TEST_CASE("copy32_to_aligned equals memcpy on random bytes", "[trie][gridmpt][un
 }
 
 TEST_CASE("copy32_to_aligned single-byte sources each reach the right destination byte", "[trie][gridmpt][unfold][copy32]") {
-    // One non-zero source byte at a time: it must land at the same index, at every phase.
     for (size_t phase = 0; phase < 4; ++phase) {
         for (size_t j = 0; j < 32; ++j) {
             alignas(16) uint8_t buf[80] = {};
@@ -131,9 +117,6 @@ TEST_CASE("copy32_to_aligned single-byte sources each reach the right destinatio
 }
 
 TEST_CASE("copy32_to_aligned reads no word that holds none of the 32 bytes", "[trie][gridmpt][unfold][copy32]") {
-    // The 32 bytes sit against an unreadable page, before and after, at each phase: a read of one
-    // word too many on either side faults (the guest memory has no such guard, so this is the
-    // stand-in for "no access beyond the bytes' own words").
     const long page = sysconf(_SC_PAGESIZE);
     REQUIRE(page >= 4096);
     uint8_t* const base = static_cast<uint8_t*>(mmap(nullptr, 3 * static_cast<size_t>(page), PROT_READ | PROT_WRITE,
@@ -176,13 +159,12 @@ struct Witness {
         : store{build_node_store(nodes)}, state{std::span<uint8_t>{prestate}, std::span<uint8_t>{store}} {}
 };
 
-// A trie whose root is a full branch with 16 hashed children (a leaf per first nibble), every node
-// captured as a complete witness.
+// A trie whose root is a full branch with 16 hashed children (a leaf per first nibble).
 struct Fixture {
     Map nodes;
     bytes32 root{};
     Bytes root_rlp;
-    std::array<bytes32, 16> child{};  // hash of the child in each slot, read off the root's encoding
+    std::array<bytes32, 16> child{};
 
     Fixture() {
         std::mt19937_64 rng(0x34);
@@ -200,7 +182,6 @@ struct Fixture {
         for (const auto& [k, v] : leaves) hb.add_leaf(silkworm::trie::unpack_nibbles(ByteView{k.bytes, 32}), v);
         root = hb.root_hash();
         root_rlp = nodes.at(root);
-        // list header (3 bytes: 0xf9 + 2 length bytes), then 16 x (0xa0 + 32) and an empty value (0x80)
         REQUIRE(root_rlp.size() == 3 + 16 * 33 + 1);
         for (unsigned i = 0; i < 16; ++i) {
             REQUIRE(root_rlp[3 + 33 * i] == 0xa0);
@@ -210,9 +191,7 @@ struct Fixture {
     }
 };
 
-// Unfolds the branch `rlp`, placed in memory `offset` bytes past a 64-byte boundary (so that its child
-// hashes, which start 4 + 33 * slot bytes in, take every phase), as the root of a trie over `witness`,
-// then unfolds `slot`.
+// Unfolds the branch `rlp`, placed in memory `offset` bytes past a 64-byte boundary.
 UnfoldResult unfold_slot_of(const Witness& witness, const Bytes& rlp, size_t offset, unsigned slot,
                             unsigned* missing = nullptr) {
     alignas(64) uint8_t buf[640] = {};
@@ -230,11 +209,10 @@ TEST_CASE("unfold_slot unfolds a hashed child whose hash sits at any alignment",
     const Fixture f;
     for (size_t offset = 0; offset < 8; ++offset) {
         for (unsigned slot = 0; slot < 16; ++slot) {
-            Witness w{f.nodes};  // nothing verified yet: the hash is the only thing that selects the node
+            Witness w{f.nodes};
             unsigned missing = 99;
             CHECK(unfold_slot_of(w, f.root_rlp, offset, slot, &missing) == UnfoldResult::kSuccess);
             CHECK(missing == 0);
-            // Unfolded again on a witness whose node is already verified (a different lookup path).
             CHECK(unfold_slot_of(w, f.root_rlp, offset, slot, &missing) == UnfoldResult::kSuccess);
             CHECK(missing == 0);
         }
@@ -242,9 +220,6 @@ TEST_CASE("unfold_slot unfolds a hashed child whose hash sits at any alignment",
 }
 
 TEST_CASE("unfold_slot rejects a child hash that differs in any one byte", "[trie][gridmpt][unfold][copy32][forged]") {
-    // A forged parent: its child hash has one byte flipped, while the witness holds the real child
-    // (under its real hash). Any copy that took the wrong bytes would find a node by accident only if
-    // it reproduced a stored hash, so the flip is the discriminator at every byte and phase.
     const Fixture f;
     for (size_t offset = 0; offset < 4; ++offset) {
         for (unsigned slot : {0u, 1u, 5u, 8u, 15u}) {
@@ -263,8 +238,6 @@ TEST_CASE("unfold_slot rejects a child hash that differs in any one byte", "[tri
 }
 
 TEST_CASE("unfold_slot rejects a stored node filed under a forged hash", "[trie][gridmpt][unfold][copy32][forged]") {
-    // The witness holds a different node's bytes under the (forged) hash the parent names: the node is
-    // found by its key and must fail its keccak check, at every phase.
     const Fixture f;
     for (size_t offset = 0; offset < 4; ++offset) {
         for (unsigned slot : {0u, 7u, 15u}) {
@@ -273,7 +246,7 @@ TEST_CASE("unfold_slot rejects a stored node filed under a forged hash", "[trie]
             fake.bytes[31] ^= 0x5A;
             std::memcpy(forged.data() + 3 + 33 * slot + 1, fake.bytes, 32);
             Map nodes = f.nodes;
-            nodes.emplace(fake, nodes.at(f.child[(slot + 1) % 16]));  // another real node's bytes
+            nodes.emplace(fake, nodes.at(f.child[(slot + 1) % 16]));
             Witness w{nodes};
             unsigned missing = 0;
             CHECK(unfold_slot_of(w, forged, offset, slot, &missing) == UnfoldResult::kMissing);
@@ -283,9 +256,6 @@ TEST_CASE("unfold_slot rejects a stored node filed under a forged hash", "[trie]
 }
 
 TEST_CASE("unfold_slot does not take the hash of a neighbouring slot", "[trie][gridmpt][unfold][copy32][forged]") {
-    // Two hashed children are 33 bytes apart: a copy that starts a byte early or late mixes the
-    // hashes of slot k and k+-1. With the witness holding only slot k's node, every other slot is
-    // missing and only slot k unfolds.
     const Fixture f;
     for (size_t offset = 0; offset < 4; ++offset) {
         for (unsigned k = 0; k < 16; ++k) {

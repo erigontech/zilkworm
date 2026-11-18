@@ -1,16 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// GridMPT<true, DirectState> regression tests: updates that read a key the trie does not have (no value to
-// write; claimed as zero, 0x80, or as nothing), and lines that go away while the seek still
-// climbs through them.
-//
-// A read of an absent key used to insert a leaf with an empty value at the point where the key
-// leaves the trie, which folded away again. Folding it deleted it and every ancestor it left empty
-// (cascade_delete), and the seek went on from lines it had just popped; and a branch left with a
-// single child the walk had already folded could not absorb it, the new hash not being in the
-// witness. A read of an absent key now inserts nothing, and a witness leaf without a value, the
-// other way an empty line got into the grid, is rejected.
+// GridMPT<true, DirectState> regression tests: updates that read a key the trie does not have.
 
 #include <algorithm>
 #include <cstdint>
@@ -88,20 +78,17 @@ bytes32 key_with_nibbles(std::initializer_list<uint8_t> nibs, uint8_t fill) {
 
 Bytes value(uint8_t v) { return Bytes{0x84, v, v, v, v}; }
 
-// What an update claims as the value before the block for a key absent from the trie: a zero slot (0x80)
-// or nothing. A claim of an empty value must not be a null view: a forged empty-valued leaf is compared
-// against it.
+// What an update claims as the value before the block for a key absent from the trie: a zero slot (0x80) or nothing.
 enum class Claim { kZero, kNone };
 const uint8_t kZeroRlp[1] = {0x80};
 
 struct Update {
     bytes32 key;
     ByteView initial;
-    Bytes current;  // empty: a read
+    Bytes current;
 };
 
-// Runs `updates` (sorted here) against a complete witness of the trie `pre` (leaves as given, an
-// empty value included) and returns the root. `valid`: the witness holds only nodes a trie can have.
+// Runs `updates` (sorted here) against a complete witness of the trie `pre`.
 bytes32 walk(const Bytes32Map& pre, std::vector<Update> updates, bool valid = true) {
     Bytes32Map nodes;
     const bytes32 pre_root = hashbuilder_root(pre, &nodes);
@@ -112,7 +99,7 @@ bytes32 walk(const Bytes32Map& pre, std::vector<Update> updates, bool valid = tr
     std::ranges::sort(updates, [](const Update& a, const Update& b) {
         return std::memcmp(a.key.bytes, b.key.bytes, 32) < 0;
     });
-    std::vector<TrieNodeFlat> flat;  // must never reallocate: GridMPT keeps views into TrieNodeFlat::buf
+    std::vector<TrieNodeFlat> flat;
     flat.reserve(updates.size());
     for (const auto& u : updates) {
         auto& node = flat.emplace_back(u.key);
@@ -134,10 +121,7 @@ bytes32 walk(const Bytes32Map& pre, std::vector<Update> updates, bool valid = tr
 
 }  // namespace
 
-// Two reads of absent keys that share 8 nibbles, after an insert: the second read split the first one's
-// empty leaf into an extension over a branch of the two, all of it empty. The next update's seek folded
-// both leaves, the cascade took the branch and the extension, and the seek went on to the popped
-// extension's line and descended from it, into std::unreachable() in fold_line.
+// Two reads of absent keys that share 8 nibbles, after an insert.
 TEST_CASE("GridMPT<true, DirectState> reads of absent keys that share a prefix", "[trie][gridmpt]") {
     const bytes32 k1 = key_from_hex("6d6c288fd01ac4893bdbcdc3b9717bba13a845056ba772398a7eaae0fffa47d9");
     const bytes32 a1 = key_from_hex("8600baa419999186f17a33e3b26008a6485f6a918223719d7d3a6f39092c4621");
@@ -152,12 +136,7 @@ TEST_CASE("GridMPT<true, DirectState> reads of absent keys that share a prefix",
 }
 
 // A read of an absent key that leaves an extension inside its path, then a write below that extension.
-// The read split the extension into a branch over its empty leaf and the extension's child; the write
-// folded that child into the branch with a new hash, and only then did the empty leaf fold away, leaving
-// the branch a single child to absorb whose hash the witness does not have.
 TEST_CASE("GridMPT<true, DirectState> read of an absent key inside an extension before a write below it", "[trie][gridmpt]") {
-    // branch{2 -> ext(0,2) -> branch{0 -> K0, 1 -> ext(2) -> branch{0 -> K1, 1 -> K2}}, 7 -> R}; the absent
-    // key goes 2,0,2,1 then 0, where the inner extension has 2.
     const bytes32 k0 = key_with_nibbles({2, 0, 2, 0}, 1);
     const bytes32 k1 = key_with_nibbles({2, 0, 2, 1, 2, 0}, 2);
     const bytes32 k2 = key_with_nibbles({2, 0, 2, 1, 2, 1}, 3);
@@ -175,10 +154,7 @@ TEST_CASE("GridMPT<true, DirectState> read of an absent key inside an extension 
     }
 }
 
-// A forged witness: two leaves without a value under an extension, which the batch reads as such. As
-// with the empty leaves above, the next update's seek folded them, the cascade took the branch and the
-// extension too, and the seek descended from the popped extension's line, into std::unreachable(). No
-// trie has a leaf without a value: decode_node() rejects it, and the walk fails.
+// A forged witness: two leaves without a value under an extension, which the batch reads as such.
 TEST_CASE("GridMPT<true, DirectState> rejects a witness leaf without a value", "[trie][gridmpt]") {
     const bytes32 k1 = key_from_hex("6d6c288fd01ac4893bdbcdc3b9717bba13a845056ba772398a7eaae0fffa47d9");
     const bytes32 a1 = key_from_hex("8600baa419999186f17a33e3b26008a6485f6a918223719d7d3a6f39092c4621");

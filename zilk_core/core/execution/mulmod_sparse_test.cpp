@@ -1,14 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The rv32 MULMOD reduction (intx div32::mulmod_reduce and its closed forms for the NIST P-256
-// prime, 2^256 - 1 and powers of two) against intx's generic mulmod on the host. The guest's
-// handler cannot run here (its MUL_LOW and MUL_HIGH are CSR writes), so the test hands the
-// reduction the product it would find: umul(x, y) in an aligned 512-bit object, and the modulus
-// in a slot between two poisoned ones, which must keep their values like the product does.
-// INTX_DIV32_TEST compiles div32 on the host.
-//
-// ZILK_MULMOD_STRESS=n multiplies the number of random cases by n (the default runs in a second).
+// The rv32 MULMOD reduction against intx's generic mulmod on the host.
 
 #ifndef INTX_DIV32_TEST
 #define INTX_DIV32_TEST
@@ -101,8 +93,6 @@ struct Rng {
 
 long g_checks = 0;
 
-// m != 0. Runs the front end on x * y and m and compares with the generic mulmod and with the
-// base's 3-argument urem on the same product (the code mulmod_reduce replaced).
 void check(const uint256& x, const uint256& y, const uint256& m) {
     REQUIRE(m != 0);
     alignas(32) uint512 p = intx::umul(x, y);
@@ -132,18 +122,15 @@ void check(const uint256& x, const uint256& y, const uint256& m) {
 std::vector<uint256> moduli(Rng& rng) {
     std::vector<uint256> out{kP256, kOnes, kBn254R, kBn254P, kStark, kSecpP, kSecpN, kP256N,
         1, 2, 3, 0xffffffffffffffff, pow2(64), pow2(255) + 1, pow2(255) - 1};
-    // One word changed by one bit, in either half, in the two moduli matched by their words.
     for (unsigned w = 0; w < 8; ++w) {
         for (const uint32_t d : {1u, 2u, 0x80000000u, 0x40000000u}) {
             out.push_back(with_word(kP256, w, word(kP256, w) ^ d));
             out.push_back(with_word(kOnes, w, word(kOnes, w) ^ d));
         }
-        // P-256's other words in place of one, and 2^256 - 1 with a word cleared.
         out.push_back(with_word(kOnes, w, 0));
         out.push_back(with_word(kP256, w, 0xffffffffu));
         out.push_back(with_word(kP256, w, 0));
     }
-    // P-256 and 2^256 - 1 shifted by whole words and bits: not the matched constants.
     out.push_back(kP256 >> 1);
     out.push_back(kOnes >> 1);
     out.push_back(kOnes - 1);
@@ -154,10 +141,10 @@ std::vector<uint256> moduli(Rng& rng) {
         if (k) {
             out.push_back(pow2(k) + 1);
             out.push_back(pow2(k) - 1);
-            out.push_back(pow2(k) | pow2(rng() % k));                  // 2^k + 2^j
-            out.push_back(pow2(k) | pow2((k & ~31u) + rng() % 32));    // a second bit in its word
-            out.push_back(pow2(k) | (pow2(k & ~31u) - 1));             // words below all ones
-            out.push_back(pow2(k) | pow2(rng() % 32));                 // a bit in word 0
+            out.push_back(pow2(k) | pow2(rng() % k));
+            out.push_back(pow2(k) | pow2((k & ~31u) + rng() % 32));
+            out.push_back(pow2(k) | (pow2(k & ~31u) - 1));
+            out.push_back(pow2(k) | pow2(rng() % 32));
         }
     }
     for (unsigned b = 1; b <= 256; ++b) out.push_back(rng.bits(b));
@@ -175,8 +162,6 @@ TEST_CASE("mulmod_reduce matches intx::mulmod on crafted operands") {
             kBn254R - 1, kStark - 1, m >> 1, (m >> 1) + 1, m << 1, ~m};
         for (const auto& a : specials)
             for (const auto& b : specials) check(a, b, m);
-        // x = m -+ d with y = 1 straddles the a * b < m shortcut, and the factorings of m - 1, m
-        // and m + 1 put the product just on either side of it.
         for (const uint256 d : {uint256{0}, uint256{1}, uint256{2}, uint256{3}, uint256{0xffffffff},
                  uint256{0x100000000}}) {
             check(m - d, 1, m);
@@ -196,8 +181,6 @@ TEST_CASE("mulmod_reduce matches intx::mulmod on crafted operands") {
 }
 
 TEST_CASE("mulmod_reduce matches intx::mulmod on the largest products") {
-    // (2^256 - 1)^2, p^2 - 1, (p - 1)^2, p * (2^256 - 1), 2^511 - ish: every product length from 9
-    // to 16 words, for the moduli that take a closed form and a few that do not.
     const uint256 big[] = {kOnes, kP256, kP256 - 1, kP256 + 1, pow2(255), pow2(255) | 1,
         kOnes - 1, kOnes ^ pow2(255), kBn254R, kStark, kSecpP};
     for (const uint256& m :
@@ -205,7 +188,6 @@ TEST_CASE("mulmod_reduce matches intx::mulmod on the largest products") {
             uint256{2}, uint256{1}})
         for (const auto& a : big)
             for (const auto& b : big) check(a, b, m);
-    // Products of exactly 9..16 words.
     Rng rng{102};
     for (const uint256& m : {kP256, kOnes, kBn254R, kStark, pow2(200)}) {
         for (unsigned total = 250; total <= 512; ++total) {
@@ -233,7 +215,6 @@ TEST_CASE("mulmod_reduce matches intx::mulmod on random operands") {
                 case 3: x = rng.bits(rng() % 257); y = rng.bits(rng() % 257); break;
                 case 4: x = rng.bits(rng() % 129); y = rng.bits(rng() % 129); break;
                 case 5: {
-                    // Words from the carry-breaking set.
                     for (unsigned w = 0; w < 8; ++w) {
                         x = with_word(x, w, rng.edge_word());
                         y = with_word(y, w, rng.edge_word());
@@ -245,7 +226,6 @@ TEST_CASE("mulmod_reduce matches intx::mulmod on random operands") {
             check(x, y, m);
         }
     }
-    // Random moduli of every width: none of them is sparse, so these are the fallback path.
     const unsigned rounds2 = 20000 * stress();
     for (unsigned r = 0; r < rounds2; ++r) {
         const uint256 m = rng.bits(1 + rng() % 256);
@@ -264,7 +244,6 @@ TEST_CASE("the P-256, 2^256 - 1 and power-of-two closed forms reduce any 512-bit
     const unsigned rounds = 200000 * stress();
     for (unsigned r = 0; r < rounds; ++r) {
         uint32_t t[16];
-        // The long product lengths, and the odd ones: the short fold takes up to 9 words.
         const unsigned live = (r % 3 == 0) ? 16 : 9 + rng() % 8;
         draw(t, live);
         if (r % 11 == 0)
@@ -289,13 +268,11 @@ TEST_CASE("the P-256, 2^256 - 1 and power-of-two closed forms reduce any 512-bit
         d32::p256_reduce_short(out, s);
         for (unsigned i = 0; i < 8; ++i) got = with_word(got, i, out[i]);
         REQUIRE(uint512{got} == sv % p256);
-        // And the full form on the same short value.
         d32::p256_reduce(out, s);
         for (unsigned i = 0; i < 8; ++i) got = with_word(got, i, out[i]);
         REQUIRE(uint512{got} == sv % p256);
     }
 
-    // The extremes of every column: 2^512 - 1 and each word alone at its maximum.
     uint32_t t[16];
     uint32_t out[8];
     uint256 got;
@@ -309,7 +286,6 @@ TEST_CASE("the P-256, 2^256 - 1 and power-of-two closed forms reduce any 512-bit
         for (unsigned i = 0; i < 8; ++i) got = with_word(got, i, out[i]);
         REQUIRE(uint512{got} == v % ones);
     }
-    // Multiples of p: the reduction must give 0, with k at its largest and smallest.
     for (unsigned k = 0; k < 4000; ++k) {
         const uint512 v = uint512{kP256} * (k < 2000 ? uint512{k} : uint512{rng.any()});
         uint32_t w[16];
@@ -318,7 +294,6 @@ TEST_CASE("the P-256, 2^256 - 1 and power-of-two closed forms reduce any 512-bit
         d32::p256_reduce(out, w);
         for (unsigned i = 0; i < 8; ++i) got = with_word(got, i, out[i]);
         REQUIRE(got == 0);
-        // And one either side: p * q +- 1.
         const uint512 up = v + 1;
         for (unsigned i = 0; i < 16; ++i)
             w[i] = static_cast<uint32_t>(up[i / 2] >> (32 * (i % 2)));
@@ -334,7 +309,6 @@ TEST_CASE("the P-256, 2^256 - 1 and power-of-two closed forms reduce any 512-bit
             REQUIRE(uint512{got} == dn % p256);
         }
     }
-    // Multiples of 2^256 - 1 likewise (all ones maps to 0, never to 2^256 - 1).
     for (unsigned k = 0; k < 4000; ++k) {
         const uint512 v = uint512{kOnes} * (k < 2000 ? uint512{k} : uint512{rng.any()});
         uint32_t w[16];

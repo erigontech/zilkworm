@@ -1,10 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// DIV and MOD handlers against intx's / and %, on divisors chosen to break the rv32 front end:
-// a power of two becomes a word shift only if the top word has one bit and every word below it
-// is zero, so 2^k + 2^j and 2^k - 1 must divide. The native build sets
-// -DEVMONE_RV32_DISPATCH_TEST, which compiles that front end on the host.
+// DIV and MOD handlers against intx's / and %, on divisors chosen to break the rv32 front end.
 
 #include <array>
 #include <cstdint>
@@ -20,8 +16,7 @@ using intx::uint256;
 
 constexpr uint64_t kPoison = 0xa5a5a5a5a5a5a5a5;
 
-// The stack of an instruction under test: x on top, then v (and m), with a poisoned slot below
-// that an instruction must not touch.
+// The stack of an instruction under test: x on top, then v (and m).
 struct Slots {
     alignas(32) std::array<uint256, 4> s;
 
@@ -40,7 +35,6 @@ uint256 pow2(unsigned k) { return uint256{1} << k; }
 
 std::vector<uint256> divisors(std::mt19937_64& rng) {
     std::vector<uint256> out{1, 2, 3, 0xffffffffffffffff, uint256{1} << 64, ~uint256{0}};
-    // The moduli MULMOD reduces in closed form on rv32 (see mulmod_sparse_test.cpp), and BN254's.
     out.push_back(intx::from_string<uint256>(
         "0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF"));
     out.push_back(intx::from_string<uint256>(
@@ -51,22 +45,17 @@ std::vector<uint256> divisors(std::mt19937_64& rng) {
         out.push_back(pow2(k));
         out.push_back(pow2(k) - 1);
         out.push_back(pow2(k) + 1);
-        // A second bit in the same word and in lower ones.
         const unsigned same = (k & ~31u) + rng() % 32;
         out.push_back(pow2(k) | pow2(same));
         out.push_back(pow2(k) | pow2(rng() % (k + 1)));
         out.push_back(pow2(k) | pow2(rng() % 32));
-        // Words below the top one set to 0xffffffff.
         out.push_back(pow2(k) | (pow2(k & ~31u) - 1));
     }
     for (int i = 0; i < 400; ++i) {
-        // Built with shifts: stores through a uint32_t* into the uint64_t words of a uint256
-        // break strict aliasing, and -O3 may drop them.
         uint256 v;
         const unsigned words = 1 + rng() % 8;
         for (unsigned w = 0; w < words; ++w) {
             const auto r = static_cast<uint32_t>(rng());
-            // Into the 64-bit words: a store through uint32_t* need not be seen by their reads.
             if (rng() & 3) v[w / 2] |= uint64_t{r} << (32 * (w % 2));
         }
         out.push_back(v);

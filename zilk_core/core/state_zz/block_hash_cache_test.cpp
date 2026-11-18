@@ -1,11 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// DirectState::get_block_hash() keeps the parent-hash walk of the header it was asked for and
-// extends it on demand. Against the walk it replaced, repeated for every request: the same hash
-// for every depth, in any order of requests, for headers that alternate, with headers inserted in
-// between, and with a header missing from the chain, which sets ancestor_missing() exactly when
-// the walk would.
+// DirectState::get_block_hash() keeps the parent-hash walk of the header it was asked for and extends it on demand.
 
 #include <cstdint>
 #include <map>
@@ -51,7 +46,6 @@ struct Reference {
 }  // namespace
 
 TEST_CASE("BLOCKHASH's kept ancestor walk answers as the walk from the header does", "[block_hash]") {
-    // A chain of 300 headers from block 1000; the one at index `gap` is held back at first.
     constexpr uint64_t kFirst = 1000;
     constexpr size_t kCount = 300;
     std::vector<BlockHeader> chain(kCount);
@@ -73,20 +67,16 @@ TEST_CASE("BLOCKHASH's kept ancestor walk answers as the walk from the header do
         for (size_t i = 0; i < kCount; ++i)
             if (i != gap) insert(chain[i]);
 
-        // The headers asked for: one past the chain's end (the block being run), two earlier ones and a
-        // fork of the first, none of which the cache may answer for another.
         BlockHeader tip;
         tip.number = kFirst + kCount;
         tip.parent_hash = chain[kCount - 1].hash();
-        // A fork of the tip: the same number, another parent, which only the parent hash tells apart.
         BlockHeader fork = tip;
         fork.parent_hash = chain[kCount - 3].hash();
         const BlockHeader* const asked[] = {&tip, &chain[kCount - 1], &chain[kCount / 2 + 7], &fork};
 
         for (int step = 0; step < 4000; ++step) {
-            if (step == 2500) insert(chain[gap]);  // The gap closes: deeper walks succeed from here.
+            if (step == 2500) insert(chain[gap]);
             const BlockHeader& h = *asked[rng.below(4) == 0 ? 1 + rng.below(3) : 0];
-            // Depths around the chain's start and the gap, near the header and beyond it.
             uint64_t n;
             switch (rng.below(4)) {
             case 0: n = h.number - 1 - rng.below(8); break;
@@ -98,6 +88,6 @@ TEST_CASE("BLOCKHASH's kept ancestor walk answers as the walk from the header do
             REQUIRE(ds.get_block_hash(h, n) == want);
             REQUIRE(ds.ancestor_missing() == ref.missing);
         }
-        CHECK(ref.missing);  // The walks below the chain's start always fail.
+        CHECK(ref.missing);
     }
 }

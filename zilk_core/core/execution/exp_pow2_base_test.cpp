@@ -1,11 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The EXP handler against intx::exp and the EIP-160 gas rule, on the bases and exponents that break
-// its rv32 word-store paths: a power of two 2^j with j < 32 becomes a word write only if the other
-// seven words are zero, base 1 must give 1 for every exponent, base 0 is not a power of two, and
-// the product j*e must not be formed for an exponent that wraps 32 bits (base 256, e = 2^29). The
-// native build sets -DEVMONE_RV32_DISPATCH_TEST, which compiles those paths on the host.
+// The EXP handler against intx::exp and the EIP-160 gas rule.
 
 #include <array>
 #include <cstdint>
@@ -23,8 +18,7 @@ using intx::uint256;
 constexpr uint64_t kPoison = 0xa5a5a5a5a5a5a5a5;
 constexpr uint256 kPoison256{kPoison, kPoison, kPoison, kPoison};
 
-// The stack of an EXP under test: the base on top, the exponent below it, and a poisoned slot
-// beneath that, which the instruction must not touch.
+// The stack of an EXP under test: the base on top, the exponent below it.
 struct Slots {
     alignas(32) std::array<uint256, 3> s;
 
@@ -55,8 +49,7 @@ int significant_bytes(const uint256& e) {
 constexpr evmc_revision kRevs[] = {EVMC_FRONTIER, EVMC_TANGERINE_WHISTLE, EVMC_SPURIOUS_DRAGON,
     EVMC_CANCUN, EVMC_OSAKA};
 
-// One EXP: the result against intx::exp, the gas left against the EIP-160 rule, the base slot
-// unchanged, the poison untouched; and the out-of-gas edge (one unit short) on the same inputs.
+// One EXP: the result against intx::exp, the gas left against the EIP-160 rule, the base slot unchanged.
 void check_exp(const uint256& base, const uint256& e, evmc_revision rev, int64_t spare) {
     const int64_t cost = significant_bytes(e) * (rev >= EVMC_SPURIOUS_DRAGON ? 50 : 10);
     const int64_t gas = cost + spare;
@@ -86,17 +79,13 @@ std::vector<uint256> bases(std::mt19937_64& rng) {
         out.push_back(pow2(k));
         out.push_back(pow2(k) - 1);
         out.push_back(pow2(k) + 1);
-        // A second bit in the same word and in lower ones: not a power of two.
         const unsigned same = (k & ~31u) + rng() % 32;
         out.push_back(pow2(k) | pow2(same));
         out.push_back(pow2(k) | pow2(rng() % (k + 1)));
         out.push_back(pow2(k) | pow2(rng() % 32));
-        // A single bit in a high word with word 0 holding a small power of two or one more.
         out.push_back(pow2(k) | pow2(8));
         out.push_back(pow2(k) | 1);
-        // Word 0 a power of two below 2^32 with one stray bit in some higher word.
         out.push_back(pow2(k % 32) | pow2(32 + rng() % 224));
-        // Words below the top one set to 0xffffffff.
         out.push_back(pow2(k) | (pow2(k & ~31u) - 1));
     }
     out.push_back(pow2(40) + 256);
@@ -120,14 +109,13 @@ std::vector<uint256> exponents(std::mt19937_64& rng) {
         out.push_back(pow2(k));
         out.push_back(pow2(k) + 1);
     }
-    out.push_back(138547333);  // 31 * e wraps to 27
+    out.push_back(138547333);
     out.push_back(0x1fffffff);
     out.push_back(0x20000001);
     out.push_back(0xffffffff);
     out.push_back(0x100000001);
     out.push_back(~uint256{0});
     out.push_back(pow2(255) | 5);
-    // High word only: low word zero, so a wrap of the low-word product would be seen as 0.
     out.push_back(pow2(32));
     out.push_back(pow2(224));
     for (int i = 0; i < 150; ++i) {
@@ -136,7 +124,6 @@ std::vector<uint256> exponents(std::mt19937_64& rng) {
         for (unsigned w = 0; w < words; ++w)
             v[w / 2] |= uint64_t{static_cast<uint32_t>(rng())} << (32 * (w % 2));
         out.push_back(v);
-        // A multiple of 2^k/j for the wrap: e such that j*e is 2^32 or 2^32 + small.
         const unsigned j = 1 + rng() % 31;
         out.push_back(uint256{((uint64_t{1} << 32) + (rng() % 300)) / j});
     }
@@ -152,8 +139,6 @@ TEST_CASE("EXP handler matches intx on powers of two, their neighbours and every
     for (const auto& b : bases(rng)) {
         for (const auto& e : es) {
             ++i;
-            // Revision and spare gas vary over the sweep; the full revision list is run for the
-            // power-of-two bases below.
             check_exp(b, e, kRevs[i % std::size(kRevs)], static_cast<int64_t>(i % 3) * 7);
         }
     }
@@ -167,8 +152,6 @@ TEST_CASE("EXP handler: every 2^j, every revision, short exponents, gas edge") {
 }
 
 TEST_CASE("EXP handler: exponents that wrap a 32-bit product") {
-    // j * e0 reaches 2^32 or 2^32 + small for these: a product formed in 32 bits would see 0 or a
-    // small value and give 2^(j*e mod 2^32), not 0.
     for (unsigned j = 1; j < 32; ++j) {
         const uint256 b = pow2(j);
         for (const uint64_t e : {uint64_t{1} << 29, (uint64_t{1} << 29) + 1,
@@ -178,7 +161,6 @@ TEST_CASE("EXP handler: exponents that wrap a 32-bit product") {
             const auto r = evmone::instr::core::exp(f.stack(), 1000, state_at(EVMC_CANCUN));
             REQUIRE(r.status == EVMC_SUCCESS);
             REQUIRE(f.s[1] == intx::exp(b, uint256{e}));
-            // The true value: 2^(j*e) with j*e >= 256 is 0 unless e is below 256.
             REQUIRE((f.s[1] == 0) == (e >= 256 || j * e >= 256));
         }
     }

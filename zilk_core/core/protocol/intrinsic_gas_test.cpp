@@ -77,16 +77,13 @@ namespace protocol {
         CHECK(intrinsic_gas(txn, EVMC_PRAGUE, non_zero) < floor_cost(txn, non_zero));
     }
 
-    // Pins the arithmetic itself, so a wrong zero/non-zero split cannot pass by
-    // agreeing with a reference that shares the same counter.
+    // Pins the arithmetic itself, not agreement with a reference sharing the counter.
     TEST_CASE("intrinsic gas and floor cost for mixed calldata", "[intrinsic_gas]") {
         constexpr size_t kZeros{70};
         constexpr size_t kNonZeros{53};
         Bytes calldata(kZeros, 0);
         calldata.append(Bytes(kNonZeros, 0xab));
 
-        // Legacy and chain-id-less, so every revision asserted below is a shape that can exist:
-        // kDynamicFee is gated at London and a chain id is rejected before Spurious Dragon.
         UnsignedTransaction txn{
             .type = TransactionType::kLegacy,
             .gas_limit = 1'000'000,
@@ -97,14 +94,10 @@ namespace protocol {
         CHECK(non_zero == kNonZeros);
         CHECK(txn.data.size() - non_zero == kZeros);
 
-        // 21000 + 53*16 + 70*4
         CHECK(intrinsic_gas(txn, EVMC_PRAGUE, non_zero) == 22128);
-        // 21000 + 53*68 + 70*4  (pre-EIP-2028 non-zero byte price)
         CHECK(intrinsic_gas(txn, EVMC_FRONTIER, non_zero) == 24884);
-        // 21000 + (70 + 53*4) * 10
         CHECK(floor_cost(txn, non_zero) == 23820);
 
-        // Contract creation adds kGTxCreate and, since Shanghai, the EIP-3860 word cost.
         UnsignedTransaction creation{txn};
         creation.to = std::nullopt;
         CHECK(intrinsic_gas(creation, EVMC_PRAGUE, non_zero) == 22128 + 32000 + 4 * 2);

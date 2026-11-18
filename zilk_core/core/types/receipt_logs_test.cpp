@@ -1,12 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// ExecutionProcessor reads the logs where the receipts keep them: logs_bloom() writes into the
-// receipt's bloom, the block bloom joins only receipts with logs, and EIP-6110 deposits are
-// extracted receipt by receipt instead of from a block-wide copy of all logs. These tests check
-// that each gives what the code it replaced gave: logs_bloom() into a dirty bloom (the receipts
-// vector is reused across blocks) equals a fresh bloom and the known answer, and per-receipt
-// deposit extraction equals extraction from the concatenated logs, failures included.
+// ExecutionProcessor reads the logs where the receipts keep them: logs_bloom() writes into the receipt's bloom.
 
 #include <cstdint>
 #include <random>
@@ -41,8 +35,7 @@ namespace {
         };
     }
 
-    // The 576-byte DepositEvent data of EIP-6110: five offsets, then each field's length and its
-    // bytes padded to words. Field bytes are drawn from rng; `bad_word` >= 0 corrupts that word.
+    // The 576-byte DepositEvent data of EIP-6110: five offsets.
     Bytes deposit_data(std::mt19937& rng, int bad_word = -1) {
         Bytes data(576, 0);
         const auto put_word = [&](size_t pos, uint32_t v) {
@@ -59,8 +52,7 @@ namespace {
         return data;
     }
 
-    // A log of one of the kinds the deposit scan tells apart: a deposit, a malformed deposit, the
-    // deposit event from another contract, another event from the deposit contract, and no topics.
+    // A log of one of the kinds the deposit scan tells apart: a deposit, a malformed deposit.
     Log make_log(std::mt19937& rng, unsigned kind) {
         Log log{protocol::kDepositContractAddress, {kDepositEvent}, {}};
         switch (kind) {
@@ -68,7 +60,6 @@ namespace {
                 log.data = deposit_data(rng);
                 break;
             case 1: {
-                // One of the five offset words or the five length words.
                 constexpr int kLayoutWords[]{0, 1, 2, 3, 4, 5, 8, 10, 12, 16};
                 log.data = deposit_data(rng, kLayoutWords[rng() % std::size(kLayoutWords)]);
                 break;
@@ -129,7 +120,6 @@ TEST_CASE("logs_bloom in place: known answer, dirty destination, no logs") {
         "00000000001400000000000000008000000000000000000000000000000000";
     CHECK(to_hex(logs_bloom(logs)) == expected);
 
-    // A receipt reused from an earlier block keeps its old bloom until logs_bloom overwrites it.
     Bloom bloom;
     bloom.fill(0xa5);
     logs_bloom(bloom, logs);
@@ -144,7 +134,7 @@ TEST_CASE("Block bloom: joining only receipts with logs gives the full join") {
     std::mt19937 rng{7};
     std::vector<Receipt> receipts(64);
     for (auto& receipt : receipts) {
-        receipt.bloom.fill(0x5a);  // dirty, as in a reused receipts vector
+        receipt.bloom.fill(0x5a);
         const unsigned n = rng() % 3 == 0 ? 0 : rng() % 4;
         for (unsigned i = 0; i < n; ++i) {
             Log log{};
@@ -173,7 +163,6 @@ TEST_CASE("EIP-6110 deposits per receipt equal deposits from all logs") {
     size_t with_deposits = 0;
     for (unsigned round = 0; round < 400; ++round) {
         std::vector<Receipt> receipts(rng() % 6);
-        // Mostly well-formed deposits; a malformed one in about one block of eight.
         for (auto& receipt : receipts) {
             const unsigned n = rng() % 4;
             for (unsigned i = 0; i < n; ++i) {

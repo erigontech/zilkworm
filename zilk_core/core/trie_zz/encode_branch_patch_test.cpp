@@ -1,8 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// encode_branch re-emits the witness RLP a branch was unfolded from and rewrites only the dirty
-// slots when no slot changed length class. Every path must equal the full re-encode byte for byte.
+// encode_branch rewrites only the dirty slots when no slot changed length class.
 
 #include <array>
 #include <cstring>
@@ -29,7 +27,7 @@ Bytes branch_node() {
     inner.append({0xc3, 0x01, 0x02, 0x03});
     inner.push_back(0x80);
     inner.push_back(0x80);
-    inner.push_back(0x80);  // value
+    inner.push_back(0x80);
     Bytes node;
     silkworm::rlp::encode_header(node, {.list = true, .payload_length = inner.size()});
     node.append(inner);
@@ -57,7 +55,7 @@ BranchNode unfold(const Bytes& node) {
 Bytes fast_encode(const BranchNode& b) { return Bytes{encode_branch(b)}; }
 
 Bytes slow_encode(BranchNode b) {
-    b.orig = nullptr;  // forces the full re-encode
+    b.orig = nullptr;
     return Bytes{encode_branch(b)};
 }
 
@@ -80,7 +78,7 @@ TEST_CASE("encode_branch patch path matches the full re-encode", "[trie][gridmpt
     SECTION("hash child replaced") {
         BranchNode b = unfold(node);
         b.set_child(5, ByteView{new_hash.data(), 32});
-        CHECK(b.child_len == b.orig_child_len);  // patch path
+        CHECK(b.child_len == b.orig_child_len);
         CHECK(fast_encode(b) != node);
         CHECK(fast_encode(b) == slow_encode(b));
     }
@@ -103,7 +101,7 @@ TEST_CASE("encode_branch patch path matches the full re-encode", "[trie][gridmpt
     SECTION("empty slot filled: layout changes, full re-encode") {
         BranchNode b = unfold(node);
         b.set_child(14, ByteView{new_hash.data(), 32});
-        CHECK(b.child_len != b.orig_child_len);  // fallback path
+        CHECK(b.child_len != b.orig_child_len);
         CHECK(fast_encode(b) == slow_encode(b));
     }
     SECTION("hash child deleted: layout changes, full re-encode") {

@@ -1,13 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// intx::count_significant_bytes(uint64_t) on rv32 counts by comparisons on the significant 32-bit
-// half instead of through a leading-zero count (a libgcc call there). Every RLP length and integer
-// encoding and EXP's gas charge depend on it, so the comparison form is checked here against the
-// leading-zero formula the host uses: around every byte and bit boundary of both halves, and on
-// random values. The host build compiles the leading-zero form into count_significant_bytes itself,
-// so the comparison form is called by name. EXP's bit width, taken on rv32 from that byte count and
-// the top byte, is checked against intx::bit_width() as well.
+// count_significant_bytes(uint64_t) on rv32 counts by comparisons on the significant half.
 
 #include <bit>
 #include <cstdint>
@@ -50,21 +43,17 @@ struct Mismatches {
 
 TEST_CASE("count_significant_bytes by comparison: boundaries of both halves") {
     Mismatches m;
-    // Every value of the low 20 bits, alone and under each high half of interest: the high half
-    // decides on its own once it is non-zero, whatever the low half holds.
     for (uint64_t v = 0; v < (uint64_t{1} << 20); ++v) {
         m.check(v);
         m.check(v << 32);
         m.check((v << 32) | 1);
         m.check((v << 32) | 0xffffffff);
     }
-    // 2^k and its neighbours at every bit position, which include every byte boundary.
     for (unsigned k = 0; k < 64; ++k) {
         const uint64_t p = uint64_t{1} << k;
         for (const uint64_t x : {p, p - 1, p + 1, p | (p - 1), ~p, ~(p - 1)})
             m.check(x);
     }
-    // Each half at each byte boundary, in every combination.
     constexpr uint32_t kEdges[]{0,        1,         0x7f,      0x80,       0xff,      0x100,
                                 0xffff,   0x10000,   0xffffff,  0x1000000,  0x7fffffff, 0x80000000,
                                 0xffffffff};
@@ -114,8 +103,6 @@ TEST_CASE("EXP bit width by bytes: powers of two and their neighbours at every p
         m.check(~p);
         m.check(~(p - 1));
     }
-    // Every value of the top significant byte at each of the 32 byte positions, over a low part
-    // of zeros, ones and a pattern: the byte that carries the width is the only one that counts.
     for (unsigned pos = 0; pos < 32; ++pos) {
         for (unsigned b = 0; b < 256; ++b) {
             const uint256 top = uint256{b} << (8 * pos);

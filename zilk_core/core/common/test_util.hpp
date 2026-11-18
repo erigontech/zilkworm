@@ -11,13 +11,13 @@
 
 namespace silkworm::test {
 
-//! Always Frontier rules.
+// Always Frontier rules.
 inline constexpr ChainConfig kFrontierConfig{
     .chain_id = 1,
     .rule_set_config = protocol::EthashConfig{.validate_seal = false},
 };
 
-//! Enables London from genesis.
+// Enables London from genesis.
 inline constexpr ChainConfig kLondonConfig{
     .chain_id = 1,
     .homestead_block = 0,
@@ -32,7 +32,7 @@ inline constexpr ChainConfig kLondonConfig{
     .rule_set_config = protocol::EthashConfig{.validate_seal = false},
 };
 
-//! Enables Shanghai from genesis.
+// Enables Shanghai from genesis.
 inline constexpr ChainConfig kShanghaiConfig{
     .chain_id = 1,
     .homestead_block = 0,
@@ -48,7 +48,7 @@ inline constexpr ChainConfig kShanghaiConfig{
     .shanghai_time = 0,
 };
 
-//! Enables Prague from genesis.
+// Enables Prague from genesis.
 inline constexpr ChainConfig kPragueConfig{
     .chain_id = 1,
     .homestead_block = 0,
@@ -95,7 +95,6 @@ inline const std::map<std::string, ChainConfig> kNetworkConfig{
          .tangerine_whistle_block = 0,
          .rule_set_config = protocol::EthashConfig{.validate_seal = false},
      }},
-    // EEST tests@v20+ spelling of EIP150 (evmone #1576 followed the same rename).
     {"TangerineWhistle",
      {
          .chain_id = 1,
@@ -118,7 +117,6 @@ inline const std::map<std::string, ChainConfig> kNetworkConfig{
          .spurious_dragon_block = 0,
          .rule_set_config = protocol::EthashConfig{.validate_seal = false},
      }},
-    // EEST tests@v20+ spelling of EIP158.
     {"SpuriousDragon",
      {
          .chain_id = 1,
@@ -276,7 +274,7 @@ inline const std::map<std::string, ChainConfig> kNetworkConfig{
          .london_block = 0,
          .terminal_total_difficulty = 0,
      }},
-    {"Paris",  // same as Merge
+    {"Paris",
      {
          .chain_id = 1,
          .homestead_block = 0,
@@ -577,9 +575,6 @@ inline const std::map<std::string, ChainConfig> kNetworkConfig{
          .bpo2_time = 0,
          .amsterdam_time = 15'000,
      }},
-    // Hardcoded glamsterdam-devnet-7 chain config (devnet-specific: a new devnet needs its own entry).
-    // The MFBD input carries only the network name; the guest maps it here to chain_id + blob schedule
-    // (via bpo/amsterdam fork times) + fork activation. amsterdam_time=0 => revision() returns EVMC_AMSTERDAM.
     {"glamsterdam-devnet-7",
      {
          .chain_id = 0x1a62c8cb6,
@@ -601,7 +596,6 @@ inline const std::map<std::string, ChainConfig> kNetworkConfig{
          .bpo2_time = 0,
          .amsterdam_time = 0,
      }},
-    // Hardcoded glamsterdam-devnet-8 chain config (devnet-specific: a new devnet needs its own entry).
     {"glamsterdam-devnet-8",
      {
          .chain_id = 0x1a6a8cc6e,
@@ -623,8 +617,6 @@ inline const std::map<std::string, ChainConfig> kNetworkConfig{
          .bpo2_time = 0,
          .amsterdam_time = 0,
      }},
-    // Sepolia fork times (kSepoliaConfig) with the pre-merge forks at genesis: stateless
-    // validation of post-merge blocks has no total difficulty for the TTD rule set.
     {"sepolia",
      {
          .chain_id = 11155111,

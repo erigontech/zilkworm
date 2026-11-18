@@ -1,13 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
 // GridMPT<true, DirectState> regression tests: references into the walk's storage must survive it growing.
-//
-// The grid was a vector reserved for 66 lines, with references to its lines held across the appends of
-// unfolds and insertions, and the copies of embedded nodes a vector that leaves view into. Either one
-// reallocating left those references to freed memory (on the guest, whose allocator never reuses
-// memory, writes through them went to the abandoned buffer and were lost). The grid now has its largest
-// size, 255 lines, from the start and fails the walk past it; the copies are a deque.
 
 #include <cstdint>
 #include <cstring>
@@ -73,8 +66,7 @@ bytes32 key_with_nibbles(const std::vector<uint8_t>& nibs, uint8_t fill) {
     return k;
 }
 
-// Runs the sorted `updates` (deletions as 0x80) against a complete witness of the trie `pre` and returns
-// the root, with the post-state's HashBuilder root in `want`.
+// Runs the sorted `updates` (deletions as 0x80) against a complete witness of the trie `pre` and returns the root.
 bytes32 walk(const Bytes32Map& pre, const std::map<bytes32, Bytes, Bytes32Less>& updates, bytes32& want,
              bool* failed = nullptr) {
     Bytes32Map nodes;
@@ -84,7 +76,7 @@ bytes32 walk(const Bytes32Map& pre, const std::map<bytes32, Bytes, Bytes32Less>&
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
 
     Bytes32Map post = pre;
-    std::vector<TrieNodeFlat> flat;  // must never reallocate: GridMPT keeps views into TrieNodeFlat::buf
+    std::vector<TrieNodeFlat> flat;
     flat.reserve(updates.size());
     for (const auto& [k, v] : updates) {
         auto& node = flat.emplace_back(k);
@@ -111,10 +103,7 @@ bytes32 walk(const Bytes32Map& pre, const std::map<bytes32, Bytes, Bytes32Less>&
 
 }  // namespace
 
-// Two leaves under a branch 40 nibbles down are short enough to be embedded in it, so each unfolds from a
-// copy of its bytes. Reading one, then deleting the other, takes two copies, and the second can move the
-// first: the read leaf, which becomes the branch's only child and merges into the extension above it,
-// was then encoded with a value viewing freed memory.
+// Two leaves under a branch 40 nibbles down are short enough to be embedded in it.
 TEST_CASE("GridMPT<true, DirectState> embedded leaves keep their bytes as more are unfolded", "[trie][gridmpt]") {
     const std::vector<uint8_t> prefix(40, 3);
     std::vector<uint8_t> pa = prefix, pb = prefix;
@@ -128,11 +117,7 @@ TEST_CASE("GridMPT<true, DirectState> embedded leaves keep their bytes as more a
     CHECK(got == want);
 }
 
-// Each branch on the path of the current key keeps the lines of the children the walk unfolded under it
-// until it leaves the branch. Keys that share the path's first l nibbles and differ at nibble l, for
-// l = 0..D-1, give each of the path's D branches 15 such children: 16 D + 1 lines. Keys ground from slot
-// numbers get there (the last 15 need a prefix of D - 1 nibbles, 16^(D-1) tries each). 66 lines were
-// reserved, and past 127 the descent's bound on the line index dropped the update; the grid now holds 255.
+// Each branch on the path keeps the lines of the children unfolded under it: 16 D + 1 lines.
 TEST_CASE("GridMPT<true, DirectState> grid of 16 lines per branch level", "[trie][gridmpt]") {
     for (const unsigned levels : {4u, 5u, 8u, 9u, 15u, 16u}) {
         CAPTURE(levels);
@@ -156,8 +141,8 @@ TEST_CASE("GridMPT<true, DirectState> grid of 16 lines per branch level", "[trie
             CHECK(got == want);
             CHECK_FALSE(failed);
         } else {
-            CHECK(got == bytes32{});  // the walk cannot go on: a root that matches no header
-            CHECK(failed);            // and fails, in release builds too
+            CHECK(got == bytes32{});
+            CHECK(failed);
         }
     }
 }

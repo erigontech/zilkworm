@@ -1,19 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// ecc::ProjPoint takes the 1 of its default y, and of the z of a point built from an affine point,
-// from ONE, a constant folded at compile time, where it used to compute FE::one() at run time (on
-// the guest a CSR multiplication per point). Every curve the precompiles use must see the same
-// value: the default point is the point at infinity (0 : 1 : 0) and the bn254 and P-256
-// accumulators start from it. The run-time 1 is built from a value the compiler cannot see, so
-// the comparison is not folded into a tautology.
-//
-// The second half is a differential test against the code before the change: mul() and msm() are
-// reproduced here with the accumulator started from a point whose y is the run-time 1 (what the
-// default ProjPoint used to be), and must agree bit for bit with ecc::mul() and ecc::msm() on
-// crafted and random scalars and points (zero, the group order and its neighbours, equal and
-// opposite points), and with an affine double-and-add reference that uses neither ONE nor the
-// Jacobian formulas.
+// ecc::ProjPoint takes the 1 of its default y, and of the z of a point built from an affine point, from ONE.
 
 #include <array>
 #include <cstdint>
@@ -130,7 +117,6 @@ struct Rng {
         return z ^ (z >> 31);
     }
     intx::uint256 scalar() {
-        // Mixed widths: full, short (as the GLV halves are) and sparse scalars.
         const intx::uint256 w{next(), next(), next(), next()};
         switch (next() % 4) {
         case 0: return w;
@@ -154,7 +140,6 @@ void check_differential(const ecc::AffinePoint<Curve>& g) {
     for (int i = 0; i < 40; ++i)
         scalars.push_back(rng.scalar());
 
-    // Points: G, random multiples, and the negation of G.
     std::vector<ecc::AffinePoint<Curve>> points{g, -g};
     for (int i = 0; i < 6; ++i) {
         const auto k = rng.scalar();
@@ -163,7 +148,6 @@ void check_differential(const ecc::AffinePoint<Curve>& g) {
             points.push_back(a);
     }
 
-    // The default point is the base infinity.
     CHECK(same_coordinates(Point{}, base_infinity<Curve>()));
 
     size_t at_infinity = 0;
@@ -178,12 +162,12 @@ void check_differential(const ecc::AffinePoint<Curve>& g) {
                 ++at_infinity;
         }
     }
-    CHECK(at_infinity > 0);  // k = 0 and k = N reach the point at infinity.
+    CHECK(at_infinity > 0);
 
     for (size_t i = 0; i < points.size(); ++i) {
         for (size_t j = 0; j < points.size(); ++j) {
             const auto& p = points[i];
-            const auto& q = points[j];  // i == j: P == Q; the first two are G and -G: P == -Q.
+            const auto& q = points[j];
             for (int t = 0; t < 8; ++t) {
                 const U u = t == 0 ? U{0} : t == 1 ? n : rng.scalar();
                 const U v = t == 2 ? U{0} : t == 3 ? n - 1 : rng.scalar();
@@ -195,10 +179,8 @@ void check_differential(const ecc::AffinePoint<Curve>& g) {
             }
         }
     }
-    // Both scalars zero: msm() returns the default point.
     CHECK(same_coordinates(ecc::msm(U{0}, g, U{0}, g), base_infinity<Curve>()));
 
-    // add()/dbl() on the point at infinity and a point built from an affine point.
     const Point inf;
     const Point from_g{g};
     CHECK(same_coordinates(from_g, Point{g.x, g.y, FE{typename Curve::uint_type{1}}}));

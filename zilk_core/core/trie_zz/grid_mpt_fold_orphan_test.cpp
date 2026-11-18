@@ -1,16 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Regression test for GridMPT::calc_root_from_updates fold bug exposed by the
-// EEST test_storage_access_cold[absent_slots_True-SSTORE {new|same} value]
-// fixtures at 60M/100M/150M gas. With ~2700 fresh storage-slot inserts on an
-// empty trie, GridMPT diverged from the canonical HashBuilder root.
-//
-// Bisected to a four-key minimal reproducer: inserting keccak-sorted keys
-// whose first-two nibbles are (0,0), (0,0), (0,0), (0,1) drives an orig-ext
-// split with m > 0 where `path[m-1] == last_nib` (e.g. extension path
-// [0,0,0]). The original code unconditionally cleared `cdep[last_nib]` after
-// `insert_line_at`, orphaning the new branch and producing a stale root.
+// Regression test: calc_root_from_updates fold bug on an orig-ext split (EEST test_storage_access_cold).
 
 #include <array>
 #include <cstdint>
@@ -57,8 +48,6 @@ bytes32 hashbuilder_root(std::span<const TrieNodeFlat> updates) {
 }  // namespace
 
 TEST_CASE("GridMPT: ext-split fold bug", "[trie][gridmpt]") {
-    // Sorted by keccak; nibbles[0..1] = 00,00,00,01. Pre-fix this produced a
-    // non-canonical GridMPT root (orphaned branch in the grid).
     static constexpr const char* kKeys[] = {
         "00028929fd935f4a47c4f35372f1494b33b122c97368e23a6482db0b16149db2",
         "00089936d6f8866fdbcb373720029ed6c076263e72bb11506447776f2764afdb",
@@ -73,7 +62,7 @@ TEST_CASE("GridMPT: ext-split fold bug", "[trie][gridmpt]") {
         updates[i].self_initial_len = 0;
         updates[i].current_off = 0;
         updates[i].current_len = 33;
-        updates[i].buf[0] = 0xa0;  // RLP prefix for 32-byte string
+        updates[i].buf[0] = 0xa0;
         std::memset(updates[i].buf + 1, 0xff, 32);
     }
 

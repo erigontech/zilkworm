@@ -1,9 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// UnsignedTransaction::maximum_gas_cost skips the blob-gas term when there are no blob hashes. It must still
-// equal gas_limit * max_fee_per_gas + total_blob_gas * max_fee_per_blob_gas (the formula as it was written
-// before the skip) for every mix of blob count and fees, including fees at the top of the uint256 range.
+// UnsignedTransaction::maximum_gas_cost skips the blob-gas term when there are no blob hashes.
 
 #include "transaction.hpp"
 
@@ -57,12 +54,10 @@ TEST_CASE("maximum_gas_cost: blob term present exactly when there are blob hashe
     tx.blob_versioned_hashes.resize(6);
     CHECK(tx.maximum_gas_cost() == intx::uint512{210'000} + intx::uint512{6 * protocol::kGasPerBlob * 7});
 
-    // No hashes: the blob fee is irrelevant, even at its maximum.
     tx.blob_versioned_hashes.clear();
     tx.max_fee_per_blob_gas = ~intx::uint256{0};
     CHECK(tx.maximum_gas_cost() == intx::uint512{210'000});
 
-    // One hash at the maximum blob fee: the full 512-bit product (no truncation).
     tx.blob_versioned_hashes.resize(1);
     CHECK(tx.maximum_gas_cost() == intx::uint512{210'000} + intx::umul(intx::uint256{protocol::kGasPerBlob}, ~intx::uint256{0}));
 }
