@@ -1,8 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// Witness JSON → MFBD FlatBundle converter (library form of the former
-// json_witness_to_flat_bundle CLI main; the CLI now wraps this).
+// Witness JSON -> MFBD FlatBundle converter; the CLI wraps it.
 
 #include "witness_converter.hpp"
 
@@ -109,9 +107,7 @@ bool collect_hex_records(const nlohmann::json& v, std::vector<std::vector<uint8_
     return false;
 }
 
-// Body of the former CLI main(): converts the witness JSON in `input` into an
-// MFBD envelope in `out`. Returns 0 on success, nonzero with `err` set on
-// failure. Error strings carry no trailing newline (the CLI appends one).
+// Converts the witness JSON in `input` into an MFBD envelope in `out`; error strings carry no trailing newline.
 int convert_json_witness(ByteView input, std::vector<uint8_t>& out, std::string& err) {
     nlohmann::json doc;
 #if defined(__cpp_exceptions)
@@ -179,8 +175,7 @@ int convert_json_witness(ByteView input, std::vector<uint8_t>& out, std::string&
     }
     const silkworm::BlockHeader& prev_header = ancestors.back();
 
-    // ancestors.back() is trusted as the immediate parent; verify before use so a
-    // mis-ordered/wrong header can't silently feed a bogus pre_root.
+    // ancestors.back() is trusted as the immediate parent; verify it before use.
     {
         silkworm::Block cur_block;
         ByteView cur_v{current_block_rlp.data(), current_block_rlp.size()};
@@ -211,8 +206,7 @@ int convert_json_witness(ByteView input, std::vector<uint8_t>& out, std::string&
         silkworm::rlp::encode(prev_block_rlp, prev_block);
     }
 
-    // load_flat_bundle() reads each ancestor as an RLP string holding the header, as the legacy bundles
-    // carry it: BLOCKHASH reads an ancestor's hash from its child's header.
+    // load_flat_bundle() reads each ancestor as an RLP string holding the header.
     silkworm::Bytes ancestors_rlp;
     {
         silkworm::Bytes entries;
@@ -367,7 +361,6 @@ int convert_json_witness(ByteView input, std::vector<uint8_t>& out, std::string&
         }
     }
 
-    // Optional inputs: fork name and per-block expect_invalid flag.
     std::string fork_name = "Mainnet";
     if (const auto it = doc.find("fork"); it != doc.end() && it->is_string()) {
         fork_name = it->get<std::string>();
@@ -400,10 +393,7 @@ int convert_json_witness(ByteView input, std::vector<uint8_t>& out, std::string&
     return 0;
 }
 
-// Assign prefix (+ optional detail) to err without letting an allocation
-// failure escape: under true heap exhaustion the assignment itself can throw
-// bad_alloc, which must not cross the extern "C" boundary. err is left empty
-// if even the assignment fails.
+// Assigns prefix (+ detail) to err; bad_alloc must not cross the extern "C" boundary, so err stays empty on failure.
 void set_message(std::string& err, const char* prefix, const char* detail) noexcept {
 #if defined(__cpp_exceptions)
     try {
@@ -418,7 +408,6 @@ void set_message(std::string& err, const char* prefix, const char* detail) noexc
 #endif
 }
 
-// Copy a std::string into a malloc'd NUL-terminated buffer (null on OOM).
 char* dup_message(const std::string& s) {
     char* msg = static_cast<char*>(std::malloc(s.size() + 1));
     if (msg != nullptr) {

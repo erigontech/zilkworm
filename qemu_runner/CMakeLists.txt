@@ -14,8 +14,6 @@ project(SilkwormRVDemo C CXX ASM)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ========== Architecture detection ==========
-# Detect based on CMAKE_SYSTEM_PROCESSOR set in toolchain file
 set(START_ASM "start.S" CACHE STRING "Assembly startup file")
 set(QEMU_SYSTEM "qemu-system-riscv32" CACHE STRING "QEMU system emulator")
 
@@ -33,7 +31,7 @@ else()
   message(STATUS "Building for RISC-V 32-bit (rv32im)")
 endif()
 
-# QEMU_DEBUG flag — propagates to zilk_core via add_subdirectory
+# Propagates to zilk_core via add_subdirectory.
 option(QEMU_DEBUG "Enable QEMU debug mode" OFF)
 
 include(CableBuildInfo)
@@ -65,10 +63,7 @@ target_include_directories(z6m_debug PRIVATE
     "${Z6M_ROOT}/third_party/evmone/lib/evmone_precompiles"
 )
 
-# zilk_core/print.hpp routes sys_print()/sys_println() to semihosting only when
-# QEMU_DEBUG is set; zilk_core/CMakeLists.txt sets it for its own subtree, so it
-# has to be repeated here or these sources fall back to the host <iostream>
-# branch and clash with src/include/semihosting.hpp.
+# zilk_core/CMakeLists.txt sets QEMU_DEBUG only for its own subtree; without it here these sources fall back to the host <iostream> branch of print.hpp and clash with semihosting.hpp.
 if(QEMU_DEBUG)
     target_compile_definitions(z6m_debug PRIVATE QEMU_DEBUG)
 endif()
@@ -83,7 +78,6 @@ target_link_options(z6m_debug PRIVATE
     -Wl,-Map=${CMAKE_BINARY_DIR}/z6m_debug.map
 )
 
-# make all references to _sbrk/_sbrk_r go to our wrappers
 target_link_options(z6m_debug PRIVATE
     -Wl,--wrap=_sbrk
     -Wl,--wrap=_sbrk_r
@@ -94,8 +88,6 @@ target_compile_options(z6m_debug PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-mstrict-align>
 )
 
-# ========== CTest / EEST test generation ==========
-# `EEST_MFBD_DIR` and `EEST_JSON_DIR` are independent; either / both / neither may be set.
 set(EEST_MFBD_DIR "" CACHE PATH "Directory of pre-converted MFBD EEST fixtures")
 set(EEST_JSON_DIR "" CACHE PATH "Directory of raw EEST JSON fixtures")
 if(EEST_MFBD_DIR OR EEST_JSON_DIR)
@@ -105,14 +97,11 @@ if(EEST_MFBD_DIR OR EEST_JSON_DIR)
     include(CTest)
 endif()
 
-# The EEST fixtures the runner is known to get wrong, see the list for why. Each is registered WILL_FAIL,
-# so one that passes again fails ctest until it is taken off the list.
+# Known runner failures, each WILL_FAIL so one that passes again fails ctest until it is delisted.
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../zilk_core/dev/eest-known-failures.txt" EEST_KNOWN_FAILURES REGEX "^[^#]")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../zilk_core/dev/eest-known-failures.txt")
 
-# Generate a driver script that pipes the fixture as-is into the QEMU payload
-# (the runner auto-dispatches on the leading 4-byte magic — MFBD or EJSN —
-# so no extra tag byte is needed) and register one ctest per fixture file.
+# Driver script pipes the fixture into the QEMU payload (the runner dispatches on the leading 4-byte magic, MFBD or EJSN); one ctest per fixture file.
 function(_register_eest_tests label ext fixtures_dir)
     set(script "${CMAKE_CURRENT_BINARY_DIR}/qemu_run_${label}.sh")
     file(WRITE  "${script}" "#!/bin/bash\n")

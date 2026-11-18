@@ -54,7 +54,6 @@ def fmt(n) -> str:
     return f"{n:,}"
 
 
-# -- Git helpers --------------------------------------------------------------
 
 def find_git_root() -> Optional[str]:
     try:
@@ -90,15 +89,9 @@ def get_git_info() -> Tuple[str, str, str]:
     return commit, branch, message
 
 
-# -- Discovery ----------------------------------------------------------------
 
 def discover_blocks(data_dir: str) -> Tuple[str, List[int]]:
-    """Discover blocks in data_dir (which directly contains numbered block dirs).
-
-    Returns (prover_data_dir, sorted_block_numbers).  The prover expects
-    --data-dir to be the parent of a blocks/ subdirectory, so we create a
-    temporary directory with a ``blocks`` symlink pointing at data_dir.
-    """
+    """Returns (prover_data_dir, sorted block numbers); prover_data_dir holds a ``blocks`` symlink to data_dir, as the prover expects."""
     blocks = []
     try:
         for entry in os.listdir(data_dir):
@@ -150,15 +143,10 @@ def compute_parallelism(total_blocks: int) -> int:
     return actual
 
 
-# -- Chunking -----------------------------------------------------------------
 
 def split_into_chunks(block_list: List[int], n_chunks: int,
                       output_dir: str) -> List[ChunkInfo]:
-    """Split block_list into n_chunks groups.
-
-    Each chunk uses --start-block/--end-block markers from its first and
-    last block.  The prover skips missing blocks in the range automatically.
-    """
+    """Split block_list into n_chunks groups bounded by their first and last block (the prover skips missing blocks in a range)."""
     if not block_list:
         return []
     n_chunks = max(1, min(n_chunks, len(block_list)))
@@ -179,7 +167,6 @@ def split_into_chunks(block_list: List[int], n_chunks: int,
     return chunks
 
 
-# -- Execution ----------------------------------------------------------------
 
 RAM_PER_INSTANCE_GB = 8
 RAM_WAIT_INTERVAL = 15
@@ -187,11 +174,7 @@ RAM_WAIT_INTERVAL = 15
 
 def run_prover_chunks(prover: str, data_dir: str,
                       chunks: List[ChunkInfo]) -> bool:
-    """Launch prover processes with memory-aware scheduling.
-
-    Each chunk is a single prover invocation with --start-block/--end-block.
-    The prover skips missing blocks in the range automatically.
-    """
+    """One prover invocation per chunk (--start-block/--end-block), launched with memory-aware scheduling."""
     processes: List[Tuple[ChunkInfo, subprocess.Popen, str]] = []
     all_ok = True
 
@@ -232,7 +215,6 @@ def run_prover_chunks(prover: str, data_dir: str,
                 p.kill()
             return False
 
-    # Monitor
     print(f"\n  Monitoring {len(processes)} processes...")
     completed = set()
     start_time = time.time()
@@ -281,7 +263,6 @@ def merge_chunk_logs(chunks: List[ChunkInfo], merged_path: str) -> str:
     return merged_path
 
 
-# -- Log parsing --------------------------------------------------------------
 
 LOG_PATTERN = re.compile(
     r"\[([^\]]*)\]\s+block\s+(\d+)\s+executed,\s+"
@@ -308,7 +289,6 @@ def parse_execution_log(log_path: str) -> List[BlockRecord]:
     return records
 
 
-# -- Report -------------------------------------------------------------------
 
 def generate_report(records: List[BlockRecord], block_range: Tuple[int, int],
                     total_blocks: int, git_commit: str, git_branch: str,
@@ -370,7 +350,6 @@ def generate_report(records: List[BlockRecord], block_range: Tuple[int, int],
 
 
 
-# -- Main ---------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="SP1 Benchmark Tool for z6m")
@@ -398,7 +377,6 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    # Discovery
     print("\n[Discovery]")
     print(f"  Data directory: {data_dir}")
     print(f"  Prover: {prover}")
@@ -431,25 +409,21 @@ def main() -> int:
     os.makedirs(output_dir, exist_ok=True)
     print(f"  Output directory: {output_dir}")
 
-    # Chunking
     print(f"\n[Chunking]")
     chunks = split_into_chunks(block_list, actual_parallel, output_dir)
     for c in chunks:
         print(f"  Chunk {c.index}: blocks {c.start_block}..{c.end_block} "
               f"({c.block_count} blocks) -> {os.path.basename(c.log_file)}")
 
-    # Execution
     print(f"\n[Execution]")
     ok = run_prover_chunks(prover, prover_data_dir, chunks)
     if not ok:
         print("\nWARNING: Some chunks failed. Proceeding with available data.")
 
-    # Merge logs
     merged_log = os.path.join(output_dir, "execution.log")
     merge_chunk_logs(chunks, merged_log)
     print(f"  Merged log: {merged_log}")
 
-    # Analysis
     print(f"\n[Analysis]")
     records = parse_execution_log(merged_log)
     print(f"  Parsed {len(records)} records")

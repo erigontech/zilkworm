@@ -35,12 +35,10 @@
 #include <zilk_core/print.hpp>
 
 #ifdef Z6M_HASH_STATE
-// The slib runner arm (S6): parse blocks[i].statelessInputBytes -> HashState -> execute ->
-// gather -> accept. These headers are HashState-only (each guarded so the DirectState build
-// pulls in nothing from them).
-#include <zilk_core/core/state_zz/hash_state.hpp>      // HashState, HashStateView
-#include <zilk_core/core/state_zz/slib_input.hpp>      // run_slib, SlibRunResult
-#include <zilk_core/dev/check_root_hashstate.hpp>      // check_root_hashstate gather overload
+// HashState-only headers, guarded so the DirectState build pulls in nothing from them.
+#include <zilk_core/core/state_zz/hash_state.hpp>
+#include <zilk_core/core/state_zz/slib_input.hpp>
+#include <zilk_core/dev/check_root_hashstate.hpp>
 #endif
 
 namespace silkworm::cmd::state_transition {
@@ -53,9 +51,7 @@ StateTransition::StateTransition(std::span<uint8_t> envelope) noexcept
 }
 
 namespace {
-    // Witness headers decode exactly. A stateless new-payload input (one carrying engine records) also
-    // has them chain contiguously up to the parent, as validate_headers requires; elsewhere they only
-    // feed the BLOCKHASH walk, which ignores a header no child names (get_block_hash).
+    // Witness headers decode exactly; a stateless new-payload input also needs them contiguous up to the parent (validate_headers).
     [[maybe_unused]] bool witness_headers_valid(const ::zilkworm::FlatBundle& bundle) {
         if (!bundle.ancestors_well_formed) {
             sys_println("ERROR: malformed witness header");
@@ -97,10 +93,7 @@ const char* engine_mismatch(const Block& block, const ::zilkworm::BlockEngineRec
 
 std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle& bundle) {
 #ifdef Z6M_HASH_STATE
-    // The MFBD flat-bundle path is DirectState-only: FlatBundle::direct is a DirectState and
-    // Blockchain binds ActiveState==HashState under the flag, so this arm cannot execute. It
-    // is disabled under Z6M_HASH_STATE (the slib path runs through blockchain_test's slib arm,
-    // S6); reject fail-closed.
+    // DirectState-only (FlatBundle::direct): Blockchain binds HashState under the flag, so reject fail-closed.
     (void)bundle;
     sys_println("ERROR: flat-bundle (MFBD) path disabled under Z6M_HASH_STATE");
     failed_ = true;
@@ -209,10 +202,7 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
-        // A bundle is one chain: its first block is anchored at the parent header its parent hash
-        // names (check_root), each later block runs on the state the one before it left. So the
-        // committed block hash binds the bundle's earlier blocks, and with them its pre-state
-        // root, only if each block extends the one validated before it (block_hash_).
+        // A bundle is one chain: each block extends the one validated before, so the committed hash binds the earlier blocks (block_hash_).
         if (!first_root_check && block.header.parent_hash != block_hash_) {
             sys_println(("ERROR: block " + std::to_string(i) + " does not extend the previous block").c_str());
             failed_ = true;
@@ -240,12 +230,8 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
-        // A later block's root is rebuilt from the accounts and slots the guest holds (check_root_new_block): the
-        // witness's records, and those the first block created or, with USE_HASH_KEY, recovered from the node
-        // store. So it is the root of the state that block ran on only if they are all of it: an account or slot
-        // the witness left out was absent to the block, and no trie was asked. The walk of the first block binds
-        // what the witness carries, not that it carries everything, so the state it leaves has to rebuild to its
-        // root from those records alone too.
+        // A later block's root is rebuilt from the records the guest holds (check_root_new_block), so the first block's post-state must
+        // rebuild to its root from those records alone: the walk binds what the witness carries, not that it carries everything.
         if (first_root_check && bundle.block_rlps.size() > 1 &&
             bundle.direct.state_root_hash() != block.header.state_root) [[unlikely]] {
             sys_println(("ERROR: the witness is not the whole state of block " + std::to_string(i)).c_str());
@@ -269,12 +255,7 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
 }
 
 namespace {
-    // The distinct keys of a record's reads of slots the witness does not carry (the list from `head`, see
-    // AbsentRead), less those `written` holds: a slot the block wrote goes into the walk as a write, whose
-    // missing pre-value claims the key absent already. Distinct before they are hashed, as each transaction
-    // that reads a slot reads it from the witness again (a third of the reads). The reads are sorted by a
-    // fold of their key's words, which is cheaper than sorting the keys, and keys are compared only where
-    // the folds are equal.
+    // Distinct keys of a record's reads of slots the witness lacks, less `written`; sorted by a fold of the key words, keys compared only on equal folds.
     [[gnu::noinline]] void absent_read_keys(std::span<const zilkworm::AbsentRead> reads, uint32_t head,
                                             const FlatHashMap<bytes32, bytes32>* written,
                                             std::vector<uint64_t>& order, std::vector<bytes32>& keys) {
@@ -298,8 +279,7 @@ namespace {
         }
     }
 
-    // A read-only update of a slot read as zero: the claim that its key is absent, which the walk checks
-    // where the key leaves the trie (and fails at the key's leaf if the witness left the slot out).
+    // Read-only update of a slot read as zero: claims the key absent, checked where it leaves the trie.
     template <class Updates>
     void emplace_absent_read(Updates& storage_updates, const bytes32& key) {
         auto& node = storage_updates.emplace_back(keccak_bytes32(key));
@@ -307,11 +287,7 @@ namespace {
         node.self_initial_len = 1;
     }
 
-    // The witness slots of an account whose storage the block wiped are in no post-state, but the block can
-    // have read them first: walks them read-only against the root the account's pre-state leaf binds, with
-    // the reads of slots the witness does not carry made under that root.
-    // Out of line: since Cancun no account a block wipes carries witness slots, and inlined into check_root
-    // the walk cost its merge loop 2.1M cycles over the 200-block corpus.
+    // Walks a wiped account's witness slots read-only against its pre-state root; out of line, as inlining slows check_root's merge loop.
     [[gnu::noinline]] bool wiped_storage_bound(const zilkworm::WipedStorage& wiped,
                                                std::span<const zilkworm::AbsentRead> absent_reads,
                                                zilkworm::GridMPT<true, DirectState>& storage_trie,
@@ -342,7 +318,7 @@ static_assert(sizeof(mpt::TrieNodeFlat::buf) >= zilkworm::kAccRlpBufSize);
 bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                                  evmc_revision rev) {
     const bool clear_empty = rev >= EVMC_SPURIOUS_DRAGON;
-    std::vector<zilkworm::AddrHashEntry> created_acc_hashes_spill;  // to be used with InlineVec additional cache area
+    std::vector<zilkworm::AddrHashEntry> created_acc_hashes_spill;
     zilkworm::InlineVec<zilkworm::AddrHashEntry, 32> created_acc_hashes(
         direct_state.created_accounts().size(), created_acc_hashes_spill);
     for (auto& [addr, _] : direct_state.created_accounts()) {
@@ -425,10 +401,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                     node.current_len = 1;
                     ++it_existing_hashes;
                 } else {
-                    // An address the witness does not carry, read as absent (or created and destructed
-                    // again): read-only, with no pre-value. The walk checks the claim that the key is
-                    // absent where it leaves the trie, and fails at its leaf if the witness left out an
-                    // account the trie has.
+                    // Address the witness lacks (or created and destructed): read-only, no pre-value; the walk fails at its leaf if the trie has it.
                     acc_updates.emplace_back(std::bit_cast<bytes32>(it_created_hashes->addr_hash));
                     ++it_created_hashes;
                 }
@@ -456,9 +429,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
         }
 #endif
 
-        // Walk pre-state slots even with no SSTORE: binds slot.initial to keccak(key) under pa->storage_root.
-        // So do the reads of slots the witness does not carry, all made under that root: one that came
-        // before a wipe is in the wiped storage walked above.
+        // Walk pre-state slots even with no SSTORE (binds slot.initial under pa->storage_root), including reads of slots the witness lacks.
         const bool has_pre_slots = !existing_slots.empty();
         const bool has_created = (created_slots != nullptr && !created_slots->empty());
         const bool has_absent_reads = pa->absent_reads != 0;
@@ -519,13 +490,12 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
                 }
             }
 #endif
-            // Raw-key order != keccak(key) order; sort required. Pointers are sorted: the walk only
-            // reads the nodes, which are 155 bytes each.
+            // Raw-key order != keccak(key) order; sort pointers, the walk only reads the nodes.
             const std::size_t n_updates = storage_updates.size();
             zilkworm::InlineVec<const mpt::TrieNodeFlat*, 32> order(n_updates, storage_order_spill);
             for (std::size_t i = 0; i < n_updates; ++i) order.emplace_back(&storage_updates[i]);
             zilkworm::sort_trie_node_ptrs(order.data(), n_updates);
-            if (mpt::is_zero_quick(storage_root)) {  // new account
+            if (mpt::is_zero_quick(storage_root)) {
                 storage_root = kEmptyRoot;
             }
             storage_trie.reset(storage_root);
@@ -539,8 +509,7 @@ bool StateTransition::check_root(DirectState& direct_state, BlockHeader& header,
             if (acc_modified) {
                 storage_root = walked;
             } else if (walked != storage_root) [[unlikely]] {
-                // Nothing writes an unmodified account's storage, so its walk has to come back to the root
-                // its account leaf binds: that leaf goes into the account trie as it was, with no other root.
+                // An unmodified account's storage walk must return the root its leaf binds: the leaf enters the account trie unchanged.
                 sys_println("ERROR: storage walk of an unmodified account left its root");
                 return false;
             }
@@ -695,9 +664,7 @@ bool StateTransition::check_root_new_block(DirectState& direct_state, BlockHeade
     std::vector<LeafRef> leaves;
     leaves.reserve(direct_state.addr_hashes().size() + direct_state.created_accounts().size());
 
-    // Every account the state holds is a leaf, an empty one too: only a transaction touching it deletes it
-    // (EIP-161), and that leaves its record deleted. Each record says so itself; a lookup by address would
-    // miss a record the witness's address map does not lead to, and drop its leaf.
+    // Every account the state holds is a leaf, empty ones too (EIP-161 deletes only via a transaction); each record says so, an address lookup would miss some.
     const auto existing = direct_state.addr_hashes();
     for (const auto& e : existing) {
         const Account* pa = direct_state.account_at_offset(e.entry_offset);
@@ -709,8 +676,7 @@ bool StateTransition::check_root_new_block(DirectState& direct_state, BlockHeade
     }
     for (const auto& [addr, pa] : direct_state.created_accounts()) {
         const auto h = silkworm::keccak256(ByteView{addr.bytes, 20});
-        // As in check_root: a lookup created this record because it missed the witness's record of the
-        // address, and the block ran as if the account were absent.
+        // As in check_root: a lookup that missed the witness's record created this one, so the block ran with the account absent.
         const auto twin = std::lower_bound(existing.begin(), existing.end(), h,
                                            [](const zilkworm::AddrHashEntry& e, const ethash::hash256& k) {
                                                return std::memcmp(e.addr_hash, k.bytes, 32) < 0;
@@ -727,11 +693,7 @@ bool StateTransition::check_root_new_block(DirectState& direct_state, BlockHeade
         leaves.push_back(r);
     }
 #if USE_HASH_KEY
-    // And the accounts the first block recovered from the node store, which the witness carries no record of:
-    // a later block that finds one deleted and pays it revives it there. None has the hash of a record above:
-    // recovery takes no address the witness carries a record of, and a lookup reaches a recovered record only
-    // where it found no created one, and creates none where it reached one. The journal loop above has encoded
-    // the leaf of each this block changed.
+    // Accounts recovered from the node store carry no witness record; their hashes differ from every record above.
     for (const auto& up : direct_state.recovered_accounts()) {
         if (up->deleted) continue;
         LeafRef r;
@@ -779,8 +741,7 @@ StateTransition::Result StateTransition::run() {
             break;
         default:
 #ifdef Z6M_HASH_STATE
-            // The HashState guest answers any other input, too short or of another schema, as an
-            // undecodable stateless input: the all-zero StatelessValidationResult, not a failed run.
+            // Any other input (too short or another schema) is undecodable: the all-zero StatelessValidationResult, not a failed run.
             gas = run_sib();
 #else
             sys_println("ERROR: unsupported input magic");
@@ -803,8 +764,7 @@ StateTransition::Result StateTransition::run() {
 
 uint64_t StateTransition::run_mfbd() {
 #ifdef Z6M_HASH_STATE
-    // MFBD is the DirectState flat-bundle path (see run_one_bundle); disabled under the
-    // HashState build. Reject early rather than parse bundles that cannot execute.
+    // Disabled under the HashState build: MFBD is the DirectState path.
     sys_println("ERROR: MFBD path disabled under Z6M_HASH_STATE");
     failed_ = true;
     return kRunFailure;

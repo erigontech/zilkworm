@@ -3,8 +3,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Builds state_transition and flat_bundle_builder in Release mode and runs
-# state_transition against every flat-bundle block in the given directory
+# Builds state_transition in Release mode and runs it against every flat-bundle block in the given directory.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -23,7 +22,6 @@ usage() {
     echo "  -l      Log output directory"
 }
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dir)
@@ -80,7 +78,6 @@ echo "Blocks dir: $BLOCKS_DIR" | tee -a "$SUMMARY_LOG"
 echo "Log dir: $LOG_DIR" | tee -a "$SUMMARY_LOG"
 echo "" | tee -a "$SUMMARY_LOG"
 
-# Build in Release mode
 echo "Building state_transition (Release)..." | tee -a "$SUMMARY_LOG"
 cmake \
     -DCMAKE_BUILD_TYPE=Release \
@@ -100,7 +97,6 @@ cmake --build "$PROJECT_DIR/build" \
 echo "Build complete: $BINARY" | tee -a "$SUMMARY_LOG"
 echo "" | tee -a "$SUMMARY_LOG"
 
-# Collect block list from --dir
 BLOCK_LIST=()
 mapfile -t ALL_BLOCKS < <(ls "$BLOCKS_DIR" | sort -n)
 for block_num in "${ALL_BLOCKS[@]}"; do
@@ -115,7 +111,6 @@ TOTAL=${#BLOCK_LIST[@]}
 echo "Blocks to process: $TOTAL" | tee -a "$SUMMARY_LOG"
 echo "" | tee -a "$SUMMARY_LOG"
 
-# Run blocks in parallel, detect mismatches
 run_block() {
     local bin_file="$1"
     local log_dir="$2"
@@ -158,7 +153,6 @@ done < <(
 
 MISMATCH_COUNT=${#MISMATCH_BLOCKS[@]}
 
-# Report
 echo "" | tee -a "$SUMMARY_LOG"
 echo "=== Results ===" | tee -a "$SUMMARY_LOG"
 echo "Total blocks run : $TOTAL" | tee -a "$SUMMARY_LOG"

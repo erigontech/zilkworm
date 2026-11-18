@@ -20,9 +20,6 @@ silkworm_library(
   PRIVATE ${LIBS_PRIVATE}
 )
 
-# set_property(TARGET silkworm_dev APPEND PROPERTY
-#   INTERFACE_LINK_LIBRARIES nlohmann_json::nlohmann_json)
-
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|aarch64|arm64)$")
   add_subdirectory(cli)
 endif()

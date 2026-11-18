@@ -1,8 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
 // Reads a witness JSON document on stdin, emits a FlatBundle on stdout.
-// Thin wrapper over the library converter in zilk_core/dev/witness_converter.
 
 #include <cstdint>
 #include <cstdio>

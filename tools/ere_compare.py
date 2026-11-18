@@ -2,23 +2,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Report execution metrics produced by the zkevm-benchmark-workload runner.
-
-Reads the per-fixture JSON reports written under <metrics-dir>/<client>/<zkvm>/.
-For two execution clients (Zilkworm and Reth) it prints a validation summary, an
-aggregate cost comparison, a per-test-family breakdown, and the best/worst N
-fixtures for Zilkworm. --validate gates one client on output_matched; --cost prints
-one client's SP1 estimated cost: totals, components, families, heaviest fixtures.
---table prints one row per metric and one column per client directory, as plain
-text or, with --markdown, a GitHub table; the Zilkworm column is named after this
-checkout's PROJECT_VERSION, the guest under test.
-
-Usage:
-    tools/ere_compare.py <metrics-dir> [--reth-glob reth-*] [--zilk-glob zilkworm-*] [--top 10]
-    tools/ere_compare.py --validate 'zilkworm-*' <metrics-dir>
-    tools/ere_compare.py --cost 'zilkworm-*' <metrics-dir> [--top 10]
-    tools/ere_compare.py --table 'zilkworm-*' [--table 'reth-*'] <metrics-dir> [--markdown] [--workload DIR]
-"""
+"""Report zkevm-benchmark-workload execution metrics: Zilkworm-vs-Reth comparison, --validate, --cost and --table modes."""
 import argparse
 import glob
 import json

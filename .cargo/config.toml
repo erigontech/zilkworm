@@ -3,22 +3,6 @@
 
 [build]
 target-dir = "prover/target"
-# target = "riscv32im-unknown-none-elf"
-# [target.riscv32im-unknown-none-elf]
-# linker = "riscv-none-elf-gcc"
-# rustflags = [
-#     "-C",
-#     "link-arg=-march=rv32im",
-#     "-C",
-#     "link-arg=-mabi=ilp32",
-#     "-C",
-#     "link-arg=-z",
-#     "-C",
-#     "link-arg=norelro",
-#     # Do not pull in the platform CRT; we provide our own startup via zksync-airbender
-#     "-C",
-#     "link-arg=-nostartfiles",
-# ]
 
 # Environment variables for C/C++ compilation in build scripts
 [env]

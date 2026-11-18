@@ -4,9 +4,7 @@
 
 #pragma once
 
-// Preliminary Silkworm API for WebAssembly.
-// Currently it's unstable and is likely to change.
-// Used for https://torquem.ch/eth_tests.html
+// Preliminary, unstable Silkworm API for WebAssembly.
 
 #include <cstdbool>
 #include <cstdint>

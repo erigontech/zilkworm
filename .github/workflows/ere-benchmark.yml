@@ -3,10 +3,7 @@
 
 name: ERE Benchmark
 
-# Runs the Zilkworm guest through zkevm-benchmark-workload (ere-hosts, SP1) on the latest batches of
-# a public R2 stateless-input catalog. The guest is the HashState build (make ere-bin), which
-# consumes the fixtures' statelessInputBytes unchanged; it comes from the run's ref, or from the
-# stateless-validator-zilkworm-sp1-<SP1 SDK version> release assets of release_tag for guest_source=release.
+# Runs the HashState guest (make ere-bin) through zkevm-benchmark-workload (ere-hosts, SP1) on the latest R2 stateless-input batches; guest_source=release uses release_tag's assets.
 on:
   push:
     branches: ['release/*']

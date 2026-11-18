@@ -19,7 +19,6 @@ int _getentropy(void *buf, size_t len) {
   if (!buf) { errno = EFAULT; return -1; }
   uint8_t *p = (uint8_t*)buf;
   uint64_t x = rdcycle() ^ (rdcycle() << 13);
-  // XorShift-ish mixer to fill the buffer
   for (size_t i = 0; i < len; ++i) {
     x ^= x << 7; x ^= x >> 9; x += 0x9E3779B97F4A7C15ULL;
     p[i] = (uint8_t)x;
@@ -27,7 +26,6 @@ int _getentropy(void *buf, size_t len) {
   return 0;
 }
 
-// Reentrant wrapper that newlib wants
 int _getentropy_r(struct _reent *r, void *buf, size_t len) {
   int rc = _getentropy(buf, len);
   if (rc < 0 && r) r->_errno = errno;

@@ -1,9 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// Legacy outer RLP layout (5 items): prev_block, current_block, pre_state,
-// ancestors, pre_trie. Converter is self-contained to keep legacy decoders
-// out of main code paths.
+// Legacy outer RLP layout (5 items): prev_block, current_block, pre_state, ancestors, pre_trie.
 
 #include <bit>
 #include <cstring>
@@ -24,9 +21,9 @@
 #include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/common_zz/mphf_builder.hpp>
 #include <zilk_core/core/common_zz/mphf_map.hpp>
-#include <zilk_core/core/trie_zz/mpt.hpp>      // silkworm::bytes32 alias
-#include <zilk_core/core/types/address.hpp>    // rlp::decode(ByteView&, evmc::address&)
-#include <zilk_core/core/types/block.hpp>      // rlp::decode<Block>
+#include <zilk_core/core/trie_zz/mpt.hpp>
+#include <zilk_core/core/types/address.hpp>
+#include <zilk_core/core/types/block.hpp>
 #include <zilk_core/core/types/evmc_bytes32.hpp>
 #include <zilk_core/core/types/withdrawal.hpp>
 

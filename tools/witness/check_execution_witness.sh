@@ -29,7 +29,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Default DIR = this repo root (two levels up from tools/witness/).
 DIR=${DIR:-$(cd "$(dirname "$0")/../.." && pwd)}
 DATA_DIR=${DATA_DIR:-$DIR/temp/mainnet}
 RPC=${RPC:-http://localhost:8545}
@@ -50,17 +49,12 @@ echo "Using z6m repo:    $DIR"
 echo "Using data-dir:    $DATA_DIR"
 mkdir -p "$DATA_DIR/blocks"
 
-# Build z6m_prover if missing.
 if [ ! -x "$PROVER" ]; then
     echo "Building z6m_prover (one-time) ..."
     (cd "$DIR" && make z6m_prover >/dev/null 2>&1) || { echo "make z6m_prover failed" >&2; exit 1; }
 fi
 
-# Run the prover for one block, capture and classify the output.
-# Stages:
-#   VALID                : "execution complete, block=" / "Executed block N (...)", non-sentinel gas_used
-#   kWrong<...>          : "Validation error kWrong<...>" + gas_used=u64::MAX
-#   OTHER                : anything else (e.g. host panic, prover crash)
+# Runs the prover for one block and classifies the output: VALID, kWrong<...> (gas_used=u64::MAX) or OTHER.
 classify_run() {
     local BLK="$1"
     local LOG="$2"
@@ -100,7 +94,6 @@ run_one() {
     classify_run "$BLK" "$LOG"
 }
 
-# Mode dispatch.
 RESULTS=()
 if [ -n "$START" ]; then
     for BLK in $(seq -f "%.0f" "$START" "$END"); do

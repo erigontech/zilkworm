@@ -2,8 +2,6 @@
 # Copyright 2025 The Original Silkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# find_package(Catch2 REQUIRED)
-
 macro(list_filter_dirs VAR DIRS)
   foreach(DIR IN LISTS ${DIRS})
     list(FILTER ${VAR} EXCLUDE REGEX "^${DIR}/")
@@ -52,10 +50,4 @@ function(silkworm_library TARGET)
     PRIVATE "${ARG_PRIVATE}"
   )
 
-  # # unit tests
-  # if(TEST_SRC AND NOT ${ARG_NO_TEST})
-  #   set(TEST_TARGET ${TARGET}_test)
-  #   add_executable(${TEST_TARGET} ${TEST_SRC})
-  #   # target_link_libraries(${TEST_TARGET} PRIVATE Catch2::Catch2WithMain ${TARGET})
-  # endif()
 endfunction()

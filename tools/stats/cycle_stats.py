@@ -65,11 +65,9 @@ def create_visualizations(data):
     cycles_per_gas = cycles / gas
     prover_gas_per_gas = prover_gas / gas
     
-    # Create figure with subplots
     fig = plt.figure(figsize=(20, 14))
     gs = GridSpec(4, 2, figure=fig, height_ratios=[1, 1, 1, 1], hspace=0.3, wspace=0.3)
     
-    # 1. Cycles vs Block
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.plot(blocks, cycles, color='blue', alpha=0.7, linewidth=1, marker='o', markersize=3)
     ax1.set_xlabel('Block Number')
@@ -78,7 +76,6 @@ def create_visualizations(data):
     ax1.grid(True, alpha=0.3)
     ax1.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
     
-    # 2. Prover Gas vs Block
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.plot(blocks, prover_gas, color='purple', alpha=0.7, linewidth=1, marker='o', markersize=3)
     ax2.set_xlabel('Block Number')
@@ -87,7 +84,6 @@ def create_visualizations(data):
     ax2.grid(True, alpha=0.3)
     ax2.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
     
-    # 3. Cycles vs Prover Gas
     ax3 = fig.add_subplot(gs[1, 0])
     ax3.scatter(prover_gas, cycles, alpha=0.6, s=30, c=blocks, cmap='viridis')
     ax3.set_xlabel('Prover Gas')
@@ -96,7 +92,6 @@ def create_visualizations(data):
     ax3.grid(True, alpha=0.3)
     ax3.ticklabel_format(style='scientific', scilimits=(0,0))
     
-    # 4. Gas Used vs Block
     ax4 = fig.add_subplot(gs[1, 1])
     ax4.plot(blocks, gas, color='red', alpha=0.7, linewidth=1, marker='o', markersize=3)
     ax4.set_xlabel('Block Number')
@@ -105,7 +100,6 @@ def create_visualizations(data):
     ax4.grid(True, alpha=0.3)
     ax4.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
     
-    # 5. Cycles per Gas ratio vs Block
     ax5 = fig.add_subplot(gs[2, 0])
     ax5.plot(blocks, cycles_per_gas, color='green', alpha=0.7, linewidth=1, marker='o', markersize=3)
     ax5.set_xlabel('Block Number')
@@ -113,7 +107,6 @@ def create_visualizations(data):
     ax5.set_title('Cycles per Gas Ratio vs Block')
     ax5.grid(True, alpha=0.3)
     
-    # 6. Prover Gas per Gas ratio vs Block
     ax6 = fig.add_subplot(gs[2, 1])
     ax6.plot(blocks, prover_gas_per_gas, color='orange', alpha=0.7, linewidth=1, marker='o', markersize=3)
     ax6.set_xlabel('Block Number')
@@ -121,10 +114,8 @@ def create_visualizations(data):
     ax6.set_title('Prover Gas per Gas Ratio vs Block')
     ax6.grid(True, alpha=0.3)
     
-    # 7. Distribution of Cycles per Gas (histogram + kde)
     ax7 = fig.add_subplot(gs[3, 0])
     ax7.hist(cycles_per_gas, bins=50, alpha=0.7, color='green', edgecolor='black', density=True)
-    # Add KDE curve
     kde = stats.gaussian_kde(cycles_per_gas)
     x_range = np.linspace(cycles_per_gas.min(), cycles_per_gas.max(), 200)
     ax7.plot(x_range, kde(x_range), 'r-', linewidth=2, label='KDE')
@@ -135,10 +126,8 @@ def create_visualizations(data):
     ax7.legend()
     ax7.grid(True, alpha=0.3)
     
-    # 8. Distribution of Prover Gas per Gas (histogram + kde)
     ax8 = fig.add_subplot(gs[3, 1])
     ax8.hist(prover_gas_per_gas, bins=50, alpha=0.7, color='orange', edgecolor='black', density=True)
-    # Add KDE curve
     kde2 = stats.gaussian_kde(prover_gas_per_gas)
     x_range2 = np.linspace(prover_gas_per_gas.min(), prover_gas_per_gas.max(), 200)
     ax8.plot(x_range2, kde2(x_range2), 'r-', linewidth=2, label='KDE')
@@ -160,7 +149,6 @@ def calculate_statistics(data, cycles_per_gas, prover_gas_per_gas):
     cycles = np.array(data['cycle_count'])
     prover_gas = np.array(data['prover_gas'])
     
-    # Calculate statistics
     avg_cycles_per_gas = np.mean(cycles_per_gas)
     max_cycles_per_gas = np.max(cycles_per_gas)
     min_cycles_per_gas = np.min(cycles_per_gas)
@@ -187,8 +175,7 @@ def calculate_statistics(data, cycles_per_gas, prover_gas_per_gas):
     print(f"\nGas Statistics:")
     print(f"  Total Gas Used: {gas.sum():,}")
     
-    # Find top 10 worst (highest) cycles per gas blocks
-    worst_cycles_indices = np.argsort(cycles_per_gas)[-10:][::-1]  # Top 10, descending
+    worst_cycles_indices = np.argsort(cycles_per_gas)[-10:][::-1]
     
     print(f"\nTop 10 Worst Cycles per Gas Blocks:")
     print("-" * 80)
@@ -198,8 +185,7 @@ def calculate_statistics(data, cycles_per_gas, prover_gas_per_gas):
     for i, idx in enumerate(worst_cycles_indices, 1):
         print(f"{i:<5} {blocks[idx]:<10} {cycles[idx]:<15,} {gas[idx]:<12,} {cycles_per_gas[idx]:<12.4f}")
     
-    # Find top 10 worst (highest) prover gas per gas blocks
-    worst_prover_gas_indices = np.argsort(prover_gas_per_gas)[-10:][::-1]  # Top 10, descending
+    worst_prover_gas_indices = np.argsort(prover_gas_per_gas)[-10:][::-1]
     
     print(f"\nTop 10 Worst Prover Gas per Gas Blocks:")
     print("-" * 85)
@@ -221,7 +207,6 @@ def create_summary_chart(data, cycles_per_gas, prover_gas_per_gas):
     
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Chart 1: Cycles vs Gas scatter plot
     scatter1 = ax1.scatter(gas, cycles, c=cycles_per_gas, cmap='viridis', 
                           s=30, alpha=0.6, edgecolors='none')
     ax1.set_xlabel('Gas Used')
@@ -231,7 +216,6 @@ def create_summary_chart(data, cycles_per_gas, prover_gas_per_gas):
     ax1.ticklabel_format(style='scientific', scilimits=(0,0))
     plt.colorbar(scatter1, ax=ax1, label='Cycles per Gas')
     
-    # Chart 2: Prover Gas vs Gas scatter plot
     scatter2 = ax2.scatter(gas, prover_gas, c=prover_gas_per_gas, cmap='plasma', 
                           s=30, alpha=0.6, edgecolors='none')
     ax2.set_xlabel('Gas Used')
@@ -246,7 +230,6 @@ def create_summary_chart(data, cycles_per_gas, prover_gas_per_gas):
 def main():
     """Main function to run the analysis"""
     
-    # Set up command line argument parsing
     parser = argparse.ArgumentParser(
         description='Analyze blockchain execution logs and generate performance statistics',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -260,7 +243,7 @@ Examples:
     
     parser.add_argument(
         '--filename', '-i',
-        nargs='?',  # Make it optional
+        nargs='?',
         default='../../temp/executionLogs.log',
         help='Path to the execution log file (default: ../temp/executionLogs.log)'
     )
@@ -277,11 +260,9 @@ Examples:
         help='Don\'t display plots (useful when saving to file)'
     )
     
-    # Parse arguments
     args = parser.parse_args()
     filename = args.filename
     
-    # Check if file exists
     if not os.path.exists(filename):
         print(f"Error: File '{filename}' not found")
         print(f"Current working directory: {os.getcwd()}")
@@ -296,17 +277,13 @@ Examples:
         print("No data found. Please check the file path and format.")
         return 1
     
-    # Create main visualizations
     print("\nCreating visualizations...")
     cycles_per_gas, prover_gas_per_gas = create_visualizations(data)
     
-    # Calculate and display statistics
     worst_cycles_indices, worst_prover_gas_indices = calculate_statistics(data, cycles_per_gas, prover_gas_per_gas)
     
-    # Create summary chart
     create_summary_chart(data, cycles_per_gas, prover_gas_per_gas)
     
-    # Handle output options
     if args.output:
         print(f"\nSaving plots to: {args.output}")
         plt.savefig(args.output, dpi=300, bbox_inches='tight')
