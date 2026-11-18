@@ -9,7 +9,6 @@
 
 namespace silkworm::math {
 
-// Computes the least integer value not less than num
 template <std::integral T = int>
 constexpr T int_ceil(double num) {
     if (num <= static_cast<double>(std::numeric_limits<T>::min())) {

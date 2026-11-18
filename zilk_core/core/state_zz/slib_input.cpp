@@ -13,7 +13,6 @@ namespace zilkworm {
 
 namespace {
 
-// Framing validated; the lists are still raw.
 struct Sections {
     std::uint64_t chain_id = 0;
     ByteView new_payload_request;
@@ -28,7 +27,6 @@ std::optional<Sections> split_stateless_input(ByteView blob) {
     }
     const ByteView body = ssz::subv(blob, 2, blob.size() - 2);
 
-    // StatelessInput: the offsets of new_payload_request and witness, then chain_id.
     std::vector<ByteView> fields;
     static constexpr std::array<size_t, 2> kInputOffsets{0, 4};
     if (!ssz::split_variable(body, kStatelessInputFixed, kInputOffsets, fields)) return std::nullopt;
@@ -37,7 +35,6 @@ std::optional<Sections> split_stateless_input(ByteView blob) {
     out.new_payload_request = fields[0];
     const ByteView wit = fields[1];
 
-    // ExecutionWitness: state, codes, headers.
     static constexpr std::array<size_t, 3> kWitnessOffsets{0, 4, 8};
     if (!ssz::split_variable(wit, kWitnessFixed, kWitnessOffsets, fields)) return std::nullopt;
     out.state = fields[0];
@@ -69,7 +66,6 @@ std::optional<StatelessInputView> parse_stateless_input(ByteView blob, HashState
     const auto n_state = ssz::byte_list_count(sec->state, kMaxWitnessStateNodes);
     const auto n_codes = ssz::byte_list_count(sec->codes, kMaxWitnessCodes);
     if (!n_state || !n_codes) return std::nullopt;
-    // Accounts derive from the clamped node hint.
     const std::uint32_t nodes_hint = std::min(*n_state, HashState::kMaxReserve);
     hs.reserve_stores(nodes_hint, *n_codes, std::max<std::uint32_t>(1024u, nodes_hint / 8u), 4096u);
 

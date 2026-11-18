@@ -9,12 +9,4 @@
 
 namespace silkworm {
 
-// void abort_due_to_assertion_failure(char const* expr, char const* file, int line) {
-//     if (expr == "" || file == "" || line == 0) {
-
-//     }
-//     // std::cerr << "Assert failed: " << expr << " Source: " << file << ", line " << line << "\n";
-//     // std::abort();
-// }
-
 }  // namespace silkworm

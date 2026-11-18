@@ -23,33 +23,25 @@ namespace {
     static_assert(alignof(KeccakSlot) == 8);
 
 #if defined(AIRBENDER)
-    // 65536 slots (4.7 MB of .bss, which costs nothing there: the guest's RAM reads as zero and is not
-    // cleared). A block hashes a few thousand distinct keys, and at 8192 slots the keys evicted and hashed
-    // again cost about 70 keccak permutations per block, each ~4,200 cycles' worth of proving time. On the
-    // 76-block corpus, 16384 slots save 31 of them and 65536 slots 54.
     inline constexpr size_t kKeccakMemoSlots{65536};
 #else
     inline constexpr size_t kKeccakMemoSlots{8192};
 #endif
     static_assert(std::has_single_bit(kKeccakMemoSlots));
-    // Table index = top log2(slots) bits of the mixed key.
     inline constexpr unsigned kKeccakMemoShift{64 - std::countr_zero(kKeccakMemoSlots)};
 
 #if defined(NO_THREAD_LOCAL) || defined(SP1) || defined(QEMU_DEBUG) || defined(AIRBENDER)
-    // Single-threaded guest: thread_local would emit an emutls call per access.
     constinit std::array<KeccakSlot, kKeccakMemoSlots> keccak_memo_{};
 #else
     thread_local constinit std::array<KeccakSlot, kKeccakMemoSlots> keccak_memo_{};
 #endif
 
-    // u64 load from 8-aligned p.
     inline uint64_t ld8_a8(const uint8_t* p) noexcept {
         uint64_t v;
         std::memcpy(&v, std::assume_aligned<8>(p), sizeof v);
         return v;
     }
 
-    // u32 load from 4-aligned p.
     inline uint32_t ld4_a4(const uint8_t* p) noexcept {
         uint32_t v;
         std::memcpy(&v, std::assume_aligned<4>(p), sizeof v);
@@ -107,7 +99,6 @@ ethash::hash256 keccak256_memo(const uint8_t* data, size_t size) noexcept {
     const uint64_t mix{(w0 ^ w1 ^ w2 ^ w3) * 0x9E3779B97F4A7C15};
     KeccakSlot& slot{keccak_memo_[mix >> kKeccakMemoShift]};
     const uint8_t* d{slot.data};
-    // Early-exit compare: SP1 costs executed instructions.
     if (slot.size == size && ld8_a8(d) == w0 && ld8_a8(d + 8) == w1 && ld8_a8(d + 16) == w2 &&
         ld8_a8(d + 24) == w3) [[likely]] {
         ethash::hash256 out;

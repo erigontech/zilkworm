@@ -7,46 +7,27 @@
 #include <cstdlib>
 #include <memory>
 
-// Padding the code store's payloads where they lie, for the EVM to run witness code without a copy.
-//
-// evmone copies every code it analyzes to append 33 zero bytes (a STOP after the last opcode and
-// the data of a PUSH32 cut off by the end): 2.8 MB a block on mainnet, about 80M cycles over the
-// 200-block corpus. In the code store's data section, entries [len:u64][key:32][payload][zeros to 8
-// bytes] follow one another, so the 33 bytes after a payload are its padding and the next entry's
-// length and key. Once every payload is hashed and every account is bound to its entry, nothing
-// reads those again (code_for() takes the account's offset and length), and DirectState::sanitize()
-// zeroes them. That pads the payload of every entry but the last in place, and evmone runs such code
-// where it lies (evmone::baseline::set_in_place_code_region(), which checks the 33 bytes itself).
-//
-// Only payload bytes are hashed, and a zeroed byte must lie in none that an account uses. That
-// holds for the dense layout MphfBuilder writes: entries that tile the data section from the 8-byte
-// sentinel to its end, each at the 8-aligned end of the one before, every entry the map refers to
-// being one of them. Anything else keeps the copy.
+// Pads each payload in place (zeroing the next entry's header) so evmone needs no copy; sound only for the dense MphfBuilder layout, where no byte an account uses is zeroed.
 
 namespace zilkworm::code_store_seal {
 
-/// The entry starts of a code-store data section (data_size bytes at data, 8-aligned), if its
-/// entries tile it.
+/// Entry starts of a code-store data section (8-aligned) whose entries tile it.
 class DenseLayout {
   public:
     DenseLayout(const uint8_t* data, uint32_t data_size) noexcept;
 
-    /// Whether the entries tile the section. The other members hold only then.
+    /// Whether the entries tile the section; the other members hold only then.
     bool dense() const noexcept { return starts_ != nullptr; }
-    /// Whether an entry starts at off.
     bool is_entry(uint64_t off) const noexcept {
         return (off & 7) == 0 && (off >> 3) < n_bits_ &&
                ((starts_[off >> 8] >> ((off >> 3) & 31)) & 1) != 0;
     }
-    /// The offset of the last entry, whose tail adjoins whatever follows the section.
     uint32_t last() const noexcept { return last_; }
 
   private:
     struct FreeDeleter {
         void operator()(uint32_t* p) const noexcept { std::free(p); }
     };
-    /// One bit per 8 bytes, set at an entry start. calloc: the guest's heap is fresh memory, zero
-    /// already, where a vector would clear it word by word.
     std::unique_ptr<uint32_t[], FreeDeleter> starts_;
     uint32_t n_bits_{0};
     uint32_t last_{0};
@@ -75,10 +56,7 @@ inline DenseLayout::DenseLayout(const uint8_t* data, uint32_t data_size) noexcep
     last_ = last;
 }
 
-/// Zeroes [end, align4(end) + 36) after the payload of every entry of a dense section (data
-/// 8-aligned) but the last: at most 39 bytes, the payload's padding and then the next entry's
-/// length and up to 28 bytes of its key, which ends 4 bytes or more before the next payload. That
-/// leaves 36 zero bytes after the payload at least, where evmone needs 33.
+/// Zeroes the bytes after the payload of every entry but the last, leaving >= 36 zero bytes (evmone needs 33).
 inline void zero_tails(uint8_t* data, uint32_t last) noexcept {
     typedef uint32_t __attribute__((may_alias)) w32;
     uint32_t len = *reinterpret_cast<const w32*>(data + 8);

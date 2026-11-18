@@ -1,9 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Bounds-checked SSZ reads shared by the stateless-input decoders: little-endian scalars, the
-// variable-field framing of a container, and lists of byte lists.
-
 #pragma once
 
 #include <cstddef>
@@ -35,9 +32,7 @@ using ::silkworm::ByteView;
     return ByteView{v.data() + off, len};
 }
 
-/// The variable-size fields of a container: the offset table entries sit at `offset_pos` within
-/// the fixed region of `fixed_size` bytes. The first offset must equal `fixed_size`, the rest be
-/// in order and in bounds; the last field runs to the end. `out[i]` is field i's bytes.
+/// First offset must equal fixed_size, the rest ordered and in bounds; the last field runs to the end.
 inline bool split_variable(ByteView body, size_t fixed_size, std::span<const size_t> offset_pos,
                            std::vector<ByteView>& out) {
     out.clear();
@@ -83,7 +78,6 @@ inline bool for_each_byte_list(ByteView blob, uint32_t elem_cap, uint32_t count_
     return true;
 }
 
-/// Materialising for_each_byte_list; clears `out`.
 inline bool decode_byte_lists(ByteView blob, uint32_t elem_cap, uint32_t count_cap,
                               std::vector<ByteView>& out) {
     out.clear();
@@ -96,7 +90,6 @@ inline bool decode_byte_lists(ByteView blob, uint32_t elem_cap, uint32_t count_c
     });
 }
 
-/// ProgressiveList[T] of a fixed-size T: `blob` is the items back to back.
 inline bool split_fixed_items(ByteView blob, size_t item_size, std::vector<ByteView>& out) {
     out.clear();
     if (blob.size() % item_size != 0) return false;

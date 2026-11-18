@@ -10,8 +10,7 @@
 
 namespace zilkworm {
 
-// Memoized keccak256; keccak is pure, so entries never go stale.
-// size must be 1..32 and is NOT checked — larger overflows the 32-byte slot buffer.
+// Memoized keccak256; size must be 1..32 and is NOT checked (larger overflows the 32-byte slot buffer).
 ethash::hash256 keccak256_memo(const uint8_t* data, size_t size) noexcept;
 
 }  // namespace zilkworm

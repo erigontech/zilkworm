@@ -20,9 +20,7 @@
 
 namespace zilkworm {
 
-/// a[0..N) == b[0..N), for the hash and key checks of the witness lookups. With strict alignment
-/// (rv32 Airbender) memcmp is a call; two word-aligned operands, the usual case, compare a word at
-/// a time inline instead.
+/// a[0..N) == b[0..N); word-aligned operands compare inline (memcmp is a call under strict alignment).
 template <size_t N>
 [[gnu::always_inline]] inline bool bytes_equal(const uint8_t* a, const uint8_t* b) noexcept {
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
@@ -41,12 +39,7 @@ template <size_t N>
 }
 
 #if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
-/// a[0..n) == b[0..n) at any alignments, for the trie's check of a witness leaf value against the
-/// claimed pre-state value (70-80 byte account leaves). memcmp compares bytewise unless both
-/// operands are word-aligned, which these rarely are. Here a is brought to a word boundary, and b's
-/// bytes are assembled from its aligned words, carried and shifted together; every load stays
-/// inside the two ranges. Short strings, which mostly differ early or are a few bytes long,
-/// compare bytewise. The native test build (EVMONE_RV32_DISPATCH_TEST) compiles it for the tests.
+/// a[0..n) == b[0..n) at any alignments; every load stays inside the two ranges.
 [[gnu::noinline]] inline bool bytes_equal_any(const uint8_t* a, const uint8_t* b, size_t n) noexcept {
     static_assert(std::endian::native == std::endian::little, "assembles b's bytes little-endian");
     typedef uint32_t __attribute__((may_alias)) w32;
@@ -56,8 +49,6 @@ template <size_t N>
             if (a[i] != b[i]) return false;
         return true;
     }
-    // The head, the partial first word and the tail are switches: GCC's loop unrolling turns a
-    // loop of a few bytes into an 8-way unrolled one behind a dispatch that costs more than the bytes.
     const unsigned h = static_cast<unsigned>(-reinterpret_cast<uintptr_t>(a)) & 3;
     switch (h) {
         case 3: if (a[2] != b[2]) return false; [[fallthrough]];
@@ -76,8 +67,6 @@ template <size_t N>
         for (size_t i = 0; i < k; ++i)
             if (wa[i] != wb[i]) return false;
     } else {
-        // cur holds b's bytes below its first word boundary, then those of each aligned word
-        // that the previous a-word did not take.
         uint32_t cur;
         switch (s) {
             case 1: cur = b[0] | uint32_t{b[1]} << 8 | uint32_t{b[2]} << 16; break;
@@ -105,15 +94,12 @@ template <size_t N>
         case 2: if (a[1] != b[1]) return false; [[fallthrough]];
         case 1: if (a[0] != b[0]) return false; [[fallthrough]];
         case 0: return true;
-        default: return std::memcmp(a, b, n - 4 * k) == 0;  // not reached
+        default: return std::memcmp(a, b, n - 4 * k) == 0;
     }
 }
 #endif
 
-/// The little-endian u64 at p, for the [len:u64] entry headers. With strict alignment (rv32
-/// Airbender) the memcpy is eight byte loads through a stack temporary; the builder 8-aligns every
-/// entry, so the header is read as two words instead, and a caller that keeps only the low half
-/// (the length as a size_t) loads one.
+/// Little-endian u64 at p (the builder 8-aligns every entry); two word loads under strict alignment.
 [[gnu::always_inline]] inline uint64_t load_u64_le(const uint8_t* p) noexcept {
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
     if ((reinterpret_cast<uintptr_t>(p) & 3) == 0) [[likely]] {
@@ -128,22 +114,15 @@ template <size_t N>
 using ::silkworm::ByteView;
 using ::silkworm::Bytes;
 
-// MphfMapHeader: u64 -> bytes minimal perfect hash with collision sidecar.
-// Header layout: displacement_factors[n_buckets]:u64, slot_offsets[n_keys]:u32
-// (0 == collision), collisions:[key:u64][data_offset:u64]*,
-// data:[len:u64][body]*.
-// Caller verifies membership via key bytes embedded in body.
-// MphfMap reads unchecked: see validate_mphf below for the layout contract.
+// Layout: displacement_factors[n_buckets]:u64, slot_offsets[n_keys]:u32 (0 = collision), collisions:[key:u64][offset:u64]*, data:[len:u64][body]*; reads are unchecked (see validate_mphf).
 inline constexpr uint64_t kMphfGoldenRatio = 0x9E3779B97F4A7C15ull;
 inline constexpr uint32_t kMphfMapVersion = 3u;
 
-// SplitMix64-stage1 mixer.
 [[gnu::always_inline]] inline uint64_t mix64_body(uint64_t z) noexcept {
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
     return z ^ (z >> 31);
 }
 
-// Lemire fast mod: x in [0,n) with one mul + shift.
 [[gnu::always_inline]] inline uint32_t fast_mod_u32(uint32_t x, uint32_t n) noexcept {
     return static_cast<uint32_t>((static_cast<uint64_t>(x) * n) >> 32);
 }
@@ -169,7 +148,6 @@ struct alignas(8) MphfMapHeader {
     uint32_t data_offset;
     uint32_t data_size;
 
-    // Lookup the [0, n_keys) index for a key
     [[gnu::always_inline]] uint32_t index_lookup(uint64_t key) const noexcept {
         const uint64_t z1 = key + seed_factor;
         const uint64_t h1 = mix64_body(z1);
@@ -185,9 +163,7 @@ struct alignas(8) MphfMapHeader {
 struct MphfCollisionEntry {
     uint64_t key;
     uint64_t offset;
-    // No length here on purpose. The entry's length lives in the data-section header
-    // ([len:u64] before the body), which is the range sanitize() hashes; a second copy
-    // could disagree with it and would be trusted for the span handed to the EVM.
+    // No length here: the data-section [len:u64] header is what sanitize() hashes, and a copy could disagree with it.
 };
 
 static_assert(sizeof(MphfMapHeader) == 56);
@@ -258,8 +234,6 @@ class MphfMap {
         return std::nullopt;
     }
 
-    // Visits the data offset of every singleton slot (skipping the 0 sentinels) and then of every
-    // sidecar entry.
     template <typename Cb>
     void for_each_offset(Cb&& cb) const noexcept {
         if (h_ == nullptr || n_keys_ == 0) return;
@@ -271,7 +245,6 @@ class MphfMap {
             cb(collisions_[i].offset);
     }
 
-    // Visits every singleton slot (skipping the 0 sentinels) and then every sidecar entry.
     template <std::size_t KeySize = 32, std::size_t KeyOffset = 0, typename Cb>
     void for_each(Cb&& cb) const noexcept {
         for_each_offset([&](uint64_t off) noexcept {
@@ -307,18 +280,7 @@ class MphfMap {
     uint64_t seed_factor_{0};
 };
 
-// The one layout check for an MphfMap region. Every map passes it before an MphfMap
-// is built over it (the DirectState constructor, for the addr map, code store and
-// node store), so find() and for_each() read without re-checking.
-//
-// It checks the header, then each section's bounds and alignment inside the region,
-// then every entry reachable from slot_offsets[] or the sidecar: [len:u64][body]
-// inside data[] with body_len >= KeyOffset + KeySize, the bytes
-// find<KeySize, KeyOffset>() memcmps.
-//
-// Checking once is sound because data[] is the only section written through
-// afterwards (Account scratch, EVM state), and it must start at or past the end of
-// the header and of every table. No later write can rewrite a checked offset.
+// The one layout check for an MphfMap region, run before construction so find() and for_each() read unchecked; sound because only data[] is written afterwards and it starts past every table.
 template <size_t KeySize, size_t KeyOffset = 0>
 [[nodiscard]] bool validate_mphf(std::span<const uint8_t> base,
                                  uint32_t region_off,
@@ -403,7 +365,6 @@ template <size_t KeySize, size_t KeyOffset = 0>
     }
     ok &= bounds_within_region(m->data_offset, m->data_size,
                                "MphfMapHeader: validate_mphf: data region out of range");
-    // data[] starts at or past the end of the header and of each table.
     const uint64_t data_lo = m->data_offset;
     if (data_lo < sizeof(MphfMapHeader) ||
         data_lo < uint64_t{m->displacement_offset} + uint64_t{m->n_buckets} * 8u ||
@@ -413,7 +374,7 @@ template <size_t KeySize, size_t KeyOffset = 0>
         sys_println("MphfMapHeader: validate_mphf: data section overlaps a preceding section");
         ok = false;
     }
-    if (!ok) [[unlikely]] return false;  // the entry walk below dereferences the sections
+    if (!ok) [[unlikely]] return false;
 
     const uint8_t* mbase = base.data() + region_off;
     const auto* slot_offsets = reinterpret_cast<const uint32_t*>(mbase + m->slot_offsets_offset);
@@ -422,11 +383,9 @@ template <size_t KeySize, size_t KeyOffset = 0>
     const uint8_t* data = mbase + m->data_offset;
     const uint32_t data_size = m->data_size;
 
-    // off is u64 (sidecar) or u32 (slot) but data[] is u32-sized: compare before
-    // adding, since off + 8 can wrap and the high half must not be dropped.
+    // Compare before adding: off is u64 and off + 8 can wrap.
     auto entry_within_data = [&](uint64_t off) -> bool {
-        // Every entry starts 8-aligned, as MphfBuilder lays them out, so every body lies at an
-        // 8-aligned offset: DirectState::find_node_rlp keeps one verified bit per body offset / 8.
+        // Entries are 8-aligned (find_node_rlp keeps one verified bit per body offset / 8).
         if ((off & 7u) != 0) [[unlikely]] {
             sys_println("MphfMapHeader: validate_mphf: entry offset not 8-aligned");
             return false;

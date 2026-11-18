@@ -45,7 +45,6 @@ class ByteView : public evmc::bytes_view {
     bool is_null() const noexcept { return data() == nullptr; }
 
   private:
-    // see code style P28
     using evmc::bytes_view::length;
 };
 

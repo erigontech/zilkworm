@@ -6,8 +6,6 @@
 
 namespace silkworm {
 
-// Helper type for std::visit
-// See https://en.cppreference.com/w/cpp/utility/variant/visit
 template <class... Ts>
 struct Overloaded : Ts... {
     using Ts::operator()...;
