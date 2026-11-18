@@ -16,6 +16,7 @@
 
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
+#include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/protocol/validation.hpp>
 #include <zilk_core/core/rlp/decode.hpp>
 #include <zilk_core/core/rlp/encode.hpp>
@@ -437,6 +438,42 @@ TEST_CASE("decoded transaction views: blob and set code transactions without a r
         const intx::uint256 base_fee{1};
         CHECK(protocol::pre_validate_transaction(decoded, EVMC_PRAGUE, 1, base_fee, intx::uint256{1}) ==
               ValidationResult::kProhibitedContractCreation);
+    }
+}
+
+// tests-zkevm v21.0.7 spurious_dragon/.../chain_id/legacy_chain_id_over_64_bits.json, chain 1.
+TEST_CASE("a legacy chain id over 64 bits is an invalid signature") {
+    struct Case {
+        const char* name;
+        const char* tx;
+        intx::uint256 chain_id;
+        ValidationResult expected;
+    };
+    const intx::uint256 two_64{intx::uint256{1} << 64};
+    const Case cases[]{
+        {"case_largest_64_bit_chain_id",
+         "f868800a823a9894f89a03b42ea1412874da2cf1ae48956f73d06039018089020000000000000022a076d9daf258a90f5388d2451f"
+         "b23d6dd43b006cc6327e110b56df07c0fc80a22ea01d055d8aa833664843c2b9aef7e53005caea0c2db013785c4971e5cb75ed6cf0",
+         two_64 - 1, ValidationResult::kWrongChainId},
+        {"case_smallest_65_bit_chain_id",
+         "f867800a823a9894f89a03b42ea1412874da2cf1ae48956f73d06039018089020000000000000024a06e788b89ea1fe9a3b6824867"
+         "790fbfe6f9be2d4426850355bb501dca6b5852399fb1229c884b36c32289f99b65d7d4dbf0485a4a057216deddc7ed1d6cc072e2",
+         two_64, ValidationResult::kInvalidSignature},
+        {"case_chain_id_plus_2_64",
+         "f868800a823a9894f89a03b42ea1412874da2cf1ae48956f73d06039018089020000000000000026a09bc48998ec8cf53b63671194"
+         "1eef8ecd3e38cd7336589ce14945bb48e46675cfa0499a107787cba7b5415871913d7d88142e2c6045c5f11ca36171fe06d29aa9d6",
+         two_64 + 1, ValidationResult::kInvalidSignature},
+    };
+    for (const Case& c : cases) {
+        INFO(c.name);
+        const std::optional<Bytes> wire{from_hex(c.tx)};
+        REQUIRE(wire);
+        Transaction txn;
+        REQUIRE(decode_block_tx(*wire, txn));
+        REQUIRE(txn.type == TransactionType::kLegacy);
+        REQUIRE(txn.chain_id == c.chain_id);
+        CHECK(protocol::pre_validate_transaction(txn, EVMC_AMSTERDAM, 1, intx::uint256{7}, intx::uint256{1}) ==
+              c.expected);
     }
 }
 
