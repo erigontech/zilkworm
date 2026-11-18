@@ -1,22 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// sanitize() pads the code store's payloads where they lie for the EVM (code_store_seal.hpp): it
-// zeroes the bytes after the payload of every entry but the last, once every payload is hashed and
-// every account bound, and only for the dense layout MphfBuilder writes, every entry the map refers
-// to being one of the entries that tile the data section. The cases here check that it zeroes
-// nothing else, nothing on a failed sanitize, nothing for a forged layout (no keys, an entry the
-// map refers to inside another's payload or across another's tail), that the code it pads is the
-// code evmone then runs in place, that the dead index is not used afterwards, and that a pre-state
-// whose code store overlaps another section is rejected. A block creates code equal to a witness
-// code with CREATE2 and runs and reads it, through the shadow run and the guest entry point. Built
-// with -DEVMONE_RV32_DISPATCH_TEST (the native test build), sanitize() seals as on the guest;
-// without it, it must leave the code store as it was. Three more cases compare against references:
-// DenseLayout and zero_tails() against an independent walk on random and mutated sections; blocks
-// of random contracts, run in place and with every code copied (status, gas, receipts, logs,
-// storage, post-state root equal); and forged witnesses, random and crafted mutations of the code
-// store, its map, the account records and the header, each in a child process, where an accepted
-// pre-state must give every contract its genuine code, with the JUMPDESTs of the copy.
+// sanitize() pads the code store's payloads where they lie for the EVM (code_store_seal.hpp).
 
 #include <algorithm>
 #include <array>
@@ -66,8 +50,7 @@ uint64_t load_u64(const uint8_t* p) {
 }
 void store_u64(uint8_t* p, uint64_t v) { std::memcpy(p, &v, 8); }
 
-// The hook exists only where evmone runs code in place (EVMONE_IN_PLACE_CODE); without it there is
-// no region to reset and sanitize() must seal nothing.
+// The hook exists only where evmone runs code in place (EVMONE_IN_PLACE_CODE).
 void reset_in_place_region() {
 #if EVMONE_IN_PLACE_CODE
     evmone::baseline::set_in_place_code_region(nullptr, nullptr);
@@ -78,16 +61,14 @@ bool analyzed_in_place(ByteView code) {
     return evmone::baseline::analyze({code.data(), code.size()}).code().data() == code.data();
 }
 
-// ---------------------------------------------------------------------------
 // DenseLayout and zero_tails on hand-made data sections
-// ---------------------------------------------------------------------------
 
 /// A data section: the 8-byte sentinel, then [len:u64][key:32][payload][zeros to 8] per entry.
 struct Section {
-    std::vector<uint64_t> words;  // 8-aligned storage
+    std::vector<uint64_t> words;
     uint32_t size{8};
     std::vector<uint32_t> offsets;
-    std::vector<uint32_t> ends;  // of the payloads, as built: zero_tails() zeroes the lengths
+    std::vector<uint32_t> ends;
 
     uint8_t* data() { return reinterpret_cast<uint8_t*>(words.data()); }
 
@@ -99,7 +80,7 @@ struct Section {
             const uint32_t n = payload_sizes[i];
             offsets.push_back(size);
             store_u64(data() + size, 32 + n);
-            std::memset(data() + size + 8, static_cast<int>(0xc0 + i % 32), 32);  // key
+            std::memset(data() + size + 8, static_cast<int>(0xc0 + i % 32), 32);
             for (uint32_t k = 0; k < n; ++k)
                 data()[size + 40 + k] = static_cast<uint8_t>(0x11 + k + i);
             ends.push_back(size + 40 + n);
@@ -111,8 +92,7 @@ struct Section {
 
 bool dense(Section& s) { return code_store_seal::DenseLayout{s.data(), s.size}.dense(); }
 
-/// zero_tails() changes only [end, round4(end) + 36) after every payload but the last's, to
-/// zero, leaving at least 33 zero bytes after each of those payloads.
+/// zero_tails() zeroes [end, round4(end) + 36) after every payload but the last.
 void check_zero_tails(Section s) {
     const std::vector<uint64_t> before = s.words;
     const code_store_seal::DenseLayout layout{s.data(), s.size};
@@ -122,7 +102,6 @@ void check_zero_tails(Section s) {
     std::vector<bool> zeroed(s.size, false);
     for (size_t i = 0; i + 1 < s.offsets.size(); ++i) {
         const uint32_t end = s.ends[i];
-        // In the next entry's 40-byte header, before its payload.
         REQUIRE(round4(end) + 36 <= s.offsets[i + 1] + 40);
         for (uint32_t b = end; b < round4(end) + 36; ++b) zeroed[b] = true;
         for (uint32_t b = end; b < end + 33; ++b) CHECK(s.data()[b] == 0);
@@ -138,9 +117,7 @@ void check_zero_tails(Section s) {
     CHECK(changed_elsewhere == 0);
 }
 
-// ---------------------------------------------------------------------------
 // Witnesses built by MphfBuilder
-// ---------------------------------------------------------------------------
 
 Bytes code_of(size_t n, uint8_t seed) {
     Bytes c(n, 0);
@@ -152,8 +129,7 @@ struct Witness {
     std::vector<uint8_t> blob;
     std::vector<uint8_t> nodestore;
     std::vector<Bytes> codes;
-    /// The entries' offsets in the data section and their lengths (32 + the payload's size), as
-    /// built: sealing zeroes the lengths in the section.
+    /// The entries' offsets in the data section and their lengths (32 + the payload's size), as built.
     std::map<uint32_t, uint32_t> entries;
 
     PreStateMeta* meta() { return reinterpret_cast<PreStateMeta*>(blob.data()); }
@@ -205,9 +181,7 @@ std::vector<uint8_t> outside_account_map(Witness& w) {
     return out;
 }
 
-/// After a sanitize() that sealed: the bytes outside the account map are as before except
-/// [end, round4(end) + 36) after each payload but the last's, now zero, and every payload but the
-/// last is analyzed in place. Without sealing, nothing changed and nothing is in place.
+/// After a sanitize() that sealed.
 void check_after_sanitize(Witness& w, const std::vector<uint8_t>& before, bool sealed) {
     const auto offsets = w.offsets();
     std::vector<bool> zeroed(w.blob.size(), false);
@@ -236,10 +210,7 @@ void check_after_sanitize(Witness& w, const std::vector<uint8_t>& before, bool s
 
 constexpr bool kSeals = ZILK_SEAL_CODE_STORE != 0;
 
-/// For a child process that may abort: no core dump. With a core_pattern that pipes to a handler
-/// (apport, systemd-coredump), the kernel runs the handler on every dump even at RLIMIT_CORE 0,
-/// about a second each; the fuzz case below has some 900 of its 1500 children abort. Elsewhere
-/// (macOS) RLIMIT_CORE 0 is all there is.
+/// For a child process that may abort: no core dump.
 void no_core_dump() {
 #if defined(__linux__)
     prctl(PR_SET_DUMPABLE, 0);
@@ -249,8 +220,7 @@ void no_core_dump() {
 #endif
 }
 
-/// Fails the test if the pre-state is accepted; true if the constructor aborted after printing
-/// `message`. The constructor aborts on a malformed layout, so it runs in a child process.
+/// Fails the test if the pre-state is accepted; true if the constructor aborted after printing `message`.
 bool rejected_with(std::vector<uint8_t> blob, const std::string& message) {
     int fds[2];
     REQUIRE(pipe(fds) == 0);
@@ -288,11 +258,11 @@ TEST_CASE("code store seal: dense layouts", "[state_zz][code_store_seal]") {
         CHECK(layout.last() == s.offsets.back());
         for (const auto off : s.offsets) {
             CHECK(layout.is_entry(off));
-            CHECK_FALSE(layout.is_entry(off + 8));  // in the key
+            CHECK_FALSE(layout.is_entry(off + 8));
             CHECK_FALSE(layout.is_entry(off + 4));
             CHECK_FALSE(layout.is_entry(off + 1));
         }
-        CHECK_FALSE(layout.is_entry(0));  // the sentinel
+        CHECK_FALSE(layout.is_entry(0));
         CHECK_FALSE(layout.is_entry(s.size));
         CHECK_FALSE(layout.is_entry(uint64_t{1} << 35));
         check_zero_tails(s);
@@ -303,7 +273,7 @@ TEST_CASE("code store seal: anything but a dense layout is left alone", "[state_
     SECTION("trailing bytes after the last entry") {
         Section s{{40, 50}, 8};
         CHECK_FALSE(dense(s));
-        Section t{{40, 50}, 48};  // room for a header, but zero: len 0
+        Section t{{40, 50}, 48};
         CHECK_FALSE(dense(t));
     }
     SECTION("a section cut inside its last entry") {
@@ -330,17 +300,13 @@ TEST_CASE("code store seal: anything but a dense layout is left alone", "[state_
     }
     SECTION("a length that skips an entry") {
         Section s{{40, 50, 60}};
-        // Entry 0 then takes the 80 bytes of its own and the 96 of entry 1.
         store_u64(s.data() + s.offsets[0], 80 + 96 - 8);
-        // Dense again, over fewer entries: the skipped one is no entry.
         const code_store_seal::DenseLayout layout{s.data(), s.size};
         REQUIRE(layout.dense());
         CHECK_FALSE(layout.is_entry(s.offsets[1]));
         CHECK(layout.is_entry(s.offsets[2]));
     }
     SECTION("a length that wraps the offset arithmetic") {
-        // The largest section that rounds: a length of 2^32 - 15 would take the next offset, 8 + 8 +
-        // len + 7, around to this very entry. Not read past the 80 bytes there are.
         Section s{{40}};
         store_u64(s.data() + s.offsets[0], 0xfffffff1u);
         CHECK_FALSE(code_store_seal::DenseLayout(s.data(), UINT32_MAX - 8).dense());
@@ -371,9 +337,6 @@ TEST_CASE("code store seal: sanitize pads every payload but the last", "[state_z
     for (const auto& codes : stores) {
         INFO("codes " << codes.size());
         Witness w = make_witness(codes);
-        // The code store ends the blob. 64 zero bytes lie after it, outside the span the state is
-        // given: were the last entry run in place, they would pad it, so that only the region's end
-        // keeps it a copy.
         const size_t blob_size = w.blob.size();
         w.blob.resize(blob_size + 64, 0);
         const auto before = outside_account_map(w);
@@ -381,14 +344,12 @@ TEST_CASE("code store seal: sanitize pads every payload but the last", "[state_z
             DirectState ds{std::span<uint8_t>{w.blob.data(), blob_size}, std::span<uint8_t>{w.nodestore}};
             REQUIRE(ds.sanitize());
             check_after_sanitize(w, before, kSeals);
-            // Every payload is still the code it was hashed as.
             for (const auto off : w.offsets()) {
                 const ByteView p = w.payload(off);
                 CHECK(std::find(codes.begin(), codes.end(), Bytes{p.data(), p.size()}) != codes.end());
             }
-            if (kSeals) CHECK_FALSE(ds.sanitize());  // once only
+            if (kSeals) CHECK_FALSE(ds.sanitize());
         }
-        // The region goes with the DirectState.
         for (const auto off : w.offsets()) CHECK_FALSE(analyzed_in_place(w.payload(off)));
     }
 }
@@ -415,8 +376,6 @@ TEST_CASE("code store seal: forged layouts are not padded", "[state_zz][code_sto
     const uint32_t a_end = w.payload_end(a);
 
     SECTION("no keys: the data section is not checked, and not walked") {
-        // validate_mphf() returns before the data section when n_keys is 0, so its offset and size
-        // could put it anywhere, over bytes no hash binds. Here it is a dense chain of entries.
         w.header()->n_keys = 0;
         const auto before = outside_account_map(w);
         DirectState ds{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
@@ -425,7 +384,6 @@ TEST_CASE("code store seal: forged layouts are not padded", "[state_zz][code_sto
         for (const auto off : offs) CHECK_FALSE(analyzed_in_place(w.payload(off)));
     }
     SECTION("the map refers to an entry inside another's payload") {
-        // A whole entry in the first payload, at an 8-aligned offset, with its own hash.
         const uint32_t f = a + 48;
         const Bytes inner = code_of(20, 9);
         store_u64(w.data() + f, 32 + inner.size());
@@ -436,17 +394,12 @@ TEST_CASE("code store seal: forged layouts are not padded", "[state_zz][code_sto
         w.repoint(a, f);
         const auto before = outside_account_map(w);
         DirectState ds{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
-        // The landed stack's tiling check (mphf_entries_tile in sanitize()) rejects an entry that
-        // overlaps another before the sealing walk ever sees it: the forgery is refused outright,
-        // so it is never padded and nothing is written.
         CHECK_FALSE(ds.sanitize());
         CHECK(outside_account_map(w) == before);
         CHECK_FALSE(analyzed_in_place(ByteView{w.data() + f + 40, inner.size()}));
         for (const auto off : offs) CHECK_FALSE(analyzed_in_place(w.payload(off)));
     }
     SECTION("the map refers to an entry across another's tail") {
-        // An entry from inside the first payload over its tail into the second payload: its
-        // payload holds the bytes sealing would zero, and its hash binds them.
         const uint32_t f = (a_end - 48) & ~uint32_t{7};
         REQUIRE(f >= a + 40);
         const uint32_t plen = offs[1] + 40 + 16 - (f + 40);
@@ -458,8 +411,6 @@ TEST_CASE("code store seal: forged layouts are not padded", "[state_zz][code_sto
         w.repoint(a, f);
         const auto before = outside_account_map(w);
         DirectState ds{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
-        // Rejected by the tiling check, as above: the entry across the tail is an overlap, so
-        // sanitize() refuses the bundle before hashing or sealing anything.
         CHECK_FALSE(ds.sanitize());
         CHECK(outside_account_map(w) == before);
         CHECK(keccak_bytes(ByteView{w.data() + f + 40, plen}) == h);
@@ -475,7 +426,6 @@ TEST_CASE("code store seal: a failed sanitize zeroes nothing", "[state_zz][code_
         w.data()[offs[1] + 40 + 7] ^= 1;
     }
     SECTION("an addr_hashes entry that is not the account's") {
-        // Fails after the code hashing and the account walk, the last check before sealing.
         w.blob[w.meta()->addr_hashes_offset + 3] ^= 1;
     }
     const auto before = outside_account_map(w);
@@ -488,7 +438,6 @@ TEST_CASE("code store seal: a failed sanitize zeroes nothing", "[state_zz][code_
 TEST_CASE("code store seal: an account no addr_hashes entry names zeroes nothing",
           "[state_zz][code_store_seal]") {
     reset_in_place_region();
-    // Accounts with code and without, and a third code so that a seal would have tails to zero.
     const Prestate ps = build_prestate({
         AcctSpec{.addr = make_addr(0x11, 1), .nonce = 1, .balance = 1000},
         AcctSpec{.addr = make_addr(0x12, 2), .nonce = 1, .balance = 0, .code = code_of(100, 1)},
@@ -500,13 +449,10 @@ TEST_CASE("code store seal: an account no addr_hashes entry names zeroes nothing
     w.nodestore = ps.nodestore;
     REQUIRE(w.meta()->n_accounts == 4);
     {
-        // The honest pre-state seals.
         Witness h = w;
         DirectState ds{std::span<uint8_t>{h.blob}, std::span<uint8_t>{h.nodestore}};
         REQUIRE(ds.sanitize());
     }
-    // One entry fewer in addr_hashes than the account map has records: the walk of addr_hashes
-    // leaves a record unnamed, the last check of sanitize(), and nothing may have been zeroed.
     w.meta()->n_accounts -= 1;
     const auto before = w.blob;
     int status = -1;
@@ -519,14 +465,12 @@ TEST_CASE("code store seal: an account no addr_hashes entry names zeroes nothing
             if (null >= 0) dup2(null, STDOUT_FILENO);
             DirectState ds{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
             const bool ok = ds.sanitize();
-            // 20: refused; 21: refused, and the code store bytes are as they were.
             _exit(ok ? 22 : (std::equal(w.blob.begin() + w.meta()->code_store_offset, w.blob.end(),
                                         before.begin() + w.meta()->code_store_offset) ? 21 : 20));
         }
         REQUIRE(waitpid(pid, &status, 0) == pid);
     }
     INFO("child status " << status);
-    // Refused at construction (abort) or by sanitize() with the blob untouched; never accepted.
     CHECK((WIFSIGNALED(status) || (WIFEXITED(status) && WEXITSTATUS(status) == 21)));
 }
 
@@ -540,7 +484,6 @@ TEST_CASE("code store seal: one region, of the last sanitized state", "[state_zz
     REQUIRE(first->sanitize());
     CHECK(analyzed_in_place(w1.payload(o1[0])) == kSeals);
 
-    // A move keeps the seal; the moved-from state leaves the region alone.
     {
         DirectState moved{std::move(*first)};
         first.reset();
@@ -548,7 +491,6 @@ TEST_CASE("code store seal: one region, of the last sanitized state", "[state_zz
     }
     CHECK_FALSE(analyzed_in_place(w1.payload(o1[0])));
 
-    // The next bundle's state replaces the region.
     DirectState second{std::span<uint8_t>{w2.blob}, std::span<uint8_t>{w2.nodestore}};
     REQUIRE(second.sanitize());
     CHECK(analyzed_in_place(w2.payload(o2[0])) == kSeals);
@@ -564,7 +506,6 @@ TEST_CASE("code store seal: created code equal to witness code goes to created_c
     for (const auto& c : {c0, c1}) {
         Account pa{};
         ds.apply_code_diff(make_addr(0x33, 0x01), pa, evmc::bytes{c.data(), c.size()});
-        // Sealed, the index of the code store is dead: no lookup by hash.
         CHECK((pa.code_store_offset == kCreatedCodeOffset) == kSeals);
         CHECK(pa.code_store_len == c.size());
         const ByteView code = ds.read_code(pa);
@@ -600,19 +541,15 @@ TEST_CASE("code store seal: a code store overlapping another pre-state section i
     REQUIRE(m.code_store_offset >= m.block_hashes_offset);
     const std::string kOverlap = "prestate sections overlap";
     {
-        DirectState ds{std::span<uint8_t>{w.blob}};  // the honest layout passes
+        DirectState ds{std::span<uint8_t>{w.blob}};
     }
     SECTION("addr_hashes inside the code store") {
-        // The account map, which runs up to them, then takes in the block hashes and the head of
-        // the code store too.
         std::vector<uint8_t> b = w.blob;
         auto* meta = reinterpret_cast<PreStateMeta*>(b.data());
         meta->addr_hashes_offset = m.code_store_offset + 8;
         CHECK(rejected_with(b, kOverlap));
     }
     SECTION("the code store inside the account map") {
-        // addr_hashes moved behind the code store: the account map, which runs up to them, then
-        // takes in the code store, whose bytes are written through as account data.
         std::vector<uint8_t> b = w.blob;
         const auto at = static_cast<uint32_t>(b.size());
         b.insert(b.end(), w.blob.begin() + m.addr_hashes_offset,
@@ -637,9 +574,7 @@ TEST_CASE("code store seal: a code store overlapping another pre-state section i
     }
 }
 
-// ---------------------------------------------------------------------------
 // A block that creates code equal to a witness code
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -660,14 +595,13 @@ void push2(Bytes& code, uint16_t v) {
     code.push_back(static_cast<uint8_t>(v));
 }
 
-/// CALL `a` with no input -> storage[base] (success) and storage[base + 1] (the first returned
-/// word); EXTCODEHASH, EXTCODESIZE and the first 32 code bytes of `a` -> storage[base + 2..4].
+/// CALL `a` with no input, then EXTCODEHASH, EXTCODESIZE and the first 32 code bytes of `a` -> storage.
 void probe(Bytes& k, const evmc::address& a, uint8_t base) {
-    push1(k, 0x20);  // retSize
-    push1(k, 0x00);  // retOffset
-    push1(k, 0x00);  // argsSize
-    push1(k, 0x00);  // argsOffset
-    push1(k, 0x00);  // value
+    push1(k, 0x20);
+    push1(k, 0x00);
+    push1(k, 0x00);
+    push1(k, 0x00);
+    push1(k, 0x00);
     push20(k, a);
     k.push_back(0x5a);  // GAS
     k.push_back(0xf1);  // CALL
@@ -681,9 +615,9 @@ void probe(Bytes& k, const evmc::address& a, uint8_t base) {
     push20(k, a);
     k.push_back(0x3b);  // EXTCODESIZE
     store_at(k, base + 3);
-    push1(k, 0x20);  // size
-    push1(k, 0x00);  // code offset
-    push1(k, 0x20);  // memory offset
+    push1(k, 0x20);
+    push1(k, 0x00);
+    push1(k, 0x20);
     push20(k, a);
     k.push_back(0x3c);  // EXTCODECOPY
     push1(k, 0x20);
@@ -695,13 +629,11 @@ void probe(Bytes& k, const evmc::address& a, uint8_t base) {
 
 TEST_CASE("code store seal: CREATE2 of a witness code, then run and read it in two transactions",
           "[state_zz][code_store_seal][exec]") {
-    const evmc::address W = make_addr(0x44, 0x04);  // a witness contract
-    const evmc::address D = make_addr(0x22, 0x02);  // CREATE2s W's code, then probes the copy
-    const evmc::address E = make_addr(0x23, 0x03);  // probes the copy in the next transaction
+    const evmc::address W = make_addr(0x44, 0x04);
+    const evmc::address D = make_addr(0x22, 0x02);
+    const evmc::address E = make_addr(0x23, 0x03);
     constexpr uint8_t kSalt = 0x2a;
 
-    // W returns 0x2a. It ends in a PUSH2 cut off by the end of the code, which the copy
-    // repeats: in place, the padding is the zeroed bytes after W's payload.
     Bytes w_code;
     push1(w_code, 0x2a);
     push1(w_code, 0x00);
@@ -712,7 +644,6 @@ TEST_CASE("code store seal: CREATE2 of a witness code, then run and read it in t
     w_code.insert(w_code.end(), {0x5b, 0x61, 0x01});
     const auto w_len = static_cast<uint16_t>(w_code.size());
 
-    // The initcode copies W's code and returns it.
     Bytes init;
     push2(init, w_len);
     push1(init, 0x00);
@@ -723,10 +654,9 @@ TEST_CASE("code store seal: CREATE2 of a witness code, then run and read it in t
     push1(init, 0x00);
     init.push_back(0xf3);  // RETURN
 
-    // D: CODECOPY the initcode from its own tail, CREATE2 it -> storage[0], probe the result.
     Bytes d_code;
     const auto init_len = static_cast<uint8_t>(init.size());
-    const size_t init_at_pos = 4;  // the PUSH2 immediate holding the initcode's offset
+    const size_t init_at_pos = 4;
     push1(d_code, init_len);
     push2(d_code, 0);
     push1(d_code, 0x00);
@@ -770,7 +700,6 @@ TEST_CASE("code store seal: CREATE2 of a witness code, then run and read it in t
     REQUIRE(S2 != evmc::address{});
     REQUIRE(S1 != S2);
 
-    // A filler code, so that none of the codes above need be the last entry.
     const Prestate ps = build_prestate({
         AcctSpec{.addr = S1, .nonce = 0, .balance = intx::uint256{1} << 64},
         AcctSpec{.addr = S2, .nonce = 0, .balance = intx::uint256{1} << 64},
@@ -787,7 +716,6 @@ TEST_CASE("code store seal: CREATE2 of a witness code, then run and read it in t
     REQUIRE(sr.all_succeeded());
     CHECK(sr.post.missing == 0);
 
-    // W's witness code ran in place, and the copy from created_code_.
     const ByteView w_witness = sr.ds->read_code(W);
     CHECK(analyzed_in_place(w_witness) == kSeals);
     const Account* created = sr.ds->find_created_account(CA);
@@ -813,7 +741,6 @@ TEST_CASE("code store seal: CREATE2 of a witness code, then run and read it in t
     expect_probe(D, 0x06);
     expect_probe(E, 0x01);
 
-    // The guest entry point accepts the block the shadow run derived, on its own copy.
     std::vector<uint8_t> env = make_envelope(chain, sr, ps.blob, ps.nodestore);
     REQUIRE_FALSE(env.empty());
     StateTransition st{std::span<uint8_t>{env}};
@@ -830,9 +757,7 @@ TEST_CASE("code store seal: CREATE2 of a witness code, then run and read it in t
     CHECK(log.find("ERROR") == std::string::npos);
 }
 
-// ---------------------------------------------------------------------------
 // DenseLayout and zero_tails() against an independent walk
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -860,8 +785,7 @@ RefWalk ref_walk(const uint8_t* d, uint64_t size) {
     return r;
 }
 
-/// A section as the reference would have it after zero_tails(): [end, round4(end) + 36) after the
-/// payload of every entry but the last, to zero.
+/// A section as the reference would have it after zero_tails().
 std::vector<uint8_t> ref_zero_tails(const std::vector<uint8_t>& in, const RefWalk& w) {
     std::vector<uint8_t> out = in;
     for (size_t i = 0; i + 1 < w.starts.size(); ++i) {
@@ -883,11 +807,10 @@ TEST_CASE("code store seal: DenseLayout and zero_tails against a reference walk"
         const size_t n = 1 + rng() % 6;
         for (size_t i = 0; i < n; ++i) sizes.push_back(static_cast<uint32_t>(rng() % 3 == 0 ? rng() % 8 : rng() % 90));
         Section s{sizes, rng() % 8 == 0 ? static_cast<uint32_t>(rng() % 24) : 0};
-        // Mutations of the header words and the section size, in most iterations.
         const unsigned n_mut = iter % 4 == 0 ? 0 : 1 + rng() % 3;
         for (unsigned m = 0; m < n_mut; ++m) {
             switch (rng() % 7) {
-            case 0:  // a length, near or far from the right one
+            case 0:
                 if (const auto off = s.offsets[rng() % s.offsets.size()]; true) {
                     const uint64_t len = load_u64(s.data() + off);
                     const uint64_t pick[] = {len + 1 + rng() % 9, len - 1 - rng() % 9, rng() % 200,
@@ -895,7 +818,7 @@ TEST_CASE("code store seal: DenseLayout and zero_tails against a reference walk"
                     store_u64(s.data() + off, pick[rng() % 7]);
                 }
                 break;
-            case 1:  // a high word
+            case 1:
                 {
                     const auto off = s.offsets[rng() % s.offsets.size()];
                     const auto at = off + 4 + rng() % 4;
@@ -908,16 +831,16 @@ TEST_CASE("code store seal: DenseLayout and zero_tails against a reference walk"
             case 3:
                 s.size += static_cast<uint32_t>(rng() % 17);
                 break;
-            case 4:  // the section size: nothing but the sentinel, or too large to round
+            case 4:
                 s.size = std::array<uint32_t, 5>{0, 8, 9, UINT32_MAX - 7, UINT32_MAX}[rng() % 5];
                 break;
-            case 5:  // a byte anywhere
+            case 5:
                 {
                     const auto at = rng() % (s.words.size() * 8);
                     s.data()[at] ^= static_cast<uint8_t>(1u << (rng() % 8));
                 }
                 break;
-            default:  // a length skipping one entry
+            default:
                 if (s.offsets.size() > 1) {
                     const size_t i = rng() % (s.offsets.size() - 1);
                     store_u64(s.data() + s.offsets[i],
@@ -929,7 +852,6 @@ TEST_CASE("code store seal: DenseLayout and zero_tails against a reference walk"
         const bool huge = s.size > s.words.size() * 8;
         const uint32_t size = s.size;
         if (huge) {
-            // A size beyond the buffer is walked by no one: only the rounding limit is exercised.
             if (size > UINT32_MAX - 8) CHECK_FALSE(code_store_seal::DenseLayout(s.data(), size).dense());
             continue;
         }
@@ -950,15 +872,12 @@ TEST_CASE("code store seal: DenseLayout and zero_tails against a reference walk"
         const auto want = ref_zero_tails(before, ref);
         CHECK(std::equal(want.begin(), want.end(), s.data()));
     }
-    // The comparison is not vacuous: both kinds, and mutated sections that still tile.
     CHECK(n_dense > 500);
     CHECK(n_not_dense > 500);
     CHECK(n_mutated_dense > 20);
 }
 
-// ---------------------------------------------------------------------------
 // Blocks of random contracts: in place and copied
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -993,7 +912,7 @@ Bytes random_contract_body(std::mt19937_64& rng, size_t size) {
             code.insert(code.end(), {0x60, static_cast<uint8_t>(u(8)), u(2) == 0 ? uint8_t{0x55} : uint8_t{0x54}});
             break;
         case 6:
-            code.insert(code.end(), {0x60, 32, 0x60, 0, 0xa1});  // LOG1 of 32 bytes
+            code.insert(code.end(), {0x60, 32, 0x60, 0, 0xa1});
             break;
         case 7:
             code.insert(code.end(), {0x60, 64, 0x60, 0, 0x60, 0, 0x39});  // CODECOPY
@@ -1006,7 +925,7 @@ Bytes random_contract_body(std::mt19937_64& rng, size_t size) {
             break;
         }
     }
-    code.resize(size);  // often inside a PUSH, with no STOP
+    code.resize(size);
     return code;
 }
 
@@ -1064,7 +983,6 @@ TEST_CASE("code store seal: blocks of random contracts, run in place and with ev
         std::vector<Bytes> codes;
         for (size_t i = 0; i < n; ++i) {
             Bytes code;
-            // Probes of two other contracts (their code is read, and run by the CALL), then a body.
             probe_with_gas(code, addrs[(i + 1) % n], 0x10);
             probe_with_gas(code, addrs[(i + 2) % n], 0x20);
             const size_t body = (seed % 4 == 0 && i == 1) ? 24576 - code.size()
@@ -1119,34 +1037,28 @@ TEST_CASE("code store seal: blocks of random contracts, run in place and with ev
         CHECK(in_place.n_logs == copied.n_logs);
         CHECK(in_place.storage == copied.storage);
         CHECK(copied.in_place == 0);
-        // Every code but the last entry's lies in place; the unit of the test is that they ran so.
         CHECK(in_place.in_place == (kSeals ? n - 1 : 0));
         if (in_place.in_place > 0) ++blocks_in_place;
         for (const bool ok : in_place.success) (ok ? succeeded : failed)++;
         for (const auto l : in_place.n_logs) logs += l;
     }
-    // Neither all reverting nor all succeeding.
     CHECK(succeeded > 10);
     CHECK(failed > 10);
     CHECK(logs > 0);
     CHECK(blocks_in_place == (kSeals ? 24u : 0u));
 }
 
-// ---------------------------------------------------------------------------
 // Forged witnesses: random and crafted mutations, each in a child process
-// ---------------------------------------------------------------------------
 
 namespace {
 
-constexpr int kFuzzFailed = 11;      // sanitize() returned false
-constexpr int kFuzzAcceptedCopy = 10;  // accepted, no code in place
-constexpr int kFuzzInPlace = 13;     // accepted, some code in place
-constexpr int kFuzzViolation = 12;   // accepted, and a contract's code is not its own
+constexpr int kFuzzFailed = 11;
+constexpr int kFuzzAcceptedCopy = 10;
+constexpr int kFuzzInPlace = 13;
+constexpr int kFuzzViolation = 12;
 constexpr int kFuzzException = 14;
 
-/// What the child checks of an accepted pre-state: every contract's code, as the VM would read it,
-/// is byte for byte its genuine code (whose hash binds the account) or none, and when it runs in
-/// place, its JUMPDESTs are those of the copy.
+/// What the child checks of an accepted pre-state: every contract's code, as the VM would read it.
 int fuzz_child(std::vector<uint8_t>& blob, std::vector<uint8_t>& nodestore,
                const std::vector<std::pair<evmc::address, Bytes>>& expect) {
     try {
@@ -1155,8 +1067,6 @@ int fuzz_child(std::vector<uint8_t>& blob, std::vector<uint8_t>& nodestore,
         bool any_in_place = false;
         for (const auto& [addr, code] : expect) {
             const ByteView got = ds.read_code(addr);
-            // An account the forged map no longer finds reads as empty: a failure of the account
-            // map, which the state root check shows, and not of the code store.
             if (got.empty()) continue;
             if (got.size() != code.size() || std::memcmp(got.data(), code.data(), code.size()) != 0) {
                 std::fprintf(stderr, "forged witness: contract %02x.. reads %zu bytes, not its %zu\n",
@@ -1228,14 +1138,14 @@ TEST_CASE("code store seal: forged witnesses never change what runs", "[state_zz
         const unsigned n_ops = 1 + rng() % 3;
         for (unsigned op = 0; op < n_ops; ++op) {
             switch (rng() % 9) {
-            case 0:  // a byte of the data section
+            case 0:
                 {
                     const auto at = rng() % dsize;
                     w.data()[at] ^= static_cast<uint8_t>(1u << (rng() % 8));
                 }
                 what += "byte;";
                 break;
-            case 1: {  // a length
+            case 1: {
                 const uint32_t off = pick_off();
                 const uint64_t len = load_u64(w.data() + off);
                 const uint64_t v[] = {len + 1 + rng() % 40, len - 1 - rng() % 40, rng() % 600, 31, 32};
@@ -1243,7 +1153,7 @@ TEST_CASE("code store seal: forged witnesses never change what runs", "[state_zz
                 what += "len;";
                 break;
             }
-            case 2:  // a slot of the map
+            case 2:
             case 3: {
                 const uint32_t i = static_cast<uint32_t>(rng() % base.header()->n_keys);
                 const uint32_t off = pick_off();
@@ -1255,7 +1165,7 @@ TEST_CASE("code store seal: forged witnesses never change what runs", "[state_zz
             }
             case 4:
             case 5:
-            case 6: {  // a genuine code copied to a place of the data section, the map pointed to it
+            case 6: {
                 const uint32_t e = pick_off();
                 const uint32_t clen = w.entries.at(e) - 32;
                 Bytes c(w.data() + e + 40, w.data() + e + 40 + clen);
@@ -1266,13 +1176,11 @@ TEST_CASE("code store seal: forged witnesses never change what runs", "[state_zz
                 if (rng() % 3 == 0) {
                     p = 8 * static_cast<uint32_t>(rng() % ((dsize - need) / 8 + 1));
                 } else {
-                    // Around the old entry, or the tail of another one.
                     const auto lo = static_cast<int64_t>(e) - 8 * static_cast<int64_t>(rng() % 12);
                     p = static_cast<uint32_t>(std::clamp<int64_t>(lo + 8 * static_cast<int64_t>(rng() % 20), 8, dsize - need));
                     p &= ~7u;
                 }
                 if (p < 8) p = 8;
-                // c was read before the copy overwrote anything.
                 store_u64(w.data() + p, 32 + clen);
                 std::memcpy(w.data() + p + 8, h.bytes, 32);
                 std::memcpy(w.data() + p + 40, c.data(), clen);
@@ -1280,7 +1188,7 @@ TEST_CASE("code store seal: forged witnesses never change what runs", "[state_zz
                 what += "craft;";
                 break;
             }
-            case 7: {  // a byte of the account records, or of addr_hashes
+            case 7: {
                 const uint32_t lo = w.meta()->prestate_offset;
                 const uint32_t hi = w.meta()->addr_hashes_offset + w.meta()->n_accounts * sizeof(AddrHashEntry);
                 const auto at = lo + rng() % (hi - lo);
@@ -1289,7 +1197,7 @@ TEST_CASE("code store seal: forged witnesses never change what runs", "[state_zz
                 what += "account;";
                 break;
             }
-            default: {  // the header of the code store
+            default: {
                 switch (rng() % 4) {
                 case 0: w.header()->n_keys = 0; break;
                 case 1: w.header()->data_size = dsize + 8 * (1 + rng() % 4); break;
@@ -1303,14 +1211,11 @@ TEST_CASE("code store seal: forged witnesses never change what runs", "[state_zz
         }
         const int v = run_in_child(w.blob, w.nodestore, expect);
         INFO("iter " << iter << " ops " << what);
-        // A refusal to construct aborts (SIGABRT); anything else but a verdict is a crash.
         REQUIRE(v != kFuzzViolation);
         REQUIRE(v != kFuzzException);
         REQUIRE((v == 128 + SIGABRT || v == kFuzzFailed || v == kFuzzAcceptedCopy || v == kFuzzInPlace));
         ++verdicts[v];
     }
-    // Not vacuous: forgeries are refused, some mutations leave an accepted pre-state, and some of
-    // those still seal.
     WARN("verdicts: aborted " << verdicts[128 + SIGABRT] << ", failed " << verdicts[kFuzzFailed]
          << ", accepted " << verdicts[kFuzzAcceptedCopy] << ", accepted in place " << verdicts[kFuzzInPlace]);
     if (iters >= 1000) {

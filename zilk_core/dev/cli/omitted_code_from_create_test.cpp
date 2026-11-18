@@ -1,12 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// A stateless witness omits bytecode that an earlier CREATE in the same block already
-// deployed: EIP-7928 code_writes satisfy the read, so the body need not travel with the
-// witness. A pre-existing account sharing that code hash then arrives with its hash intact
-// and no code-store entry (code_store_len == 0), and read_code() must serve the in-block
-// copy. Serving empty code instead executes calls to the account as no-ops, observed on
-// glamsterdam-devnet-8 blocks 236593/236594 as a receipts-root mismatch.
+// A stateless witness omits bytecode that an earlier CREATE in the same block already deployed.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -32,7 +27,6 @@ TEST_CASE("pre-state code omitted from the witness resolves from an in-block CRE
     evmc::address deployed{};
     deployed.bytes[19] = 0x22;
 
-    // `existing` keeps its code hash; its body is absent from the witness code store.
     std::vector<DirectState::AccountInfo> accounts{
         test_util::make_contract(existing, 1, intx::uint256{0}, code_hash, /*code_len=*/0),
         test_util::make_eoa(deployed, 0, intx::uint256{0})};
@@ -41,7 +35,6 @@ TEST_CASE("pre-state code omitted from the witness resolves from an in-block CRE
     DirectState ds{std::span<uint8_t>{blob}, std::span<uint8_t>{nodestore}};
     REQUIRE(ds.sanitize());
 
-    // An earlier transaction deploys the same bytecode elsewhere.
     evmone::state::StateDiff diff;
     auto& e = diff.modified_accounts.emplace_back();
     e.addr = deployed;
@@ -66,7 +59,6 @@ TEST_CASE("pre-state code without a record offset resolves from the witness code
     evmc::address existing{};
     existing.bytes[19] = 0x11;
 
-    // The body is in the witness code store, but the record carries no code_store_len.
     std::vector<DirectState::AccountInfo> accounts{
         test_util::make_contract(existing, 1, intx::uint256{0}, code_hash, /*code_len=*/0)};
     auto blob = DirectState::build_blob_from_accounts(accounts, {},

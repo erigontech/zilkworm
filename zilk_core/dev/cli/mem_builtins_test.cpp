@@ -1,18 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Host tests of the Airbender guest's memcpy, memmove, memset and memcmp
-// (prover/guest_common/src/mem_builtins.cpp as Airbender builds it, built for the host by
-// mem_builtins_host.cpp). prover/guest_common/src/mem_builtins_test.cpp tests the same file
-// without the CSR MEMCOPY, at both word sizes.
-//
-// The guest cannot run here, so two things stand in for it. The oracle is the plain byte-by-byte
-// semantics of each function, with canary bytes around every destination: a wrong byte, a store
-// outside the range and an overrun all fail. The CSR MEMCOPY is csr_memcopy32() below, which
-// fails the test when an operand is not 32-byte aligned or when dst == src: on the guest those
-// are prover faults rather than wrong bytes, so a byte comparison alone would not see them.
-// Word accesses at the wrong alignment are covered by building this test with
-// -fsanitize=alignment (x86 would otherwise run them silently).
+// Host tests of the Airbender guest's memcpy, memmove, memset and memcmp.
 
 #include <array>
 #include <cstddef>
@@ -47,8 +36,7 @@ void fail(const std::string& what) {
 
 }  // namespace
 
-// Reads all 32 bytes before it writes any, like the memmove() fast paths expect of an overlapping
-// copy.
+// Reads all 32 bytes before it writes any, like the memmove() fast paths expect of an overlapping copy.
 extern "C" void csr_memcopy32(void* dst, const void* src) {
     ++g_csr.calls;
     const auto d = reinterpret_cast<uintptr_t>(dst);
@@ -103,9 +91,7 @@ std::string describe(const char* fn, size_t n, size_t doff, size_t soff) {
 // Bytes guarded on each side of the destination range and compared after the call.
 constexpr size_t kGuard = 64;
 
-// CSR MEMCOPY calls memcpy() must make at word alignment: none for n <= 131, which a jump into a
-// run of word copies takes, and none between addresses in different phases modulo 32; else one per
-// whole 32-byte chunk after the lead. The unaligned shapes are left unchecked (SIZE_MAX).
+// CSR MEMCOPY calls memcpy() must make at word alignment.
 size_t expected_csr_calls(size_t n, size_t doff, size_t soff) {
     if ((doff & 3) != 0 || (soff & 3) != 0) return SIZE_MAX;
     if (n <= 131 || ((doff ^ soff) & 31) != 0) return 0;
@@ -113,8 +99,7 @@ size_t expected_csr_calls(size_t n, size_t doff, size_t soff) {
     return (n - lead) / 32;
 }
 
-// One memcpy(dst + doff, src + soff, n) against the byte loop. g_dst and g_src are the arenas
-// (64-byte aligned, so offsets are alignments); dst offsets start at kGuard.
+// One memcpy(dst + doff, src + soff, n) against the byte loop.
 void check_memcpy(size_t n, size_t doff, size_t soff) {
     const size_t dpos = kGuard + doff;
     const size_t total = dpos + n + kGuard;
@@ -122,7 +107,6 @@ void check_memcpy(size_t n, size_t doff, size_t soff) {
     std::memcpy(g_expect, g_pristine, total);
     for (size_t i = 0; i < n; ++i) g_expect[dpos + i] = g_src[soff + i];
 
-    // g_csr.calls keeps counting across the test, which checks that some copy used the CSR.
     const size_t calls_before = g_csr.calls;
     void* ret = zilk_guest_memcpy(g_dst + dpos, g_src + soff, n);
     const size_t calls = g_csr.calls - calls_before;
@@ -185,9 +169,6 @@ TEST_CASE("guest memcpy: sizes to 2200 cross the 512-byte CSR loop and its remai
 TEST_CASE("guest memcpy: boundary sizes and the inline paths", "[mem_builtins]") {
     init_arenas(0xdeadbeefcafef00dULL);
     reset_log();
-    // Sizes where memcpy() changes path: <16 (unaligned bytes), 16, 32, 128..132 (the inline word
-    // run ends at 131), the CSR blocks by a jump into a run of up to 15 and 16 at a time from 512
-    // bytes after the lead, and the last words and bytes after them.
     constexpr std::array<size_t, 24> sizes{0,   1,   3,   4,   7,   8,   15,  16,  31,  32,  33,  63,
                                            127, 128, 131, 132, 133, 159, 160, 255, 256, 260, 511, 512};
     for (size_t n : sizes)
@@ -212,8 +193,8 @@ TEST_CASE("guest memcpy: random sizes, offsets and contents", "[mem_builtins]") 
         }
         size_t doff = rng.below(64);
         size_t soff = rng.below(64);
-        if (rng.below(3) == 0) soff = doff;                    // same phase: the CSR path
-        if (rng.below(4) == 0) { doff &= ~size_t{3}; soff &= ~size_t{3}; }  // word-aligned
+        if (rng.below(3) == 0) soff = doff;
+        if (rng.below(4) == 0) { doff &= ~size_t{3}; soff &= ~size_t{3}; }
         if (doff + n + 2 * kGuard > kArena || soff + n > kArena) continue;
         check_memcpy(n, doff, soff);
     }
@@ -225,8 +206,6 @@ TEST_CASE("guest memcpy: random sizes, offsets and contents", "[mem_builtins]") 
 TEST_CASE("guest memcpy: a copy onto itself never reaches the CSR", "[mem_builtins]") {
     init_arenas(0xabad1deaabad1deaULL);
     reset_log();
-    // GCC may emit memcpy(p, p, n) for a self-assignment and memmove() forwards one for MCOPY with
-    // equal offsets. The delegation requires x10 != x11, and csr_memcopy32() records a violation.
     for (size_t n = 0; n <= 700; ++n)
         for (size_t off : {size_t{0}, size_t{1}, size_t{2}, size_t{4}, size_t{32}, size_t{36}}) {
             std::memcpy(g_dst, g_pristine, kArena);
@@ -246,7 +225,6 @@ TEST_CASE("guest memmove: overlap in both directions at distances 0..80", "[mem_
     init_arenas(0x5555aaaa5555aaaaULL);
     reset_log();
     constexpr size_t kBase = 256;
-    // d < s is forwarded to memcpy(), which must copy ascending; d > s goes backward.
     for (size_t n = 0; n <= 200; ++n)
         for (size_t aoff = 0; aoff < 8; ++aoff)
             for (int delta = -80; delta <= 80; ++delta) {
@@ -273,11 +251,11 @@ TEST_CASE("guest memmove: larger overlapping and disjoint moves", "[mem_builtins
         const size_t s = 64 + rng.below(2048);
         size_t d;
         switch (rng.below(3)) {
-            case 0: d = s + rng.below(130); break;                      // forward, overlapping
-            case 1: d = s >= 130 ? s - rng.below(130) : s; break;       // backward, overlapping
-            default: d = 64 + rng.below(2048); break;                   // anywhere
+            case 0: d = s + rng.below(130); break;
+            case 1: d = s >= 130 ? s - rng.below(130) : s; break;
+            default: d = 64 + rng.below(2048); break;
         }
-        if (rng.below(3) == 0) d = (d & ~size_t{31}) | (s & 31);       // same phase modulo 32
+        if (rng.below(3) == 0) d = (d & ~size_t{31}) | (s & 31);
         if (d + n > kArena || s + n > kArena) continue;
         check_memmove(d, s, n);
     }
@@ -289,7 +267,6 @@ TEST_CASE("guest memmove: larger overlapping and disjoint moves", "[mem_builtins
 TEST_CASE("guest memset: every size and alignment against the byte loop", "[mem_builtins]") {
     init_arenas(0x2468ace02468ace0ULL);
     reset_log();
-    // Past 256 bytes zeros go by CSR blocks, a jump into a run of up to 15 and 16 at a time.
     for (int c : {0, 0xff, 0x5a, 0x1a5 /* the int is truncated to a byte */})
         for (size_t n = 0; n <= 640; ++n)
             for (size_t off = 0; off < 36; ++off) {

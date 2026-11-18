@@ -1,25 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// MLOAD, MSTORE, MSTORE8, CALLDATALOAD and KECCAK256 against a model of the Yellow Paper rules, at
-// the boundaries of the memory and the calldata. The rv32 dispatch tests the memory with one
-// compare against a limit kept next to its size (Memory::limit32()) and the calldata against one
-// kept next to its size (ExecutionState::cd_lim), and hashes 64 bytes inside the memory without
-// the general path. Built with -DEVMONE_RV32_DISPATCH_TEST (the rv32 test configuration), the
-// native build compiles those paths on the host; without it the tests still hold, on the general
-// code.
-//
-// The model is a small interpreter of the opcodes the programs use (PUSH, POP, MSIZE, MLOAD,
-// MSTORE, MSTORE8, CALLDATALOAD, KECCAK256, RETURN, STOP) with the gas of Cancun: stack checks
-// first, then the base cost, then the memory and word costs. It is written from the rules alone
-// (offsets and sizes as 256-bit numbers, the expansion cost from the word count), so an access at
-// an offset near 2^32 that a 32-bit sum would wrap, a size or offset above 32 bits, a limit that
-// disagrees with the size and a gas charged twice or not at all show as a different status, gas
-// left or output. Programs are directed (every boundary of each opcode, at memory sizes from 0 to
-// 0x120 and calldata of 0 to 65 bytes) and random (the offsets drawn around the live size of the
-// memory and the calldata). Each runs on one VM in a row, so that its per-depth state is reused
-// by a program of another memory and calldata size, at the exact gas of the model, one below it,
-// and at random lower values, and a CALL test reuses the state of depth 1 between callees.
+// MLOAD, MSTORE, MSTORE8, CALLDATALOAD and KECCAK256 against a model of the Yellow Paper rules.
 
 #include <algorithm>
 #include <cstdint>
@@ -99,7 +80,7 @@ struct Asm {
 // ------------------------------------------------------------------- model
 
 struct Model {
-    static constexpr uint64_t kHuge = uint64_t{1} << 36;  // an end past this costs more than any gas
+    static constexpr uint64_t kHuge = uint64_t{1} << 36;
 
     bytes mem;
     std::vector<uint256> stack;
@@ -282,11 +263,7 @@ std::string hexs(const bytes& b) {
     return s;
 }
 
-// A digest of every outcome the engine gave, printed at exit when MEMCHECK_DIGEST is set: the
-// programs and gas values are fixed by seeds, so the digests of two builds are equal exactly when
-// the builds gave one outcome to each program (this is how a change is compared with the code it
-// replaces, which has no model of its own to be checked against: the base run passes the same
-// tests).
+// A digest of every outcome the engine gave, printed at exit when MEMCHECK_DIGEST is set.
 struct Digest {
     uint64_t h = 1469598103934665603ull;
     size_t runs = 0;
@@ -303,8 +280,7 @@ struct Digest {
     }
 } g_digest;
 
-// One program at the model's exact gas, one below it, and a few other values: the engine must give
-// the model's status, gas left and output. Returns the number of runs.
+// One program at the model's exact gas, one below it, and a few other values.
 size_t check(Engine& e, Model& m, const bytes& code, const bytes& input, std::mt19937_64& rng,
     int64_t extra_gas = -1) {
     const auto ample = m.run(code, kAmple, input);
@@ -319,7 +295,6 @@ size_t check(Engine& e, Model& m, const bytes& code, const bytes& input, std::mt
             gases.push_back(used - 1 - static_cast<int64_t>(rng() % 12));
         }
     } else {
-        // A failure: find where by lowering the gas a little below what is enough for the prefix.
         gases.push_back(static_cast<int64_t>(rng() % 200));
     }
     if (extra_gas >= 0)
@@ -351,12 +326,10 @@ bytes pattern(size_t n, uint8_t seed) {
     return b;
 }
 
-// Memory of exactly `size` bytes (a multiple of 32), filled with a pattern: one MSTORE at size-32,
-// and, below it, MSTOREs of pattern words.
+// Memory of exactly `size` bytes (a multiple of 32), filled with a pattern: one MSTORE at size-32, and, below it.
 Asm grow_to(size_t size, uint8_t seed) {
     Asm a;
     for (size_t at = 0; at < size; at += 32) {
-        // Words of distinct bytes so that a read at a wrong offset shows.
         a.push(intx::be::unsafe::load<uint256>(pattern(32, static_cast<uint8_t>(seed + at)).data()), true);
         a.push(at);
         a.op(MSTORE);
@@ -385,7 +358,6 @@ std::vector<uint256> edge_values(size_t b) {
     for (const uint64_t x : {uint64_t{255}, uint64_t{256}, uint64_t{257}, uint64_t{0xffffffff}, uint64_t{0xffffffffff},
              uint64_t{1} << 40, uint64_t{1} << 63, ~uint64_t{0}})
         v.emplace_back(x);
-    // Each high word on its own (a test of one word less than all seven is a bug the others hide).
     for (unsigned k = 1; k < 8; ++k)
         v.push_back(uint256{1} << (32 * k));
     v.push_back(uint256{1} << 255);
@@ -406,7 +378,6 @@ TEST_CASE("MLOAD, MSTORE and MSTORE8 at the edges of the memory", "[memcheck]") 
             const auto vals = edge_values(msize);
             for (const uint8_t op : {MLOAD, MSTORE, MSTORE8}) {
                 for (const auto& off : vals) {
-                    // The offset in its shortest form (PUSH1 offsets are the fused form) and as PUSH32.
                     for (const bool full : {false, true}) {
                         auto a = grow_to(msize, 1);
                         if (op == MLOAD) {
@@ -438,7 +409,6 @@ TEST_CASE("PUSH1 MLOAD and PUSH1 MSTORE at the edges of a memory of 0x100 and 0x
                     a.push(off).op(MLOAD).push(0).op(MSTORE);
                 else
                     a.push(0xcafe, true).push(off).op(MSTORE);
-                // The memory afterwards, whole, to see a store outside the checked memory.
                 a.op(MSIZE).push(0).op(MSTORE).push(0x140).push(0).op(RETURN);
                 check(e, m, a.code, {}, rng);
             }
@@ -452,8 +422,6 @@ TEST_CASE("CALLDATALOAD at the edges of the calldata", "[memcheck]") {
         Engine e{config != 1, config == 2};
         Model m;
         size_t runs = 0;
-        // Calldata sizes in a row of every kind: the state is reused with a limit from the
-        // previous size.
         for (const size_t n : {size_t{100}, size_t{0}, size_t{31}, size_t{32}, size_t{33}, size_t{64}, size_t{65},
                  size_t{0}, size_t{1}, size_t{63}, size_t{200}, size_t{4}}) {
             const auto input = pattern(n, 0x40);
@@ -483,10 +451,8 @@ TEST_CASE("KECCAK256 at the edges of the memory, sizes and indexes", "[memcheck]
                      uint256{1} << 128, uint256{1} << 224, uint256{1} << 255,
                      kTop, kTop - 63, uint256{0xffffffc0}, uint256{0xffffffe0}, uint256{0xffffffff}})
                 sizes.push_back(s);
-            // 64 plus a single high word, one word at a time: the low word alone is the fast path's.
             for (unsigned k = 1; k < 8; ++k)
                 sizes.push_back((uint256{1} << (32 * k)) + 64);
-            // Size 64 at every index, the other sizes at the indexes near the memory only.
             for (const auto& s : sizes) {
                 for (const auto& i : idx) {
                     if (s != 64 && !(i < msize + 70 || i >= (uint256{1} << 32) - 70))
@@ -505,22 +471,17 @@ TEST_CASE("KECCAK256 at the edges of the memory, sizes and indexes", "[memcheck]
 }
 
 TEST_CASE("KECCAK256 of 64 bytes costs 42 gas inside the memory, once, at any alignment", "[memcheck]") {
-    // Against fixed numbers, not the model: the program's whole bill is 98 gas, 42 of it the
-    // hash's (30 + 2 words x 6), and 97 gas is out of gas.
     for (const bool cgoto : {true, false}) {
         Engine e{cgoto, false};
         for (unsigned at = 0; at <= 8; ++at) {
             auto a = grow_to(128, 9);
             a.push(64).push(at).op(KECCAK256).op(POP);
-            // 4 x (PUSH32 + PUSH1 + MSTORE) = 36, the memory of 4 words = 12, then PUSH1, PUSH1, the
-            // hash and POP.
             const int64_t used = 36 + 12 + 3 + 3 + 30 + 12 + 2;
             const auto got = e.run(a.code, used, {});
             CHECK(got.status == EVMC_SUCCESS);
             CHECK(got.gas_left == 0);
             const auto less = e.run(a.code, used - 1, {});
             CHECK(less.status == EVMC_OUT_OF_GAS);
-            // The hash itself, as 32 bytes through MSTORE: the digest of the bytes at `at`.
             auto b = grow_to(128, 9);
             b.push(64).push(at).op(KECCAK256).push(0).op(MSTORE).push(32).push(0).op(RETURN);
             Model m;
@@ -528,7 +489,6 @@ TEST_CASE("KECCAK256 of 64 bytes costs 42 gas inside the memory, once, at any al
             REQUIRE(expected.status == EVMC_SUCCESS);
             const auto r = e.run(b.code, kAmple, {});
             CHECK(r == expected);
-            // The model's memory is the Yellow Paper's: the digest is of the 64 bytes at `at`.
             bytes mem;
             for (size_t w = 0; w < 128; w += 32) {
                 const auto p = pattern(32, static_cast<uint8_t>(9 + w));
@@ -548,15 +508,13 @@ TEST_CASE("KECCAK256, memory and calldata accesses in random programs", "[memche
         size_t runs = 0;
         const size_t programs = 12000;
         for (size_t p = 0; p < programs; ++p) {
-            // The calldata of this program (any size from 0 to 130, mostly the edge sizes).
             static constexpr size_t kSizes[] = {0, 1, 31, 32, 33, 63, 64, 65, 96, 100, 129};
             const size_t n = rng() % 3 == 0 ? rng() % 131 : kSizes[rng() % std::size(kSizes)];
             const auto input = pattern(n, static_cast<uint8_t>(rng()));
 
             Asm a;
-            size_t msize = 0;  // the size the memory has if every access so far succeeded
-            size_t depth = 0;  // stack items
-            // Keeps msize for the offsets drawn around it: a guess, the model is the oracle.
+            size_t msize = 0;
+            size_t depth = 0;
             const auto touch = [&](const uint256& off, size_t len) {
                 if (off < (uint256{1} << 20))
                     msize = std::max(msize, (static_cast<size_t>(off) + len + 31) / 32 * 32);
@@ -564,7 +522,6 @@ TEST_CASE("KECCAK256, memory and calldata accesses in random programs", "[memche
             const auto draw = [&](size_t boundary) -> uint256 {
                 const auto pick = rng() % 10;
                 if (pick < 6) {
-                    // Near the boundary, or near 0 or the 32-bit edge.
                     const auto vals = edge_values(boundary);
                     return vals[rng() % vals.size()];
                 }
@@ -582,7 +539,6 @@ TEST_CASE("KECCAK256, memory and calldata accesses in random programs", "[memche
             for (size_t i = 0; i < len; ++i) {
                 const auto kind = rng() % 9;
                 if (kind <= 1) {
-                    // MSTORE: value, offset
                     push_val(uint256{rng(), rng(), rng(), rng()});
                     const auto off = draw(msize);
                     push_val(off);
@@ -598,7 +554,6 @@ TEST_CASE("KECCAK256, memory and calldata accesses in random programs", "[memche
                     push_val(draw(n));
                     a.op(CALLDATALOAD);
                 } else if (kind <= 5) {
-                    // KECCAK256: size, offset; size 64 for most.
                     const auto size = rng() % 3 == 0 ? draw(msize) : uint256{64};
                     const auto off = draw(msize);
                     push_val(size);
@@ -660,7 +615,7 @@ Outcome run_calls(const bytes& code, const bytes& callee, const bytes& callee2) 
         acc.code = evmc::bytes(c.data(), c.size());
         std::memcpy(acc.code_hash.bytes, ethash::keccak256(c.data(), c.size()).bytes, 32);
         acc.balance = 1000000;
-        acc.loaded = true;  // Seeded: the view is not asked for it.
+        acc.loaded = true;
         state.access(a) = std::move(acc);
     };
     add(kCaller, code);
@@ -699,22 +654,15 @@ Asm& call(Asm& a, const evmc::address& to, uint64_t in, uint64_t in_size, uint64
 }  // namespace
 
 TEST_CASE("the state of one depth is reused by calls of other memory and calldata sizes", "[memcheck]") {
-    // The caller's memory is all 0xff (so that a calldata limit left over from a longer calldata
-    // reads its bytes where the zero padding of a short one is due).
     Asm filler;
     for (unsigned w = 0; w < 8; ++w)
         filler.push(~uint256{0}, true).push(32 * w).op(MSTORE);
 
-    // Callee 1: grows its memory to 1 KiB and returns CALLDATALOAD(64).
     const auto callee1 = Asm{}.push(1).push(0x3e0).op(MSTORE).push(64).op(CALLDATALOAD).push(0).op(MSTORE)
                              .push(32).push(0).op(RETURN).code;
-    // Callee 2: returns the first word of its calldata and, after it, the gas between two GAS
-    // readings around PUSH1 0 MLOAD POP: 13 when the frame's memory starts empty (the MLOAD pays 3
-    // for the expansion to 32 bytes), 10 when a limit left over from callee 1 says it holds 1 KiB.
     const auto callee2 = Asm{}.op(GAS).push(0).op(MLOAD).op(POP).op(GAS).op(SWAP1).op(SUB)
                              .push(0x20).op(MSTORE).push(0).op(CALLDATALOAD).push(0).op(MSTORE)
                              .push(64).push(0).op(RETURN).code;
-    // The same, run first as the only frame under the caller (the reference), at depth 1.
     const auto reference = [&](uint64_t in_size) {
         Asm c;
         c.code = filler.code;
@@ -726,8 +674,8 @@ TEST_CASE("the state of one depth is reused by calls of other memory and calldat
         for (const uint64_t second : {uint64_t{0}, uint64_t{4}, uint64_t{31}, uint64_t{32}}) {
             Asm c;
             c.code = filler.code;
-            call(c, kCallee, 0, first, 0x200);   // depth 1: a calldata of `first` bytes, a memory of 1 KiB
-            call(c, kCallee2, 0, second, 0x100); // depth 1 again: `second` bytes, an empty memory
+            call(c, kCallee, 0, first, 0x200);
+            call(c, kCallee2, 0, second, 0x100);
             c.push(0x40).push(0x100).op(RETURN);
             const auto got = run_calls(c.code, callee1, callee2);
             const auto expected = reference(second);
@@ -735,7 +683,6 @@ TEST_CASE("the state of one depth is reused by calls of other memory and calldat
             REQUIRE(expected.status == EVMC_SUCCESS);
             REQUIRE(got.output.size() == 64);
             CHECK(got.output == expected.output);
-            // The calldata word is zero-padded after the `second` bytes (0xff before them).
             for (size_t i = 0; i < 32; ++i)
                 CHECK(got.output[i] == (i < second ? 0xff : 0x00));
             CHECK(got.output[63] == 13);
@@ -744,9 +691,6 @@ TEST_CASE("the state of one depth is reused by calls of other memory and calldat
 }
 
 TEST_CASE("the memory limit follows the size through growth and clear", "[memcheck]") {
-    // limit32() is the size minus 31 (0 while empty) after every change of the size, and the new
-    // extent is zero even when the bytes under it were written before a clear. Release builds
-    // drop the asserts inside Memory, so this reads the limit itself.
     std::mt19937_64 rng{21};
     evmone::Memory mem;
     const auto expected = [](size_t size) { return size != 0 ? size - 31 : size_t{0}; };
@@ -761,14 +705,8 @@ TEST_CASE("the memory limit follows the size through growth and clear", "[memche
             REQUIRE(mem.limit32() == 0);
         }
         const size_t old = mem.size();
-        // The two fused writers of the MSTORE fast path take their limits as constants: a store
-        // at the end of the memory (any size, 0 included, within the capacity) and the store at
-        // 0x40 of the empty memory.
         const auto pick = rng() % 4;
         if (pick == 0 && old + 32 <= mem.capacity()) {
-            // The bytes past the size are dirty (a frame's buffer is reused). A store that starts
-            // below the end leaves the new word zero for the part it does not cover; one that
-            // starts at the end covers it whole.
             for (size_t i = old; i < old + 32; ++i)
                 mem[i] = 0xff;
             const size_t offset = old - (old != 0 && rng() % 2 == 0 ? rng() % 32 : 0);
@@ -792,7 +730,6 @@ TEST_CASE("the memory limit follows the size through growth and clear", "[memche
                 REQUIRE(mem[i] == 0);
             continue;
         }
-        // One word, a few words, a page or more (the capacity grows).
         static constexpr size_t kSteps[] = {1, 1, 1, 2, 3, 7, 64, 129, 1100};
         const size_t size = mem.size() + 32 * kSteps[rng() % std::size(kSteps)];
         mem.grow(size);
@@ -812,8 +749,6 @@ TEST_CASE("the calldata limit follows the message of every kind of state", "[mem
     const evmc::bytes_view code_view{code, std::size(code)};
     static constexpr size_t kSizes[] = {0, 1, 31, 32, 33, 63, 64, 65, 100, 0xffff, 0x7fffffff, 0xffffffff};
 
-    // The default state is safe: the empty memory and no calldata limit send every access down the
-    // checks that read the sizes.
     const evmone::ExecutionState fresh;
     CHECK(fresh.cd_lim == 0);
     CHECK(fresh.memory.limit32() == 0);
@@ -826,7 +761,6 @@ TEST_CASE("the calldata limit follows the message of every kind of state", "[mem
         CHECK(constructed.cd_lim == expected(n));
         const evmone::advanced::AdvancedExecutionState advanced{msg, EVMC_CANCUN, host_interface, nullptr, code_view};
         CHECK(advanced.cd_lim == expected(n));
-        // The state of a depth reused after another message: grown memory, a longer calldata.
         reused.memory.grow(reused.memory.size() + 64);
         reused.reset(msg, EVMC_CANCUN, host_interface, nullptr, code_view);
         CHECK(reused.cd_lim == expected(n));

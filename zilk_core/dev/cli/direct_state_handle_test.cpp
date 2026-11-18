@@ -1,10 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// DirectStateView::get_account hands the evmone State a handle to its record of the account, and
-// get_storage_at, get_account_code_at and apply_state_diff use it instead of looking the address
-// up again. The handle must be that record, so every read through it equals the plain read and
-// the diff it carries lands where the lookup would have put it.
+// DirectStateView::get_account hands the evmone State a handle to its record of the account, and get_storage_at.
 
 #include <cstdint>
 #include <memory>
@@ -173,7 +169,6 @@ TEST_CASE("a handle to a created account survives a rehash of created_accounts_"
     REQUIRE(acc.has_value());
     REQUIRE(acc->handle == f.state->read_account(kBorn));
 
-    // Materializing absent addresses inserts into the map: far more than its bucket count.
     for (uint64_t i = 0; i < 600; ++i) {
         evmc::address a{};
         for (int b = 0; b < 8; ++b) a.bytes[19 - b] = static_cast<uint8_t>((i + 1) >> (8 * b));
@@ -207,7 +202,6 @@ TEST_CASE("apply_state_diff gives the same root with and without handles", "[sta
         entry_for(d1, addr, true);
         entry_for(d2, addr, false);
     }
-    // A new account has no record to hand over: the handle stays null.
     for (auto* d : {&d1, &d2}) {
         auto& e = d->modified_accounts.emplace_back();
         e.addr = kBorn;
@@ -230,7 +224,6 @@ TEST_CASE("the block access list records storage reads made through a handle", "
     DirectStateView view{*f.state};
     evmone::state::State state{view};
 
-    // The State reads the slot of a loaded account through the account's handle.
     REQUIRE(!state.get(kOneSlot).nonexistent);
     CHECK(state.get_storage(kOneSlot, index_key(5)).current == index_key(55));
 

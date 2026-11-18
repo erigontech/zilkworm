@@ -1,18 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The rv32 dispatch runs SHL and SHR with both operands on the stack on 32-bit words: a shift of
-// 256 or more, in any of the 8 words of the shift operand, gives 0, and a smaller one selects an
-// unrolled body by its word shift. The shift operands here are pushed by PUSH2 or PUSH32, never
-// PUSH1, which takes the PUSH1 fusion (a few cases cross-check the two). Results are compared with
-// a bit-by-bit model for every shift from 0 to 511, for shifts 2^k - 1, 2^k and 2^k + 1 at every
-// bit k, for shift operands with exactly one non-zero word at each position and a low word below,
-// at and above 256, and for random operands (values of mixed word density, shifts of mixed
-// length). A sentinel under the operands must survive, which pins the stack height after the
-// shift; the gas used, the underflow, out-of-gas and undefined-before-Constantinople outcomes must
-// not change. Built with -DEVMONE_RV32_DISPATCH_TEST (the rv32 test configuration), the native
-// build compiles the word handlers on the host; without it the generic intx shift runs and the
-// same checks hold.
+// The rv32 dispatch runs SHL and SHR with both operands on the stack on 32-bit words: a shift of 256 or more.
 
 #include <array>
 #include <cstdint>
@@ -51,7 +39,7 @@ void push32(bytes& code, const uint256& v) {
     code.insert(code.end(), w.begin(), w.end());
 }
 
-// Pushes the shift: PUSH2 when it fits, else PUSH32. Never PUSH1.
+// Pushes the shift: PUSH2 when it fits, else PUSH32.
 void push_shift(bytes& code, const uint256& s) {
     if (s <= 0xffff) {
         code.insert(code.end(),
@@ -72,8 +60,7 @@ bytes program(uint8_t op, const uint256& x, const uint256& s) {
     return code;
 }
 
-// The result of x op s from the bits, with s read as a full 256-bit number: bit i of the result
-// is bit i - s of x for SHL and bit i + s for SHR, and 0 outside.
+// The result of x op s from the bits, with s read as a full 256-bit number: bit i of the result is bit i.
 uint256 model(uint8_t op, const uint256& x, const uint256& s) {
     if (s >= 256)
         return 0;
@@ -130,14 +117,12 @@ struct Runner {
     }
 };
 
-// Values of mixed density: x is all zero, a single bit, all ones, or random words, some of them
-// zeroed or set to ones.
+// Values of mixed density: x is all zero, a single bit, all ones, or random words.
 std::vector<uint256> values() {
     const uint256 minus1 = ~uint256{0};
     std::vector<uint256> v = {1, 2, uint256{1} << 255, minus1, minus1 - 1,
         uint256{0xdeadbeef} << 100, uint256{0x0123456789abcdef, 0xfedcba9876543210,
             0x0f0f0f0f0f0f0f0f, 0xf0f0f0f0f0f0f0f0},
-        // each 32-bit word marked differently, so a misplaced word shows
         uint256{0x0000000200000001, 0x0000000400000003, 0x0000000600000005, 0x0000000800000007}};
     std::mt19937_64 rng{11};
     for (int i = 0; i < 4; ++i)
@@ -190,8 +175,6 @@ TEST_CASE("SHL and SHR of a stack operand: shifts 2^k - 1, 2^k and 2^k + 1", "[s
 }
 
 TEST_CASE("SHL and SHR of a stack operand: one non-zero word in the shift", "[shift_stack]") {
-    // Any word above word 0 non-zero is a shift of 2^32 or more: the result is 0, whatever the
-    // low word, and a mutation that leaves one word out of the test shifts by the low word.
     const std::array<uint64_t, 5> pieces = {
         1, 0x80000000, 0xffffffff, 0x100000000, 0x7654321012345678};
     const std::array<uint32_t, 8> lows = {0, 1, 31, 32, 255, 256, 0x7fffffff, 0xffffffff};
@@ -200,14 +183,12 @@ TEST_CASE("SHL and SHR of a stack operand: one non-zero word in the shift", "[sh
         const auto xs = values();
         for (unsigned word = 0; word < 8; ++word) {
             for (const auto piece : pieces) {
-                // The 32-bit word at `word` set, so words 1-7 each are tested alone; a piece of
-                // 2^32 or more spills into the next word, so that case is a pair.
                 for (const auto low : lows) {
                     if (word == 0 && low != lows[0])
-                        continue;  // the low word is the piece itself, so one pass covers it
+                        continue;
                     uint256 s = low;
                     if (word == 0)
-                        s = piece;  // the low word alone (up to 64 bits: words 0 and 1)
+                        s = piece;
                     else
                         s = s | (uint256{piece} << (32 * word));
                     for (const uint8_t op : {SHL, SHR}) {
@@ -217,7 +198,6 @@ TEST_CASE("SHL and SHR of a stack operand: one non-zero word in the shift", "[sh
                 }
             }
         }
-        // The low word alone at and around 256, and 2^32 - 1 (the largest with no high word).
         for (const uint32_t s : {255u, 256u, 257u, 0x1ffu, 0x100u << 8, 0x7fffffffu, 0x80000000u,
                  0xfffffeffu, 0xffffffffu}) {
             for (const uint8_t op : {SHL, SHR}) {
@@ -236,9 +216,9 @@ TEST_CASE("SHL and SHR of a stack operand: random operands", "[shift_stack]") {
             const uint256 x = mixed(rng);
             uint256 s;
             switch (rng() % 5) {
-            case 0: s = rng() % 300; break;                       // around the word shifts
-            case 1: s = mixed(rng); break;                        // mostly 256 or more
-            case 2: s = rng() & 0xffffffff; break;                // a low word only
+            case 0: s = rng() % 300; break;
+            case 1: s = mixed(rng); break;
+            case 2: s = rng() & 0xffffffff; break;
             case 3: s = uint256{0, 0, 0, 0} | (rng() % 256); break;
             default:
                 s = uint256{rng() % 300, 0, 0, 0} | (uint256{rng() % 2} << (rng() % 256));
@@ -266,7 +246,7 @@ TEST_CASE("SHL and SHR of a stack operand agree with the PUSH1 fusion and intx",
                 const auto b = r.run(program(op, x, s), 1000000);
                 REQUIRE(a.status == EVMC_SUCCESS);
                 REQUIRE(a.output == b.output);
-                REQUIRE(a.gas_left == b.gas_left);  // PUSH2 and PUSH1 both cost 3
+                REQUIRE(a.gas_left == b.gas_left);
                 const uint256 want = op == SHL ? x << uint256{s} : x >> uint256{s};
                 REQUIRE(bytes(b.output.begin(), b.output.begin() + 32) == be32(want));
             }
@@ -278,7 +258,6 @@ TEST_CASE("SHL and SHR of a stack operand: gas and failures", "[shift_stack]") {
     for (const bool cgoto : {true, false}) {
         Runner r{cgoto};
         for (const uint8_t op : {SHL, SHR}) {
-            // PUSH32 PUSH32 OP: 3 + 3 + 3 gas, then the implicit STOP.
             bytes two;
             push32(two, 0x1234);
             push32(two, 5);
@@ -295,7 +274,6 @@ TEST_CASE("SHL and SHR of a stack operand: gas and failures", "[shift_stack]") {
                         REQUIRE(out.gas_left == gas - 9);
                     }
                 }
-                // A shift of 256 or more costs the same.
                 bytes big;
                 push32(big, 0x1234);
                 push32(big, uint256{1} << 200);
@@ -304,7 +282,6 @@ TEST_CASE("SHL and SHR of a stack operand: gas and failures", "[shift_stack]") {
                 const auto ok = r.run(big, 9, rev);
                 REQUIRE(ok.status == EVMC_SUCCESS);
                 REQUIRE(ok.gas_left == 0);
-                // Large gas limits.
                 for (const int64_t gas :
                     {int64_t{1} << 31, (int64_t{1} << 32) + 9, int64_t{1} << 50}) {
                     const auto out = r.run(two, gas, rev);
@@ -312,8 +289,6 @@ TEST_CASE("SHL and SHR of a stack operand: gas and failures", "[shift_stack]") {
                     REQUIRE(out.gas_left == gas - 9);
                 }
             }
-            // Stack underflow with no item and with one: the operands are pushed by PUSH32, so no
-            // fusion is involved; the shift fails before it reads or writes a slot.
             const bytes none{op};
             bytes one;
             push32(one, 7);
@@ -326,7 +301,6 @@ TEST_CASE("SHL and SHR of a stack operand: gas and failures", "[shift_stack]") {
                 REQUIRE(b.status == EVMC_STACK_UNDERFLOW);
                 REQUIRE(b.gas_left == 0);
             }
-            // Before Constantinople the opcode does not exist, with the operands there or not.
             for (const auto rev : {EVMC_FRONTIER, EVMC_HOMESTEAD, EVMC_TANGERINE_WHISTLE,
                      EVMC_SPURIOUS_DRAGON, EVMC_BYZANTIUM}) {
                 for (const auto& code : {none, one, two}) {
@@ -343,7 +317,6 @@ TEST_CASE("SHL and SHR of a stack operand: a full stack and a chain", "[shift_st
     for (const bool cgoto : {true, false}) {
         Runner r{cgoto};
         for (const uint8_t op : {SHL, SHR}) {
-            // 1022 items, then the operands pushed on top reach 1024 and the shift leaves 1023.
             bytes code;
             for (int i = 0; i < 1022; ++i)
                 code.insert(code.end(), {PUSH1, static_cast<uint8_t>(i)});
@@ -358,7 +331,6 @@ TEST_CASE("SHL and SHR of a stack operand: a full stack and a chain", "[shift_st
             const uint256 want = op == SHL ? x << uint256{100} : x >> uint256{100};
             REQUIRE(out.output == be32(want));
         }
-        // A chain of shifts through the same slot: (((x << a) >> b) << c) >> d.
         std::mt19937_64 rng{41};
         for (int i = 0; i < 300; ++i) {
             const uint256 x = mixed(rng);

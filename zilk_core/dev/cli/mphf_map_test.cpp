@@ -1,19 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
 // MphfBuilder / MphfMap unit tests (zilkworm.tests target).
-//
-// Why these sit alongside the account-read soundness tests: `DirectState`'s account and
-// code lookups route through this minimal perfect hash map, so the account-read argument
-// depends on `find()` never turning a genuinely-present key into a false miss. The map
-// gives each distinct key one index and stores its body there; keys the builder cannot
-// place that way go into a side list, the collision sidecar. `MphfMap::find` consults the
-// sidecar ONLY when the slot it lands on is empty — an occupied slot whose embedded key
-// fails the byte comparison is a definitive miss, with no sidecar scan. So the builder owes
-// the lookup one invariant: a key whose body lives in the sidecar must land on an empty
-// slot. `chd_solve` upholds it with an explicit occupancy map, co-spilling any placed key
-// that shares an index with a spilled one (see mphf_builder.cpp). The four spill-invariant
-// cases below were added for that work.
 
 #include <algorithm>
 #include <array>
@@ -39,7 +26,7 @@ using silkworm::ByteView;
 
 namespace {
 
-inline constexpr uint32_t kTestMphfMagic = 0x54534554u;  // 'TEST'
+inline constexpr uint32_t kTestMphfMagic = 0x54534554u;
 
 struct AddrBody {
     std::array<uint8_t, 20> addr{};
@@ -68,7 +55,6 @@ AddrBody make_addr_body(uint64_t tag, uint8_t seed_byte) {
     ab.body.resize(60);
     std::memcpy(ab.body.data(), ab.addr.data(), 20);
     std::memcpy(ab.body.data() + 20, &tag, 8);
-    // pad
     std::memset(ab.body.data() + 28, 0xAB, 32);
     return ab;
 }
@@ -91,8 +77,7 @@ AddrBody make_addr_body(uint64_t tag, uint8_t seed_byte) {
     return m->collisions_size / static_cast<uint32_t>(sizeof(zilkworm::MphfCollisionEntry));
 }
 
-// A map over n sequential tagged addresses. A 0 budget override means "use the
-// production default"; small overrides force CHD to exhaust and spill.
+// A map over n sequential tagged addresses.
 struct BuiltMap {
     std::vector<uint8_t> blob;
     std::vector<AddrBody> entries;
@@ -129,9 +114,7 @@ struct BuiltMap {
 
 }  // namespace
 
-// Clean key set with default retry budget: finalize() returns a valid blob
-// and every key resolves via the primary path. Establishes that the
-// graceful-fallback code path doesn't break the clean case.
+// Clean key set with default retry budget.
 TEST_CASE("MphfBuilder clean build resolves all keys via primary path", "[mphf]") {
     const uint32_t N = 64;
     std::vector<AddrBody> entries;
@@ -164,13 +147,7 @@ TEST_CASE("MphfBuilder clean build resolves all keys via primary path", "[mphf]"
     }
 }
 
-// A CHD bucket that exhausts its displacement budget spills its keys into the
-// collision sidecar and keeps displacement factor 0, so those keys probe the
-// index index_lookup() reproduces at runtime. find() treats an occupied slot
-// whose embedded key fails memcmp as a definitive miss and consults the sidecar
-// only from an empty slot, so a placed key owning that index made the spilled
-// key unreachable. The builder must therefore leave every sidecar key's index
-// empty. Guard: every added key resolves, spill or no spill.
+// A spilled CHD bucket leaves every sidecar key's index empty, so every added key resolves.
 TEST_CASE("MphfBuilder keeps every key findable when buckets spill", "[mphf]") {
     struct Recipe {
         uint32_t max_retries;
@@ -183,7 +160,7 @@ TEST_CASE("MphfBuilder keeps every key findable when buckets spill", "[mphf]") {
         {1, 1, 12, true},
         {2, 1, 32, true},
         {2, 1, 512, true},
-        {0, 0, 1000, false},  // production budget: places every key
+        {0, 0, 1000, false},
     };
 
     uint64_t tag_base = 0x600000ULL;
@@ -194,7 +171,6 @@ TEST_CASE("MphfBuilder keeps every key findable when buckets spill", "[mphf]") {
         auto* m = built.header();
         CAPTURE(r.max_retries, r.max_displacement, r.n, m->n_keys, m->collisions_size);
         REQUIRE(m->n_keys == r.n);
-        // The recipe must exercise the branch it claims to, or the case is vacuous.
         if (r.expect_spill) {
             REQUIRE(m->collisions_size > 0);
         } else {
@@ -220,9 +196,7 @@ TEST_CASE("MphfBuilder keeps every key findable when buckets spill", "[mphf]") {
     }
 }
 
-// The invariant find() rests on: slot_offsets[index_lookup(key)] == 0 for every
-// key whose body lives in the sidecar, so slot == 0 unambiguously means
-// "consult the sidecar".
+// The invariant find() rests on: slot_offsets[index_lookup(key)] == 0 for every key whose body lives in the sidecar.
 TEST_CASE("MphfBuilder sidecar keys always probe an empty slot", "[mphf]") {
     struct Recipe {
         uint32_t max_retries;
@@ -254,10 +228,7 @@ TEST_CASE("MphfBuilder sidecar keys always probe an empty slot", "[mphf]") {
     CHECK(sidecar_entries_checked > 0u);
 }
 
-// find() misses two ways: an occupied slot whose embedded key fails memcmp
-// (definitive, no sidecar scan) and an empty slot that scans the sidecar in
-// vain. Both must report absence, and both must actually be reached — a
-// spilled map is the only way empty slots exist in an otherwise minimal table.
+// find() misses two ways: an occupied slot whose embedded key fails memcmp.
 TEST_CASE("MphfMap absent keys miss from both occupied and empty slots", "[mphf]") {
     auto built = build_map(2, 1, 512, 0x700000ULL);
     REQUIRE_FALSE(built.blob.empty());
@@ -269,7 +240,6 @@ TEST_CASE("MphfMap absent keys miss from both occupied and empty slots", "[mphf]
     uint32_t from_empty = 0;
     uint32_t false_hits = 0;
     for (uint32_t i = 0; i < 512; ++i) {
-        // 0x7F0000.. is disjoint from the 0x700000..0x7001FF keys built above.
         const auto absent = make_addr_body(0x7F0000ULL + i, 0);
         const uint32_t idx = m->index_lookup(key8_of(absent));
         REQUIRE(idx < m->n_keys);
@@ -282,13 +252,11 @@ TEST_CASE("MphfMap absent keys miss from both occupied and empty slots", "[mphf]
     }
     CAPTURE(from_occupied, from_empty, false_hits);
     CHECK(false_hits == 0u);
-    CHECK(from_occupied > 0u);  // definitive miss: memcmp against a foreign body
-    CHECK(from_empty > 0u);     // sidecar scanned, still a miss
+    CHECK(from_occupied > 0u);
+    CHECK(from_empty > 0u);
 }
 
-// Sweep sizes under a reduced CHD budget. This used to stop at the first size
-// that produced a sidecar (16, which happens to have no unreachable key), which
-// is how the spill bug survived; no early exit now.
+// Sweep sizes under a reduced CHD budget.
 TEST_CASE("MphfBuilder exhaustion sweep keeps every size findable", "[mphf]") {
     uint32_t sizes_with_sidecar = 0;
     uint32_t broken_sizes = 0;
@@ -326,7 +294,7 @@ TEST_CASE("MphfBuilder exhaustion sweep keeps every size findable", "[mphf]") {
     for (uint32_t n : {128u, 256u, 512u, 1024u}) check_size(n);
 
     CAPTURE(sizes_with_sidecar, broken_sizes);
-    CHECK(sizes_with_sidecar > 0u);  // the sweep must reach the spill path
+    CHECK(sizes_with_sidecar > 0u);
     CHECK(broken_sizes == 0u);
 }
 
@@ -407,19 +375,14 @@ TEST_CASE("MphfBuilder spilled slots reuse the collision marker", "[mphf]") {
 
 namespace {
 
-// A CHD-spilled unique-fingerprint address must stay reachable on the EVM
-// read path. A spilled singleton lands in the MPHF-internal sidecar but not
-// in the AddrCollisionEntry table (fingerprint groups of size > 1 only), so
-// the read path must fall back to the sidecar (MphfMap::find) after the
-// singleton-slot miss. Historically it didn't; regression guard below.
+// A CHD-spilled unique-fingerprint address must stay reachable on the EVM read path.
 
-struct CollEntry {  // mirrors AddrCollisionEntry
+struct CollEntry {
     std::array<uint8_t, 20> addr;
     uint32_t entry_offset;
 };
 
-// AddrCollisionEntry table as built by build_blob_from_accounts: fingerprint
-// groups of size > 1 only, sorted by full address.
+// AddrCollisionEntry table as built by build_blob_from_accounts.
 std::vector<CollEntry> build_addr_collision_table(const std::vector<AddrBody>& entries,
                                                   const MphfMapHeader* m) {
     const auto* slot_offsets =
@@ -477,8 +440,6 @@ const uint8_t* evm_read_path_find(MphfMapHeader* m, const std::vector<CollEntry>
 }  // namespace
 
 TEST_CASE("EVM read path finds a spilled singleton", "[mphf]") {
-    // Two addresses (distinct fingerprints) that collide into one bucket and
-    // spill under a 1-seed / 1-displacement CHD budget.
     std::vector<AddrBody> entries{make_addr_body(0x516000, 0), make_addr_body(0x516001, 0)};
 
     MphfBuilder<20> b{kTestMphfMagic, kMphfMapVersion};
@@ -490,12 +451,11 @@ TEST_CASE("EVM read path finds a spilled singleton", "[mphf]") {
 
     REQUIRE_FALSE(blob.empty());
     auto* m = reinterpret_cast<MphfMapHeader*>(blob.data());
-    REQUIRE(m->collisions_size > 0);  // confirm the pair spilled
+    REQUIRE(m->collisions_size > 0);
 
     const auto table = build_addr_collision_table(entries, m);
 
     const auto& e = entries[0];
-    // Spilled singleton: present in the sidecar, absent from the collision table.
     MphfMap mm{m};
     auto stored = mm.find<20, 0, &addr_key8>(reinterpret_cast<const uint8_t(&)[20]>(*e.addr.data()));
     REQUIRE(stored.has_value());
@@ -554,11 +514,10 @@ TEST_CASE("MphfMap collision entries are {u64 key, u64 offset}, 8-aligned, and o
         CHECK_FALSE(zilkworm::validate_mphf<20>(std::span<const uint8_t>{forged}, 0, size, kTestMphfMagic));
     }
 
-    // The soundness condition in validate_mphf's comment: data[] past every table.
     SECTION("validate_mphf rejects a data section that overlaps the sidecar") {
         auto forged = built.blob;
         auto* fh = reinterpret_cast<MphfMapHeader*>(forged.data());
-        fh->data_offset = fh->collisions_offset;  // 8-aligned and still inside the region
+        fh->data_offset = fh->collisions_offset;
         CHECK_FALSE(zilkworm::validate_mphf<20>(std::span<const uint8_t>{forged}, 0, size, kTestMphfMagic));
     }
 
@@ -584,7 +543,7 @@ TEST_CASE("MphfMap collision entries are {u64 key, u64 offset}, 8-aligned, and o
 
     SECTION("a sidecar entry whose body runs past data_size is rejected") {
         auto forged = built.blob;
-        const uint64_t lie = m->data_size;  // header says the body fills the arena and more
+        const uint64_t lie = m->data_size;
         std::memcpy(forged.data() + m->data_offset + honest_off, &lie, 8);
         check_rejected(forged);
     }
@@ -599,7 +558,7 @@ TEST_CASE("MphfMap collision entries are {u64 key, u64 offset}, 8-aligned, and o
         std::memcpy(forged.data() + m->data_offset + slot_off, &lie, 8);
         check_rejected(forged);
         auto undersized = built.blob;
-        const uint64_t short_len = 19;  // one byte short of the 20-byte key
+        const uint64_t short_len = 19;
         std::memcpy(undersized.data() + m->data_offset + slot_off, &short_len, 8);
         check_rejected(undersized);
     }

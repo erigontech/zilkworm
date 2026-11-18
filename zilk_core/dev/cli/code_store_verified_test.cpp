@@ -1,9 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// sanitize() skips the hashing of the code-store entries the input reader marked (CodeStoreVerified),
-// and only those: an entry is skipped for a bit set at its own 8-aligned offset in the data section
-// the reader hashed, once. Everything else is hashed and a mismatch still fails the witness.
+// sanitize() skips the hashing of the code-store entries the input reader marked (CodeStoreVerified), and only those.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -34,10 +32,10 @@ Bytes code_of(size_t n, uint8_t seed) {
 struct Witness {
     std::vector<uint8_t> blob;
     std::vector<uint8_t> nodestore;
-    uint8_t* data{nullptr};  // The code store's data section in blob.
+    uint8_t* data{nullptr};
     uint32_t data_size{0};
-    std::vector<uint64_t> offsets;  // Entry offsets in it.
-    std::vector<uint32_t> slot_field_offsets;  // Where in blob each slot offset is stored.
+    std::vector<uint64_t> offsets;
+    std::vector<uint32_t> slot_field_offsets;
 
     uint64_t offset_of_payload_size(size_t n) const {
         for (const auto off : offsets) {
@@ -145,9 +143,6 @@ TEST_CASE("sanitize skips the entries marked, and takes the marks once", "[state
         m.set(a);
         g_code_store_verified = m.handshake(w);
         w.data[a + 8 + 32 + 100] ^= 1;
-        // sanitize() may zero the bytes after the payloads (the rv32 test build does, see
-        // code_store_seal.hpp), which another DirectState would reject as a malformed layout:
-        // the second one gets the bytes back, at the same address.
         const std::vector<uint8_t> as_read = w.blob;
         DirectState first{std::span<uint8_t>{w.blob}, std::span<uint8_t>{w.nodestore}};
         CHECK(first.sanitize());
@@ -192,7 +187,6 @@ TEST_CASE("marks of another data section, size or capacity are not used", "[stat
     SECTION("an entry beyond the bitmap's capacity") {
         const uint32_t idx = static_cast<uint32_t>(a >> 3);
         for (const uint32_t n_bits : {0u, idx, idx - 1}) {
-            // The bit itself is there to be read; the capacity says it is not a mark.
             Marks wide{kBits};
             wide.set(a);
             g_code_store_verified = {w.data, w.data_size, wide.bits.data(), n_bits};
@@ -207,11 +201,6 @@ TEST_CASE("marks of another data section, size or capacity are not used", "[stat
 
 TEST_CASE("a mark of an entry is not one of an offset inside it", "[state_zz][direct_state][code_store_verified][soundness]") {
     HandshakeGuard guard;
-    // A code store whose one slot points 1 or 2 bytes into an entry: such an offset has the bit index
-    // of the entry's own. The bytes at +shift are the upper bytes of the entry's length, then the
-    // first bytes of its key (cleared here), so a payload of 9000 (or 2.1M) bytes makes them a length
-    // of 35 (or 32) bytes, inside the data section. The layout check rejects the offset as not
-    // 8-aligned, before any mark is read.
     for (const auto& [shift, size] : {std::pair<uint32_t, size_t>{1, 9000}, {2, 2100000}}) {
         DYNAMIC_SECTION("offset 8 + " << shift) {
             auto w = make_witness({code_of(size, 5)});
@@ -220,14 +209,12 @@ TEST_CASE("a mark of an entry is not one of an offset inside it", "[state_zz][di
             std::memset(w.data + entry + 8, 0, 8);
             Marks m{kBits};
             m.set(entry);
-            m.set(entry + shift);  // Not a distinct bit: the same one.
+            m.set(entry + shift);
             REQUIRE(m.bits[entry >> 8] == (uint32_t{1} << ((entry >> 3) & 31)));
 
-            // The entry itself is skipped on its mark, whatever its key now is.
             g_code_store_verified = m.handshake(w);
             CHECK(sanitize(w));
 
-            // Moved to the offset inside it, the slot no longer passes the layout check.
             const auto* meta = reinterpret_cast<const PreStateMeta*>(w.blob.data());
             REQUIRE(validate_mphf<32>(w.blob, meta->code_store_offset, meta->code_store_size,
                                       kMphfCodeStoreMagic));

@@ -1,20 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The Airbender guest commits only the hash of the last block a run validates. A bundle is one
-// chain: its first block is anchored at the parent header its parent hash names, and each later
-// block runs on the state the one before it left, so StateTransition requires each block to
-// extend the one validated before it in the bundle. Bundles are independent chains (the EEST
-// conversions pack one test per bundle). These cases drive the public entry point over MFBD
-// envelopes built from one honest two-block chain (genesis -> A -> B, a value transfer each,
-// complete witnesses):
-//
-//   1. a single-block run returns A's hash, the genesis state root and A's state root;
-//   2. A then B, in one bundle or in two, is accepted and returns B's hash;
-//   3. in one bundle, B's execution re-parented onto genesis after A is rejected (it was accepted
-//      before the check: its root still matches), while two independent bundles are accepted in
-//      either order and return the hash of the last one's block.
-//   4. a block rejected after it ran ends its bundle: A after it in a bundle of its own is accepted.
+// The Airbender guest commits only the hash of the last block a run validates.
 
 #include <array>
 #include <cstdint>
@@ -56,10 +42,10 @@ Bytes encode(const silkworm::Block& b) {
 }
 
 struct Chain {
-    Prestate pre_a;  // witness before A (the genesis state)
-    Prestate pre_b;  // witness before B (the state after A)
+    Prestate pre_a;
+    Prestate pre_b;
     silkworm::Block genesis, a, b;
-    silkworm::Block b_off;  // B's execution, re-parented onto genesis as block 1
+    silkworm::Block b_off;
     Bytes genesis_rlp, a_rlp, b_rlp, b_off_rlp;
 };
 
@@ -83,7 +69,6 @@ Chain make_chain_ab() {
     c.a = seal(setup.base, sr_a);
     c.a_rlp = encode(c.a);
 
-    // Zero gas price: the transfers move only their values.
     c.pre_b = build_prestate({{s_a, 1, kBalance - 1}, {s_b, 0, kBalance}, {kRecipient, 0, 2}});
     REQUIRE(c.pre_b.prev_root == c.a.header.state_root);
 
@@ -106,7 +91,6 @@ Chain make_chain_ab() {
     c.b = seal(b, sr_b);
     c.b_rlp = encode(c.b);
 
-    // Same transactions, receipts and post-state as B; only its place in the chain differs.
     c.b_off = c.b;
     c.b_off.header.parent_hash = c.genesis.header.hash();
     c.b_off.header.number = 1;
@@ -153,7 +137,7 @@ Outcome run(std::vector<uint8_t> env) {
     StateTransition st{std::span<uint8_t>{env}};
     Outcome o{};
     {
-        StdoutCapture cap;  // keep tight: Catch2 writes to std::cout too
+        StdoutCapture cap;
         o.r = st.run();
         o.log = cap.str();
     }
@@ -196,11 +180,8 @@ TEST_CASE("a run whose blocks extend each other returns the last block's hash",
 TEST_CASE("a block that does not extend the previous one in its bundle is rejected",
           "[state_transition][public_output][soundness]") {
     const Chain c = make_chain_ab();
-    // A alone is accepted: what the case below rejects is the broken link.
     REQUIRE_FALSE(run(envelope({bundle(c.genesis_rlp, {ByteView{c.a_rlp}}, c.pre_a)})).failed);
 
-    // B_off's header names genesis as parent, so its hash would bind the genesis state root as
-    // its pre-state, yet it runs on the state A left; its root still matches.
     const Outcome o = run(
         envelope({bundle(c.genesis_rlp, {ByteView{c.a_rlp}, ByteView{c.b_off_rlp}}, c.pre_a)}));
     CHECK(o.failed);
@@ -213,7 +194,6 @@ TEST_CASE("independent bundles return the last bundle's block hash",
     const Chain c = make_chain_ab();
     const auto bundle_a = bundle(c.genesis_rlp, {ByteView{c.a_rlp}}, c.pre_a);
     const auto bundle_b = bundle(c.a_rlp, {ByteView{c.b_rlp}}, c.pre_b);
-    // Each bundle is anchored at its own parent header; the output covers the last one's chain.
     const Outcome ba = run(envelope({bundle_b, bundle_a}));
     REQUIRE_FALSE(ba.failed);
     CHECK(ba.r.block_hash == c.a.header.hash());
@@ -225,7 +205,6 @@ TEST_CASE("independent bundles return the last bundle's block hash",
 
 TEST_CASE("a rejected block ends its bundle", "[state_transition][public_output][soundness]") {
     const Chain c = make_chain_ab();
-    // A with a wrong gas used: rejected only once its transfer has run.
     silkworm::Block r = c.a;
     r.header.gas_used += 1;
     const Bytes r_rlp = encode(r);
@@ -238,7 +217,6 @@ TEST_CASE("a rejected block ends its bundle", "[state_transition][public_output]
     CHECK(split.r.block_hash == c.a.header.hash());
     CHECK(split.r.post_state_root == c.a.header.state_root);
 
-    // In one bundle, A would run on the state the rejected transfer left.
     const std::array<uint8_t, 2> first_rejected{kBlockFlagExpectInvalid, 0};
     const Outcome o = run(envelope(
         {bundle(c.genesis_rlp, {ByteView{r_rlp}, ByteView{c.a_rlp}}, c.pre_a, first_rejected)}));

@@ -1,19 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The rv32 dispatch runs SAR by moving 32-bit words: fused with a PUSH1 that gives the shift, and
-// on its own when the shift comes from the stack. These programs run SAR in both forms on values
-// whose words, signs and word boundaries each matter (0, 1, -1, 2^255, 2^255 - 1, single bits at
-// each word's ends, alternating patterns, random values of both signs) for every shift from 0 to
-// 255, shifts from the stack of 256 and beyond or with any high word set, and check the result
-// against a SAR computed bit by bit. Gas left and status are checked at every gas limit around the
-// SAR and at large ones (gas left stays exact far above the program's cost), with the stack too
-// short, a full stack, and before Petersburg, where SAR is undefined and that test comes first.
-// Built with -DEVMONE_RV32_DISPATCH_TEST (the rv32 test configuration), the native build
-// compiles these paths on the host; without it, instr::core::sar() runs, which the same checks
-// cover. Every program also runs on the baseline without the computed-goto dispatch (the
-// separate PUSH1 and SAR) and on the advanced interpreter (instr::core::sar()), the unchanged
-// code to compare with.
+// The rv32 dispatch runs SAR by moving 32-bit words: fused with a PUSH1 that gives the shift.
 
 #include <cstdint>
 #include <random>
@@ -38,18 +25,17 @@ enum : uint8_t {
 
 // How the shift reaches SAR.
 enum class Shape {
-    push1,           // PUSH32 x, PUSH1 s, SAR: the fused form
-    push1_jumpdest,  // PUSH32 x, PUSH1 s, JUMPDEST, SAR: s from the stack
-    swap,            // PUSH1 s, PUSH32 x, SWAP1, SAR: s from the stack, through SWAP1's table
-    push32,          // PUSH32 x, PUSH32 s, SAR: any 256-bit s, from the stack
+    push1,
+    push1_jumpdest,
+    swap,
+    push32,
 };
 
 constexpr Shape kSmallShapes[] = {Shape::push1, Shape::push1_jumpdest, Shape::swap};
 
-// The gas each shape takes before the SAR, and after it: PUSH1 0, MSTORE (with one word of memory),
-// PUSH1 32, PUSH1 0, RETURN.
+// The gas each shape takes before the SAR, and after it: PUSH1 0, MSTORE (with one word of memory), PUSH1 32.
 int64_t gas_before(Shape s) {
-    return s == Shape::swap ? 9 : s == Shape::push1_jumpdest ? 7 : 6;  // 3 + 3 (+ 3 SWAP1, 1 JUMPDEST)
+    return s == Shape::swap ? 9 : s == Shape::push1_jumpdest ? 7 : 6;
 }
 constexpr int64_t kSarGas = 3;
 constexpr int64_t kAfterGas = 3 + 3 + 3 + 3 + 3;
@@ -93,8 +79,7 @@ bytes program(Shape shape, const uint256& x, const uint256& s) {
     return code;
 }
 
-// x >> s with the sign filling in, bit by bit from the words: bit i is bit i + s of x, or the sign
-// when i + s is 256 or more.
+// x >> s with sign fill, bit by bit: bit i is bit i + s of x, or the sign beyond 256.
 uint256 sar_reference(const uint256& x, const uint256& s) {
     const auto bit = [&](unsigned i) { return (x[i / 64] >> (i % 64)) & 1; };
     const uint64_t sign = bit(255);
@@ -113,18 +98,14 @@ struct Outcome {
     bytes output;
 };
 
-// The interpreters: the baseline with the computed-goto dispatch (the rv32 paths under
-// EVMONE_RV32_DISPATCH), the baseline without it (stack SAR by words, no PUSH1 fusion), and the
-// advanced interpreter, which runs instr::core::sar() and is the unchanged code to compare with.
+// The interpreters: the baseline with the computed-goto dispatch (the rv32 paths under EVMONE_RV32_DISPATCH).
 enum class Mode { cgoto, baseline, advanced };
 constexpr Mode kModes[] = {Mode::cgoto, Mode::baseline, Mode::advanced};
 
 struct Runner {
     evmc::VM vm{evmc_create_evmone()};
     evmc::MockedHost host;
-    // The advanced interpreter charges a basic block's gas up front, so when a program runs out of
-    // gas it can fail with another status than the baseline's (which instruction fails differs);
-    // only whether it fails and the gas left (0) are comparable.
+    // The advanced interpreter charges a basic block's gas up front.
     bool advanced = false;
 
     explicit Runner(Mode mode) : advanced(mode == Mode::advanced) {
@@ -160,10 +141,10 @@ std::vector<uint256> values() {
         uint256{0x0123456789abcdef, 0xfedcba9876543210, 0x0f1e2d3c4b5a6978, 0x8796a5b4c3d2e1f0},
         uint256{0x0123456789abcdef, 0xfedcba9876543210, 0x0f1e2d3c4b5a6978, 0x7796a5b4c3d2e1f0}};
     for (unsigned w = 0; w < 8; ++w) {
-        v.push_back(uint256{1} << (32 * w));         // the low bit of word w
-        v.push_back(uint256{1} << (32 * w + 31));    // its high bit
-        v.push_back(minus1 << (32 * w));             // negative, zero below word w
-        v.push_back(~(uint256{0xffffffff} << (32 * w)));  // word w zero, the rest ones
+        v.push_back(uint256{1} << (32 * w));
+        v.push_back(uint256{1} << (32 * w + 31));
+        v.push_back(minus1 << (32 * w));
+        v.push_back(~(uint256{0xffffffff} << (32 * w)));
     }
     std::mt19937_64 rng{29};
     for (int i = 0; i < 12; ++i) {
@@ -207,8 +188,7 @@ constexpr int64_t kLarge[] = {(int64_t{1} << 31) - 1, (int64_t{1} << 31) + 2,
     (int64_t{1} << 31) + 3, (int64_t{1} << 32) - 1, (int64_t{1} << 32), (int64_t{1} << 32) + 2,
     (int64_t{1} << 32) + 3, (int64_t{1} << 40) + 3};
 
-// Status and gas left at every gas limit from 0 to past the program and at large ones, in a
-// revision where SAR is undefined and in ones where it is defined.
+// Status and gas left at every gas limit from 0 to past the program and at large ones.
 void check_gas(Runner& r, Shape shape, const uint256& x, const uint256& s) {
     const auto code = program(shape, x, s);
     const int64_t before = gas_before(shape);
@@ -226,11 +206,11 @@ void check_gas(Runner& r, Shape shape, const uint256& x, const uint256& s) {
             if (gas < before)
                 want = EVMC_OUT_OF_GAS;
             else if (!defined)
-                want = EVMC_UNDEFINED_INSTRUCTION;  // before the SAR's gas test
+                want = EVMC_UNDEFINED_INSTRUCTION;
             else if (gas < total)
                 want = EVMC_OUT_OF_GAS;
             if (r.advanced && want != EVMC_SUCCESS)
-                want = out.status == EVMC_SUCCESS ? EVMC_SUCCESS : out.status;  // Any failure.
+                want = out.status == EVMC_SUCCESS ? EVMC_SUCCESS : out.status;
             if (out.status != want || out.gas_left != (want == EVMC_SUCCESS ? gas - total : 0)) {
                 FAIL(describe(shape, x, s, gas, rev) << ": status " << out.status << " (want "
                                                      << want << ") gas_left " << out.gas_left);
@@ -285,9 +265,6 @@ TEST_CASE("SAR status and gas left at every gas limit and revision", "[sar_words
 TEST_CASE("SAR with the stack too short or full", "[sar_words]") {
     for (const auto mode : kModes) {
         Runner r{mode};
-        // PUSH1 s SAR with nothing under the shift: the PUSH1 runs, then SAR underflows before
-        // its gas is tested; undefined comes first before Petersburg.
-        // SAR alone, and PUSH32 s SAR, from the stack.
         const bytes shapes[] = {{PUSH1, 7, SAR}, {SAR}, {PUSH2, 0, 7, SAR}, {PUSH1, 7, JUMPDEST, SAR}};
         const int64_t before[] = {3, 0, 3, 4};
         for (size_t i = 0; i < std::size(shapes); ++i) {
@@ -307,7 +284,6 @@ TEST_CASE("SAR with the stack too short or full", "[sar_words]") {
                 }
             }
         }
-        // 1024 items: the PUSH1 overflows before SAR is reached.
         bytes full;
         for (int i = 0; i < 1024; ++i)
             full.insert(full.end(), {PUSH1, static_cast<uint8_t>(i)});
@@ -315,11 +291,10 @@ TEST_CASE("SAR with the stack too short or full", "[sar_words]") {
             bytes code = full;
             code.insert(code.end(), {PUSH1, 7, SAR});
             REQUIRE(r.run(code, 1000000, rev).status == EVMC_STACK_OVERFLOW);
-            // 1023 items: PUSH1 fills the stack, SAR takes two and leaves one; DUP1 and POP.
             code.assign(full.begin(), full.end() - 2);
             code.insert(code.end(), {PUSH1, 7, SAR, DUP1, POP, POP});
             const auto out = r.run(code, 1000000, rev);
-            if (r.advanced && rev < EVMC_PETERSBURG)  // It may find the overflow first.
+            if (r.advanced && rev < EVMC_PETERSBURG)
                 REQUIRE(out.status != EVMC_SUCCESS);
             else
                 REQUIRE(out.status ==
@@ -330,12 +305,6 @@ TEST_CASE("SAR with the stack too short or full", "[sar_words]") {
 
 TEST_CASE("SAR on random programs: status, gas left and output equal the unchanged code's",
           "[sar_words]") {
-    // The computed-goto dispatch (PUSH1 SAR fused) is compared with the baseline without it, which
-    // runs the separate PUSH1 and SAR through check_requirements(), so status and gas left must be
-    // equal, and with the advanced interpreter, which runs instr::core::sar(): the output and gas
-    // left when the program succeeds, and failure with no gas left otherwise (see Runner::advanced).
-    // The programs run with gas around the total and in revisions on both sides of Petersburg, and
-    // the outputs also meet the bitwise SAR.
     std::mt19937_64 rng{37};
     const auto word = [&]() -> uint64_t {
         switch (rng() % 8) {

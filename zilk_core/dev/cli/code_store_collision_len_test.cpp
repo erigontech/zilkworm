@@ -18,18 +18,17 @@
 namespace zilkworm {
 namespace {
 
-/// Rebuild a single-key code store so its only entry is reached through the collision
-/// sidecar; `plant` writes header_len + *plant into entry bytes 12..16, the offset high half.
+/// Rebuild a single-key code store so its only entry is reached through the collision sidecar.
 std::vector<uint8_t> route_via_sidecar(const std::vector<uint8_t>& in, uint64_t key,
                                        std::optional<uint32_t> plant) {
     const auto* h = reinterpret_cast<const MphfMapHeader*>(in.data());
     constexpr uint32_t kEntry = sizeof(MphfCollisionEntry);
-    REQUIRE(h->collisions_size == 0);  // the builder placed it in a slot
+    REQUIRE(h->collisions_size == 0);
 
     std::vector<uint8_t> out(in.size() + kEntry, 0);
-    std::memcpy(out.data(), in.data(), h->data_offset);  // header + displacement + slots
+    std::memcpy(out.data(), in.data(), h->data_offset);
     auto* oh = reinterpret_cast<MphfMapHeader*>(out.data());
-    oh->collisions_offset = h->data_offset;  // sidecar sits just before the data section
+    oh->collisions_offset = h->data_offset;
     oh->collisions_size = kEntry;
     oh->data_offset = h->data_offset + kEntry;
     std::memcpy(out.data() + oh->data_offset, in.data() + h->data_offset, h->data_size);
@@ -39,7 +38,7 @@ std::vector<uint8_t> route_via_sidecar(const std::vector<uint8_t>& in, uint64_t 
     for (uint32_t i = 0; i < oh->n_keys; ++i) {
         if (slots[i] != 0) {
             off = slots[i];
-            slots[i] = 0;  // 0 == "resolve through the sidecar"
+            slots[i] = 0;
             break;
         }
     }
@@ -102,8 +101,6 @@ TEST_CASE("a length planted in a code-store sidecar entry's offset high half is 
         CHECK(ds.read_code(b.addr).size() == code.size());
     }
 
-    // 0 plants the honest length: a reader still using bytes 12..16 as a length accepts it.
-    // validate_mphf<32> is the check DirectState runs on the code store at construction.
     for (const uint32_t extra : {0u, 40u}) {
         DYNAMIC_SECTION("a value planted in the offset high half is rejected (extra=" << extra << ")") {
             const auto store = route_via_sidecar(honest_store, key, extra);

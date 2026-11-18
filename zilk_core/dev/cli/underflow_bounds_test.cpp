@@ -1,14 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The rv32 dispatch tests 2- and 3-operand stack underflow against stack_bottom + 1 and + 2
-// computed once per frame, in check_requirements, in the comparison PUSH2 JUMPI fusions and in
-// the SWAP1 successor entries. Every instruction runs here with one item too few and with exactly
-// enough, reached from each kind of entry (the plain table, the PUSH1, SWAP1 and SWAP2 successor
-// tables, DUP1, PUSH0 and CALLDATASIZE before it), in every revision and in both dispatchers; the
-// fused groups run at every gas limit around the item they lack. Built with
-// -DEVMONE_RV32_DISPATCH_TEST (the rv32 test configuration), the native build compiles those
-// paths on the host.
+// The rv32 dispatch tests 2- and 3-operand stack underflow against stack_bottom + 1 and + 2 computed once per frame.
 
 #include <algorithm>
 #include <cstdint>
@@ -71,16 +63,13 @@ int entry_needs(Entry e) {
     }
 }
 
-// h items on the stack, the last step being the entry, then op and zero bytes (its immediate,
-// if any, and STOP). Returns false if the entry cannot leave h items.
+// h items on the stack, the last step being the entry, then op and zero bytes (its immediate, if any, and STOP).
 bool build(bytes& code, Entry e, int h, uint8_t op) {
     code.clear();
     const bool pushes = e == Entry::push1 || e == Entry::push0 || e == Entry::calldatasize;
     const int before = pushes ? h - 1 : e == Entry::dup1 ? h - 1 : h;
     if (before < 0 || before < entry_needs(e))
         return false;
-    // Small values: an instruction given exactly enough items must not fail for its operands'
-    // sake in a way that could hide an underflow (memory offsets stay small).
     for (int i = 0; i < before; ++i)
         code.insert(code.end(), {PUSH2, 0, static_cast<uint8_t>(1 + i % 3)});
     switch (e) {
@@ -103,14 +92,12 @@ std::string describe(uint8_t op, Entry e, int h, evmc_revision rev, bool cgoto) 
            (cgoto ? " cgoto" : " switch");
 }
 
-// The comparison PUSH2 JUMPI groups and the SWAP1 / SWAP2 successor pairs, with the gas and the
-// stack items each instruction needs, in order (none of them changes the height before the last).
-// Jump groups have a PUSH2 whose immediate is patched to the target.
+// The comparison PUSH2 JUMPI groups and the SWAP1 / SWAP2 successor pairs.
 struct Group {
     const char* name;
     bytes body;
-    std::vector<int64_t> gas;  // per instruction, PUSH2 and its immediate as one
-    std::vector<int> needs;    // per instruction
+    std::vector<int64_t> gas;
+    std::vector<int> needs;
     bool jumps;
 };
 
@@ -141,25 +128,20 @@ const std::vector<Group>& groups() {
     return g;
 }
 
-// The items the whole group needs: the first instruction's (the comparison pops before the
-// PUSH2), or the most any of the swap pairs' instructions needs.
+// The items the whole group needs: the first instruction's (the comparison pops before the PUSH2).
 int group_items(const Group& g) {
     return g.jumps && g.body[0] != SWAP1 ? g.needs[0] : std::max(g.needs[0], g.needs[1]);
 }
 
-// k items, each pushed by PUSH1 (3 gas), that decide a jump group's jump with `taken` (SWAP1
-// JUMP gets the target second from the top), then the group, a fall-through that returns 0x11
-// and a JUMPDEST that returns 0x22.
+// k items, each pushed by PUSH1 (3 gas), that decide a jump group's jump with `taken`.
 bytes build_group(const Group& g, int k, bool taken) {
     const uint8_t op = g.body[0];
-    std::vector<uint8_t> top_first;  // the items from the top down
+    std::vector<uint8_t> top_first;
     if (op == ISZERO)
         top_first = {static_cast<uint8_t>(taken ? 0 : 9)};
     else if (op == EQ)
         top_first = {5, static_cast<uint8_t>(taken ? 5 : 7)};
     else if (op >= LT && op <= SGT) {
-        // The top a = 5 and the second b: a < b holds for b = 7 and a > b for b = 3. ISZERO
-        // inverts the jump.
         const bool lt = op == LT || op == SLT;
         const bool holds = taken != (g.body[1] == ISZERO);
         top_first = {5, static_cast<uint8_t>(holds == lt ? 7 : 3)};
@@ -213,7 +195,6 @@ TEST_CASE("every instruction underflows one item short and not with exactly enou
                     const auto op8 = static_cast<uint8_t>(op);
                     if (build(code, e, required - 1, op8)) {
                         const auto out = r.run(code, 1000000, revision);
-                        // The undefined-instruction test comes first, then the underflow test.
                         const auto expected =
                             defined ? EVMC_STACK_UNDERFLOW : EVMC_UNDEFINED_INSTRUCTION;
                         if (out.status != expected || out.gas_left != 0)
@@ -246,8 +227,6 @@ TEST_CASE("fused groups underflow at the instruction that lacks an item, at ever
                 const int items = group_items(g);
                 for (int k = 0; k < items; ++k) {
                     const auto code = build_group(g, k, true);
-                    // Each PUSH1 and each instruction before the short one charges its gas; the
-                    // short one fails on the stack before it charges any.
                     int64_t before = 3 * k;
                     size_t i = 0;
                     while (k >= g.needs[i])
@@ -261,13 +240,11 @@ TEST_CASE("fused groups underflow at the instruction that lacks an item, at ever
                                         << (cgoto ? " cgoto" : " switch") << ": status "
                                         << out.status << " gas_left " << out.gas_left);
                     }
-                    // Gas limits where the fused handlers' single charge falls back.
                     for (const int64_t large : {int64_t{1} << 31, (int64_t{1} << 32) + 5}) {
                         const auto out = r.run(code, before + large, rev);
                         REQUIRE(out.status == EVMC_STACK_UNDERFLOW);
                     }
                 }
-                // Exactly enough items: the group completes, both ways for a conditional jump.
                 for (const bool taken : {true, false}) {
                     if (!taken && (!g.jumps || g.body[1] == JUMP))
                         continue;

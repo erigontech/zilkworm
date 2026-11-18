@@ -1,18 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The instructions that push a value of the environment (CALLVALUE, CALLER, ADDRESS, ORIGIN,
-// COINBASE, SELFBALANCE), KECCAK256 and LOG0-LOG4 convert big-endian bytes straight into the stack
-// slot, or the stack items straight into the log's topics, on rv32. Each case here checks the
-// result against a byte-order model through the state Host: the pushed value as returned memory,
-// and the log's address, topics (the first popped is topics[0]) and data. The values have leading
-// zero words or none, addresses have leading zero bytes or none, and every push lands on a stack
-// slot that held all ones before. LOG runs at every gas limit around the exact cost (out of gas
-// leaves no log), in static mode, and with each topic pattern (zero, one, an address, 2^255,
-// 2^256 - 1, a hash). The pushes also run with the stack full. Both dispatch loops run every case.
-// The native build runs the portable conversions (the LOG storage and host call are shared); the
-// guest's word-wise and byte-wise conversions are covered by the bench and EEST, and were also run
-// in an RV32IM emulator during development (that harness is not part of the repo).
+// The instructions that push a value of the environment (CALLVALUE, CALLER, ADDRESS, ORIGIN, COINBASE, SELFBALANCE).
 
 #include <cstdint>
 #include <optional>
@@ -115,7 +103,7 @@ Outcome run(const bytes& code, const Env& env, int64_t gas, bool cgoto) {
     evmone::state::Account acc;
     acc.code = code;
     acc.balance = env.balance;
-    acc.loaded = true;  // Seeded: the view is not asked for it.
+    acc.loaded = true;
     state.access(env.recipient) = std::move(acc);
 
     evmc::VM vm{new evmone::VM{}};
@@ -182,7 +170,7 @@ const std::vector<uint256>& values() {
         uint256 x = 0x9e3779b97f4a7c15;
         for (int i = 0; i < 64; ++i) {
             x = x * 0x5851f42d4c957f2d + 0x14057b7ef767814f;
-            const auto words = static_cast<unsigned>(x[3] % 9);  // 0 to 8 significant words
+            const auto words = static_cast<unsigned>(x[3] % 9);
             r.push_back(words == 0 ? uint256{0} : (x | 1) >> (32 * (8 - words)));
         }
         return r;
@@ -251,7 +239,6 @@ TEST_CASE("SELFBALANCE pushes the balance of the executing account", "[env_push]
 }
 
 TEST_CASE("KECCAK256 pushes the hash of the memory range", "[env_push]") {
-    // Memory 0..95 holds the bytes 1, 2, ..., 96.
     bytes mem(96, 0);
     for (size_t i = 0; i < mem.size(); ++i)
         mem[i] = static_cast<uint8_t>(i + 1);
@@ -273,7 +260,6 @@ TEST_CASE("KECCAK256 pushes the hash of the memory range", "[env_push]") {
 }
 
 TEST_CASE("LOG0-LOG4 emit the recipient, the topics in pop order and the data", "[env_push]") {
-    // Memory 0..63 holds the bytes 0xa0, 0xa1, ..., 0xdf.
     bytes mem(64, 0);
     for (size_t i = 0; i < mem.size(); ++i)
         mem[i] = static_cast<uint8_t>(0xa0 + i);
@@ -285,7 +271,6 @@ TEST_CASE("LOG0-LOG4 emit the recipient, the topics in pop order and the data", 
         for (size_t first = 0; first < patterns.size(); ++first) {
             if (n == 0 && first != 0)
                 break;
-            // topics[i] = patterns[(first + 3 i) % size]: each pattern at each position.
             std::vector<uint256> topics;
             for (unsigned i = 0; i < n; ++i)
                 topics.push_back(patterns[(first + 3 * i) % patterns.size()]);
@@ -294,11 +279,9 @@ TEST_CASE("LOG0-LOG4 emit the recipient, the topics in pop order and the data", 
                 Asm a;
                 for (uint64_t w = 0; w < 2; ++w)
                     a.push(intx::be::unsafe::load<uint256>(&mem[32 * w])).push(32 * w).op(MSTORE);
-                for (unsigned i = n; i-- > 0;)  // topics[0] is pushed last: the first popped
+                for (unsigned i = n; i-- > 0;)
                     a.push(topics[i]);
                 a.push(size).push(offset).op(static_cast<uint8_t>(LOG0 + n)).op(STOP);
-                // 2 MSTOREs with their pushes and 2 words of memory, the pushes of the topics
-                // and of the range, then LOG: 375 per topic and 8 per byte, its memory paid.
                 const int64_t used = 2 * 9 + 6 + 3 * (n + 2) + 375 * (n + 1) + 8 * int64_t(size);
                 const bytes data(&mem[offset], size);
                 for (const bool cgoto : {true, false}) {

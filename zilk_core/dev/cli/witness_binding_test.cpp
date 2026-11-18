@@ -1,15 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// Forged witnesses the guest must reject. Every value the guest executes with has to be bound to
-// the parent's state root through the account and storage tries; the bench, EEST and the honest
-// tests only feed bundles a real chain produced, so none of them can show such a hole closed.
-//
-// Each case forges part of a witness, seals the block that executing the forged witness yields (as a
-// dishonest producer would: gas, receipts and the state root its own run computes) and drives the
-// public entry point, StateTransition::run, with it. The honest twin of every case, sealed the same
-// way, is accepted, so a rejection is the forgery's doing. Every case asserts the line the check that
-// must fire prints, not just the rejection.
+// Forged witnesses the guest must reject.
 
 #include <algorithm>
 #include <array>
@@ -44,10 +35,9 @@ evmc::bytes32 word(uint64_t v) {
 
 constexpr uint64_t kGas = 1'000'000;
 const intx::uint256 kSenderBalance{intx::uint256{1} << 64};
-const evmc::address kCaller = make_addr(0x22, 0x02);  // calls kHolder and stores what it returns
-const evmc::address kHolder = make_addr(0x33, 0x03);  // holds the storage under test
+const evmc::address kCaller = make_addr(0x22, 0x02);
+const evmc::address kHolder = make_addr(0x33, 0x03);
 
-/// PUSH32 <v>
 void push32(Bytes& code, const evmc::bytes32& v) {
     code.push_back(0x7f);
     code.append(v.bytes, sizeof(v.bytes));
@@ -60,8 +50,8 @@ Bytes return_slot(const evmc::bytes32& key) {
     k.push_back(0x54);  // SLOAD
     push1(k, 0x00);
     k.push_back(0x52);  // MSTORE
-    push1(k, 0x20);     // size
-    push1(k, 0x00);     // offset
+    push1(k, 0x20);
+    push1(k, 0x00);
     k.push_back(0xf3);  // RETURN
     return k;
 }
@@ -69,10 +59,10 @@ Bytes return_slot(const evmc::bytes32& key) {
 /// STATICCALLs `holder`, stores the word it returns in storage[0], then the sentinel storage[1] = 1.
 Bytes store_call_result(const evmc::address& holder) {
     Bytes k;
-    push1(k, 0x20);  // retSize
-    push1(k, 0x00);  // retOffset
-    push1(k, 0x00);  // argsSize
-    push1(k, 0x00);  // argsOffset
+    push1(k, 0x20);
+    push1(k, 0x00);
+    push1(k, 0x00);
+    push1(k, 0x00);
     push20(k, holder);
     k.push_back(0x5a);  // GAS
     k.push_back(0xfa);  // STATICCALL
@@ -103,11 +93,7 @@ AcctSpec sender_of(const Tx& t, uint64_t nonce = 0) {
     return AcctSpec{.addr = t.sender, .nonce = nonce, .balance = kSenderBalance};
 }
 
-/// The pre-state blob a producer hands over with `witness`, against the tries of `state`: a record of
-/// an account `state` has carries that account's storage root, so its account leaf is the committed
-/// one whatever slots or fields the record claims; any other record commits to its own slots. The
-/// blob's block-hash section holds `block_hashes`, and its code store the code of the records and of
-/// `code_of`'s accounts.
+/// The pre-state blob a producer hands over with `witness`, against the tries of `state`.
 std::vector<uint8_t> witness_blob(const std::vector<AcctSpec>& state, const std::vector<AcctSpec>& witness,
                                   std::vector<BlockHashEntry> block_hashes = {},
                                   const std::vector<AcctSpec>& code_of = {}) {
@@ -136,8 +122,7 @@ std::vector<uint8_t> witness_blob(const std::vector<AcctSpec>& state, const std:
     return DirectState::build_blob_from_accounts(std::move(infos), std::move(block_hashes), build_code_store(codes));
 }
 
-/// The node store build_prestate() makes for `state`, without the nodes `omit(hash, in_account_trie)`
-/// picks.
+/// The node store build_prestate() makes for `state`, without the nodes `omit(hash, in_account_trie)` picks.
 template <class Omit>
 std::vector<uint8_t> node_store_omitting(const std::vector<AcctSpec>& state, Omit omit) {
     std::vector<std::pair<bytes32, Bytes>> storage_nodes;
@@ -172,8 +157,7 @@ std::vector<uint8_t> node_store_without_storage(const std::vector<AcctSpec>& sta
     return node_store_omitting(state, [](const bytes32&, bool in_account_trie) { return !in_account_trie; });
 }
 
-/// The node store of `state` without the leaf of `a` in the account trie. An account leaf is too long to be
-/// embedded in its parent, which holds its hash, so the leaf node is the one node that holds the account's RLP.
+/// The node store of `state` without the leaf of `a` in the account trie.
 std::vector<uint8_t> node_store_without_leaf_of(const std::vector<AcctSpec>& state, const evmc::address& a) {
     std::vector<std::pair<bytes32, Bytes>> leaves;
     std::vector<std::pair<bytes32, Bytes>> unused;
@@ -239,7 +223,7 @@ Outcome run_envelope(std::vector<uint8_t> env) {
     StateTransition st{std::span<uint8_t>{env}};
     Outcome o{};
     {
-        StdoutCapture cap;  // keep tight: Catch2 writes to std::cout too
+        StdoutCapture cap;
         o.gas = st.run().gas_used;
         o.log = cap.str();
     }
@@ -268,14 +252,11 @@ void expect_rejected(const Outcome& o, std::string_view why) {
 }
 
 #if USE_HASH_KEY
-// With USE_HASH_KEY a block that reads an account or slot the witness carries no record of recovers it from
-// the node store, along its trie path, which binds it to the parent's state root. Where the witness leaves out
-// a node of that path too, the guest halts (fatal()) with one of these lines.
+// With USE_HASH_KEY a missing record is recovered from the node store along its trie path, else the guest halts.
 constexpr std::string_view kAccountWalkHalt = "USE_HASH_KEY: account walk hit missing/malformed node";
 constexpr std::string_view kSlotWalkHalt = "USE_HASH_KEY: slot walk hit missing/malformed node";
 
-/// The guest halts on `s`'s block with `blob` and `nodestore` as its witness, and `why`, the line it prints
-/// then, is in its log. fatal() ends the process, so the guest runs in a child.
+/// The guest halts on `s`'s block with `blob` and `nodestore` as its witness, and `why`.
 void expect_halted(const Sealed& s, const std::vector<uint8_t>& blob, const std::vector<uint8_t>& nodestore,
                    std::string_view why) {
     const ChildRun r = run_envelope_in_child(make_envelope(s.chain, s.sr, blob, nodestore, s.network));
@@ -311,14 +292,12 @@ TEST_CASE("the guest accepts an honest bundle whose reads are all bound",
     const Prestate ps = build_prestate(state);
 
     const Sealed s = seal(t, ps.prev_root, ps.blob, ps.nodestore);
-    CHECK(s.sr.storage(kCaller, 0) == word(5));  // the read happened
+    CHECK(s.sr.storage(kCaller, 0) == word(5));
     CHECK(s.sr.storage(kCaller, 1) == word(1));
     expect_accepted(run_guest(s, ps.blob, ps.nodestore), s);
 }
 
-// A slot whose witness value differs from its storage leaf fails the storage walk. The walk of an
-// account the block only reads used to be computed and dropped, and a failed walk only returned a
-// zero root, so nothing rejected the forged value.
+// A slot whose witness value differs from its storage leaf fails the storage walk.
 TEST_CASE("check_root rejects a forged value of a slot an unmodified account holds",
           "[witness][binding][trie_failed]") {
     const Tx t = tx_to(kCaller);
@@ -329,14 +308,13 @@ TEST_CASE("check_root rejects a forged value of a slot an unmodified account hol
     spec_of(forged, kHolder).storage = {{word(1), word(0x77)}};
     const std::vector<uint8_t> blob = witness_blob(state, forged);
     const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
-    REQUIRE(s.sr.storage(kCaller, 0) == word(0x77));  // the forged value is what executes
+    REQUIRE(s.sr.storage(kCaller, 0) == word(0x77));
     expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value mismatch in existing leaf");
 
     const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
     expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 }
 
-// A failed account-trie walk used to return a zero root, which a header with a zero state root matched.
 TEST_CASE("check_root rejects a failed account-trie walk whatever the header's state root",
           "[witness][binding][trie_failed]") {
     const Tx t = tx_to(kCaller);
@@ -363,13 +341,10 @@ TEST_CASE("check_root rejects a failed account-trie walk whatever the header's s
     expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 }
 
-// Without its root node a trie used to start empty: the walk then rebuilt a trie of the updated keys
-// alone, and the root a producer computed the same way was accepted.
 TEST_CASE("check_root rejects a witness that omits a pre-state root node",
           "[witness][binding][trie_failed]") {
     const Tx t = tx_to(kCaller);
     std::vector<AcctSpec> state = read_through_call(t, word(1), {{word(1), word(5)}});
-    // kCaller writes storage[0] and storage[1] next to a slot it already holds.
     spec_of(state, kCaller).storage = {{word(7), word(9)}};
     const Prestate ps = build_prestate(state);
 
@@ -384,9 +359,6 @@ TEST_CASE("check_root rejects a witness that omits a pre-state root node",
         const std::vector<uint8_t> nodestore =
             node_store_omitting(state, [&](const bytes32& h, bool) { return h == sroot; });
 #if USE_HASH_KEY
-        // kCaller's writes read the slots first, which the witness does not carry, and their recovery
-        // starts from the root it leaves out: the guest halts. (The block is sealed on the whole node
-        // store: a run on this one halts too.)
         const Sealed s = seal(t, ps.prev_root, ps.blob, ps.nodestore);
         expect_halted(s, ps.blob, nodestore, kSlotWalkHalt);
 #else
@@ -399,13 +371,7 @@ TEST_CASE("check_root rejects a witness that omits a pre-state root node",
     expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 }
 
-// ---------------------------------------------------------------------------
-// Claims for keys absent from the trie
-// ---------------------------------------------------------------------------
-// A key the walk has to insert is absent from the pre-state trie, so its claimed pre-value must be
-// empty: no value for a created account or slot, 0x80 (zero) for a slot read as absent. A read-only
-// claim of anything else used to insert an empty leaf that folded away again, returning the
-// committed root while the block executed with the claimed value.
+// A key the walk has to insert is absent from the pre-state trie, so its claimed pre-value must be empty.
 
 namespace {
 
@@ -423,8 +389,7 @@ evmc::bytes32 find_slot(uint64_t from, Pred pred) {
     }
 }
 
-/// A storage trie and a slot absent from it, inserted at one of the four places
-/// calc_root_from_updates inserts a leaf.
+/// A storage trie and a slot absent from it.
 struct AbsentKey {
     const char* shape;
     Slots present;
@@ -434,9 +399,7 @@ struct AbsentKey {
 std::vector<AbsentKey> absent_keys() {
     const evmc::bytes32 a = word(1);
     const auto n = [&](unsigned i) { return path_nibble(a, i); };
-    // b shares no nibble with a: the root is a branch.
     const evmc::bytes32 b = find_slot(2, [&](const evmc::bytes32& s) { return path_nibble(s, 0) != n(0); });
-    // c shares two nibbles with a: the root is an extension.
     const evmc::bytes32 c = find_slot(2, [&](const evmc::bytes32& s) {
         return path_nibble(s, 0) == n(0) && path_nibble(s, 1) == n(1);
     });
@@ -489,7 +452,7 @@ Bytes store_balance(const evmc::address& a) {
     return k;
 }
 
-constexpr uint64_t kCopyTarget = 0x99;  // a slot of kHolder that no shape has present
+constexpr uint64_t kCopyTarget = 0x99;
 
 }  // namespace
 
@@ -527,9 +490,7 @@ TEST_CASE("check_root rejects a claimed value for a slot absent from the storage
     }
 }
 
-// The claims an honest witness makes for absent slots: a zero read (0x80) and a fresh write (no value),
-// in every insertion shape. The zero read of an account the block does not modify also has to fold
-// back to the committed root exactly.
+// The claims an honest witness makes for absent slots: a zero read (0x80) and a fresh write (no value).
 TEST_CASE("check_root accepts zero and fresh-write claims for absent slots",
           "[witness][binding][absent][honest]") {
     for (const AbsentKey& k : absent_keys()) {
@@ -611,12 +572,7 @@ TEST_CASE("check_root rejects an account the witness invents", "[witness][bindin
     }
 }
 
-// ---------------------------------------------------------------------------
-// The value a slot executes with
-// ---------------------------------------------------------------------------
-// A witness slot has an initial and a current value. check_root binds only the initial one to the
-// storage root, so execution has to start from it too: a current value the witness sets apart used
-// to be what the block read, and what a modified account then carried into the post-state.
+// A witness slot has an initial and a current value.
 
 namespace {
 
@@ -635,8 +591,7 @@ void forge_slot_current(std::vector<uint8_t>& blob, const evmc::address& addr, c
     FAIL("slot not in the witness");
 }
 
-/// A witness whose slot storage[1] of kHolder is 5 by its initial value and 0x77 by its current one,
-/// and the blocks sealed for it: by a producer that executed with 0x77, and by an honest one.
+/// A witness whose slot storage[1] of kHolder is 5 by its initial value and 0x77 by its current one.
 struct ForgedCurrent {
     Prestate ps;
     std::vector<uint8_t> blob;
@@ -651,8 +606,6 @@ ForgedCurrent forge_current(const Tx& t, const std::vector<AcctSpec>& state, Pos
     f.blob = f.ps.blob;
     forge_slot_current(f.blob, kHolder, word(1), word(0x77));
 
-    // What executing with 0x77 yields: the gas and receipts of a run whose witness holds 0x77, and the
-    // root the forged witness used to be checked against, that of the post-state with 0x77 read.
     std::vector<AcctSpec> with_forged = state;
     spec_of(with_forged, kHolder).storage = {{word(1), word(0x77)}};
     f.forged = seal(t, f.ps.prev_root, witness_blob(state, with_forged), f.ps.nodestore);
@@ -672,8 +625,7 @@ ForgedCurrent forge_current_read_through_call(const Tx& t) {
     });
 }
 
-// The holder copies storage[1] to storage[kCopyTarget]. A current value apart from the initial one
-// used to be written back as storage[1]'s new value too.
+// The holder copies storage[1] to storage[kCopyTarget].
 ForgedCurrent forge_current_copied_by_holder(const Tx& t) {
     const auto holder = [&](Slots storage) {
         return std::vector<AcctSpec>{
@@ -719,17 +671,11 @@ TEST_CASE("the guest executes a slot with the value its storage root binds",
     }
 }
 
-// ---------------------------------------------------------------------------
-// The order of a record's slots
-// ---------------------------------------------------------------------------
 // The guest finds a slot by a binary search of its record's slots by key, which assumed the keys ascend.
-// check_root sorts the slots it walks itself, so a witness that put them out of order still bound every
-// value it carries, but a search could miss a slot, and the block read zero for it.
 
 namespace {
 
-/// read_through_call()'s state, where kCaller reads storage[1] of kHolder, which holds storage[1] = 5 and
-/// storage[2] = 6, and its witness.
+/// read_through_call()'s state, where kCaller reads storage[1] of kHolder.
 struct HolderOfTwo {
     Tx t;
     std::vector<AcctSpec> state;
@@ -743,8 +689,7 @@ HolderOfTwo holder_of_two() {
     return {t, std::move(state), std::move(ps)};
 }
 
-/// The block a producer seals for `h` after reading `v` for storage[1]: the gas and receipts of a run that
-/// read it, and the root of the post-state.
+/// The block a producer seals for `h` after reading `v` for storage[1]: the gas and receipts of a run that read it.
 Sealed sealed_reading(const HolderOfTwo& h, const evmc::bytes32& v) {
     std::vector<AcctSpec> with_v = h.state;
     spec_of(with_v, kHolder).storage = {{word(1), v}, {word(2), word(6)}};
@@ -770,7 +715,6 @@ std::span<Slot> holder_slots(std::vector<uint8_t>& blob) {
 TEST_CASE("the guest rejects a witness whose slots are out of order", "[witness][binding][slot_order]") {
     const HolderOfTwo h = holder_of_two();
 
-    // storage[2] before storage[1]: the search for storage[1] (5) missed it, and the block read 0.
     std::vector<uint8_t> blob = h.ps.blob;
     const std::span<Slot> slots = holder_slots(blob);
     REQUIRE(slots.size() == 2);
@@ -783,12 +727,10 @@ TEST_CASE("the guest rejects a witness whose slots are out of order", "[witness]
     expect_accepted(run_guest(honest, h.ps.blob, h.ps.nodestore), honest);
 }
 
-// A key held twice does not ascend either. The search finds the first of the two; the walk checks each claim
-// in turn against the leaf, so a value apart from the committed one already failed it.
+// A key held twice does not ascend either.
 TEST_CASE("the guest rejects a witness that holds a slot twice", "[witness][binding][slot_order]") {
     const HolderOfTwo h = holder_of_two();
 
-    // storage[1] as 0, then as 5: the search for storage[1] found 0.
     std::vector<uint8_t> blob = h.ps.blob;
     const std::span<Slot> slots = holder_slots(blob);
     REQUIRE(slots.size() == 2);
@@ -799,13 +741,7 @@ TEST_CASE("the guest rejects a witness that holds a slot twice", "[witness][bind
                     "sanitize: witness slot keys not in ascending order");
 }
 
-// ---------------------------------------------------------------------------
-// Storage the block wipes
-// ---------------------------------------------------------------------------
-// Before Cancun SELFDESTRUCT deletes an account, storage and all, and a later transaction can create it
-// again with empty storage. Neither post-state holds the slots the witness carried for it, but the block
-// may have executed with them first. check_root used to skip the storage walk of a deleted account, and
-// that of a recreated one walked only its new slots, so a forged value it read was never checked.
+// Before Cancun SELFDESTRUCT deletes an account, storage and all.
 
 namespace {
 
@@ -823,14 +759,13 @@ Bytes return_slot_or_selfdestruct(const evmc::bytes32& key) {
     return k;
 }
 
-/// STATICCALLs `holder` and stores the word it returns in storage[0], CALLs it with calldata, which
-/// has it SELFDESTRUCT, then the sentinel.
+/// STATICCALLs `holder` and stores the word it returns in storage[0], CALLs it with calldata.
 Bytes store_call_result_then_selfdestruct(const evmc::address& holder) {
     Bytes k;
-    push1(k, 0x20);  // retSize
-    push1(k, 0x00);  // retOffset
-    push1(k, 0x00);  // argsSize
-    push1(k, 0x00);  // argsOffset
+    push1(k, 0x20);
+    push1(k, 0x00);
+    push1(k, 0x00);
+    push1(k, 0x00);
     push20(k, holder);
     k.push_back(0x5a);  // GAS
     k.push_back(0xfa);  // STATICCALL
@@ -838,11 +773,11 @@ Bytes store_call_result_then_selfdestruct(const evmc::address& holder) {
     push1(k, 0x00);
     k.push_back(0x51);  // MLOAD
     store_observation(k);
-    push1(k, 0x00);  // retSize
-    push1(k, 0x00);  // retOffset
-    push1(k, 0x01);  // argsSize
-    push1(k, 0x00);  // argsOffset
-    push1(k, 0x00);  // value
+    push1(k, 0x00);
+    push1(k, 0x00);
+    push1(k, 0x01);
+    push1(k, 0x00);
+    push1(k, 0x00);
     push20(k, holder);
     k.push_back(0x5a);  // GAS
     k.push_back(0xf1);  // CALL
@@ -869,10 +804,10 @@ constexpr uint8_t kSalt = 0x01;
 /// CREATE2s kStopInit with kSalt and stores the address it returns in storage[0], then the sentinel.
 Bytes create2_stop() {
     Bytes k;
-    push1(k, kSalt);    // salt
-    push1(k, 0x01);     // size: memory[0] is 0x00, kStopInit
-    push1(k, 0x00);     // offset
-    push1(k, 0x00);     // value
+    push1(k, kSalt);
+    push1(k, 0x01);
+    push1(k, 0x00);
+    push1(k, 0x00);
     k.push_back(0xf5);  // CREATE2
     store_observation(k);
     append_sentinel_and_stop(k);
@@ -892,10 +827,9 @@ evmc::address create2_stop_address(const evmc::address& creator) {
     return out;
 }
 
-const evmc::address kFactory = make_addr(0x55, 0x05);  // CREATE2s the destructed account back
+const evmc::address kFactory = make_addr(0x55, 0x05);
 
-/// kCaller reads storage[1] of `holder` through a STATICCALL, then has it SELFDESTRUCT; `holder` holds
-/// `storage`.
+/// kCaller reads storage[1] of `holder` through a STATICCALL, then has it SELFDESTRUCT; `holder` holds `storage`.
 std::vector<AcctSpec> read_then_selfdestruct(const Tx& t, const evmc::address& holder, Slots storage) {
     return {
         sender_of(t),
@@ -912,8 +846,7 @@ std::vector<uint8_t> forge_slot(const std::vector<AcctSpec>& state, const evmc::
     return witness_blob(state, forged);
 }
 
-/// A block whose first transaction has kCaller read storage[1] of `holder` and have it SELFDESTRUCT,
-/// and whose second creates `holder` again.
+/// A block whose first transaction has kCaller read storage[1] of `holder` and have it SELFDESTRUCT.
 struct Recreated {
     std::vector<Tx> txs;
     evmc::address holder;
@@ -961,7 +894,6 @@ TEST_CASE("check_root rejects a forged slot of an account the block destructs",
         };
         const Prestate ps = build_prestate(state);
 
-        // The write costs the same from 0x77 as from 5: the block is the honest one.
         const std::vector<uint8_t> blob = forge_slot(state, kHolder);
         const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
         REQUIRE(s.sr.ds->is_deleted(kHolder));
@@ -1031,8 +963,7 @@ TEST_CASE("the guest accepts the slots of an account the block wipes, as its sto
     }
 }
 
-// Since Cancun (EIP-6780) SELFDESTRUCT deletes only an account the same transaction created, which has no
-// pre-state storage. Any other account keeps its storage, and its walk binds the slots as it always did.
+// Since Cancun (EIP-6780) SELFDESTRUCT deletes only an account the same transaction created.
 TEST_CASE("from Cancun on, an account SELFDESTRUCT leaves in place binds its slots as before",
           "[witness][binding][wiped]") {
     const Tx t = tx_to(kCaller);
@@ -1051,14 +982,7 @@ TEST_CASE("from Cancun on, an account SELFDESTRUCT leaves in place binds its slo
     expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 }
 
-// ---------------------------------------------------------------------------
-// Create collisions
-// ---------------------------------------------------------------------------
-// A CREATE or CREATE2 to an account with a nonce, code or storage fails (EIP-7610, on every fork). The
-// guest used to take "has storage" from whether the witness carried a slot of the account, which is not
-// what its storage root says: a zero slot, the claim for an absent key, made a creation collide, and a
-// witness without the slots of an account whose storage root is not empty, which a creation does not
-// read, let one go ahead.
+// A CREATE or CREATE2 to an account with a nonce, code or storage fails (EIP-7610, on every fork).
 
 namespace {
 
@@ -1070,7 +994,6 @@ struct Create2Over {
 };
 
 Create2Over create2_over(AcctSpec target) {
-    // A colliding CREATE2 burns the 63/64 of the gas it passes on, and the factory still has to store.
     Create2Over c{tx_to(kFactory, /*value=*/0, /*gas_limit=*/3 * kGas), create2_stop_address(kFactory), {}};
     REQUIRE(c.t.sender != c.target);
     target.addr = c.target;
@@ -1095,7 +1018,7 @@ std::vector<AcctSpec> after_create2(const Create2Over& c, bool created) {
     std::vector<AcctSpec> post = c.state;
     spec_of(post, c.t.sender).nonce = 1;
     AcctSpec& factory = spec_of(post, kFactory);
-    factory.nonce = 2;  // a colliding CREATE2 bumps it all the same
+    factory.nonce = 2;
     factory.storage = {{word(1), word(1)}};
     if (created) {
         evmc::bytes32 target{};
@@ -1106,9 +1029,7 @@ std::vector<AcctSpec> after_create2(const Create2Over& c, bool created) {
     return post;
 }
 
-/// The block a producer seals for `c` whose CREATE2 `created` the target or collided: the gas and
-/// receipts of a run against a witness whose target has the storage that decides so, and the state root
-/// of after_create2().
+/// The block a producer seals for `c` whose CREATE2 `created` the target or collided.
 Sealed seal_create2(const Create2Over& c, const Prestate& ps, bool created, const char* network) {
     std::vector<AcctSpec> as_if = c.state;
     spec_of(as_if, c.target).storage = created ? Slots{} : Slots{{word(1), word(5)}};
@@ -1176,21 +1097,14 @@ TEST_CASE("the guest decides a CREATE2 collision by its target's storage root",
     }
 }
 
-// ---------------------------------------------------------------------------
-// The later blocks of a bundle
-// ---------------------------------------------------------------------------
-// Each block of a bundle after the first runs on the state the block before it left, and its state root
-// is rebuilt from the accounts and slots the witness holds (check_root_new_block), not walked from the
-// root before it. The first block's walk binds what the witness carries to its parent's root, but not
-// that the witness carries everything: an account or slot it left out was absent to a later block, and
-// the root rebuilt without it, the one a producer that executed so committed to, was accepted.
+// Each block of a bundle after the first runs on the state the block before it left.
 
 namespace {
 
-const evmc::address kPayee = make_addr(0x66, 0x06);      // paid by block 1
-const evmc::address kRich = make_addr(0x77, 0x07);       // whose balance block 2 reads
-const evmc::address kBystander = make_addr(0x88, 0x08);  // no block touches it
-const evmc::address kEmpty = make_addr(0x99, 0x09);      // no nonce, balance or code; no block touches it
+const evmc::address kPayee = make_addr(0x66, 0x06);
+const evmc::address kRich = make_addr(0x77, 0x07);
+const evmc::address kBystander = make_addr(0x88, 0x08);
+const evmc::address kEmpty = make_addr(0x99, 0x09);
 
 /// Block 1 has its sender pay kPayee 1 wei, block 2 runs `t2` on the state block 1 leaves.
 struct TwoBlocks {
@@ -1199,8 +1113,7 @@ struct TwoBlocks {
     std::vector<AcctSpec> state;
 };
 
-/// Two blocks on read_through_call()'s state, where kCaller reads storage[1] of kHolder, which holds 5;
-/// block 1 touches neither.
+/// Two blocks on read_through_call()'s state, where kCaller reads storage[1] of kHolder, which holds 5.
 TwoBlocks two_blocks(Tx t2) {
     TwoBlocks b{tx_to(kPayee, /*value=*/1), std::move(t2), {}};
     REQUIRE(b.t1.sender != b.t2.sender);
@@ -1251,8 +1164,7 @@ silkworm::Block sealed_block(const Sealed& s) {
     return b;
 }
 
-/// The block after `first`'s as a producer seals it: `t` run on the state `first`'s run left, which it
-/// goes on to change, with the gas and receipts that yields and the state root `root`.
+/// The block after `first`'s as a producer seals it: `t` run on the state `first`'s run left.
 silkworm::Block seal_next(Sealed& first, const Tx& t, const bytes32& root) {
     const silkworm::BlockHeader parent = sealed_block(first).header;
     silkworm::Block b{};
@@ -1325,11 +1237,11 @@ TEST_CASE("the guest rejects a later block run without an account the witness om
         const Prestate ps = build_prestate(b.state);
         const std::vector<uint8_t> blob = witness_blob(b.state, without(b.state, kHolder));
         Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
-        REQUIRE(s.sr.post.root == build_prestate(after_block_1(b)).prev_root);  // block 1 is the honest one
+        REQUIRE(s.sr.post.root == build_prestate(after_block_1(b)).prev_root);
         const silkworm::Block next =
             seal_next(s, b.t2, build_prestate(without(after_read(b, evmc::bytes32{}), kHolder)).prev_root);
         REQUIRE(s.sr.storage(kCaller, 1) == word(1));
-        REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});  // kHolder was absent to block 2
+        REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
         expect_rejected(run_guest(s, next, blob, ps.nodestore), "the witness is not the whole state");
     }
     SECTION("paid by a value transfer") {
@@ -1337,7 +1249,6 @@ TEST_CASE("the guest rejects a later block run without an account the witness om
         const Prestate ps = build_prestate(b.state);
         const std::vector<uint8_t> blob = witness_blob(b.state, without(b.state, kHolder));
         Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
-        // Block 2 created kHolder afresh: no nonce, code or storage, and the 1 wei it was paid.
         std::vector<AcctSpec> post = without(after_payment(b), kHolder);
         post.push_back(AcctSpec{.addr = kHolder, .nonce = 0, .balance = 1});
         const silkworm::Block next = seal_next(s, b.t2, build_prestate(post).prev_root);
@@ -1355,13 +1266,9 @@ TEST_CASE("the guest rejects a later block that read a slot the witness omits",
     const std::vector<uint8_t> blob = witness_blob(b.state, witness);
     Sealed s = seal(b.t1, ps.prev_root, blob, ps.nodestore);
 #if USE_HASH_KEY
-    // The producer's run of block 2 recovered the slot along its trie path, which the witness holds, so block
-    // 2 is the honest one. The guest rejects the bundle all the same, after block 1, before any recovery in
-    // block 2 could matter: a later block runs on the state the witness holds, which is not the whole state.
     const silkworm::Block next = seal_next(s, b.t2, build_prestate(after_read(b, word(5))).prev_root);
     REQUIRE(s.sr.storage(kCaller, 0) == word(5));
 #else
-    // Block 2 loaded kHolder, so its storage root was rebuilt from the slots the witness carries: none.
     std::vector<AcctSpec> post = after_read(b, evmc::bytes32{});
     spec_of(post, kHolder).storage = {};
     const silkworm::Block next = seal_next(s, b.t2, build_prestate(post).prev_root);
@@ -1370,9 +1277,7 @@ TEST_CASE("the guest rejects a later block that read a slot the witness omits",
     expect_rejected(run_guest(s, next, blob, ps.nodestore), "the witness is not the whole state");
 }
 
-// A record the witness's address map does not lead to is walked and rebuilt like any other, but a lookup
-// misses it, and the block runs as if the account were absent. check_root rejects the record a lookup then
-// creates for the address; the rebuild of a later block's root also left out every record a lookup missed.
+// A record the witness's address map does not lead to is walked and rebuilt like any other, but a lookup misses it.
 TEST_CASE("the guest rejects a later block that missed an account record the witness hides",
           "[witness][binding][later_block]") {
     const TwoBlocks b = balance_read_in_block_2();
@@ -1383,14 +1288,11 @@ TEST_CASE("the guest rejects a later block that missed an account record the wit
     REQUIRE(s.sr.post.root == build_prestate(after_block_1(b)).prev_root);
     const silkworm::Block next = seal_next(
         s, b.t2, build_prestate(without(without(after_read(b, evmc::bytes32{}), kRich), kBystander)).prev_root);
-    REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});  // kRich was absent to block 2
+    REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
     expect_rejected(run_guest(s, next, blob, ps.nodestore), "Created and existing hashes clash");
 }
 
-// An empty account is in the trie until a transaction touches it (EIP-161). Since Paris mainnet holds none
-// (EIP-7523), but the guest does not assume so. The rebuild of a later block's root used to leave out
-// every empty account, so a block whose root dropped one no block touched was accepted, and the block that
-// kept it rejected.
+// An empty account is in the trie until a transaction touches it (EIP-161).
 TEST_CASE("a later block's state root keeps an empty account no block touches",
           "[witness][binding][later_block]") {
     const Tx t1 = tx_to(kPayee, /*value=*/1);
@@ -1422,11 +1324,6 @@ TEST_CASE("a later block's state root keeps an empty account no block touches",
 }
 
 // With USE_HASH_KEY the first block recovers an account the witness carries no record of from the node store.
-// It is in the state the later blocks run on, and so in the roots the guest rebuilds for them from the records
-// it holds: the check that the witness holds the whole state after the first block, and each later block's
-// root. Both used to leave recovered accounts out, so a later block's root that dropped one the first block
-// deleted and the second paid was accepted, and the bundle of one the first block left in place was rejected.
-// Without USE_HASH_KEY the guest rejects the first block, which reads the account as absent.
 TEST_CASE("a later block's state root keeps the accounts the first block recovered",
           "[witness][binding][later_block]") {
     SECTION("one the first block deletes and the second pays") {
@@ -1436,12 +1333,10 @@ TEST_CASE("a later block's state root keeps the accounts the first block recover
         const std::vector<AcctSpec> state = {sender_of(t1), sender_of(t2), AcctSpec{.addr = kEmpty}};
         const Prestate ps = build_prestate(state);
         const std::vector<uint8_t> blob = witness_blob(state, without(state, kEmpty));
-        // Block 1 touches kEmpty, which EIP-161 then deletes.
         std::vector<AcctSpec> post = without(state, kEmpty);
         spec_of(post, t1.sender).nonce = 1;
         Sealed s = seal(t1, ps.prev_root, blob, ps.nodestore);
         s.sr.post.root = build_prestate(post).prev_root;
-        // Block 2 pays it 1 wei, which creates it again.
         spec_of(post, t2.sender).nonce = 1;
         spec_of(post, t2.sender).balance -= 1;
         const bytes32 without_it = build_prestate(post).prev_root;
@@ -1481,8 +1376,7 @@ TEST_CASE("a later block's state root keeps the accounts the first block recover
     }
 }
 
-// A value the witness forges for an account or slot only a later block reads is bound all the same: the
-// first block's walk checks every record and slot the witness carries, whichever block reads it.
+// A value the witness forges for an account or slot only a later block reads is bound all the same.
 TEST_CASE("the guest rejects a value the witness forges for a later block",
           "[witness][binding][later_block]") {
     SECTION("a slot") {
@@ -1498,7 +1392,6 @@ TEST_CASE("the guest rejects a value the witness forges for a later block",
         expect_rejected(run_guest(s, next, blob, ps.nodestore), "Pre value mismatch in existing leaf");
     }
     SECTION("an account") {
-        // kRich does not exist; the witness invents it.
         const TwoBlocks b = balance_read_in_block_2();
         const std::vector<AcctSpec> state = without(b.state, kRich);
         const Prestate ps = build_prestate(state);
@@ -1540,9 +1433,7 @@ TEST_CASE("the guest accepts later blocks that read and pay accounts the first l
     }
 }
 
-// A later block reads an address the state does not have as absent, as the first block does. With
-// USE_HASH_KEY its lookup used to walk the account trie from the root of the block before it, whose nodes
-// no witness holds, and halt the guest.
+// A later block reads an address the state does not have as absent, as the first block does.
 TEST_CASE("the guest accepts a later block that pays an account the state does not have",
           "[witness][binding][later_block][honest]") {
     const evmc::address fresh = make_addr(0xaa, 0x0a);
@@ -1558,13 +1449,6 @@ TEST_CASE("the guest accepts a later block that pays an account the state does n
     expect_accepted(run_guest(s, next, ps.blob, ps.nodestore), s, next);
 }
 
-// ---------------------------------------------------------------------------
-// Block hashes
-// ---------------------------------------------------------------------------
-// BLOCKHASH used to read the witness: its block-hash section first, then the headers it carries, by their
-// numbers. Neither is bound to the block, so a hash a producer put there was what the block read, and the
-// hash of a block it carried no header of read zero. The hash of an ancestor is the parent hash of its
-// child, which the guest holds only through the headers from the block back, each keyed by its own hash.
 
 namespace {
 
@@ -1591,8 +1475,7 @@ bytes32 root_after_reading(const Tx& t, const evmc::bytes32& h) {
     return build_prestate(post).prev_root;
 }
 
-/// Block n carrying `t`, the headers of the blocks 0 to n - 1 before it, and the last of them as the
-/// bundle's genesis: the parent, which anchors `prev_root`.
+/// Block n carrying `t`, the headers of the blocks 0 to n - 1 before it.
 struct Ancestry {
     std::vector<silkworm::BlockHeader> headers;
     ChainSetup chain;
@@ -1633,7 +1516,7 @@ Outcome run_guest(const Sealed& s, const Prestate& ps, std::span<const silkworm:
     for (const silkworm::BlockHeader& h : ancestors) {
         Bytes header;
         silkworm::rlp::encode(header, h);
-        silkworm::rlp::encode(entries, ByteView{header});  // a string holding the header, as bundles carry it
+        silkworm::rlp::encode(entries, ByteView{header});
     }
     Bytes ancestors_rlp;
     silkworm::rlp::encode_header(ancestors_rlp, {.list = true, .payload_length = entries.size()});
@@ -1659,8 +1542,6 @@ TEST_CASE("the guest takes no block hash from the witness's block-hash section",
     forged.block_number = 0;
     std::memset(forged.block_hash, 0xde, sizeof(forged.block_hash));
     const std::vector<uint8_t> blob = witness_blob(state, state, {forged});
-    // Storing one nonzero hash costs what storing another does, so this run's gas and receipts are those
-    // of a run that read the forged one.
     Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
     s.sr.post.root = root_after_reading(t, std::bit_cast<evmc::bytes32>(forged.block_hash));
     expect_rejected(run_guest(s, blob, ps.nodestore), "State Root Mismatch");
@@ -1674,11 +1555,10 @@ TEST_CASE("the guest takes an ancestor's hash from its child, not from a header 
           "[witness][binding][block_hash]") {
     const Tx t = tx_to(kCaller);
     const Prestate ps = build_prestate(block_hash_reader(t));
-    const Ancestry a = ancestry(2, ps.prev_root, t);  // block 2 reads the hash of block 0
+    const Ancestry a = ancestry(2, ps.prev_root, t);
     const Sealed honest = seal_on(a, t, ps, a.headers);
     CHECK(honest.sr.storage(kCaller, 0) == a.headers[0].hash());
 
-    // A header numbered 0 that is not block 0's, which block 1's parent hash names.
     silkworm::BlockHeader off_chain = a.headers[0];
     off_chain.timestamp += 7;
     Sealed s = seal_on(a, t, ps, a.headers);
@@ -1692,9 +1572,8 @@ TEST_CASE("the guest rejects a block that read the hash of an ancestor the witne
           "[witness][binding][block_hash]") {
     const Tx t = tx_to(kCaller);
     const Prestate ps = build_prestate(block_hash_reader(t));
-    const Ancestry a = ancestry(3, ps.prev_root, t);  // block 3 reads the hash of block 0, which block 1 names
+    const Ancestry a = ancestry(3, ps.prev_root, t);
 
-    // Without block 1's header the hash read zero.
     const Sealed s = seal_on(a, t, ps, std::span{a.headers}.last(1));
     REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
     expect_rejected(run_guest(s, ps, {}), "read the hash of an ancestor the witness does not hold");
@@ -1704,17 +1583,7 @@ TEST_CASE("the guest rejects a block that read the hash of an ancestor the witne
     expect_accepted(run_guest(honest, ps, std::span{a.headers}.first(2)), honest);
 }
 
-// ---------------------------------------------------------------------------
-// Accounts and slots the witness leaves out
-// ---------------------------------------------------------------------------
 // The guest reads an account the witness does not carry as absent and a slot it does not carry as zero.
-// Nothing checked that the trie has no such key: a witness that left out an account or a slot the block
-// reads, its trie nodes all in the node store as an honest witness has them, made the block execute with
-// an absent account or a zero slot, and check_root, which walked only the keys the witness carries, came
-// back to the committed root. check_root now walks each such read as a claim that the key is absent,
-// which fails at the leaf the witness left out; one the trie does not have is shown absent by the nodes
-// along its path. A block that writes an account the witness leaves out was rejected already: the write
-// is inserted where the account's leaf is.
 
 namespace {
 
@@ -1725,10 +1594,9 @@ bytes32 root_after(std::vector<AcctSpec> state, Edit edit) {
     return build_prestate(state).prev_root;
 }
 
-const evmc::address kOmitted = make_addr(0x66, 0x06);  // an account the witness leaves out
+const evmc::address kOmitted = make_addr(0x66, 0x06);
 
-/// What read_through_call() leaves behind: the sender's nonce, and kCaller's storage[0] = `read` and
-/// sentinel.
+/// What read_through_call() leaves behind: the sender's nonce, and kCaller's storage[0] = `read` and sentinel.
 void after_read_through_call(std::vector<AcctSpec>& state, const Tx& t, const evmc::bytes32& read) {
     spec_of(state, t.sender).nonce = 1;
     spec_of(state, kCaller).storage = {{word(0), read}, {word(1), word(1)}};
@@ -1758,9 +1626,6 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
         REQUIRE(s.sr.storage(kCaller, 0) == evmc::bytes32{});
         s.sr.post.root = after(evmc::bytes32{});
 #if USE_HASH_KEY
-        // The guest recovers kOmitted along its trie path, which the witness holds (the producer's run, which
-        // holds no header, recovers no account), and stores the balance it has: a block that stored zero
-        // fails the gas check.
         expect_rejected(run_guest(s, blob, ps.nodestore), "kWrongBlockGas");
 #else
         expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value mismatch in existing leaf");
@@ -1770,8 +1635,6 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
         REQUIRE(honest.sr.post.root == after(word(1000)));
         expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 #if USE_HASH_KEY
-        // The block that stored the balance is accepted from the witness without kOmitted, and halts the
-        // guest once the witness leaves out its leaf too.
         expect_accepted(run_guest(honest, blob, ps.nodestore), honest);
         expect_halted(honest, blob, node_store_without_leaf_of(state, kOmitted), kAccountWalkHalt);
 #endif
@@ -1789,8 +1652,6 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
         REQUIRE(s.sr.gas_used == 21'000);
         s.sr.post.root = root_after(state, [&](std::vector<AcctSpec>& post) { spec_of(post, t.sender).nonce = 1; });
 #if USE_HASH_KEY
-        // The guest recovers kHolder along its trie path, which the witness holds, but not the code its code
-        // hash names, which the witness leaves out too: the block is invalid.
         expect_rejected(run_guest(s, blob, ps.nodestore), "read_code: code omitted from witness for non-empty code_hash");
 #else
         expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value mismatch in existing leaf");
@@ -1803,8 +1664,6 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
                 }));
         expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 #if USE_HASH_KEY
-        // With kHolder's code in the code store, the block that ran it is accepted from the witness without
-        // kHolder's record, and halts the guest once the witness leaves out its leaf too.
         const std::vector<uint8_t> with_code =
             witness_blob(state, without(state, kHolder), {}, {AcctSpec{.addr = kHolder, .code = write_slot(word(1))}});
         expect_accepted(run_guest(honest, with_code, ps.nodestore), honest);
@@ -1826,8 +1685,6 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
             spec_of(post, kCaller).storage = {{word(1), word(1)}};
         });
 #if USE_HASH_KEY
-        // The guest recovers the sender along its trie path, which the witness holds, with its balance: the
-        // root of a block that wrote a sender without one is not the one the guest computes.
         expect_rejected(run_guest(s, blob, ps.nodestore), "State Root Mismatch at block 0");
 #else
         expect_rejected(run_guest(s, blob, ps.nodestore), "Pre value mismatch in existing leaf");
@@ -1836,8 +1693,6 @@ TEST_CASE("check_root rejects a block that reads an account the witness leaves o
         const Sealed honest = seal(t, ps.prev_root, ps.blob, ps.nodestore);
         expect_accepted(run_guest(honest, ps.blob, ps.nodestore), honest);
 #if USE_HASH_KEY
-        // The honest block is accepted from the witness without the sender, and halts the guest once the
-        // witness leaves out its leaf too.
         expect_accepted(run_guest(honest, blob, ps.nodestore), honest);
         expect_halted(honest, blob, node_store_without_leaf_of(state, t.sender), kAccountWalkHalt);
 #endif
@@ -1857,9 +1712,6 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
             spec_of(witness, kHolder).storage = carries_other ? Slots{{word(2), word(6)}} : Slots{};
             const std::vector<uint8_t> blob = witness_blob(state, witness);
 #if USE_HASH_KEY
-            // The producer's run and the guest's recover the slot along its trie path, which the witness holds:
-            // the block reads the value the storage root binds, and is accepted. A witness that leaves out the
-            // path too halts the guest.
             const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
             REQUIRE(s.sr.storage(kCaller, 0) == word(5));
             REQUIRE(s.sr.post.root == root_after(state, [&](std::vector<AcctSpec>& post) {
@@ -1884,7 +1736,6 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
         }
     }
     SECTION("copied by its modified holder") {
-        // storage[kCopyTarget] = storage[1]: copying the zero the witness makes of storage[1] clears it.
         const Tx t = tx_to(kHolder);
         const std::vector<AcctSpec> state = {
             sender_of(t),
@@ -1903,7 +1754,6 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
         spec_of(witness, kHolder).storage = {{word(kCopyTarget), word(9)}};
         const std::vector<uint8_t> blob = witness_blob(state, witness);
 #if USE_HASH_KEY
-        // Recovered along its trie path, which the witness holds, as for a holder the block only reads.
         const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
         REQUIRE(s.sr.ds->read_storage(kHolder, word(kCopyTarget)) == word(5));
         REQUIRE(s.sr.post.root == after(word(5)));
@@ -1934,8 +1784,6 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
         spec_of(witness, kHolder).storage = {};
         const std::vector<uint8_t> blob = witness_blob(state, witness);
 #if USE_HASH_KEY
-        // Recovered along its trie path, which the witness holds, before the SELFDESTRUCT: the walk that
-        // recovered it bound it to the storage root the deleted account's leaf commits to.
         const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
         REQUIRE(s.sr.storage(kCaller, 0) == word(5));
         REQUIRE(s.sr.ds->is_deleted(kHolder));
@@ -1971,7 +1819,6 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
         spec_of(witness, r.holder).storage = {};
         const std::vector<uint8_t> blob = witness_blob(r.state, witness);
 #if USE_HASH_KEY
-        // As for the account the block destructs: the recovered slot was bound when it was read.
         const Sealed s = seal(r.txs, ps.prev_root, blob, ps.nodestore);
         REQUIRE(s.sr.storage(kCaller, 0) == word(5));
         REQUIRE_FALSE(s.sr.ds->is_deleted(r.holder));
@@ -1992,8 +1839,7 @@ TEST_CASE("check_root rejects a block that reads a slot the witness leaves out",
     }
 }
 
-// The absent reads of honest blocks: the witness carries no record or slot for the key, and the node store
-// holds the trie nodes along its path, down to where it leaves the trie.
+// The absent reads of honest blocks: the witness carries no record or slot for the key.
 TEST_CASE("check_root accepts a block that reads an account or slot the trie does not have",
           "[witness][binding][omitted][honest]") {
     SECTION("the balance of an absent account") {
@@ -2051,12 +1897,10 @@ TEST_CASE("check_root accepts a block that reads an account or slot the trie doe
     }
 }
 
-// The claim that a key is absent needs the nodes that show it: a witness without them is rejected, as it
-// would be for a key it carries.
+// The claim that a key is absent needs the nodes that show it: a witness without them is rejected.
 TEST_CASE("check_root rejects the read of an absent slot whose trie nodes the witness leaves out",
           "[witness][binding][omitted]") {
     const Tx t = tx_to(kCaller);
-    // Slot c leaves the trie inside the leaf of slot a, which only the walk of c unfolds.
     const evmc::bytes32 a = word(1);
     const evmc::bytes32 b =
         find_slot(2, [&](const evmc::bytes32& k) { return path_nibble(k, 0) != path_nibble(a, 0); });
@@ -2073,8 +1917,6 @@ TEST_CASE("check_root rejects the read of an absent slot whose trie nodes the wi
     const std::vector<uint8_t> nodestore =
         node_store_omitting(state, [&](const bytes32& h, bool in_trie) { return !in_trie && h != sroot; });
 #if USE_HASH_KEY
-    // The read of c walks its trie path to show it absent, and halts the guest at the leaf of a the witness
-    // leaves out. (Sealed on the whole node store: a run on this one halts too.)
     const Sealed s = seal(t, ps.prev_root, blob, ps.nodestore);
     expect_halted(s, blob, nodestore, kSlotWalkHalt);
 #else

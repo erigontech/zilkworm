@@ -1,9 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Flat-bundle parsing of the data a stateless new-payload check needs beyond the block RLP:
-// the per-block engine record (claimed block hash, versioned hashes) and the witness headers,
-// which must decode as exactly one header each.
+// Flat-bundle parsing of the data a stateless new-payload check needs beyond the block RLP.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -99,9 +97,7 @@ TEST_CASE("witness headers decode as header lists or wrapped byte strings", "[fl
     const auto r8 = rlp_of(h8);
     const auto r9 = rlp_of(h9);
 
-    // Rust host: RLP list of header lists.
     auto lists = bundle(rlp_list(r8 + r9));
-    // C++ hosts: RLP list of byte strings wrapping each header.
     silkworm::Bytes wrapped;
     silkworm::rlp::encode(wrapped, silkworm::ByteView{r8});
     silkworm::rlp::encode(wrapped, silkworm::ByteView{r9});
@@ -122,7 +118,7 @@ TEST_CASE("witness header followed by trailing bytes is malformed", "[flat_bundl
     silkworm::BlockHeader h9;
     h9.number = 9;
     auto padded = rlp_of(h9);
-    padded.push_back(0x00);  // trailing byte after the header RLP, as in an SSZ-padded witness header
+    padded.push_back(0x00);
 
     auto blob = bundle(rlp_list(padded));
     const auto fb = load(blob);

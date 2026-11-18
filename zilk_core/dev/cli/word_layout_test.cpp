@@ -1,13 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// EVM memory, calldata and return data against a byte-order model, through the state Host. The
-// native build sets -DEVMONE_RV32_DISPATCH_TEST, which keeps them in the big-endian word layout
-// (evmone/word_layout.hpp), where the bytes of every copy that crosses a byte-order boundary or
-// ends inside a word are at risk: calldata at an offset that is not a multiple of 4, a callee that
-// returns or reads a few bytes, memory that is not zero around a partial copy, init code and
-// deployed code at odd offsets. No fixture covers these residues, and the model does not depend on
-// the layout, so the same test holds on a build without it.
+// EVM memory, calldata and return data against a byte-order model, through the state Host.
 
 #include <algorithm>
 #include <cstdint>
@@ -34,7 +27,7 @@ constexpr address kCaller = 0xaa00000000000000000000000000000000000001_address;
 constexpr address kEcho = 0xbb00000000000000000000000000000000000002_address;
 constexpr address kSender = 0x5e00000000000000000000000000000000000004_address;
 constexpr address kIdentity = 0x0000000000000000000000000000000000000004_address;
-constexpr uint32_t kCallGas = 100000;  // The gas of Asm::call.
+constexpr uint32_t kCallGas = 100000;
 
 enum : uint8_t {
     STOP = 0x00, ADD = 0x01, SUB = 0x03, MOD = 0x06, KECCAK = 0x20, CALLDATALOAD = 0x35,
@@ -96,8 +89,7 @@ address precompile_address(uint16_t id) {
     return a;
 }
 
-// The output of a precompile called with Asm::call on the @p size bytes at @p input (byte order),
-// which is also the return data the call leaves.
+// The output of a precompile called with Asm::call on the @p size bytes at @p input (byte order).
 bytes precompile_output(uint16_t id, const uint8_t* input, size_t size) {
     evmc_message msg{};
     msg.kind = EVMC_CALL;
@@ -117,7 +109,7 @@ struct Outcome {
     std::vector<bytes> logs;
     int64_t gas_used = 0;
 #ifdef EVMONE_RV32_DISPATCH_TEST
-    uint64_t converted = 0;  // Bytes converted from the word layout into byte order.
+    uint64_t converted = 0;
 #endif
 };
 
@@ -149,7 +141,7 @@ Outcome run(const bytes& code, const bytes& calldata, const bytes& echo = echo_c
         acc.code = c;
         std::memcpy(acc.code_hash.bytes, ethash::keccak256(c.data(), c.size()).bytes, 32);
         acc.balance = 1000000;
-        acc.loaded = true;  // Seeded: the view is not asked for it.
+        acc.loaded = true;
         state.access(a) = std::move(acc);
     };
     add(kCaller, code);
@@ -239,8 +231,6 @@ TEST_CASE("CALLDATACOPY pads with zeros in the bytes after the calldata", "[word
 }
 
 TEST_CASE("a callee's calldata ends at the size of the arguments", "[word_layout]") {
-    // The caller's memory holds 0x11 bytes around the 5 argument bytes; the callee loads its
-    // calldata as a word and must see zeros after the fifth byte.
     const bytes loader = Asm{}.push(0).op(CALLDATALOAD).push(0).op(MSTORE).ret(0, 32).code;
     for (uint64_t in = 0; in < 8; ++in) {
         const auto out = run(Asm{}.mstore(0, filled(0x11)).mstore(32, filled(0x11))
@@ -254,18 +244,13 @@ TEST_CASE("a callee's calldata ends at the size of the arguments", "[word_layout
 }
 
 TEST_CASE("CALLDATALOAD equals a byte-order model at every index", "[word_layout]") {
-    // Every index from 0 to past the end of the calldata, so that the word is whole, partial or
-    // empty, and indexes whose low 32 bits are inside the calldata but whose high bits are not
-    // zero: the rv32 build tests the index a 32-bit word at a time (see calldataload()). The
-    // calldata of the transaction is in byte order; a callee's is the caller's memory (in the word
-    // layout on the rv32 test build) at each alignment, between bytes that are not zero.
     std::vector<bytes32> indexes;
     for (uint8_t i = 0; i < 104; ++i) {
         bytes32 w{};
         w.bytes[31] = i;
         indexes.push_back(w);
     }
-    for (const unsigned high : {27u, 23u, 0u}) {  // 2^32 + 4, 2^64 + 4 and 2^255 + 4.
+    for (const unsigned high : {27u, 23u, 0u}) {
         bytes32 w{};
         w.bytes[high] = high == 0 ? uint8_t{0x80} : uint8_t{1};
         w.bytes[31] = 4;
@@ -315,7 +300,6 @@ TEST_CASE("CALLDATALOAD equals a byte-order model at every index", "[word_layout
 }
 
 TEST_CASE("a CALL writes only the bytes of the output range", "[word_layout]") {
-    // The callee returns 3 bytes; with the memory full of 0xff the byte after them stays.
     const bytes three = Asm{}.mstore(0, filled(0xab)).ret(0, 3).code;
     for (uint64_t out_offset = 0; out_offset < 8; ++out_offset) {
         const auto out = run(Asm{}.mstore(0, filled(0xff)).mstore(32, filled(0xff))
@@ -339,14 +323,10 @@ TEST_CASE("RETURNDATACOPY past the return data fails", "[word_layout]") {
 }
 
 TEST_CASE("deployed code starting with 0xEF is rejected at its first byte only", "[word_layout]") {
-    // The init code returns 8 bytes of memory with a 0xEF in the byte under test, from an offset
-    // of every residue modulo 4: the first logical byte of the code and the fourth are physical
-    // bytes 0 and 3 of a word in the layout, and EIP-3541 looks at the first only.
     for (uint64_t ef_at = 0; ef_at < 8; ++ef_at) {
         for (uint64_t offset = 0; offset < 4; ++offset) {
             Asm init;
             init.mstore(0, filled(0x00)).mstore8(offset + ef_at, 0xef).ret(offset, 8);
-            // The init code follows the program and is created from memory at an odd offset.
             const uint64_t at = 37;
             const auto program = [&](uint64_t init_at) {
                 Asm p;
@@ -367,13 +347,9 @@ TEST_CASE("deployed code starting with 0xEF is rejected at its first byte only",
 }
 
 TEST_CASE("a CREATE inside init code keeps both init codes", "[word_layout]") {
-    // The init code of the outer CREATE creates another contract from its own memory, and deploys
-    // the size of that contract's code as the code of the outer one. Both init codes sit at odd
-    // offsets in the memory of their frames.
     Asm inner;
     inner.mstore(0, filled(0x42)).ret(3, 8);
     const auto create_from_code = [](Asm& a, uint64_t code_at, size_t code_size, uint64_t at) {
-        // code_at: the offset of the init code to create, patched by the caller through `at`.
         a.push(code_size).push(code_at).push(at).op(CODECOPY);
         a.push(code_size).push(at).push(0).op(CREATE);
     };
@@ -390,7 +366,7 @@ TEST_CASE("a CREATE inside init code keeps both init codes", "[word_layout]") {
     const auto program = [&](uint64_t middle_at) {
         Asm outer;
         create_from_code(outer, middle_at, middle.code.size(), 21);
-        outer.push(32).push(0).push(0).op(DUP1 + 3).op(0x3c).ret(0, 32);  // EXTCODECOPY(created, 0, 0, 32)
+        outer.push(32).push(0).push(0).op(DUP1 + 3).op(0x3c).ret(0, 32);
         return outer;
     };
     auto outer = program(0);
@@ -418,12 +394,11 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
         const auto size = [&] {
             switch (rng.below(8)) {
             case 0: return rng.below(12);
-            case 1: return uint64_t{64};  // The size of the hash's memo.
+            case 1: return uint64_t{64};
             case 2: return rng.below(300);
             default: return rng.below(70);
             }
         };
-        // The code is also CODECOPY's source, so the model replays the steps once it is complete.
         enum Kind {
             MSTORE_K, MSTORE8_K, MCOPY_K, CALLDATACOPY_K, CODECOPY_K, CALLECHO_K, MLOAD_K, KECCAK_K,
             LOG_K, EXTCODECOPY_K, CALLFRAME_K, RETURNDATACOPY_K, MODEXP_K, BLAKE2F_K, KINDS
@@ -442,7 +417,6 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
             case CALLDATACOPY_K: a.copy(CALLDATACOPY, s.a, s.b % 120, s.c); break;
             case CODECOPY_K: a.copy(CODECOPY, s.a, s.b, s.c); break;
             case CALLECHO_K:
-                // Identity precompile: arguments s.b..s.b+s.c, output s.a with a size of its own.
                 a.call(kIdentity, s.b, s.c, s.a, out_size).op(POP);
                 break;
             case MLOAD_K: a.push(s.b).op(MLOAD).push(s.a).op(MSTORE); break;
@@ -459,13 +433,10 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
                 break;
             case CALLFRAME_K: a.call(kEcho, s.b, s.c, s.a, out_size).op(POP); break;
             case RETURNDATACOPY_K:
-                // From s.b modulo (the size + 1) to the end: always inside the return data.
                 a.push(1).op(RETURNDATASIZE).op(ADD).push(s.b).op(MOD);
                 a.op(DUP1).op(RETURNDATASIZE).op(SUB).op(SWAP1).push(s.a).op(RETURNDATACOPY);
                 break;
             case MODEXP_K: {
-                // Lengths of up to 40 bytes at s.b (the bytes after them are what the memory
-                // holds), and an input that ends near the end of the modulus.
                 const uint64_t lens[] = {s.w.bytes[2] % 41u, s.w.bytes[3] % 41u, s.w.bytes[4] % 41u};
                 for (size_t k = 0; k < 3; ++k) {
                     bytes32 len{};
@@ -477,7 +448,6 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
                 break;
             }
             case BLAKE2F_K:
-                // Few rounds; a final-block flag of 0, 1 or the invalid 2; sizes 213 and next to it.
                 s.w.bytes[0] = s.w.bytes[1] = s.w.bytes[2] = 0;
                 s.w.bytes[3] = static_cast<uint8_t>(s.w.bytes[3] % 13);
                 a.mstore(s.b, s.w).mstore8(s.b + 212, static_cast<uint8_t>(s.w.bytes[4] % 3));
@@ -489,7 +459,6 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
             steps.push_back(s);
         }
         a.ret(0, 512);
-        // Replay on the model, now that the code is known.
         for (const auto& s : steps) {
             const uint64_t out_size = s.w.bytes[30] % 40;
             switch (s.kind) {
@@ -538,7 +507,6 @@ TEST_CASE("memory operations equal a byte-order model", "[word_layout]") {
         const auto out = run(a.code, calldata);
         REQUIRE(out.status == EVMC_SUCCESS);
         REQUIRE(out.output.size() == 512);
-        // Memory beyond what the program touched reads as zero, in the model as in the EVM.
         CHECK(std::equal(out.output.begin(), out.output.end(), m.mem.begin()));
         CHECK(out.logs == m.logs);
     }
@@ -570,15 +538,13 @@ bytes modexp_input(uint32_t base_len, uint32_t exp_len, uint32_t mod_len, size_t
 struct PrecompileCall {
     evmc_revision rev;
     uint16_t id;
-    bytes setup;  // The first bytes of the input; zeros follow.
+    bytes setup;
     uint64_t in_offset;
     uint64_t size;
     uint32_t gas;
 };
 
-// Pays for 64 KiB of memory, copies the setup bytes from the code to the input and, with @p call,
-// calls the precompile on the input. With @p results it returns the success flag as a word and the
-// return data after it; without, it stops.
+// Pays for 64 KiB of memory, copies the setup bytes from the code to the input and, with @p call.
 bytes precompile_program(const PrecompileCall& c, bool call, bool results) {
     const auto build = [&](uint64_t setup_at) {
         Asm a;
@@ -605,14 +571,9 @@ bytes precompile_program(const PrecompileCall& c, bool call, bool results) {
 }  // namespace
 
 TEST_CASE("a precompile converts no more of its input than its gas pays for", "[word_layout]") {
-    // A precompile called from the EVM gets its input converted from the caller's memory into byte
-    // order. The memory is paid for once, and most precompiles cost the same for any input size:
-    // converting bytes that they never read made each call as expensive as its input is long. The
-    // bound is 11 bytes per gas unit of the call, above identity's 32 bytes per 3 gas. Each call
-    // must also give the precompile's own status, gas and output on the bytes of its input.
     struct Kind {
         uint16_t id;
-        uint64_t size;  // The input size the precompile is built around.
+        uint64_t size;
     };
     const Kind kinds[] = {{0x01, 128}, {0x02, 64}, {0x03, 64}, {0x04, 32}, {0x05, 96}, {0x06, 128},
         {0x07, 96}, {0x08, 192}, {0x09, 213}, {0x0a, 192}, {0x0b, 256}, {0x0c, 160}, {0x0d, 512},
@@ -624,8 +585,6 @@ TEST_CASE("a precompile converts no more of its input than its gas pays for", "[
                 continue;
             std::vector<bytes> setups{{}, pattern(k.size + 1, 0x5a)};
             if (k.id == 0x05) {
-                // Short lengths, a long exponent with no modulus (the minimum price before Osaka),
-                // and lengths that cost more than the call has.
                 setups.push_back(modexp_input(1, 1, 1, 3));
                 setups.push_back(modexp_input(0, 50000, 0, 64));
                 setups.push_back(modexp_input(40, 40, 40, 120));
@@ -635,7 +594,7 @@ TEST_CASE("a precompile converts no more of its input than its gas pays for", "[
             if (k.id == 0x09) {
                 auto in = pattern(213, 0x11);
                 in[0] = in[1] = in[2] = 0;
-                in[3] = 12;  // Rounds.
+                in[3] = 12;
                 in[212] = 1;
                 setups.push_back(in);
             }
@@ -675,7 +634,6 @@ TEST_CASE("a precompile converts no more of its input than its gas pays for", "[
         msg.input_size = input.size();
         const auto expected = evmone::state::call_precompile(c.rev, msg);
 
-        // CALL (warm) 100, seven pushes 21, POP 2, and what the precompile used.
         const auto call_gas = with.gas_used - without.gas_used;
         CHECK(call_gas == 123 + c.gas - expected.gas_left);
         bytes expected_output(32, 0);
@@ -688,8 +646,6 @@ TEST_CASE("a precompile converts no more of its input than its gas pays for", "[
 }
 
 TEST_CASE("the precompile input buffer keeps its contents when it grows", "[word_layout]") {
-    // MODEXP converts the first bytes of its input before the gas check and the rest after it, into
-    // a buffer that may grow in between. The size is above any other use in the tests.
     auto* const small = evmone::wl::scratch<4>(16);
     for (uint8_t i = 0; i < 16; ++i)
         small[i] = static_cast<uint8_t>(i + 1);
@@ -700,8 +656,6 @@ TEST_CASE("the precompile input buffer keeps its contents when it grows", "[word
 #endif
 
 TEST_CASE("EXTCODECOPY writes the code and its zero padding only in its range", "[word_layout]") {
-    // The code is written into the memory in byte order and turned into the layout there, so the
-    // words at both ends hold bytes of the copy next to bytes it must keep.
     const bytes code = echo_code();
     for (uint64_t dst = 0; dst < 8; ++dst) {
         for (const uint64_t src :
@@ -724,9 +678,7 @@ TEST_CASE("EXTCODECOPY writes the code and its zero padding only in its range", 
 #ifdef EVMONE_RV32_DISPATCH_TEST
 namespace {
 
-// Runs @p program with a growing size (start + 32 k for k = 0, 1, ...) and checks that the
-// buffers of the layout allocate less than 4 times the largest size in all: the guest never frees
-// memory, and buffers that grew to each larger size exactly took the sum of all the sizes.
+// Runs @p program with a growing size.
 void check_allocation(const char* what, uint64_t largest, const bytes& code) {
     INFO(what);
     const auto allocated_before = evmone::wl::usage.allocated;
@@ -738,7 +690,6 @@ void check_allocation(const char* what, uint64_t largest, const bytes& code) {
 }  // namespace
 
 TEST_CASE("growing uses of the layout's buffers allocate under 4 times the largest", "[word_layout]") {
-    // Sizes start + 32 k, k < steps, in memory paid for once.
     const auto program = [](uint64_t start, uint64_t steps, auto&& step) {
         Asm a;
         a.push(0).push4(static_cast<uint32_t>(start + 32 * steps + 64)).op(MSTORE8);
@@ -746,18 +697,14 @@ TEST_CASE("growing uses of the layout's buffers allocate under 4 times the large
             step(a, start + 32 * k);
         return a.op(STOP).code;
     };
-    // From an account without code and from one with a short code: what is copied is the code,
-    // whatever the size.
     for (const auto& from : {kSender, kEcho}) {
         check_allocation("EXTCODECOPY", 0, program(70000, 200, [&](Asm& a, uint64_t size) {
             a.push4(static_cast<uint32_t>(size)).push(0).push(1).push_addr(from).op(EXTCODECOPY);
         }));
     }
-    // Above the sizes before: the hash shares its buffer with the code copy before the fix.
     check_allocation("KECCAK256", 160000 + 32 * 99, program(160000, 100, [](Asm& a, uint64_t size) {
         a.push4(static_cast<uint32_t>(size)).push(0).op(KECCAK).op(POP);
     }));
-    // The input of a precompile and the return data, from a precompile and from a frame.
     const auto call = [](Asm& a, const address& to, uint64_t size) {
         a.push(0).push(0).push4(static_cast<uint32_t>(size)).push(1).push(0).push_addr(to);
         a.push4(1000000).op(CALL).op(POP);
@@ -766,7 +713,6 @@ TEST_CASE("growing uses of the layout's buffers allocate under 4 times the large
         program(70000, 200, [&](Asm& a, uint64_t size) { call(a, kIdentity, size); }));
     check_allocation("return data", 70000 + 32 * 199,
         program(70000, 200, [&](Asm& a, uint64_t size) { call(a, kEcho, size); }));
-    // The init code of CREATE (all zeros: it deploys nothing), within the limit of its size.
     Asm creates;
     for (uint64_t k = 0; k < 100; ++k)
         creates.push(20000 + 32 * k).push(3).push(0).op(CREATE).op(POP);
@@ -774,11 +720,7 @@ TEST_CASE("growing uses of the layout's buffers allocate under 4 times the large
 }
 #endif
 
-// KECCAK256 memoizes the inputs of one block (evmone's keccak_memo; a few slots in this build, so
-// inputs evict each other) and the aligned 64-byte ones (ethash_keccak256_64_be on the guest). A
-// hash that repeats an input, one whose input changed in its last byte or only past its end, and
-// inputs of every size and alignment around the word and block boundaries must all be the hash
-// of the bytes as they are at the time.
+// KECCAK256 memoizes the inputs of one block.
 TEST_CASE("KECCAK256 of repeated and changed inputs equals the hash of the bytes", "[word_layout]") {
     Rng rng{0x9E3779B97F4A7C15ull};
     for (int program = 0; program < 40; ++program) {
@@ -804,20 +746,20 @@ TEST_CASE("KECCAK256 of repeated and changed inputs equals the hash of the bytes
             const uint64_t size = rng.below(3) == 0 ? 64 : 1 + rng.below(140);
             const uint64_t offset = rng.below(4) == 0 ? 32 * rng.below(8) : rng.below(300);
             hash(offset, size);
-            hash(offset, size);  // A repeat: the memo's answer.
+            hash(offset, size);
             const auto change = [&](uint64_t at) {
                 const auto v = static_cast<uint8_t>(m.mem[at] ^ (1 + rng.below(255)));
                 a.mstore8(at, v);
                 m.mem[at] = v;
             };
             switch (rng.below(3)) {
-            case 0: change(offset + size - 1); break;  // The last byte: in the masked word.
-            case 1: change(offset + size); break;      // Past the end: the same input.
+            case 0: change(offset + size - 1); break;
+            case 1: change(offset + size); break;
             default: change(offset + rng.below(size)); break;
             }
             hash(offset, size);
             if (rng.below(2) == 0)
-                hash(rng.below(300), size);  // Another input of the same size.
+                hash(rng.below(300), size);
         }
         a.ret(out, 32 * expected.size());
         const auto o = run(a.code, {});
