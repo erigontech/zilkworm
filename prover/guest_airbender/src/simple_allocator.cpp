@@ -20,7 +20,7 @@ extern uint8_t _sheap[];
 extern uint8_t _eheap[];
 }
 
-// Two pointer variables, not a struct: each access is one gp-relative lw/sw. heap_end holds _eheap; externally_visible stops LTO folding it; constinit keeps both out of .init_array.
+// Two pointers, not a struct: one gp-relative lw/sw each; externally_visible stops LTO folding heap_end; constinit avoids .init_array.
 #if defined(__GNUC__) && !defined(__clang__)
 #define GUEST_EXTERNALLY_VISIBLE __attribute__((externally_visible))
 #else
@@ -32,7 +32,7 @@ GUEST_EXTERNALLY_VISIBLE constinit uint8_t* heap_end = _eheap;
 // _sheap/_eheap are ALIGN(2097152) in link.x, so rounding heap_next up to any alignment up to that stays at or below heap_end.
 static constexpr size_t kMaxAlign = 2097152;
 
-// Null when the request does not fit; throwing operator new forms must never return null (libstdc++ containers store through it unchecked), so they end the run instead.
+// Null when the request does not fit; throwing operator new forms must never return null, so they end the run.
 static void* bump_allocate(size_t size) {
     // Align to 8 bytes so that any naturally-aligned type can be stored.
     uintptr_t p = (reinterpret_cast<uintptr_t>(heap_next) + 7u) & ~uintptr_t{7u};
@@ -83,7 +83,7 @@ static void* bump_allocate_aligned(size_t size, size_t align) {
     return reinterpret_cast<void*>(p);
 }
 
-// Over-aligned types must not reach libstdc++'s versions: they call newlib's memalign, whose chunk headers land in unallocated heap.
+// Over-aligned types must not reach libstdc++'s versions: newlib's memalign puts chunk headers in unallocated heap.
 void* operator new(size_t size, std::align_val_t al) {
     return bump_allocate_or_finish(bump_allocate_aligned(size, static_cast<size_t>(al)));
 }
@@ -100,7 +100,7 @@ void* operator new[](size_t size, std::align_val_t al, const std::nothrow_t&) no
     return bump_allocate_aligned(size, static_cast<size_t>(al));
 }
 
-// No free; every replaceable delete, sized ones too, is empty so LTO drops the calls and the destructor loops that only free. Do not mark these noinline.
+// Every replaceable delete is empty (sized ones too) so LTO drops the calls and free-only destructor loops; not noinline.
 void operator delete(void*) noexcept {}
 void operator delete[](void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
@@ -114,7 +114,7 @@ void operator delete[](void*, size_t, std::align_val_t) noexcept {}
 void operator delete(void*, std::align_val_t, const std::nothrow_t&) noexcept {}
 void operator delete[](void*, std::align_val_t, const std::nothrow_t&) noexcept {}
 
-// C allocation routed to the same bump allocator: newlib's arena grows from `end` via an unbounded _sbrk and would overlap _sheap, corrupting the witness blob.
+// C allocation shares the bump allocator: newlib's arena would overlap _sheap and corrupt the witness blob.
 extern "C" {
 
 void* malloc(size_t size) {
@@ -129,7 +129,7 @@ void* calloc(size_t nmemb, size_t size) {
     if (__builtin_mul_overflow(nmemb, size, &total)) {
         return nullptr;
     }
-    // No zeroing: the heap never hands a byte out twice and untouched RAM reads 0 (as .bss relies on); reusing memory would need zeroing back. Not malloc + memset: GCC folds that into calloc.
+    // No zeroing: no byte is handed out twice and untouched RAM reads 0; reusing memory would need zeroing back.
     return bump_allocate(total);
 }
 
@@ -142,7 +142,7 @@ void* realloc(void* ptr, size_t size) {
     }
     void* q = malloc(size);
     if (q != nullptr) {
-        // Old size is untracked: over-copying stays inside flat RAM; callers like evmone::Memory::grow zero the extension; memmove because the source tail may overlap.
+        // Old size is untracked: over-copying stays in flat RAM, callers zero the extension; memmove as the tail may overlap.
         __builtin_memmove(q, ptr, size);
     }
     return q;

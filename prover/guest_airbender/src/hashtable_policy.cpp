@@ -1,4 +1,4 @@
-// Integer growth check for unordered containers: with max_load_factor 1.0f every double in libstdc++'s _M_need_rehash is an exact integer, so these formulas give identical bucket counts and rehash points (they differ only at n_elt + n_ins == SIZE_MAX).
+// Integer growth check: at max_load_factor 1.0f libstdc++'s soft-float _M_need_rehash math is exact-integer, so results match.
 // Wrapped via -Wl,--wrap (CMakeLists.txt); other load factors and bucket counts from 14 up go to the real functions.
 
 #include <algorithm>

@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// SP1 zkVM runtime for the pure C++ guest: entry point, multi-step syscalls, public-values buffering and hashing, bare-metal stubs.
+// SP1 zkVM runtime for the C++ guest: entry point, multi-step syscalls, public-values hashing, bare-metal stubs.
 
 #include <cstddef>
 #include <cstdint>
@@ -24,7 +24,7 @@ extern "C" void *_sbrk(ptrdiff_t incr) noexcept {
     return prev;
 }
 
-// Input region for read_vec_raw, as in Rust's EMBEDDED_RESERVED_INPUT_PTR: the top 16 GB (1<<34) of the 1<<48 address space.
+// Input region for read_vec_raw (Rust's EMBEDDED_RESERVED_INPUT_PTR): the top 16 GB (1<<34) of the 1<<48 space.
 static constexpr uintptr_t INPUT_REGION_SIZE  = uintptr_t(1) << 34;
 static constexpr uintptr_t MAX_MEMORY         = uintptr_t(1) << 37;
 static constexpr uintptr_t INPUT_REGION_START = MAX_MEMORY - INPUT_REGION_SIZE;

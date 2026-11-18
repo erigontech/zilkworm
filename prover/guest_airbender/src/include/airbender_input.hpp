@@ -15,7 +15,7 @@ namespace airbender {
 
 namespace detail {
 
-/// Copies the next @p n words in out-of-line blocks of 64; stores go through a may_alias type because the guest reads the same bytes through witness record fields.
+/// Copies the next @p n words; may_alias stores, since the guest reads the same bytes through witness record fields.
 [[gnu::noinline]] inline void read_words(uint32_t* dst_, size_t n) {
     typedef uint32_t __attribute__((may_alias)) w32;
     w32* dst = reinterpret_cast<w32*>(dst_);
@@ -39,13 +39,13 @@ struct InputWords {
     }
 };
 
-/// One bit per 8 bytes of the code store's data section, up to 16 MiB (larger payloads are hashed by sanitize()); .bss, as RAM starts zeroed.
+/// One bit per 8 bytes of the code store data section, up to 16 MiB; .bss, as RAM starts zeroed.
 inline constexpr uint32_t kCodeStoreBits = 1u << 21;
 inline uint32_t code_store_bits[kCodeStoreBits / 32];
 
 }  // namespace detail
 
-/// Reads the input blob from the CSR oracle (first word = byte count, then ceil(n/4) LE words), hashing code-store payloads as they are read; the bytes are the same either way.
+/// Reads the input blob (word 0 = byte count, then LE words), hashing code-store payloads as it reads; same bytes either way.
 inline std::pair<uint8_t*, size_t> read_input_from_csr()
 {
     uint32_t num_bytes = csr_read_word();

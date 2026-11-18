@@ -3,7 +3,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Entrypoint of the Airbender prover image: with arguments runs the prover (`prove --file-name ...`, `verify --proof ... --vk ...`); without, runs the proving service from the environment and restarts it whenever it exits, for launchers with no restart policy.
+# Airbender image entrypoint: with arguments runs the prover; without, runs the proving service and restarts it on exit.
 #
 #   RPC_URL               execution client JSON-RPC serving debug_executionWitness (required)
 #   WS_URL                its WebSocket endpoint, for newHeads (optional; polls without it)
@@ -36,7 +36,7 @@ DATA_DIR=${DATA_DIR:-/data}
 PROVE_EVERY=${PROVE_EVERY:-100}
 RESTART_DELAY=${RESTART_DELAY:-30}
 
-# The verification key (EVKEY001) the proofs verify against is a function of the guest and recursion programs, so it is computed once per pair; a volume reused by another image gets its own.
+# EVKEY001 key the proofs verify against: computed once per guest/prover pair; a reused volume gets its own.
 VK_ID=$(cat "$GUEST.bin" "$GUEST.text" "${FSV_DIR:?FSV_DIR is required}"/fsv_*.bin "$FSV_DIR"/fsv_*.text \
         | sha256sum | cut -c1-16)
 VK_DIR=${VK_DIR:-$DATA_DIR/vk-${ZILKWORM_REVISION:-local}-$VK_ID}

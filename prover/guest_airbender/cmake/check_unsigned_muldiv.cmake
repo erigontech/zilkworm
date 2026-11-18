@@ -1,4 +1,4 @@
-# Post-link check: fails the build if the ELF holds a signed mulh, mulhsu, div or rem, which Airbender's machine decodes as illegal (the prover panics); source must keep such arithmetic unsigned. Allowlisted newlib/libgcc __sfvwrite_r and execute_stack_op run only on a failing guest.
+# Post-link check: fails if the ELF holds signed mulh/mulhsu/div/rem, which Airbender decodes as illegal; keep such arithmetic unsigned.
 #
 cmake_minimum_required(VERSION 3.20)  # IN_LIST in script mode
 

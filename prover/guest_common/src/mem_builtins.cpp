@@ -1,9 +1,9 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// memcpy, memmove, memset and memcmp for SP1 (rv64im) and Airbender (rv32im): aligned word accesses only, never touching a word outside the ranges; overlapping copies run lowest-first or read the source before storing.
+// memcpy/memmove/memset/memcmp for SP1 and Airbender: aligned word access only; overlapping copies run lowest-first or load first.
 //
-// Compiled with -fno-builtin (else GCC turns the loops back into the calls they implement); SP1 links these as -Wl,--wrap targets, Airbender defines them directly; host tests set ZILK_MEM_NAME, ZILK_MEM_WORD and ZILK_MEM_BLOCK32.
+// Built with -fno-builtin (GCC would loop back into these calls); SP1 links them as -Wl,--wrap targets, Airbender directly.
 
 #include <cstddef>
 #include <cstdint>
@@ -202,7 +202,7 @@ template <size_t... I>
     ((dw[I + 1] = (v[I] >> hi) | (v[I + 1] << lo)), ...);
 }
 
-/// Copies 32 bytes between ends not both word-aligned: re-lane the source words in registers, reading all before the first store (overlap-safe).
+/// Copies 32 bytes between ends not both word-aligned: re-lane in registers, loading all before the first store.
 template <size_t... I>
 [[gnu::always_inline]] inline void copy32_any(
     uint8_t* d, const uint8_t* s, std::index_sequence<I...>) noexcept
@@ -308,7 +308,7 @@ template <size_t... I>
 }
 }  // namespace
 
-// Not __restrict: memmove() forwards overlapping ranges here, and __restrict lets GCC turn word loops into a memcpy call, recursive under -Wl,--wrap on SP1.
+// Not __restrict: GCC would turn word loops into a memcpy call, recursive under -Wl,--wrap on SP1.
 extern "C" void* ZILK_MEM_NAME(memcpy)(void* dest, const void* src, size_t n) noexcept
 {
     auto* d = static_cast<uint8_t*>(dest);
@@ -425,7 +425,7 @@ extern "C" void* ZILK_MEM_NAME(memmove)(void* dest, const void* src, size_t n) n
 
 namespace
 {
-/// Stores @p v to words [0, @p words) (<= MAX) highest first by a jump into a run: Airbender's JIT fuses ascending store runs assuming no jump lands inside, unless RISCV_MERGE_WINDOW=0.
+/// Stores @p v to @p words (<= MAX) words highest first: Airbender's JIT fuses ascending store runs unless RISCV_MERGE_WINDOW=0.
 template <size_t MAX>
 [[gnu::always_inline]] inline void fill_words_upto(
     word_alias* d, word_alias v, size_t words) noexcept
@@ -585,7 +585,7 @@ template <size_t N = WORD_SIZE>
     return static_cast<int>(p[N - 1]) - static_cast<int>(q[N - 1]);
 }
 
-/// Returns the next WORD_SIZE bytes of an operand read in aligned words, advancing @p w; unaligned, @p cur carries the word @p w points to and @p lo is the operand's bit offset in it.
+/// Returns the next WORD_SIZE bytes of an operand read in aligned words; unaligned, @p cur holds the word at @p w, @p lo the bit offset.
 template <bool ALIGNED>
 [[gnu::always_inline]] inline word_alias next(
     const word_alias*& w, word_alias& cur, unsigned lo) noexcept
@@ -701,7 +701,7 @@ extern "C" int ZILK_MEM_NAME(memcmp)(const void* a, const void* b, size_t n) noe
 #if ZILK_MEM_BLOCK32
 namespace
 {
-/// The out-of-line remainder of memcpy(): 32-byte-aligned ends by blocks, other large copies in words, and unaligned-end copies. One function, since block32() binds x10..x12 and two make GCC move memcpy()'s arguments on every call.
+/// memcpy()'s out-of-line remainder: block copies for 32-byte-aligned ends, words, and unaligned ends; one function as block32() binds x10..x12.
 [[gnu::noinline]] void* memcpy_rest(void* dest, const void* src, size_t n) noexcept
 {
     if ((reinterpret_cast<uintptr_t>(dest) | reinterpret_cast<uintptr_t>(src)) % WORD_SIZE != 0)

@@ -1,4 +1,4 @@
-//! Proves the guest via Airbender v3's prover_pipeline to the final unified recursion layer at 100-bit security, on a thread with a 1 GiB stack; a panic ends that thread, fails the block, and a new prover is built.
+//! Proves to the final recursion layer at 100-bit security, on a 1 GiB-stack thread; a panic fails the block and rebuilds the prover.
 //!
 //! Adapted from matter-labs/airbender-platform crates/airbender-host/src/prover/gpu_prover.rs and
 //! matter-labs/ethereum-prover ethereum_prover/src/prover/gpu_prover.rs (MIT OR Apache-2.0).

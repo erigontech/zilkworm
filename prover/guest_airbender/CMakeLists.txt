@@ -59,12 +59,12 @@ target_include_directories(z6m_guest SYSTEM PRIVATE
 )
 
 
-# -fno-builtin and no LTO keep the mem builtins' loops from becoming library calls and let the strong symbols override newlib; -fno-toplevel-reorder keeps memcpy() ahead of memcpy_rest() so call sites stay within jal range.
+# -fno-builtin, no LTO: the strong mem builtins override newlib; -fno-toplevel-reorder keeps their callers in jal range.
 set_source_files_properties(${MEM_BUILTINS_SRC} PROPERTIES
     COMPILE_OPTIONS "-fno-builtin;-fno-tree-loop-distribute-patterns;-fno-lto;-fno-toplevel-reorder"
 )
 
-# hashtable_policy.cpp defines the --wrap target below; like mem_builtins.cpp it is compiled without LTO and lands within jal range of its callers.
+# hashtable_policy.cpp defines the --wrap target; built without LTO like mem_builtins.cpp, within jal range of callers.
 set_source_files_properties(src/hashtable_policy.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 
 target_include_directories(z6m_guest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/include)
@@ -74,7 +74,7 @@ target_compile_options(z6m_guest PRIVATE
     -fno-unwind-tables
     -fno-asynchronous-unwind-tables
     -fno-stack-protector
-    # The frame pointer is the toolchain file's choice (omitted in cmake/riscv32im.cmake); a profiling build sets -fno-omit-frame-pointer there.
+    # The frame pointer is set in cmake/riscv32im.cmake (omitted; a profiling build sets -fno-omit-frame-pointer there).
     -fdata-sections
     -ffunction-sections
 )
@@ -96,7 +96,7 @@ target_link_libraries(z6m_guest PRIVATE
     "${CMAKE_BINARY_DIR}/zilkworm/zilk_core/core/types_zz/libsilkworm_types_zz.a"
     "${CMAKE_BINARY_DIR}/zilkworm/third_party/libevmone.a"
     "${CMAKE_BINARY_DIR}/zilkworm/deps/src/blst/libblst.a"
-    # The subbuild no longer produces evmc loader/instructions libs (EVMC folded into evmone); the guest never dlopens VMs.
+    # EVMC is folded into evmone, so there are no evmc loader/instructions libs; the guest never dlopens VMs.
     c m gcc nosys stdc++
     -Wl,--end-group
 )

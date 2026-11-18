@@ -1,4 +1,4 @@
-# Post-link check: fails the build if dead code returns (std::format machinery, evmone's advanced interpreter): the guest copies all of .rodata to RAM every block, so each costs cycles.
+# Post-link check: fails if dead code returns (std::format machinery, evmone's advanced interpreter); .rodata is copied to RAM every block.
 # Run as: cmake -DNM=<nm> -DELF=<elf> -P check_no_dead_code.cmake
 execute_process(
     COMMAND ${NM} --demangle ${ELF}

@@ -1,4 +1,4 @@
-//! The guest commits one 32-byte value in a0..a7 (LE words): the last validated block's hash, zero if none. The host derives it from the input alone and refuses any run or proof that commits another.
+//! The guest commits one 32-byte value in a0..a7: the last validated block's hash (zero if none), which the host derives from the input alone.
 
 use alloy_primitives::{keccak256, B256};
 use eyre::{bail, eyre, Result};
@@ -14,10 +14,10 @@ pub struct Expected {
 }
 
 // Mirrors types_zz/flat_bundle.{hpp,cpp}.
-const INPUT_MAGIC_MFBD: u32 = 0x4442_464D;
+const INPUT_MAGIC_MFBD: u32 = 0x4442_464D; // "MFBD"
 const INPUT_VERSION_MFBD: u32 = 1;
 const INPUT_HEADER_SIZE_MFBD: usize = 16;
-const FLAT_BUNDLE_MAGIC: u32 = 0x444E_4246;
+const FLAT_BUNDLE_MAGIC: u32 = 0x444E_4246; // "FBND"
 const FLAT_BUNDLE_VERSION: u32 = 14;
 const FLAT_BUNDLE_HEADER_SIZE: usize = 56;
 /// Byte offsets of the blocks section's (offset, size) pair in the flat-bundle header.

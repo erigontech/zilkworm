@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Builds the C++ witness converter with CMake and links it statically; needs a C++23 g++ (>= 14, newest probed first) on Linux, AppleClang on macOS.
+//! Builds the C++ witness converter with CMake and links it statically (C++23 g++ >= 14 on Linux, AppleClang on macOS).
 
 use std::env;
 use std::path::{Path, PathBuf};

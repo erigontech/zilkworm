@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 // Must match types_zz/input_envelope.hpp.
-const INPUT_MAGIC_EJSN: u32 = 0x4E534A45;
+const INPUT_MAGIC_EJSN: u32 = 0x4E534A45; // "EJSN"
 const INPUT_VERSION_EJSN: u32 = 1;
 
 /// EJSN-wrapped EEST blockchain_test JSON; the guest reads it with a single `read_vec()`.

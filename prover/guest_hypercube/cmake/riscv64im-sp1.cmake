@@ -14,9 +14,9 @@ set(CMAKE_RANLIB       riscv-none-elf-ranlib)
 set(BUILD_SHARED_LIBS OFF)
 
 set(common_flags "-march=rv64im -mabi=lp64 -ffunction-sections -fdata-sections -fno-PIC")
-# SP1 charges one cycle per retired instruction, so only instruction-removing optimizations pay: GCC's inlining limits are widened (roughly doubled; -flto loses here).
+# SP1 charges one cycle per instruction, so only instruction-removing optimizations pay: GCC inlining limits are widened.
 #
-# -mtune=size prices a branch, mul and div at one instruction as SP1 does; -mstrict-align is required with it: that cost table allows unaligned access, so GCC merges byte loads into an `ld` that SP1 rejects (LD must be aligned to 8 bytes).
+# -mtune=size prices branch/mul/div at one instruction as SP1 does; -mstrict-align is required: GCC would merge byte loads into an unaligned `ld`.
 set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap \
 -funroll-loops \
 --param inline-unit-growth=100 --param max-inline-insns-auto=60 \

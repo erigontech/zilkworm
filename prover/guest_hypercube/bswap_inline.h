@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// rv64im has no Zbb, so GCC would call libgcc's __bswapdi2/__bswapsi2; expand inline instead. Force-included in every C/C++ unit (cmake/riscv64im-sp1.cmake).
+// rv64im has no Zbb: expand bswap inline instead of calling libgcc __bswapdi2/__bswapsi2 (force-included everywhere).
 #pragma once
 #ifndef __ASSEMBLER__  // blst compiles its .S through the C driver, which sees this too.
 

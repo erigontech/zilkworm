@@ -87,6 +87,7 @@ SP1_ECALL_2ARG(syscall_sha256_compress, 0x00010106)
 
 SP1_ECALL_2ARG(syscall_uint256_mulmod, 0x0001011D)
 
+// BLS12-381 field syscalls do plain modular arithmetic, not Montgomery.
 SP1_ECALL_2ARG(syscall_bls12381_fp_addmod, 0x00010120)
 SP1_ECALL_2ARG(syscall_bls12381_fp_submod, 0x00010121)
 SP1_ECALL_2ARG(syscall_bls12381_fp_mulmod, 0x00010122)

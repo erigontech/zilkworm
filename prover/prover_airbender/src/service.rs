@@ -20,7 +20,7 @@ use z6m_common::{fetch_block_and_witness, FetchRequest};
 /// Capacity of the fetcher -> prover-worker queue; each queued item holds one MFBD bundle on disk.
 const PROVER_QUEUE_CAPACITY: usize = 4;
 
-/// Cap on `eth_blockNumber` and the startup newHeads subscription: the RPC clients have no timeout, so a silent node would hold the fetcher forever.
+/// Cap on `eth_blockNumber` and the newHeads subscription: the RPC clients have no timeout of their own.
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
@@ -141,7 +141,7 @@ impl AirbenderService {
             .to_string()
     }
 
-    /// Runs a fetcher task (RPC -> MFBD bundle -> preflight -> bounded channel) and a prover worker draining it; Ethproofs posts are background tasks so neither waits on HTTP.
+    /// Fetcher task (RPC -> MFBD bundle -> preflight -> channel) and prover worker; Ethproofs posts are background tasks.
     pub async fn run(self) -> Result<()> {
         info!("Starting airbender service (pipelined fetch / prove)");
         let me = Arc::new(self);
@@ -232,7 +232,7 @@ impl AirbenderService {
                 }
             };
 
-            // At the tip, skip ahead when more than max_lag behind: stale blocks are worth little and a witness can take far longer than the tip's (or never come).
+            // At the tip, skip ahead when more than max_lag behind: stale blocks are worth little and witnesses can take far longer.
             let lag = latest.saturating_sub(next_block);
             if caught_up
                 && self.config.end_block.is_none()
@@ -406,7 +406,7 @@ impl AirbenderService {
         Ok(())
     }
 
-    /// Proves one block; the proof is written and posted only if the preflight ran to the exit point and the proof commits the block's hash.
+    /// Proves one block; the proof is written and posted only if the preflight reached the exit point and the proof commits the block's hash.
     async fn prove_item(
         self: &Arc<Self>,
         item: &WorkItem,
@@ -425,7 +425,7 @@ impl AirbenderService {
             });
         };
 
-        // Preflight before proving: the prover proves a run ending in finish_error, then aborts the process in the recursion layer (uncatchable JIT panic). Z6M_CONCURRENT_PREFLIGHT=1 runs it alongside proving, gating only the proof's write and post, at the cost of that abort.
+        // Preflight before proving: a run ending in finish_error would be proved, then abort the process in the recursion layer (JIT panic).
         let mut preflight_handle = None;
         if self.serial_preflight {
             let run = preflight
@@ -532,7 +532,7 @@ impl AirbenderService {
 
     /// Why a preflight run rules its block out, if it does.
     fn preflight_failure(&self, run: &VmRunOutcome) -> Option<String> {
-        // The simulator bounds steps, the prover the timestamp (a delegation call advances it by more than one cycle): a run can pass the exit point beyond the prover's bound.
+        // The simulator bounds steps, the prover the timestamp: a run can reach the exit point past the prover's bound, which would cut it short.
         let bound = self.config.max_cycles.min(MAX_PROVABLE_CYCLES) as u64;
         if run.cycle_count >= bound {
             Some(format!(

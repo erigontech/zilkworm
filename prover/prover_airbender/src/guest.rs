@@ -1,4 +1,4 @@
-//! The guest binary and its runs on Airbender's simulator, which decodes as the prover does (RV32IM without mulh, mulhsu, div, rem).
+//! The guest binary and its simulator runs; the simulator decodes as the prover does (RV32IM without mulh, mulhsu, div, rem).
 
 use eyre::{bail, eyre, Result};
 use field::baby_bear::base::BabyBearField;
@@ -118,7 +118,7 @@ impl Guest {
         })
     }
 
-    /// Runs the guest on `oracle` (words read from CSR 0x7C0) for at most `max_cycles`; a panic on an unsupported instruction or a read past the input is an error.
+    /// Runs the guest on `oracle` (CSR 0x7C0 words) for at most `max_cycles`; unsupported instructions or reads past the input are errors.
     pub fn run(
         &self,
         oracle: Vec<u32>,

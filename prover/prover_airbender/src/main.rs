@@ -233,7 +233,7 @@ struct ExecutionLog {
     exec_time_secs: f64,
     freq_cycles_per_sec: u64,
     reached_end: bool,
-    /// The run parked at finish_success; every other guest stop (finish_error, fatal(), abort, trap handler) is also a self-loop reported as reached_end.
+    /// The run parked at finish_success; any other guest stop is also a self-loop, which the VM reports as reached_end too.
     succeeded: bool,
     final_pc: u32,
     input_path: PathBuf,
@@ -335,7 +335,7 @@ fn execute_block(
     let run = guest.run(oracle, max_cycles, flamegraph_path)?;
     let succeeded = run.succeeded(guest.exit_pc);
 
-    // A successful run parks in the exit self-loop with its public output in a0..a7; a failed one parks in finish_error's loop and commits nothing.
+    // A successful run parks in the exit self-loop with its output in a0..a7; a failed one parks in finish_error and commits nothing.
     let expected = if succeeded {
         let expected = public_output::expected_for_file(input_path, is_test)?;
         public_output::check(&expected.block_hash, &run.output)?;
@@ -473,7 +473,7 @@ fn fsv_dir_note() -> String {
 const MERGE_WINDOW_VAR: &str = "RISCV_MERGE_WINDOW";
 
 fn main() -> Result<()> {
-    // Airbender's JIT fuses runs of same-base word loads/stores assuming no jump lands inside a run; keccak.c's buf_zero_state_from and mem_builtins.cpp's memset do, so fusion is off (0). Set before any other thread starts, as the JIT reads it once.
+    // 0 disables the JIT's fusion of word load/store runs (the guest jumps into such runs); set before any other thread starts.
     if std::env::var_os(MERGE_WINDOW_VAR).is_none() {
         std::env::set_var(MERGE_WINDOW_VAR, "0");
     }
@@ -677,7 +677,7 @@ async fn run() -> Result<()> {
                 args.replay_threads,
             )?;
 
-            // Run on the simulator first, as the service's preflight does: the prover proves wherever the run stopped (even finish_error or the cycle bound), yielding a proof that commits no block.
+            // Simulate first, as the service's preflight does: the prover proves any stop (finish_error, cycle bound), committing no block.
             let preflight = execute_block(
                 &guest,
                 &input_path,
@@ -686,7 +686,7 @@ async fn run() -> Result<()> {
                 is_test,
                 None,
             )?;
-            // The simulator bounds steps, the prover the timestamp (a delegation call advances it by more than one cycle): check the cycle count too.
+            // The simulator bounds steps, the prover the timestamp (delegation calls advance it by more than 1): check the cycle count too.
             if !preflight.succeeded || preflight.cycle_count >= settings.cycles_bound as u64 {
                 bail!(
                     "preflight: block {} did not finish successfully within {} cycles (final_pc=0x{:08x} reached_end={} cycles={}); not proving",
@@ -806,7 +806,7 @@ async fn run() -> Result<()> {
             println!("Verifier accepted in {:.2?}", started.elapsed());
             println!("verifier output[0..8]  = {:08x?}", &output[..8]);
             println!("verifier output[8..16] = {:08x?}", &output[8..]);
-            // output[0..8] is the guest's own output; output[8..16] is the recursion chain over the setups and final PC, which alone binds the proof to this guest.
+            // output[0..8] is the guest's own output; output[8..16] the recursion chain, which alone binds the proof to this guest.
             println!("CHAIN BINDING OK: output[8..16] is a chain hash of the key");
 
             // output[0..8] is the last validated block's hash; the proof binds its block only through it.

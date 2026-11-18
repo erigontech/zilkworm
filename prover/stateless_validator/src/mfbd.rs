@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure-Rust MFBD encoder, byte-identical to the C++ `json_witness_to_flat_bundle` for the same witness (sorted key8 / input order throughout).
+//! Pure-Rust MFBD encoder, byte-identical to the C++ `json_witness_to_flat_bundle` for the same witness.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -11,24 +11,24 @@ use alloy_rlp::Decodable;
 use anyhow::{anyhow, bail, Result};
 use stateless::StatelessInput;
 
-pub const MFBD_MAGIC: u32 = 0x4442464D;
+pub const MFBD_MAGIC: u32 = 0x4442464D; // "MFBD"
 pub const MFBD_VERSION: u32 = 1;
 pub const MFBD_HEADER_SIZE: usize = 16;
 
-const FLAT_BUNDLE_MAGIC: u32 = 0x444E4246;
+const FLAT_BUNDLE_MAGIC: u32 = 0x444E4246; // "FBND"
 const FLAT_BUNDLE_VERSION: u32 = 14;
 const FLAT_BUNDLE_HEADER_SIZE: usize = 56;
 
 // 9 u32 fields + 8 reserved u32 = 68 bytes.
-const PRESTATE_MAGIC: u32 = 0x53455250;
+const PRESTATE_MAGIC: u32 = 0x53455250; // "PRES"
 const PRESTATE_VERSION: u32 = 4;
 const PRESTATE_META_SIZE: usize = 68;
 
 const MPHF_MAP_VERSION: u32 = 3;
 const MPHF_MAP_HEADER_SIZE: usize = 56;
-const MPHF_ADDR_MAP_MAGIC: u32 = 0x4148504D;
-const MPHF_CODE_STORE_MAGIC: u32 = 0x4348504D;
-const MPHF_NODE_STORE_MAGIC: u32 = 0x4E48504D;
+const MPHF_ADDR_MAP_MAGIC: u32 = 0x4148504D; // "MPHA"
+const MPHF_CODE_STORE_MAGIC: u32 = 0x4348504D; // "MPHC"
+const MPHF_NODE_STORE_MAGIC: u32 = 0x4E48504D; // "MPHN"
 
 const MPHF_GOLDEN_RATIO: u64 = 0x9E3779B97F4A7C15;
 const MPHF_LAMBDA: u32 = 4;
@@ -526,7 +526,7 @@ fn decode_branch(payload: &[u8]) -> Result<BranchChildren> {
     Ok(out)
 }
 
-/// Decodes an extension/leaf body: `path` gets up to 64 nibbles (`plen` written); `second` is the leaf value, a 32-byte child hash, or an embedded child's full RLP.
+/// Decodes an extension/leaf body: `path` gets up to 64 nibbles (`plen` written); `second` is the leaf value or child reference.
 fn decode_ext_or_leaf<'a>(
     payload: &'a [u8],
 ) -> Result<(bool, [u8; 64], usize, &'a [u8])> {
@@ -713,7 +713,7 @@ fn account_info_to_body(info: &mut AccountInfo) -> Vec<u8> {
     let body_size = ACCOUNT_SIZE + (slot_count as usize) * SLOT_SIZE;
     let mut body = vec![0u8; body_size];
 
-    // Offsets mirror the C++ Account struct; unwritten fields (deleted, acc_rlp_*, modified, code_store_offset, acc_rlp_buf) stay 0.
+    // Offsets mirror the C++ Account struct; unwritten fields (deleted, acc_rlp_*, modified, ...) stay 0.
     body[0..20].copy_from_slice(&info.addr);
     body[24..32].copy_from_slice(&info.nonce.to_le_bytes());
     body[32..64].copy_from_slice(&info.balance);
@@ -1130,7 +1130,7 @@ fn build_mfbd(
         ancestors_payload.extend_from_slice(h.as_ref());
     }
 
-    // Match C++: emit block_flags only when expect_invalid; an empty section means all blocks valid, and [0] would break byte parity.
+    // Match C++: block_flags only when expect_invalid (an empty section means all valid; [0] would break byte parity).
     let invalid_flag = if expect_invalid { BLOCK_FLAG_EXPECT_INVALID } else { 0 };
     let block_flags_buf: Vec<u8> = match engine {
         Some(_) => vec![invalid_flag | BLOCK_FLAG_ENGINE_RECORD],

@@ -5,8 +5,6 @@
 
 _start:
     /* Jump to the absolute address defined by the linker script. */
-    # lui ra, %hi(_abs_start)
-    # jr %lo(_abs_start)(ra)
 
     la ra, _abs_start
     jr ra
@@ -39,7 +37,6 @@ machine_default_start_trap:
     // so we swap it with x31
 	csrrw x31, mscratch, x31
 
-    # sw x31, -4(sp)
     sw x30, -8(x31)
     sw x29, -12(x31)
     sw x28, -16(x31)
@@ -72,7 +69,6 @@ machine_default_start_trap:
     sw x1, -124(x31)
     
     // we will not restore it, so we are ok to avoid write
-    # sw x0, -128(x31)
 
     // move valid sp into a0,
     mv a0, x31
@@ -92,10 +88,8 @@ machine_default_start_trap:
     csrw mscratch, a0 // save it for now
 
     // it's illegal instruction, so we skip. Anyway can not overwrite x0
-    # lw x0, 0(sp)
 
     lw x1, 4(sp)
-    # lw x2, 8(sp) // do not overwrite SP yet
     lw x3, 12(sp)
     lw x4, 16(sp)
     lw x5, 20(sp)

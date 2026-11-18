@@ -1,6 +1,6 @@
 //! The verification key (EVKEY001 v2) and proof verification against it.
 //!
-//! A proof is accepted only if its final verifier's recursion chain hash (output[8..16]) is one of the key's three expected hashes (zero, one, two+ unrolled layers), recomputed from the guest and FSV_DIR binaries with the RECURSION_*_BLAKE modes and never taken from a proof.
+//! A proof is accepted only if its chain hash (output[8..16]) matches a key hash recomputed from the guest and FSV_DIR, never from the proof.
 //!
 //! Adapted from matter-labs/ethereum-prover ethereum_prover/src/verification_key_format.rs,
 //! verifier_artifacts.rs and verification.rs (MIT OR Apache-2.0).
@@ -125,7 +125,7 @@ pub fn verify_proof_file(proof_file: &[u8], key: &VerificationKey) -> Result<[u3
     Ok(output)
 }
 
-/// Selects the recursion verifier programs and thus the chain hashes; non-default values (Blake2s with compression) make proofs no published key accepts.
+/// Selects the recursion verifier programs and so the chain hashes; anything but the default (Blake2s with compression) matches no published key.
 const RECURSION_BLAKE_VARS: [&str; 4] = [
     "RECURSION_UNROLLED_BLAKE",
     "RECURSION_BRIDGE_BLAKE",

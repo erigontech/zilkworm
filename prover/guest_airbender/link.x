@@ -54,7 +54,7 @@ SECTIONS
     _sirodata = LOADADDR(.rodata);
     _srodata = .;
 
-    /* The gp window: ld relaxes an auipc pair to one gp-relative access when the target lies within gp's 12-bit reach less this section's alignment (256) and the object's size; the hottest objects sit on both sides of __global_pointer$, the farthest first below it. */
+    /* gp window: hot objects within gp's 12-bit reach (less the 256-byte alignment and object size), farthest first below gp. */
     *(.rodata._ZN8silkworm10kEmptyHashE)
     *(.rodata._ZN6evmone6crypto9secp256k112_GLOBAL__N_1L6FP_ONEE)
     *(.rodata._ZN6evmone6crypto5bn2549Fq6Config3ksiE)
