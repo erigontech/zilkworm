@@ -9,7 +9,6 @@
 #include <evmc/evmc.hpp>
 #include <zilk_core/core/common/bytes.hpp>
 
-// See Yellow Paper, Appendix E "Precompiled Contracts"
 namespace silkworm::precompile {
 
 using GasFunction = uint64_t (*)(ByteView input, evmc_revision) noexcept;
@@ -32,28 +31,21 @@ std::optional<Bytes> rip160_run(ByteView input) noexcept;
 uint64_t id_gas(ByteView input, evmc_revision) noexcept;
 std::optional<Bytes> id_run(ByteView input) noexcept;
 
-// EIP-2565: ModExp Gas Cos
 uint64_t expmod_gas(ByteView input, evmc_revision) noexcept;
-// EIP-198: Big integer modular exponentiation
 std::optional<Bytes> expmod_run(ByteView input) noexcept;
 
-// EIP-196: Precompiled contracts for addition and scalar multiplication on the elliptic curve alt_bn128
 uint64_t bn_add_gas(ByteView input, evmc_revision) noexcept;
 std::optional<Bytes> bn_add_run(ByteView input) noexcept;
 
-// EIP-196: Precompiled contracts for addition and scalar multiplication on the elliptic curve alt_bn128
 uint64_t bn_mul_gas(ByteView input, evmc_revision) noexcept;
 std::optional<Bytes> bn_mul_run(ByteView input) noexcept;
 
-// EIP-197: Precompiled contracts for optimal ate pairing check on the elliptic curve alt_bn128
 uint64_t snarkv_gas(ByteView input, evmc_revision) noexcept;
 std::optional<Bytes> snarkv_run(ByteView input) noexcept;
 
-// EIP-152: Add BLAKE2 compression function `F` precompile
 uint64_t blake2_f_gas(ByteView input, evmc_revision) noexcept;
 std::optional<Bytes> blake2_f_run(ByteView input) noexcept;
 
-// EIP-4844: Shard Blob Transactions
 uint64_t point_evaluation_gas(ByteView input, evmc_revision) noexcept;
 std::optional<Bytes> point_evaluation_run(ByteView input) noexcept;
 

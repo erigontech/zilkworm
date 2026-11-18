@@ -38,37 +38,28 @@ class ExecutionProcessor {
 
     ~ExecutionProcessor();
 
-    /**
-     * Execute a transaction, but do not write to the DB yet.
-     * Precondition: transaction must be valid.
-     */
+    /// Executes a valid transaction without writing to the DB.
     void execute_transaction(const Transaction& txn, Receipt& receipt) noexcept;
 
-    //! \brief Execute the block.
-    //! \remarks Warning: This method does not verify state root; pre-Byzantium receipt root isn't validated either.
-    //! \pre RuleSet's validate_block_header & pre_validate_block_body must return kOk.
+    //! Requires validated header and body; verifies neither the state root nor the pre-Byzantium receipt root.
     ValidationResult execute_block(std::vector<Receipt>& receipts) noexcept;
 
     uint64_t available_gas() const noexcept;
 
   public:
-    //! The hash of an ancestor of the block, see DirectState::get_block_hash().
-    //! Public so the file-local BlockHashes adapter (evmone callback) can forward.
+    //! Public so the file-local BlockHashes adapter can forward.
     evmc::bytes32 get_block_hash_for_evm(int64_t block_num) const noexcept;
 
   private:
-    //! Evaluate the chain's revision at the current block's number/timestamp.
     evmc_revision revision() const noexcept;
 
-    /// Apply an evmone StateDiff to DirectState.
     void apply_state_diff(const evmone::state::StateDiff& diff);
     ValidationResult execute_block_no_post_validation(std::vector<Receipt>& receipts) noexcept;
 
     uint64_t cumulative_gas_used_{0};
-    // EIP-7778/8037 (Amsterdam): per-dimension block gas accounting.
+    // Amsterdam per-dimension block gas (EIP-7778/8037).
     int64_t sum_regular_block_gas_{0};
     int64_t sum_state_block_gas_{0};
-    // EIP-7928 (Amsterdam): block-level access list under construction.
     evmone::state::BalBuilder bal_builder_{};
     size_t tx_index_{0};
     ActiveState& direct_;
