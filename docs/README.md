@@ -126,7 +126,7 @@ compile time with the CMake option `Z6M_HASH_STATE`: [hashstate.md](hashstate.md
 
 ## Provers and services
 
-- **`z6m_prover` (SP1 Hypercube host)** — `fetch`, `execute`, `prove`, `verify`, `setup`, `--service`, `--test-service` — [../README.md](../README.md#how-to-run) — `prover/prover_hypercube/src/main.rs`, `service.rs` — `make z6m_prover`
+- **`z6m_prover` (SP1 Hypercube host)** — `fetch`, `execute`, `prove`, `--service`, `--test-service` (`setup` and `verify` parse but do nothing) — [../README.md](../README.md#how-to-run) — `prover/prover_hypercube/src/main.rs`, `service.rs` — `make z6m_prover`
 - **Fetcher and Ethproofs client** — [architecture.md](architecture.md#prover-host-rust) — `prover/common/src/fetcher.rs`, `ethproofs_client.rs`
 - **`z6m_prover_airbender`** — simulator, GPU prover, verification key, service — [`../prover/prover_airbender/README.md`](../prover/prover_airbender/README.md) — `prover/prover_airbender/src/`
 - **Airbender proving pipeline, proof and key formats** — [airbender_architecture.md](airbender_architecture.md#5-proving-airbender-v3)

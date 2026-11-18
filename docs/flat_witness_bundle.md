@@ -186,7 +186,7 @@ they arise for different reasons.
 There are three roles for an MphfMap in a bundle — the addr-map and the
 `code_store` (both inside `direct_state`) and the `node_store` (a peer
 section). All three share one wire format and one lookup engine. It is worth
-separating three things that the name "MphfMap" used to conflate:
+separating three things the name "MphfMap" covers:
 
 - **The conceptual map** — a u64 → bytes minimal-perfect-hash map with a
   collision sidecar.

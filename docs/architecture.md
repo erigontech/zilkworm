@@ -17,7 +17,7 @@ thin entry point over **zilk_core**, the C++ block validator (a fork of Silkworm
 
 | Crate | Path | Role |
 |---|---|---|
-| `z6m_prover` | `prover/prover_hypercube/` | SP1 Hypercube host: `fetch`, `execute`, `prove`, `verify`, `--service`, `--test-service` (`main.rs`, `service.rs`); builds the guest's stdin (`stdin_builders.rs`); embeds the guest ELF (`build.rs`). |
+| `z6m_prover` | `prover/prover_hypercube/` | SP1 Hypercube host: `fetch`, `execute`, `prove`, `--service`, `--test-service` (`main.rs`, `service.rs`; the `setup` and `verify` subcommands parse but do nothing); builds the guest's stdin (`stdin_builders.rs`); embeds the guest ELF (`build.rs`). |
 | `z6m_prover_airbender` | `prover/prover_airbender/` | Airbender host: simulator, GPU prover, verification key, service. See [airbender_architecture.md](airbender_architecture.md). |
 | common | `prover/common/` | `fetcher.rs` (block, raw block RLP and `debug_executionWitness` over JSON-RPC, converted to an MFBD bundle), `ethproofs_client.rs`. |
 | witness FFI | `prover/witness_ffi/` | Links the C++ witness JSON to MFBD converter (`zilk_core/dev/witness_converter.{hpp,cpp}`) into the Rust hosts. |
@@ -104,8 +104,8 @@ An 8-byte header followed by the JSON, which runs to the end of the input:
 ```
 
 `run_ejsn` (`zilk_core/dev/blockchain_test_runner.cpp`) parses the JSON and runs every test in it.
-The run's result follows the EEST convention the native runner turns into its exit code: 0 all
-passed, 1 any failed, 2 none failed and at least one skipped.
+It returns `kRunFailure` if any test failed, `kRunSkipped` if none failed and at least one was
+skipped, and the gas otherwise; the native runner turns these into the exit codes 1, 2 and 0.
 
 ## Runners
 

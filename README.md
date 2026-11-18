@@ -65,11 +65,12 @@ $ docker run somnergy/z6m_prover --help
 | `z6m_prover fetch --rpc-url <URL> --block-number <N> --data-dir <dir>` | Fetch a block and its witness; writes `<dir>/blocks/<N>/flatWitnessBundle<N>.mfbd` |
 | `z6m_prover execute --block-number <N> --data-dir <dir>` | Execute the guest on a fetched block, without proving |
 | `z6m_prover execute --file-name <bundle.mfbd>` | Execute the guest on a bundle file (`--is-test` for an EEST JSON fixture) |
-| `z6m_prover setup` | Generate the proving and verifying keys |
 | `z6m_prover prove --block-number <N> --data-dir <dir>` | Prove a block (`--proof-type core, compressed, groth16, plonk`) |
-| `z6m_prover verify` | Verify a proof against a verifying key |
 | `z6m_prover --service --rpc-url <URL>` | Follow the chain: fetch, execute and prove as blocks arrive |
 | `z6m_prover --test-service ...` | Execute a range of blocks, or a fixture tree, from disk |
+
+The `setup` and `verify` subcommands are accepted but do nothing at present: their bodies are
+commented out in `prover/prover_hypercube/src/main.rs`.
 
 ### Test service (offline batch execution)
 
@@ -107,7 +108,7 @@ Install the NVIDIA drivers and the [NVIDIA Container Toolkit](https://docs.nvidi
 
 ```
 docker run --gpus all --rm --network host \
-  -v "$PWD:/work:rw" -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$PWD:/work:rw" -v /var/run/docker.sock:/var/run/docker.sock -w /work \
   -e SP1_PROVER=cuda \
   somnergy/z6m_prover prove --file-name /work/flatWitnessBundle<N>.mfbd
 ```

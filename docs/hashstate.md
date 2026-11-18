@@ -334,7 +334,7 @@ a single-path confirmation walk, `confirm_absent`, and bump
   `HashIndex<64, &storage_key8_at, uint8_t>` holding a constant 1 per entry), so a
   repeated miss of the same slot, which a block often makes, is answered from
   the memo without another walk. Only a proven miss is entered; an unprovable
-  one is recorded on every read, as before. The memo is sound because a proof
+  one is recorded on every read. The memo is sound because a proof
   reads nothing that changes between builds: the account's `storage_root` in
   the append-only arena record the build wrote, and keccak-bound nodes that a
   later add can neither alter nor turn into the key. `build_state_from_trie`
