@@ -136,3 +136,164 @@ covers the last validated block's bundle only. `z6m_prover_airbender` derives th
 the input (keccak256 of the last valid block's RLP header) and fails on a mismatch in `execute`,
 `prove`, `verify`, `--test-service` and `--service`.
 
+## Runners
+
+### Dispatch
+
+Entry point: `StateTransition::run()` in
+`zilk_core/dev/state_transition.cpp`. The leading 4 bytes are read and matched
+against `kInputMagicEJSN` / `kInputMagicMFBD`:
+
+```cpp
+switch (magic) {
+    case kInputMagicEJSN: return run_ejsn();
+    case kInputMagicMFBD: return run_mfbd();
+    default: sys_println("ERROR: unsupported input magic"); return kRunFailure;
+}
+```
+
+### EJSN envelope
+
+**EJSN** (`EEST JSON`) — 8-byte header followed by raw EEST `blockchain_test`
+JSON bytes (no inner length prefix — body runs to envelope end):
+
+```
++0   u32  magic   == 'EJSN' (0x4E534A45)
++4   u32  version == 1
++8   <JSON bytes …>
+```
+
+Only `MFBD` and `EJSN` are declared in code today (`flat_bundle.hpp`). A few
+other four-character codes are *conventions referenced in prose only* — they are
+**not** defined as constants anywhere and the dispatch does not handle them:
+
+| Code | Hex | Status |
+|---|---|---|
+| `URLP` | `0x504C5255` | Legacy Unified RLP (pre-FlatBundle); not in code |
+| `SFBD` | `0x44424653` | Notional "single FlatBundle" — use MFBD with `n_bundles=1`; not in code |
+| `STBD` | `0x44425453` | Notional future single-transaction proving; not in code |
+
+### EJSN path
+
+`run_ejsn()` strips the 8-byte envelope header, parses the body as an EEST
+`blockchain_test` JSON document, and runs each test sub-object via the
+`blockchain_test()` helper (which constructs an in-memory `DirectState` from the
+test's `pre` block and exercises one `Blockchain::insert_block` per entry in
+`blocks`). Exit codes mirror the legacy EEST contract:
+
+- `0` — all passed
+- `1` — any failed
+- `2` — any skipped (no failures)
+
+### SP1 input building
+
+The Rust prover host builds an `SP1Stdin` carrying exactly one envelope per
+proof request. See `prover/prover_hypercube/src/stdin_builders.rs` (and the
+equivalent `prover_turbo` variant):
+
+```rust
+const INPUT_MAGIC_EJSN: u32 = 0x4E534A45;
+const INPUT_VERSION_EJSN: u32 = 1;
+
+pub fn build_stdin_from_eth_tests(path: &Path) -> Result<SP1Stdin> {
+    let mut stdin = SP1Stdin::new();
+    let raw = fs::read_to_string(path)?;
+    let minified = serde_json::to_string(&serde_json::from_str::<Value>(&raw)?)?;
+    let json_bytes = minified.as_bytes();
+
+    let mut envelope = Vec::with_capacity(8 + json_bytes.len());
+    envelope.extend_from_slice(&INPUT_MAGIC_EJSN.to_le_bytes());
+    envelope.extend_from_slice(&INPUT_VERSION_EJSN.to_le_bytes());
+    envelope.extend_from_slice(json_bytes);
+    stdin.write_vec(envelope);
+    Ok(stdin)
+}
+
+pub fn build_stdin_from_mfbd(path: &Path) -> Result<SP1Stdin> {
+    let mut stdin = SP1Stdin::new();
+    let raw = fs::read(path)?;        // file is already MFBD-wrapped on disk
+    stdin.write_vec(raw);
+    Ok(stdin)
+}
+```
+
+The MFBD path slurps the on-disk bundle file unmodified — the converters
+(`json_witness_to_flat_bundle`, `legacy_to_flat_bundle`, `eest_to_flat_bundle`)
+write the MFBD envelope at file-write time, so no re-wrapping is required.
+
+`SP1Stdin` layout is a single `Vec<u8>`. The guest does ONE `read_vec_raw()` and
+hands the bytes straight to `StateTransition`
+(`prover/guest_hypercube/src/main.cpp`):
+
+```cpp
+ReadVecResult input_buf = read_vec_raw();
+std::span<uint8_t> envelope{input_buf.ptr, input_buf.len};
+auto st = silkworm::cmd::state_transition::StateTransition(envelope);
+uint64_t result = st.run();
+```
+
+Note: the Rust constants are an independent mirror of the C++ values in
+`flat_bundle.hpp`. They are kept in sync by convention; a future binding
+generator could collapse them.
+
+### Native run
+
+The native runner is `zilk_core/dev/cli/runner.cpp` (built as the
+`state_transition` executable). It accepts either a file or a directory:
+
+- **`.json`** — `run_json_test_file()` reads the file, wraps it in an in-memory
+  EJSN envelope, constructs `StateTransition`, and returns the run's exit code
+  (0/1/2 per EEST semantics).
+- **`.bin` / unknown** — `run_flat_bundle_file()` reads the file straight into a
+  vector. The on-disk file is already MFBD-wrapped (the converters emit it that
+  way), so the bytes pass through unmodified into `StateTransition`. The runner
+  prints `Cumulative Gas Used: <n>` and returns 0.
+- **Directory** — iterates recursively, dispatching per file extension.
+
+The runner is the same binary the EEST harness (`make eest-blockchain-tests`)
+drives via ctest.
+
+### QEMU run
+
+`qemu_runner/` cross-compiles `zilk_core` to a RISC-V target (rv32im or rv64im)
+and runs the resulting binary under QEMU semihosting. Used for cycle-accurate
+instruction profiling without paying SP1 prover overhead.
+
+`qemu_runner/src/main.cpp` reads the envelope file via semihosting into a static
+200 MB buffer:
+
+```cpp
+static char ENV_BUF[200 * 1024 * 1024];
+
+int h = sh::open_file_read("stdin_payload.bin");
+// chunked read into ENV_BUF until EOF …
+std::string envelope_str(ENV_BUF, ENV_BUF + total);
+const uint64_t res = sample_run_wrapped(envelope_str);
+sh::exit(static_cast<int>(res));
+```
+
+`qemu_runner/src/cppextern.cpp::sample_run_wrapped` constructs a
+`std::span<uint8_t>` over the envelope bytes and hands them to
+`StateTransition::run()` — the magic dispatch chooses MFBD or EJSN exactly as in
+the SP1 guest. The wire format is the same `stdin_payload.bin` that the prover
+host would have written for an SP1 run.
+
+### EEST JSON tests
+
+The EEST corpus on disk lives at
+`test-fixtures-cache/eest_stable/fixtures/blockchain_tests/` (populated by
+`make test-fixtures` from the `test-fixtures.json` pin).
+Two harness paths consume it:
+
+- **Native runner** — `runner.cpp::run_json_test_file` reads a `.json` file
+  byte-for-byte, prepends an 8-byte EJSN header in memory, and feeds the
+  envelope to `StateTransition`. EEST JSON files on disk are never re-encoded.
+- **SP1 prover via `.mfbd`** — `eest_to_flat_bundle bulk-convert` converts the
+  EEST corpus into a parallel `.mfbd` tree. Freshness is managed by the
+  `Makefile` (not the converter binary): `make eest-blockchain-tests` writes a
+  `manifest.json` recording both the fixture submodule SHA (`eest_sha`) and the
+  converter SHA (`converter_sha`), and re-runs `bulk-convert` only when that
+  manifest is absent or its `converter_sha` no longer matches. The SP1 prover
+  then ingests the `.mfbd` files via the MFBD path.
+
+Both paths land in the same `StateTransition::run()` magic dispatch.

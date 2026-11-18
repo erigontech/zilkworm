@@ -284,3 +284,43 @@ as state-root / gas mismatches.
 | Benchmark driver | `tools/scripts/sp1_benchmark.py` |
 | Format spec | `docs/flat_witness_bundle.md` |
 | Wire discipline rule | `tools/claude/AGENTS.md` |
+
+## Converters (moved from flat_witness_bundle.md)
+
+Three converters produce MFBD-wrapped FlatBundle files that the runner, the
+QEMU runner, and the SP1 host can all consume unmodified.
+
+### 8.1 `legacy_to_flat_bundle`
+
+`zilk_core/dev/cli/legacy_to_flat_bundle.cpp`. One-shot converter from the old
+`unifiedBlockAndStateRlp<N>.bin` shape (5 RLP items, in order: genesis block
+[decoded as `genesis_rlp` and passed as the bundle's genesis], current block,
+pre-state, ancestors, pre-trie) to a v14 FlatBundle wrapped in MFBD with
+`n_bundles=1`. The output bundle's `network` section is hardcoded to
+`"Mainnet"`. Self-contained — keeps the legacy decoders out of the main code
+paths. Usage: `legacy_to_flat_bundle <legacy.bin> <flat.bin>`.
+
+### 8.2 `json_witness_to_flat_bundle`
+
+`zilk_core/dev/cli/json_witness_to_flat_bundle.cpp`. Reads a witness JSON
+document on stdin (the `{block, headers, state, codes, keys}` payload that
+`prover/common/src/fetcher.rs` synthesises from a geth `debug_executionWitness`
+response), walks the witness state trie and per-account storage tries in C++,
+fingerprints addresses, builds the addr-map and node-store MphfMaps, and
+assembles a v14 FlatBundle. The output bundle's `network` section is hardcoded
+to `"Mainnet"`. Output is MFBD-wrapped and written to stdout.
+
+### 8.3 `eest_to_flat_bundle`
+
+`zilk_core/dev/cli/eest_to_flat_bundle.cpp`. Converts EEST `blockchain_test`
+JSON fixtures into MFBD-wrapped FlatBundle files. Supports `emit` (single
+subtest by index) and `bulk-convert` (recursive directory walk that mirrors the
+input tree to per-file `.mfbd` outputs; the `manifest.json` freshness file is
+written by the `Makefile`, not by the converter). The output bundle's `network`
+section is taken from the fixture's `network` field (falling back to `"Mainnet"`
+when absent). Used by `make eest-blockchain-tests` to materialise an `.mfbd` mirror of
+the EEST corpus that the SP1 prover ingests via the MFBD path.
+
+All three converters call into the same `::zilkworm::build_flat_bundle`
+assembler declared in `flat_bundle.hpp` and then wrap the resulting FBND blob in
+a 16-byte MFBD header.
