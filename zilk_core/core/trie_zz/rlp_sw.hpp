@@ -22,21 +22,12 @@
 
 namespace zilkworm {
 
-// rlp/endian helpers live in silkworm; aliases for local readability.
 namespace rlp = ::silkworm::rlp;
 namespace endian = ::silkworm::endian;
 
-// The encoding of one node, returned as a view by encode_line() and its encode_*() and valid
-// until the next call. A fixed 32-byte aligned array rather than a Bytes: the copy-and-patch
-// encode of a branch can then put its copy at the witness node's offset modulo 32 (the guest's
-// memcpy copies same-phase operands in 32-byte CSR chunks), and the keccak of the result stays on
-// its aligned path as witness node bodies are 8-aligned. A branch is at most 3 + 16 * 33 + 1 bytes
-// (its value is empty in the fixed-key state and storage tries), a leaf holds at most an account.
-// Witness nodes are untrusted, so decode_node() enforces both: a branch with a value and a leaf
-// value over kMaxLeafValueSize are invalid, which bounds every node any encoder can produce.
+// A node's encoding, valid until the next call; decode_node() rejects branch values and over-long leaf values.
 inline constexpr size_t kNodeBufferSize = 2048;
-/// The longest leaf value decode_node() accepts. An account is at most 110 bytes; this limit
-/// only has to keep a leaf's encoding (list header, path, value header and value) in the buffer.
+// Longest leaf value decode_node() accepts; it only has to keep the leaf's encoding in the buffer.
 inline constexpr size_t kMaxLeafValueSize = kNodeBufferSize - 64;
 static_assert(3 + 34 + 3 + kMaxLeafValueSize <= kNodeBufferSize, "a leaf must fit the encode buffer");
 static_assert(31 + 3 + 16 * 33 + 1 <= kNodeBufferSize,
@@ -52,7 +43,6 @@ inline void clear_static_buffer() {}
 
 inline const Bytes empty{silkworm::rlp::kEmptyStringCode};
 
-// Writes an RLP list header for a payload of `len` bytes at `out`, returns the position after it.
 inline uint8_t* encode_list_header(uint8_t* out, size_t len) noexcept {
     if (len < 56) {
         *out++ = static_cast<uint8_t>(rlp::kEmptyListCode + len);
@@ -72,8 +62,7 @@ inline uint8_t* encode_hp_path(uint8_t* out, const uint8_t* nib, size_t n, bool 
     const uint8_t flag = (leaf ? 0x2 : 0x0) | (odd ? 0x1 : 0x0);
     *out++ = static_cast<uint8_t>((flag << 4) | (odd ? (n ? (nib[0] & 0x0F) : 0) : 0));
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-    // nib is a nibbles64 array (4-aligned, 64 bytes). With x a word of it masked to low nibbles,
-    // t = x << 4 | x >> 8 holds n0 n1 in byte 0, n1 n2 in byte 1 and n2 n3 in byte 2.
+    // nib is a 4-aligned nibbles64 array; t = x << 4 | x >> 8 holds n0 n1 in byte 0, n1 n2 in byte 1, n2 n3 in byte 2.
     typedef uint32_t __attribute__((may_alias)) w32;
     const w32* w = reinterpret_cast<const w32*>(std::assume_aligned<4>(nib));
     size_t bytes = n / 2;
@@ -103,12 +92,11 @@ inline uint8_t* encode_hp_path(uint8_t* out, const uint8_t* nib, size_t n, bool 
 #else
     size_t i = odd ? 1 : 0;
     for (; i + 1 < n; i += 2) *out++ = static_cast<uint8_t>((nib[i] << 4) | (nib[i + 1] & 0x0F));
-    if (i < n) *out++ = static_cast<uint8_t>((nib[i] << 4));  // last high nibble only
+    if (i < n) *out++ = static_cast<uint8_t>((nib[i] << 4));
 #endif
     return out;
 }
 
-// Writes an RLP string header for a payload of `len` bytes at `out`, returns the position after it.
 inline uint8_t* encode_string_header(uint8_t* out, size_t len) noexcept {
     if (len < 56) {
         *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + len);
@@ -124,7 +112,6 @@ inline uint8_t* encode_string_header(uint8_t* out, size_t len) noexcept {
     return out;
 }
 
-// HP decode -> (is_leaf, nibbles[]). Returns false on malformed.
 inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, uint8_t& out_len) noexcept {
     if (in.empty()) [[unlikely]] return false;
     uint8_t flag = in[0] >> 4;
@@ -137,7 +124,7 @@ inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, 
     const uint8_t* const end = in.data() + in.size();
 #pragma GCC unroll 4
     for (const uint8_t* p = in.data() + 1; p != end; ++p, o += 2) {
-        const uint8_t b = *p;  // read once: out may alias in as far as the compiler knows
+        const uint8_t b = *p;
         o[0] = static_cast<uint8_t>(b >> 4);
         o[1] = static_cast<uint8_t>(b & 0x0F);
     }
@@ -145,9 +132,7 @@ inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, 
     return true;
 }
 
-// The index of a nonzero mask's lowest set bit. rv32im has no count-trailing-zeros instruction and
-// std::countr_zero is a __ctzsi2 call there: isolate the bit and look its index up by a De Bruijn
-// multiply instead.
+// Index of a nonzero mask's lowest set bit by De Bruijn multiply (rv32im has no ctz).
 [[gnu::always_inline]] inline unsigned lowest_set_bit(uint32_t m) noexcept {
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
     static constexpr uint8_t kIndex[32] = {0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
@@ -159,16 +144,12 @@ inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, 
 }
 
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-// Copies the 32 bytes at the 8-aligned src to dst, where dst & 3 == Off (1..3), little endian. A dst
-// at 2 mod 4 takes each source word as two halfwords. An odd dst takes the bytes before its first
-// word boundary, then seven words each shifted together from two source words, then the last Off
-// bytes.
+// Copies 32 bytes from 8-aligned src to dst with dst & 3 == Off (1..3), little endian.
 template <unsigned Off>
 [[gnu::always_inline]] inline void copy32_at_phase(uint8_t* dst, const uint8_t* src) noexcept {
     typedef uint32_t __attribute__((may_alias)) w32;
     typedef uint16_t __attribute__((may_alias)) h16;
-    // Each source word is loaded once, ahead of the stores that use it: for all the compiler knows
-    // a store may alias src, and it loaded the word again after one.
+    // Each source word is loaded once, before the stores: a store may alias src.
     const w32* const s = reinterpret_cast<const w32*>(std::assume_aligned<8>(src));
     if constexpr (Off == 2) {
         h16* const d = reinterpret_cast<h16*>(dst);
@@ -191,8 +172,7 @@ template <unsigned Off>
     }
 }
 
-// Copies the 32 bytes at the 8-aligned src to dst at any alignment, with a word store wherever dst
-// allows one: the guest's memcpy takes ~60 cycles when dst is not word-aligned.
+// Copies 32 bytes from 8-aligned src to dst at any alignment, with word stores where dst allows.
 [[gnu::always_inline]] inline void copy32_from_aligned8(uint8_t* dst, const uint8_t* src) noexcept {
     switch (reinterpret_cast<uintptr_t>(dst) & 3) {
         case 0: {
@@ -215,11 +195,9 @@ template <unsigned Off>
 }
 #endif
 
-// Writes branch slot i's 32-byte hash reference to dst.
 [[gnu::always_inline]] inline void put_child_hash(uint8_t* dst, const BranchNode& b, size_t i) noexcept {
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-    // child_ptr points into the witness at any alignment; a slot rewritten since holds its hash in
-    // child[i], which is 8-aligned.
+    // child_ptr points into the witness at any alignment; a rewritten slot holds its hash in child[i] (8-aligned).
     if (b.child_ptr[i] == nullptr) [[likely]] {
         copy32_from_aligned8(dst, b.child[i].bytes);
         return;
@@ -228,12 +206,7 @@ template <unsigned Off>
     std::memcpy(dst, b.child_ptr[i] ? b.child_ptr[i] : b.child[i].bytes, 32);
 }
 
-// Whether b's witness node is a full branch: 16 hash references and an empty value, 3 + 16 * 33 + 1
-// bytes with slot i at 3 + 33 i. Each slot of the node has length class 32, a hash reference (0xa0 and
-// 32 bytes) or an embedded node of 32 bytes, and its list header is 3 bytes (0xf9 and two length
-// bytes): the slots then fill 16 * 33 bytes before the value byte, which only 16 hash references do.
-// fast_decode_header() also takes a 4-byte header with a leading zero, which would leave room for one
-// embedded node of 32 bytes and shift the slots after it.
+// Whether b's witness node is a full branch: 16 hash refs, empty value, slot i at 3 + 33 i (no leading-zero header).
 [[gnu::always_inline]] inline bool has_full_branch_orig(const BranchNode& b) noexcept {
     typedef uint32_t __attribute__((may_alias)) w32;
     const w32* const lens = reinterpret_cast<const w32*>(std::assume_aligned<8>(b.orig_child_len.data()));
@@ -242,34 +215,24 @@ template <unsigned Off>
             (lens[3] ^ 0x20202020u)) == 0;
 }
 
-// Whether encode_branch(b) is the witness node b.orig, a full branch, with the hash bytes of the dirty
-// slots rewritten and nothing else (its full-branch copy-and-patch path), and that node is 8-aligned:
-// what ethash_keccak256_full_branch() hashes from the node itself, with no copy. b.orig, a witness
-// node, is verified against its hash before it is unfolded, and its bytes are never written.
+// Whether encode_branch(b) is the 8-aligned witness node b.orig with only dirty hashes rewritten (never written).
 [[gnu::always_inline]] inline bool hashes_from_witness(const BranchNode& b) noexcept {
     return b.mask != 0 && b.orig != nullptr && (reinterpret_cast<uintptr_t>(b.orig) & 7) == 0 &&
            b.same_layout_as_orig() && has_full_branch_orig(b);
 }
 
-// Always inlined (the guest calls it from encode_line() only): grown by the inline hash copies
-// above, it was otherwise compiled out of line and reached by a call.
 [[gnu::always_inline]] inline ByteView encode_branch(const BranchNode& b) {
     if (b.mask == 0) {
         return empty;
     }
-    // Same length class in every slot means the witness encoding's layout is unchanged:
-    // copy it into the scratch buffer and rewrite only the dirty slots there. Clean slots
-    // still read (hash) or were copied (embedded) from that encoding, so this matches
-    // the full re-encode byte for byte. The original witness bytes are never written.
+    // Same length class in every slot keeps the witness layout: copy it and rewrite only the dirty slots.
     if (b.orig != nullptr && b.same_layout_as_orig()) {
-        // At the witness node's phase modulo 32, see static_buffer.
         uint8_t* const out = static_buffer + (reinterpret_cast<uintptr_t>(b.orig) & 31);
         std::memcpy(out, b.orig, b.orig_size);
         if (b.dirty == 0) {
             return ByteView{out, b.orig_size};
         }
-        // A full branch (most branches on mainnet) has slot i at 3 + 33 i, so its dirty slots are
-        // addressed directly. The general walk below sums the slot sizes up to the last dirty one.
+        // A full branch has slot i at 3 + 33 i, so dirty slots are addressed directly.
         if (has_full_branch_orig(b)) {
             for (unsigned dirty = b.dirty; dirty != 0; dirty &= dirty - 1) {
                 const unsigned i = lowest_set_bit(dirty);
@@ -281,9 +244,8 @@ template <unsigned Off>
         }
         {
             const uint8_t b0 = b.orig[0];
-            uint8_t* p = out + (b0 < 0xf8 ? 1 : 1 + (b0 - 0xf7));  // list header length
-            // Walk the slots only up to the last dirty one (the rest are already in place), with
-            // the mask in a local: the byte copies below may alias b, so b.dirty was reloaded per slot.
+            uint8_t* p = out + (b0 < 0xf8 ? 1 : 1 + (b0 - 0xf7));
+            // Walk only up to the last dirty slot, with the mask in a local (byte copies may alias b).
             unsigned dirty = b.dirty;
             for (size_t i = 0; dirty != 0; ++i, dirty >>= 1) {
                 const auto len = b.orig_child_len[i];
@@ -303,17 +265,13 @@ template <unsigned Off>
         return ByteView{out, b.orig_size};
     }
     size_t payload_length = 0;
-    // Calculate payload for 16 children
     for (size_t i = 0; i < 16; ++i) {
         auto child_len = b.child_len[i];
 
-        // No double encoding for embedded node
         payload_length += (child_len == 0 || child_len == 32)
                                 ? 1 + child_len
                                 : child_len;
 
-        // Double encoding of embedded node
-        // payload_length += 1 + child_len;
     }
 
     payload_length += rlp::length(b.value);
@@ -338,46 +296,28 @@ template <unsigned Off>
     return ByteView{begin, static_cast<size_t>(p - begin)};
 }
 
-// The number of leading keccak blocks of the full branch b's encoding that the state saved for it in
-// the pool already covers, or 0 when none does; b must satisfy hashes_from_witness(). A nonzero result
-// consumes the saved state: the caller must resume from it, now, with ethash_keccak256_full_branch().
-//
-// The saved state is that of the first 136 * blocks bytes of the witness node b.orig (see
-// keccak_prefix.hpp). The encoding is that node with the hash bytes of the dirty slots rewritten
-// (hashes_from_witness()), slot i's from byte 4 + 33 i on. So the bytes before the first dirty slot
-// are the node's, and the saved state may be used if none of the slots that begin inside the blocks it
-// covers is dirty (kHeadSlots). That a clean slot is unchanged does not rest on the update that asked
-// for the snapshot: every change to a slot sets its dirty bit, and the pool row is found by b.orig. A
-// node with no dirty slot is the witness node and resumes too.
+// Leading keccak blocks of full branch b's encoding its saved state covers, or 0; nonzero consumes the state.
 [[gnu::always_inline]] inline unsigned take_resumable_blocks(const BranchNode& b, size_t row) noexcept {
     if (kprefix::tag_orig[row] != b.orig) return 0;
-    // tag_sb is 1..3 while the tag is set (verify_and_snap() stores the first_blocks() of a slot). Masked all the
-    // same: the index stays inside kHeadSlots, and the count within what a resume takes, whatever the row holds.
+    // tag_sb is 1..3 while tagged; masked so the index stays inside kHeadSlots whatever the row holds.
     const unsigned blocks = kprefix::tag_sb[row] & 3u;
     if ((b.dirty & kprefix::kHeadSlots[blocks]) != 0) return 0;
     kprefix::tag_orig[row] = nullptr;
     return blocks;
 }
 
-// The most leading blocks of the full branch b's encoding (b satisfies hashes_from_witness()) that are still the
-// witness node's bytes: those before the hash bytes of its first dirty slot, all three whole blocks if no slot is
-// dirty. A state saved for the node serves the encoding if it covers no more blocks than this, the same test as
-// take_resumable_blocks()'s kHeadSlots one: slot i's hash bytes begin at 4 + 33 i, in block (4 + 33 i) / 136.
+// Leading blocks of full branch b's encoding still the witness node's: those before the first dirty slot's hash bytes.
 [[gnu::always_inline]] inline unsigned full_branch_clean_blocks(const BranchNode& b) noexcept {
     return b.dirty == 0 ? 3u : kprefix::first_blocks(lowest_set_bit(b.dirty));
 }
 
-// The leading whole blocks of encode_branch(b) that are bytes of b's witness node, for a b laid out as that node
-// (b.orig set, same_layout_as_orig()): encode_branch() copies the node and rewrites only the slots in b.dirty, each
-// from the first byte of its item, at the offset the items before it take in the node (a hash reference 33 bytes,
-// an empty slot 1, an embedded node its own length; the list header 1 to 3). So the bytes before the item of the
-// first dirty slot are the node's, and all of them are if no slot is dirty.
+// Leading whole blocks of encode_branch(b) that are b's witness node bytes: those before the first dirty slot's item.
 [[gnu::always_inline]] inline unsigned same_layout_clean_blocks(const BranchNode& b) noexcept {
     size_t clean = b.orig_size;
     if (b.dirty != 0) {
         const unsigned first = lowest_set_bit(b.dirty);
         const unsigned b0 = b.orig[0];
-        clean = b0 < 0xf8u ? 1u : 1u + (b0 - 0xf7u);  // as encode_branch()
+        clean = b0 < 0xf8u ? 1u : 1u + (b0 - 0xf7u);
         for (unsigned i = 0; i < first; ++i) {
             const unsigned len = b.orig_child_len[i];
             clean += len == 0 ? 1u : len == 32 ? 33u : len;
@@ -386,9 +326,7 @@ template <unsigned Off>
     return static_cast<unsigned>(clean / kprefix::kBlock);
 }
 
-// Writes the list header of a leaf or extension payload at `out`, returns the position after it. A payload
-// below 256 bytes takes the one-byte long form without to_big_compact; a longer one (a leaf value of up to
-// kMaxLeafValueSize) goes through encode_list_header.
+// A payload below 256 bytes takes the one-byte long form; a longer one goes through encode_list_header.
 inline uint8_t* encode_short_node_list_header(uint8_t* out, size_t payload) noexcept {
     if (payload < 56) {
         *out++ = static_cast<uint8_t>(rlp::kEmptyListCode + payload);
@@ -401,9 +339,7 @@ inline uint8_t* encode_short_node_list_header(uint8_t* out, size_t payload) noex
     return out;
 }
 
-// The HP path's flag byte is below 0x80 (flag <= 3), so a one-byte path (an empty or one-nibble one) is its own RLP
-// encoding and a longer one has a one-byte string header (at most 33 bytes). Written in place, the path
-// needs no stack copy.
+// The HP flag byte is below 0x80: a one-byte path is its own RLP; a longer one has a one-byte string header.
 inline uint8_t* encode_hp_path_rlp(uint8_t* out, const nibbles64& path, bool leaf) noexcept {
     const size_t hp_len = 1 + path.len / 2;
     if (hp_len != 1) *out++ = static_cast<uint8_t>(rlp::kEmptyStringCode + hp_len);
@@ -420,14 +356,12 @@ inline ByteView encode_ext(const ExtensionNode& e) {
         return empty;
     }
 
-    // Child RLP length.
     const size_t child_rlp_len = (e.child_len == 32) ? 33 : e.child_len;
     const size_t payload = hp_path_rlp_length(e.path) + child_rlp_len;
 
     uint8_t* out = encode_short_node_list_header(static_buffer, payload);
     out = encode_hp_path_rlp(out, e.path, /*leaf*/ false);
 
-    // Child.
     if (e.child_len == 32) {
         *out++ = 0xa0;
         std::memcpy(out, e.child.bytes, 32);
@@ -453,7 +387,6 @@ inline ByteView encode_leaf(const LeafNode& l) {
     uint8_t* out = encode_short_node_list_header(static_buffer, payload);
     out = encode_hp_path_rlp(out, l.path, /*leaf*/ true);
 
-    // Value.
     if (val_single) {
         *out++ = l.value[0];
     } else {
@@ -466,56 +399,48 @@ inline ByteView encode_leaf(const LeafNode& l) {
     return ByteView{static_buffer, static_cast<size_t>(out - static_buffer)};
 }
 
-// ---------------------------------------------
-// Decoding helpers for MPT nodes
-// ---------------------------------------------
-
-// Store one decoded child into branch slot i (empty / embedded / 0xa0-hash).
-// start_byte is the child's RLP start byte; data/len is its decoded payload.
+// Stores one decoded child into branch slot i (empty, embedded or 0xa0 hash); start_byte is its RLP start byte.
 [[gnu::always_inline]] inline bool fill_branch_child(BranchNode& out, size_t i,
                                                      uint8_t start_byte,
                                                      const uint8_t* data, size_t len) {
     if (len == 0) {
-        out.child_len[i] = 0;  // empty child (RLP empty string 0x80)
+        out.child_len[i] = 0;
         out.child_ptr[i] = nullptr;
         return true;
     }
     if (start_byte != 0xa0) {
         if (len > 31) return false;  // embedded child must fit child[i].bytes (with header byte)
         out.child_len[i] = static_cast<uint8_t>(len + 1);
-        out.child[i].bytes[0] = start_byte;  // keep header byte for embedded child
+        out.child[i].bytes[0] = start_byte;
         out.child_ptr[i] = nullptr;
         std::copy_n(data, len, &out.child[i].bytes[1]);
     } else {
-        out.child_len[i] = 32;  // 0xa0 hashref is always 32 bytes
-        out.child_ptr[i] = data;  // reference witness blob; no copy
+        out.child_len[i] = 32;
+        out.child_ptr[i] = data;
     }
     out.mask |= (1 << i);
     return true;
 }
 
-// Decode one branch child from `remaining` into slot i, advancing `remaining`.
-// A branch child is only: 0x80 (empty) | 0xa0+32 (hash ref) | short embedded
-// list (0xc0..0xf7, <32B). Skips the general decode_header (no single-byte /
-// long-string / long-list handling a branch child never hits).
+// A branch child is only 0x80, 0xa0 + 32 bytes (hash ref) or a short embedded list (0xc0..0xf7); skips decode_header.
 [[gnu::always_inline]] inline bool fill_branch_child_rlp(BranchNode& out, size_t i, ByteView& remaining) {
     if (remaining.empty()) return false;
     const uint8_t b0 = remaining[0];
-    if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty
+    if (b0 == rlp::kEmptyStringCode) {
         out.child_len[i] = 0;
         out.child_ptr[i] = nullptr;
         remaining.remove_prefix(1);
         return true;
     }
-    if (b0 == 0xa0) {  // 32-byte hash ref
-        if (remaining.size() < 33) return false;  // input-too-short (matches decode_header)
+    if (b0 == 0xa0) {
+        if (remaining.size() < 33) return false;
         out.child_ptr[i] = remaining.data() + 1;
         out.child_len[i] = 32;
         out.mask |= (1u << i);
         remaining.remove_prefix(33);
         return true;
     }
-    if (b0 >= 0xc0 && b0 <= 0xf7) {  // embedded short list
+    if (b0 >= 0xc0 && b0 <= 0xf7) {
         const size_t payload = static_cast<size_t>(b0 - 0xc0);
         if (payload > 31) return false;  // must fit child[i].bytes (header + payload)
         if (remaining.size() < 1 + payload) return false;
@@ -527,7 +452,7 @@ inline ByteView encode_leaf(const LeafNode& l) {
         remaining.remove_prefix(1 + payload);
         return true;
     }
-    return false;  // not a valid branch child
+    return false;
 }
 
 inline bool decode_branch(ByteView payload, BranchNode& out) {
@@ -535,17 +460,14 @@ inline bool decode_branch(ByteView payload, BranchNode& out) {
 
     ByteView remaining = payload;
 
-    // Decode 16 children
     for (size_t i = 0; i < 16; ++i) {
         if (!fill_branch_child_rlp(out, i, remaining)) return false;
     }
 
-    // Decode value - usually empty
     if (remaining.size() == 1 && remaining[0] == rlp::kEmptyStringCode) {
         out.value = {};
-        return true;  // value empty + list fully consumed
+        return true;
     }
-    // Rare: non-empty value.
     auto hdr_value = rlp::decode_header(remaining);
     if (!hdr_value || hdr_value->list) return false;
     out.value = remaining.substr(0, hdr_value->payload_length);
@@ -558,54 +480,41 @@ inline bool decode_ext_or_leaf(ByteView payload, bool& is_leaf,
                                ByteView& second) {
     ByteView remaining = payload;
 
-    // First element - HP encoded path
     auto h1 = rlp::decode_header(remaining);
     if (!h1 || h1->list) [[unlikely]] return false;
     ByteView hp_path = remaining.substr(0, h1->payload_length);
     remaining.remove_prefix(h1->payload_length);
 
-    // Decode HP path first to determine if it's a leaf or extension
     if (!hp_decode(hp_path, is_leaf, path, plen)) [[unlikely]] {
         return false;
     }
 
-    // Second element - child hash (for extension) or value (for leaf)
     const uint8_t* second_start = remaining.data();
     auto h2 = rlp::decode_header(remaining);
     if (!h2 || h2->list) [[unlikely]] return false;
 
     if (!is_leaf) {
-        // Extension: for hash references, return just the 32-byte hash (not RLP-encoded)
-        // For embedded nodes, return the full RLP
+        // Extension: a hash reference returns the 32-byte hash alone; an embedded node returns its full RLP.
         if (h2->payload_length == 32) {
-            // Hash reference: return just the payload (32 bytes)
             second = remaining.substr(0, 32);
         } else {
-            // Embedded node: return full RLP-encoded form (header + payload)
             size_t header_len = static_cast<size_t>(remaining.data() - second_start);
             size_t total_len = header_len + h2->payload_length;
             second = ByteView{second_start, total_len};
         }
     } else {
-        // Leaf: return just the value payload
         second = remaining.substr(0, h2->payload_length);
     }
 
     remaining.remove_prefix(h2->payload_length);
 
-    // Should have consumed everything
     return remaining.empty();
 }
 
-// Single-pass node decode
 inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                             bool& is_leaf, std::array<uint8_t, 64>& path,
                             uint8_t& plen, ByteView& second) {
-    // A full branch: 16 hash children and an empty value, 16 * 33 + 1 payload bytes. That is
-    // most witness branch nodes on mainnet (65% of those re-encoded). Once each child is seen
-    // to be a 33-byte string (length byte 0xa0), the layout fixes every pointer and length and
-    // the mask, which the general decode below derives one child at a time at ~20
-    // instructions each.
+    // Fast path for a full branch (16 hash children, empty value): the layout fixes every pointer, length and the mask.
     if (payload.size() == 16 * 33 + 1 && payload[16 * 33] == rlp::kEmptyStringCode) {
         const uint8_t* const p = payload.data();
         bool hashes = true;
@@ -631,7 +540,6 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
 
     ByteView remaining = payload;
 
-    // Element 0
     const uint8_t e0_start = remaining.empty() ? 0 : *remaining.data();
     auto h0 = rlp::decode_header(remaining);
     if (!h0) return kInvalid;
@@ -639,7 +547,6 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
     const bool e0_list = h0->list;
     remaining.remove_prefix(h0->payload_length);
 
-    // Element 1
     const uint8_t e1_start = remaining.empty() ? 0 : *remaining.data();
     const uint8_t* e1_start_ptr = remaining.data();
     auto h1 = rlp::decode_header(remaining);
@@ -648,36 +555,30 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
     const bool e1_list = h1->list;
     remaining.remove_prefix(h1->payload_length);
 
-    if (remaining.empty()) {    // This is leaf or extension
+    if (remaining.empty()) {
         if (e0_list) [[unlikely]] return kInvalid;
         if (!hp_decode(e0_payload, is_leaf, path, plen)) [[unlikely]] return kInvalid;
         if (e1_list) [[unlikely]] return kInvalid;
 
         if (!is_leaf) {
             if (h1->payload_length == 32) {
-                second = e1_payload;  // exactly the 32-byte hash payload
+                second = e1_payload;
             } else {
                 size_t header_len = static_cast<size_t>(e1_payload.data() - e1_start_ptr);
                 second = ByteView{e1_start_ptr, header_len + h1->payload_length};
             }
         } else {
-            // No trie has a leaf without a value: a key whose value goes loses its leaf. As a grid line it would
-            // be empty, and its fold would delete the ancestors it leaves empty too, where the seek's folds must
-            // delete a line each (see seek_with_last_insert()).
-            if (h1->payload_length == 0 || h1->payload_length > kMaxLeafValueSize) [[unlikely]] return kInvalid;  // see static_buffer
+            // No trie has a leaf without a value: its grid line would be empty and its fold would delete ancestors too.
+            if (h1->payload_length == 0 || h1->payload_length > kMaxLeafValueSize) [[unlikely]] return kInvalid;
             second = e1_payload;
         }
         return kExtOrLeaf;
     }
 
-    // Elements 0 and 1 are already decoded; fill them, then decode slots 2..15.
     out_branch.mask = 0;
     if (!fill_branch_child(out_branch, 0, e0_start, e0_payload.data(), h0->payload_length)) return kInvalid;
     if (!fill_branch_child(out_branch, 1, e1_start, e1_payload.data(), h1->payload_length)) return kInvalid;
 
-    // Slots 2..15: fill_branch_child_rlp() with the position in local pointers and the mask in a
-    // local. `remaining` escapes into decode_header() below, so each of its updates was a stack
-    // store, and out_branch.mask was reloaded and stored around every child's byte copy.
     {
         const uint8_t* p = remaining.data();
         const uint8_t* const end = p + remaining.size();
@@ -685,19 +586,19 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
         for (size_t i = 2; i < 16; ++i) {
             if (p == end) return kInvalid;
             const uint8_t b0 = *p;
-            if (b0 == 0xa0) {  // 32-byte hash ref
-                if (end - p < 33) return kInvalid;  // input-too-short (matches decode_header)
+            if (b0 == 0xa0) {
+                if (end - p < 33) return kInvalid;
                 out_branch.child_ptr[i] = p + 1;
                 out_branch.child_len[i] = 32;
                 mask |= 1u << i;
                 p += 33;
-            } else if (b0 == rlp::kEmptyStringCode) {  // 0x80 empty
+            } else if (b0 == rlp::kEmptyStringCode) {
                 out_branch.child_len[i] = 0;
                 out_branch.child_ptr[i] = nullptr;
                 ++p;
-            } else if (b0 >= 0xc0 && b0 <= 0xf7) {  // embedded short list
+            } else if (b0 >= 0xc0 && b0 <= 0xf7) {
                 const size_t plen_ = static_cast<size_t>(b0 - 0xc0);
-                if (plen_ > 31) return kInvalid;  // must fit child[i].bytes (header + payload)
+                if (plen_ > 31) return kInvalid;
                 if (static_cast<size_t>(end - p) < 1 + plen_) return kInvalid;
                 out_branch.child[i].bytes[0] = b0;
                 std::copy_n(p + 1, plen_, &out_branch.child[i].bytes[1]);
@@ -706,16 +607,14 @@ inline Kind decode_node(ByteView payload, BranchNode& out_branch,
                 mask |= 1u << i;
                 p += 1 + plen_;
             } else {
-                return kInvalid;  // not a valid branch child
+                return kInvalid;
             }
         }
         out_branch.mask = static_cast<uint16_t>(mask);
         remaining = ByteView{p, static_cast<size_t>(end - p)};
     }
 
-    // Value (17th): empty (0x80), and the list ends there. The state and storage tries have
-    // fixed-length keys, so no key ends at a branch; a value would also not fit the encode buffer
-    // budget for branches (see static_buffer).
+    // The 17th value must be empty: keys are fixed-length, and a value would not fit the static_buffer budget.
     if (remaining.size() == 1 && remaining[0] == rlp::kEmptyStringCode) {
         out_branch.value = {};
         return kBranch;
@@ -736,7 +635,6 @@ inline bool is_empty(const GridLine& line) {
     }
 }
 
-// Encode the given line's node
 inline ByteView encode_line(const GridLine& line) {
     switch (line.kind) {
         case kBranch:

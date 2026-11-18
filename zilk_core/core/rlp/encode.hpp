@@ -2,9 +2,6 @@
 // Copyright 2025 The Original Silkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// RLP encoding functions as per
-// https://eth.wiki/en/fundamentals/rlp
-
 #pragma once
 
 #include <intx/intx.hpp>
@@ -26,17 +23,10 @@ void encode_header(Bytes& to, Header header);
 
 void encode(Bytes& to, ByteView str);
 
-// In-place variant of `encode(Bytes&, ByteView)` — writes the RLP encoding
-// of `str` directly into `dst` and returns the number of bytes written.
-// Caller is responsible for ensuring the buffer is large enough
-// (header + str.size(); ≤ 1 + str.size() for str.size() < 56). Tried
-// inline; cycles dropped but trace-area grew → +0.01% prover_gas. Kept OOL.
+// Writes the RLP of str to dst, returns bytes written; caller guarantees capacity.
 size_t encode_into(uint8_t* dst, ByteView str) noexcept;
 
-// Header-inline short-string variant. ASSUMES str.size() < 56 — caller's
-// responsibility (e.g. storage slot values after zeroless_view, which fit in
-// 0..32 bytes). Avoids the OOL call hop on the storage-trie hot path
-// (called twice per slot in check_root, hundreds of times per block).
+// Requires str.size() < 56 (caller's responsibility); no bounds check.
 [[gnu::always_inline]] inline size_t encode_into_small(uint8_t* dst, ByteView s) noexcept {
     if (s.size() == 1 && s[0] < kEmptyStringCode) {
         dst[0] = s[0];

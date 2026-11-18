@@ -11,7 +11,6 @@
 
 namespace silkworm::rlp {
 
-//! Decodes an RLP list of dynamic size with items of type T
 template <typename T>
 DecodingResult decode(ByteView& from, std::vector<T>& to, Leftover mode = Leftover::kProhibit) noexcept {
     const auto h{decode_header(from)};
@@ -55,7 +54,6 @@ DecodingResult decode_items(ByteView& from, Arg1& arg1, Arg2& arg2, Args&... arg
     return decode_items(from, arg2, args...);
 }
 
-//! Decodes an RLP list with a fixed number of items with various types
 template <typename Arg1, typename Arg2, typename... Args>
 DecodingResult decode(ByteView& from, Leftover mode, Arg1& arg1, Arg2& arg2, Args&... args) noexcept {
     const auto header{decode_header(from)};
@@ -80,11 +78,7 @@ DecodingResult decode(ByteView& from, Leftover mode, Arg1& arg1, Arg2& arg2, Arg
     return {};
 }
 
-/**
- * Decodes an RLP list of dynamic size with items of any type.
- * The resulting RlpByteView-s refer to RLP-encoded data of the list items.
- * Use rlp::decode(to[i].data, ...) to fully decode them.
- */
+// Items stay raw RLP; decode each with rlp::decode(item.data, ...).
 template <>
 inline DecodingResult decode(ByteView& from, std::vector<RlpByteView>& to, Leftover mode) noexcept {
     auto header = decode_header(from);
