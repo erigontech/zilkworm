@@ -1,13 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Tests for the guests' memcpy, memmove, memset and memcmp (mem_builtins.cpp), compiled into the
-// native test binary at both word sizes, 8 bytes as on SP1 and 4 as on Airbender, and compared
-// against libc. Beyond the right bytes they must survive the overlapping copies memmove() forwards
-// to memcpy(), and never touch a word that holds no byte of the ranges, which is what keeps the
-// masked ends safe; guard pages on either side of a page check that. The build adds the alignment
-// sanitizer, which stands in for the guests' trap on a misaligned word access. Airbender's CSR
-// MEMCOPY blocks are tested apart, in zilk_core/dev/cli/mem_builtins_test.cpp.
+// Tests for the guests' memcpy, memmove, memset and memcmp (mem_builtins.cpp).
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -62,7 +56,7 @@ const Mem MEMS[] = {
         w32::z6m_mem32_memcmp},
 };
 
-constexpr size_t PAD = 64;  // Padding whose content must survive the call.
+constexpr size_t PAD = 64;
 
 /// Returns a pointer at least @p base whose address is @p want modulo 8 (the larger word size).
 template <typename T>
@@ -100,8 +94,6 @@ struct GuardedPage
 
 TEST_CASE("guest mem builtins: memcpy of every size and alignment matches libc", "[mem_builtins]")
 {
-    // Past 32 words the aligned copy loops 16 words at a time; 640 bytes run that loop several
-    // times, ending in every remainder.
     std::mt19937_64 rng{12345};
     for (const auto& m : MEMS)
     {
@@ -127,7 +119,6 @@ TEST_CASE("guest mem builtins: memcpy of every size and alignment matches libc",
                     REQUIRE(m.memcpy(d, s, n) == d);
                     std::memcpy(r, s, n);
 
-                    // The copied bytes, and nothing else in the destination buffer, must match.
                     if (std::memcmp(dst.data(), ref.data(), span) != 0)
                         FAIL("n=" << n << " src+" << src_phase << " dst+" << dst_phase);
                 }
@@ -138,8 +129,6 @@ TEST_CASE("guest mem builtins: memcpy of every size and alignment matches libc",
 
 TEST_CASE("guest mem builtins: memmove in either direction matches libc", "[mem_builtins]")
 {
-    // dest below src (and up to dest == src) goes to memcpy(), which must read each source word
-    // before the store that can clobber it; dest above src goes backward.
     std::mt19937_64 rng{6789};
     for (const auto& m : MEMS)
     {
@@ -164,7 +153,6 @@ TEST_CASE("guest mem builtins: memmove in either direction matches libc", "[mem_
                     if (std::memcmp(buf.data(), ref.data(), span) != 0)
                         FAIL("n=" << n << " delta=" << delta << " src+" << phase);
 
-                    // memcpy() itself, where a forward copy is right.
                     if (delta <= 0)
                     {
                         REQUIRE(m.memcpy(d, s, n) == d);
@@ -175,7 +163,6 @@ TEST_CASE("guest mem builtins: memmove in either direction matches libc", "[mem_
                 }
             }
         }
-        // Large moves, the backward ones word by word.
         std::vector<uint8_t> buf(70000), ref(70000);
         for (size_t n : {size_t{4096}, size_t{5000}, size_t{65536}})
         {
@@ -197,8 +184,6 @@ TEST_CASE("guest mem builtins: memmove in either direction matches libc", "[mem_
 
 TEST_CASE("guest mem builtins: memset of every size and alignment matches libc", "[mem_builtins]")
 {
-    // Past 64 words the fill loops 16 words at a time; 640 bytes run that loop several times,
-    // ending in every remainder.
     std::mt19937_64 rng{1357};
     for (const auto& m : MEMS)
     {
@@ -220,7 +205,6 @@ TEST_CASE("guest mem builtins: memset of every size and alignment matches libc",
                     REQUIRE(m.memset(d, c, n) == d);
                     std::memset(r, c, n);
 
-                    // The filled bytes, and nothing else in the buffer, must match.
                     if (std::memcmp(buf.data(), ref.data(), span) != 0)
                         FAIL("n=" << n << " phase=" << phase << " c=" << c);
                 }
@@ -248,8 +232,6 @@ TEST_CASE("guest mem builtins: memcmp of every size, alignment and difference ma
                     const auto* p = at_phase(a.data(), a_phase);
                     auto* q = at_phase(b.data(), b_phase);
 
-                    // Equal, then the first difference at each position (a sample of them past
-                    // 72 bytes) and random bytes after it, either operand the greater.
                     for (size_t pos = 0; pos <= n; pos += (n <= 72 || pos + 9 >= n) ? 1 : 7)
                     {
                         std::memcpy(q, p, n);
@@ -277,9 +259,6 @@ TEST_CASE("guest mem builtins: no access to a word outside the ranges", "[mem_bu
     GuardedPage src, dst;
     const auto page = src.size;
 
-    // The last byte flush against the guard page after, then the first byte in the first word of
-    // the page, on either side; an access to a word before or past the ones holding the ranges
-    // would raise SIGSEGV.
     for (const auto& m : MEMS)
     {
         for (size_t n = 1; n <= 640; ++n)
@@ -301,7 +280,6 @@ TEST_CASE("guest mem builtins: no access to a word outside the ranges", "[mem_bu
                 }
                 std::memset(dst.data, 0xAB, page);
             }
-            // memcmp() resolves a difference by bytes: the last one, against the guard page.
             std::memcpy(dst.data + page - n, src.data + 1024, n);
             dst.data[page - 1] ^= 1;
             CHECK(m.memcmp(dst.data + page - n, src.data + 1024, n) != 0);

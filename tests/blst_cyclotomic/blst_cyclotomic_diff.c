@@ -1,14 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// Differential test of the guest's fused cyclotomic squaring outputs (3*t - 2*a and 3*t + 2*a,
-// formed with one CSR sum and one reduction) against the three modular operations of blst's
-// original cyclotomic_sqr_fp12 and against an exact big-number model. Both versions are
-// compiled from the patch script's own text (extract.py) and the CSR instruction runs on the
-// emulation in bigint_emu.h. Compiled as C: it is the blst code, not C++.
-//
-// The domain is what the guest produces: t and a canonical (below p). The tests cover the whole
-// function too, with sqr_fp4 replaced by a stub that hands out chosen t values.
+// Differential test of the guest's fused cyclotomic squaring outputs.
 #include "bigint_emu.h"
 #include "blst_cyclotomic_diff.h"
 
@@ -20,7 +12,7 @@ typedef vec384fp6 vec384fp12[2];
 unsigned long emu_calls;
 static unsigned long cov_reduce_calls, cov_reduce_taken, cov_q[5];
 
-/* ---- big numbers: 16 little-endian 32-bit limbs ---- */
+// ---- big numbers: 16 little-endian 32-bit limbs ----
 #define NB 16
 typedef limb_t bn[NB];
 static limb_t P[12];
@@ -37,7 +29,7 @@ static void bn_add(bn r, const bn a, const bn b)
     llimb_t c = 0;
     for (int i = 0; i < NB; i++) { c += (llimb_t)a[i] + b[i]; r[i] = (limb_t)c; c >>= 32; }
 }
-static void bn_sub(bn r, const bn a, const bn b)   /* a >= b */
+static void bn_sub(bn r, const bn a, const bn b)
 {
     limb_t bw = 0;
     for (int i = 0; i < NB; i++) { llimb_t d = (llimb_t)a[i] - b[i] - bw; r[i] = (limb_t)d; bw = (limb_t)(d >> 63); }
@@ -53,7 +45,7 @@ static limb_t bn_divsmall(bn r, const bn a, limb_t k)
     for (int i = NB - 1; i >= 0; i--) { llimb_t cur = (rem << 32) | a[i]; r[i] = (limb_t)(cur / k); rem = cur % k; }
     return (limb_t)rem;
 }
-static void bn_from_i(bn r, long long v)   /* small signed offsets are applied by the caller */
+static void bn_from_i(bn r, long long v)
 {
     memset(r, 0, sizeof(bn)); r[0] = (limb_t)v;
 }
@@ -62,7 +54,7 @@ static void bn_addi(bn r, const bn a, long long d)
     bn t; bn_from_i(t, d < 0 ? -d : d);
     if (d >= 0) bn_add(r, a, t);
     else if (bn_cmp(a, t) >= 0) bn_sub(r, a, t);
-    else memset(r, 0xff, sizeof(bn));     /* below zero: callers drop it through the range test */
+    else memset(r, 0xff, sizeof(bn));
 }
 static int bn_lt_5p(const bn v)
 {
@@ -70,7 +62,7 @@ static int bn_lt_5p(const bn v)
     return bn_cmp(v, p5) < 0;
 }
 
-/* modular operations on canonical values */
+// modular operations on canonical values
 static void modadd(limb_t *r, const limb_t *x, const limb_t *y)
 {
     bn a, b, s, pp; bn_set12(a, x); bn_set12(b, y); bn_set12(pp, P);
@@ -85,7 +77,7 @@ static void modsub(limb_t *r, const limb_t *x, const limb_t *y)
     else { bn_add(s, a, pp); bn_sub(s, s, b); }
     memcpy(r, s, 48);
 }
-/* exact (3t -/+ 2a) mod p from big-number arithmetic alone */
+// exact (3t -/+ 2a) mod p from big-number arithmetic alone
 static void model_lin(limb_t *out, const limb_t *t, const limb_t *a, int sub)
 {
     bn bt, ba, pp, v, w;
@@ -97,7 +89,7 @@ static void model_lin(limb_t *out, const limb_t *t, const limb_t *a, int sub)
     while (bn_cmp(v, pp) >= 0) bn_sub(v, v, pp);
     memcpy(out, v, 48);
 }
-/* blst's chain: sub/add, add, add */
+// blst's chain: sub/add, add, add
 static void chain_lin(limb_t *out, const limb_t *t, const limb_t *a, int sub)
 {
     limb_t s[12];
@@ -106,7 +98,7 @@ static void chain_lin(limb_t *out, const limb_t *t, const limb_t *a, int sub)
     modadd(out, s, t);
 }
 
-/* ---- stubs for what the blocks call ---- */
+// ---- stubs for what the blocks call ----
 static void sub_fp2(vec384x ret, const vec384x a, const vec384x b)
 {
     limb_t r[2][12];
@@ -125,7 +117,7 @@ static void mul_by_u_plus_1_fp2(vec384x ret, const vec384x a)
     modsub(r[0], a[0], a[1]); modadd(r[1], a[0], a[1]);
     memcpy(ret, r, sizeof r);
 }
-static limb_t inj[3][2][2][12];   /* the t values the next squaring gets, one fp4 per sqr_fp4 call */
+static limb_t inj[3][2][2][12];
 static int inj_n;
 static void sqr_fp4(vec384fp4 ret, const vec384x a0, const vec384x a1)
 {
@@ -136,13 +128,13 @@ static void sqr_fp4(vec384fp4 ret, const vec384x a0, const vec384x a1)
 #include "base_block.inc"
 #include "cand_block.inc"
 
-/* ---- generators ---- */
+// ---- generators ----
 static uint64_t rs = 0x9e3779b97f4a7c15ull;
 static inline uint64_t rnd64(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return rs; }
 static inline limb_t rnd32(void) { return (limb_t)(rnd64() >> 17); }
 static int lt_p(const limb_t a[12]) { for (int i = 11; i >= 0; i--) if (a[i] != P[i]) return a[i] < P[i]; return 0; }
 static void gen_reduced(limb_t a[12]) { do { for (int i = 0; i < 12; i++) a[i] = rnd32(); a[11] &= 0x1fffffff; } while (!lt_p(a)); }
-static void gen_small(limb_t a[12])      /* random bit length */
+static void gen_small(limb_t a[12])
 {
     int bits = rnd32() % 381;
     memset(a, 0, 48);
@@ -185,17 +177,15 @@ static void build_edges(void)
         bn_pow2(v, bits[i]); add_edge(v); bn_addi(v, v, 1); add_edge(v);
         bn_pow2(v, bits[i]); bn_addi(v, v, -1); add_edge(v);
     }
-    /* p with its low 256 bits cleared, and with the top word one lower and the rest all ones */
     memset(v, 0, sizeof v); memcpy(v + 8, P + 8, 16); add_edge(v);
     memset(v, 0, sizeof v); memset(v, 0xff, 44); v[11] = P[11] - 1; add_edge(v);
     memset(v, 0, sizeof v); memset(v, 0xff, 32); add_edge(v);
     memset(v, 0, sizeof v); memset(v, 0xff, 32); v[8] = 1; add_edge(v);
-    /* every word 0 or all ones, alternating */
     memset(v, 0, sizeof v); for (int i = 0; i < 11; i += 2) v[i] = 0xffffffff; add_edge(v);
     memset(v, 0, sizeof v); for (int i = 1; i < 11; i += 2) v[i] = 0xffffffff; add_edge(v);
 }
 
-/* ---- checks ---- */
+// ---- checks ----
 static int failed;
 static char *fail_msg;
 static size_t fail_cap;
@@ -229,7 +219,7 @@ static void core(const limb_t *t, const limb_t *a, int sub)
     if (sub) { if (k > max_sub) max_sub = k; } else if (k > max_add) max_add = k;
     if (memcmp(r, m, 48)) { fail("fused != model", t, a, sub); return; }
     if (memcmp(t, tc, 48) || memcmp(a, ac, 48)) { fail("inputs modified", t, a, sub); return; }
-    memcpy(r, a, 48);   /* ret == a, as mul_n_sqr calls it */
+    memcpy(r, a, 48);
     if (sub) _cyc_3t_sub_2a(r, t, r); else _cyc_3t_add_2a(r, t, r);
     if (memcmp(r, m, 48)) { fail("fused ret==a != model", t, a, sub); return; }
     memcpy(r, t, 48);
@@ -238,11 +228,11 @@ static void core(const limb_t *t, const limb_t *a, int sub)
 }
 static void core2(const limb_t *t, const limb_t *a) { core(t, a, 1); core(t, a, 0); }
 
-/* a pair (t, a) whose pre-reduction value v is the given one: add: v = 3t + 2a, sub: v = 3t - 2a + 2p */
+// a pair (t, a) whose pre-reduction value v is the given one: add: v = 3t + 2a, sub: v = 3t - 2a + 2p
 static void aim(const bn v, const limb_t *a, int sub)
 {
     bn ba, pp, x, y, q; limb_t t[12];
-    for (int i = NB - 1; i >= 0; i--) if (v[i] == 0xffffffff && i == NB - 1) return;   /* bn_addi underflow */
+    for (int i = NB - 1; i >= 0; i--) if (v[i] == 0xffffffff && i == NB - 1) return;
     bn_set12(ba, a); bn_set12(pp, P);
     if (!bn_lt_5p(v)) return;
     bn_mulsmall(y, ba, 2);
@@ -260,7 +250,7 @@ static void aim(const bn v, const limb_t *a, int sub)
     memcpy(t, q, 48);
     core(t, a, sub);
 }
-/* targets around the multiples of p, the quotient thresholds and the 2^256 split of v */
+// targets around the multiples of p, the quotient thresholds and the 2^256 split of v
 static void crafted(const limb_t *a)
 {
     bn pp, v, w, t352; bn_set12(pp, P); bn_pow2(t352, 352);
@@ -268,12 +258,12 @@ static void crafted(const limb_t *a)
         for (int k = 0; k <= 4; k++) {
             bn kp; bn_mulsmall(kp, pp, k);
             for (int d = -6; d <= 6; d++) { bn_addi(v, kp, d); aim(v, a, sub); }
-            if (k >= 1) {   /* the smallest v whose top word reaches ceil(k*p / 2^352), and its neighbours */
+            if (k >= 1) {
                 bn c; bn_add(c, kp, t352); bn_addi(c, c, -1);
                 for (int i = 0; i < 11; i++) c[i] = 0;
                 for (int d = -3; d <= 3; d++) { bn_addi(v, c, d); aim(v, a, sub); }
             }
-            bn hi; memcpy(hi, kp, sizeof hi); for (int i = 0; i < 8; i++) hi[i] = 0;   /* (kp >> 256) << 256 */
+            bn hi; memcpy(hi, kp, sizeof hi); for (int i = 0; i < 8; i++) hi[i] = 0;
             static const int ehi[] = {-1, 0, 1};
             for (unsigned e = 0; e < 3; e++) {
                 bn h2; bn_pow2(w, 256); bn_mulsmall(w, w, 1);
@@ -296,7 +286,6 @@ static void crafted(const limb_t *a)
                 }
             }
         }
-        /* carries of the CSR sums: v's low 256 bits wrap in the middle of the computation */
         for (int i = 0; i < 40; i++) {
             bn_set12(v, a); memset(v, 0, sizeof v);
             for (int j = 0; j < 8; j++) v[j] = (rnd32() & 1) ? 0xffffffff : rnd32();
@@ -351,7 +340,6 @@ int blst_cyc_difftest(long n, unsigned long long seed, struct blst_cyc_stats* st
     rs = 0x9e3779b97f4a7c15ull ^ (seed * 0x2545F4914F6CDD1Dull);
     build_edges();
 
-    /* the tables the block carries are k*p */
     for (int k = 1; k <= 4; k++) {
         bn pp, kp; bn_set12(pp, P); bn_mulsmall(kp, pp, k);
         for (int i = 0; i < 12; i++) {
@@ -376,7 +364,6 @@ int blst_cyc_difftest(long n, unsigned long long seed, struct blst_cyc_stats* st
         }
     }
 
-    /* the whole function: wiring of t and a to the twelve outputs, the u+1 twist, ret == a */
     {
         static limb_t wa[2][3][2][12], wt[3][2][2][12];
         for (int mode = 0; mode < 6 && !failed; mode++) {
