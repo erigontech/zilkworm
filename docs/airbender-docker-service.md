@@ -1,7 +1,9 @@
 # Airbender prover service — Docker image
 
-How to build, get and run the dockerized Airbender proving service (zksync-airbender v3,
-100-bit security, proofs in the Ethproofs EPROOF01 v2 format).
+**Backend: DirectState** (the Airbender guest, MFBD bundles). How to build, get and run the
+dockerized Airbender proving service (zksync-airbender v3, 100-bit security, proofs in the
+Ethproofs EPROOF01 v2 format). The guest and the proof formats are in
+[airbender_architecture.md](airbender_architecture.md).
 
 ## Image
 

@@ -1,4 +1,11 @@
-# Z6M Airbender Guest Architecture
+# Airbender Guest Architecture
+
+**Backend: DirectState.** The Airbender guest is the rv32im build of zilk_core for
+[zksync-airbender](https://github.com/matter-labs/zksync-airbender). It takes an MFBD flat witness
+bundle (or an EEST JSON test) and runs the DirectState path of [directstate.md](directstate.md),
+with node-store recovery (`USE_HASH_KEY`) on by default. The prover's commands are in
+[`prover/prover_airbender/README.md`](../prover/prover_airbender/README.md); the image and the
+proving service are in [airbender-docker-service.md](airbender-docker-service.md).
 
 ## 1. Guest Program Build
 
@@ -53,6 +60,7 @@ Produces `z6m_guest.elf`, then `objcopy -O binary` creates `z6m_guest.bin` (flat
 | `prover/guest_common/src/mem_builtins.cpp` | Word-aligned `memcpy`, `memmove`, `memset`, `memcmp`, shared with the SP1 guest |
 | `runtime_stubs.c` | Stubs for `floor`, `fegetround`, `__dso_handle` |
 | `airbender_csr.hpp` | All CSR operations: read/write, UART, blake2s, bigint, keccak, finish |
+| `airbender_input.hpp` | `read_input_from_csr`: the input oracle reader |
 
 ---
 
@@ -70,9 +78,10 @@ _start_rust (airbender_runtime.cpp)
   → calls main()
 
 main (main.cpp)
-  → airbender::read_input_from_csr()  — reads block data from CSR oracle
-  → run_unified_rlp(ByteView)         — executes the block
-  → airbender::finish_success(out)    — writes result to registers, halts
+  → airbender::read_input_from_csr()  — reads the input from the CSR oracle
+  → StateTransition::run()            — dispatches on the input's magic, validates the blocks
+  → airbender::finish_success(out)    — writes the block hash to registers a0..a7, halts
+  (a failed or skipped run ends at airbender::finish_error())
 ```
 
 ### Input Reading Protocol (`airbender::read_input_from_csr`)
@@ -82,42 +91,13 @@ main (main.cpp)
 4. Handle trailing 0-3 bytes individually
 5. Return `{buffer_ptr, num_bytes}` as a `ByteView`
 
-The input is a **unified block-and-state RLP** binary: genesis block + target block + pre-state accounts/storage/code + pre-trie nodes, all concatenated as a single RLP list.
-
-### Block Execution (`StateTransition::run_rlp`)
-```
-run_rlp(unified_rlp_)
-  → RLP decode: genesis block, target block, pre-state, headers
-  → read_pre_state_from_rlp(): populate InMemoryState with accounts, storage, code
-  → Blockchain::insert_block(block):
-      → validate_block_header()
-      → pre_validate_block_body()
-      → execute_block() → ExecutionProcessor::execute_block_no_post_validation()
-          → For each transaction:
-              evmone::state::transition() → Host::call() → EVM dispatch loop
-      → apply_state_diff()
-  → check_root(): GridMPT verification against expected state root
-  → Return gas_used
-```
+The input is one envelope, told apart by its leading 4-byte magic: `MFBD` (a flat witness bundle)
+or `EJSN` (an EEST JSON test); see [architecture.md](architecture.md#input-format-and-dispatch).
+What `StateTransition::run()` does with a bundle is in [directstate.md](directstate.md#mfbd-run).
 
 ---
 
-## 3. Binary Input (vs JSON)
-
-The original zksync-airbender `runner.rs` was hardcoded to load `../zksync-os/zksync_os/app.bin` with no CLI arguments and no input file support. The zilkworm guest needs a **binary RLP input** (not JSON), fed through the CSR non-determinism oracle.
-
-### Changes to zksync-airbender (`risc_v_simulator/bin/runner.rs`)
-- Added CLI argument parsing: `--bin <path>`, `--input-file <path>`, `--cycles <N>`
-- Added `build_oracle()`: reads the input file bytes, prepends a u32 byte-count word, packs into LE u32 words
-- Feeds the oracle to `QuasiUARTSource::new_with_reads(oracle)` which the simulator delivers via CSR reads
-- Made `RunResultMeasurements` fields public and `Debug`-derivable for cycle reporting
-
-### Why binary, not JSON
-The z6m witness format is a compact RLP encoding of the full block context (genesis + block + pre-state + trie). This is ~6-16 MB per block. JSON would be 10-50x larger and require a JSON parser in the guest (nlohmann/json adds ~200KB of code). The binary format is parsed directly via `rlp::decode_header` / `rlp::decode` which are lightweight pointer-advancing operations.
-
----
-
-## 4. Precompile Acceleration
+## 3. Precompile Acceleration
 
 ### Keccak-f[1600] via CSRs 0x7CD, 0x7CC, 0x7CE
 
@@ -130,7 +110,7 @@ Ethereum uses Keccak-256 for everything: address derivation, storage slot hashin
 2. Set x10=0 (control, bumped by each call), x11=buffer pointer
 3. Execute 361 contiguous CSR writes: 24 rounds of 5 `csrrw x0, 0x7CD, x0`, 5 `csrrw x0, 0x7CC, x0` and 5 `csrrw x0, 0x7CE, x0`, then a last `csrrw x0, 0x7CD, x0` (`.rept`, not a loop: the transpiler recognizes the run by its first CSR and the call count, runs the whole permutation on the first write and moves the PC past the rest)
 
-Each CSR write is one step of a round; the three delegation circuits prove them. They replaced the 649-write KeccakSpecial5 run (CSR 0x7CB), whose circuit takes about twice the witness cells; on mainnet blocks proving takes about 8.5% less time on 4 GPUs.
+Each CSR write is one step of a round; the three delegation circuits prove them.
 
 ### BigInt U256 via CSR 0x7CA
 
@@ -153,12 +133,11 @@ Both pointers must be 32-byte aligned and point to RAM (>= 0x400000).
 The EVM `ecrecover` precompile (address 0x01) and transaction sender recovery use evmone's
 built-in secp256k1 code, which on AIRBENDER runs its field arithmetic through the BigInt CSR
 and computes u1*G + u2*R with a GLV-decomposed MSM over precomputed G / phi(G) tables
-(see zvm1 `lib/evmone_precompiles/secp256k1.cpp`). An earlier libsecp256k1-based path was
-dropped once this became faster.
+(see zvm1 `lib/evmone_precompiles/secp256k1.cpp`).
 
 ---
 
-## 5. Building and Running
+## 4. Building and Running
 
 ### Prerequisites
 - xPack `riscv-none-elf-gcc` 15.2.0 (or compatible) in PATH
@@ -178,23 +157,11 @@ make z6m_prover_airbender
 ```
 Output: `prover/prover_airbender/target/release/z6m_prover_airbender`
 
-### Execute a Block
-```bash
-prover/prover_airbender/target/release/z6m_prover_airbender execute \
-    --file-name /path/to/unifiedBlockAndStateRlp<N>.bin
-```
+### Execute, prove, verify
 
-Options:
-- `--guest-bin <path>` — override guest binary (default: `prover/guest_airbender/build/z6m_guest.bin`)
-- `--cycles <N>` — max cycle limit (default: 5,000,000,000)
-
-### Batch Execution
-```bash
-prover/prover_airbender/target/release/z6m_prover_airbender execute \
-    --test-service \
-    --start-block 24522000 --end-block 24522010 \
-    --data-dir /mnt/nodes_wd_8tb/benchmark_blocks
-```
+The commands of `z6m_prover_airbender` (`execute`, `vk`, `prove`, `verify`, `bench`, `--service`,
+`--test-service`) are in
+[`prover/prover_airbender/README.md`](../prover/prover_airbender/README.md).
 
 ### Running EEST Test Fixtures
 
@@ -224,18 +191,7 @@ A test passes only if its log has the guest's `run successful` line and no `CRAS
 
 **Oracle protocol**: The oracle is the input's byte count followed by its bytes, packed into little-endian u32 words. The guest reads them from CSR 0x7C0 and dispatches on the input's leading 4-byte magic: `MFBD` (a flat witness bundle, as converted on disk) or `EJSN` (an EEST JSON test). With `--is-test`, the Rust prover minifies the JSON fixture and wraps it in the `EJSN` envelope.
 
-### Example Output
-```
-Loading guest binary: prover/guest_airbender/build/z6m_guest.bin (3.2 MB)
-Loading input: unifiedBlockAndStateRlp24522000.bin (15.8 MB)
-UART: `[state_transition] run successful, gas used: 59681801`
-Took 2213982219 cycles to finish
-Executed block 24522000 (gas_used=59681801, cycles=2213982219, time=14.27s, freq=155M cycles/s, reached_end=true)
-```
-
----
-
-## 6. Proving (Airbender v3)
+## 5. Proving (Airbender v3)
 
 `z6m_prover_airbender` proves with zksync-airbender's v3 stack (`prover_pipeline`, pinned to
 bd0d5153), always to the final unified recursion layer at 100-bit security. See
@@ -260,7 +216,8 @@ word load/store runs, because the guest jumps into such runs (keccak's `buf_zero
 ### Statement and public output
 
 Every layer's verifier outputs 16 words. Words 0..7 are the guest's registers a0..a7 at its exit
-(the hash of the last block it validated, carried unchanged through the recursion). Words 8..15
+(the hash of the last block it validated, carried unchanged through the recursion; see
+[architecture.md](architecture.md#airbender-guest)). Words 8..15
 are the recursion chain: a Blake2s hash chain over each distinct layer's end parameters, the
 hash of its exit PC and setup commitments. The chain binds a proof to the guest binary and the
 verifier programs; the output binds it to a block.
