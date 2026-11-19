@@ -1,5 +1,4 @@
-// Integer growth check: at max_load_factor 1.0f libstdc++'s soft-float _M_need_rehash math is exact-integer, so results match.
-// Wrapped via -Wl,--wrap (CMakeLists.txt); other load factors and bucket counts from 14 up go to the real functions.
+// Integer _M_need_rehash: at max_load_factor 1.0f libstdc++'s double math is exact, so results match.
 
 #include <algorithm>
 #include <bit>
@@ -22,7 +21,7 @@ namespace
 {
 using std::__detail::_Prime_rehash_policy;
 
-// The ilp32 psABI returns std::pair<bool, size_t> in a0/a1; a uint64_t with the same two words is returned straight from registers.
+// ilp32 returns pair<bool, size_t> in a0/a1, but GCC builds it on the stack; a uint64_t stays in regs.
 using RehashPair = std::pair<bool, std::size_t>;
 using RehashResult = std::uint64_t;
 static_assert(sizeof(RehashPair) == sizeof(RehashResult) && offsetof(RehashPair, second) == 4);

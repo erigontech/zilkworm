@@ -9,8 +9,7 @@ set(CMAKE_ASM_COMPILER riscv-none-elf-gcc)
 set(BUILD_SHARED_LIBS OFF)
 
 set(common_flags "-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany -ffunction-sections -fdata-sections -fno-PIC")
-# Inlining limits widened as in riscv64im-sp1.cmake (instruction-counted target); builtins stay on, mem_builtins.cpp keeps -fno-builtin.
-# -mbranch-cost=1 prices a branch at one instruction; -mtune=size is not used: it makes GCC emit signed div/mulh, which Airbender lacks.
+# No -mtune=size (unlike the SP1 guest): it makes GCC emit signed div/mulh, which Airbender lacks.
 set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer \
 --param inline-unit-growth=100 --param max-inline-insns-auto=60 \
 --param large-function-growth=200 \

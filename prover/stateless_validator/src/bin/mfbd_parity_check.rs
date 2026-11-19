@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Asserts the Rust MFBD encoder and the C++ `json_witness_to_flat_bundle` emit identical bytes; exits 0 iff all inputs match.
+//! Asserts the Rust and C++ (`json_witness_to_flat_bundle`) MFBD encoders agree; exit 0 iff all match.
 
 use std::fs;
 use std::io::Write;

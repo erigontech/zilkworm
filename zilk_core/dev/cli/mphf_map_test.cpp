@@ -147,7 +147,7 @@ TEST_CASE("MphfBuilder clean build resolves all keys via primary path", "[mphf]"
     }
 }
 
-// A spilled CHD bucket leaves every sidecar key's index empty, so every added key resolves.
+// Spilled keys must probe empty slots, as find() scans the sidecar only from one: every added key resolves.
 TEST_CASE("MphfBuilder keeps every key findable when buckets spill", "[mphf]") {
     struct Recipe {
         uint32_t max_retries;
@@ -228,7 +228,7 @@ TEST_CASE("MphfBuilder sidecar keys always probe an empty slot", "[mphf]") {
     CHECK(sidecar_entries_checked > 0u);
 }
 
-// find() misses two ways: an occupied slot whose embedded key fails memcmp.
+// find() misses two ways, both reached here: an occupied slot failing memcmp, an empty slot's sidecar scan.
 TEST_CASE("MphfMap absent keys miss from both occupied and empty slots", "[mphf]") {
     auto built = build_map(2, 1, 512, 0x700000ULL);
     REQUIRE_FALSE(built.blob.empty());

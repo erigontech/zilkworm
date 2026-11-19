@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure-Rust MFBD encoder, byte-identical to the C++ `json_witness_to_flat_bundle` for the same witness.
+//! Pure-Rust MFBD encoder, byte-identical to C++ `json_witness_to_flat_bundle` (MPHFs in key8 order).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -478,7 +478,7 @@ fn rlp_decode_header(input: &[u8]) -> Result<RlpHeader> {
     }
 }
 
-/// Decodes a branch body (after the outer list header) into 16 child forms plus the 17th value slice; mirrors C++ `decode_branch`.
+/// Decodes a branch body (past its list header) into 16 children and the value, as C++ `decode_branch`.
 fn decode_branch(payload: &[u8]) -> Result<BranchChildren> {
     let mut out = BranchChildren::default();
     let mut remaining = payload;
@@ -526,7 +526,7 @@ fn decode_branch(payload: &[u8]) -> Result<BranchChildren> {
     Ok(out)
 }
 
-/// Decodes an extension/leaf body: `path` gets up to 64 nibbles (`plen` written); `second` is the leaf value or child reference.
+/// Decodes an extension/leaf body: <= 64 nibbles into `path` (`plen` set); `second`: value or child.
 fn decode_ext_or_leaf<'a>(
     payload: &'a [u8],
 ) -> Result<(bool, [u8; 64], usize, &'a [u8])> {
@@ -1179,6 +1179,7 @@ pub struct AmsterdamBlockParts<'a> {
     pub excess_blob_gas: u64,
     pub slot_number: u64,
     pub parent_beacon_block_root: [u8; 32],
+    /// EIP-7685 requests, each `[type_byte, data...]`.
     pub execution_requests: &'a [Bytes],
     pub transactions: &'a [Bytes],
     pub withdrawals: &'a [AmsterdamWithdrawal],

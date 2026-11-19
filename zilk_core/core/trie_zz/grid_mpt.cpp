@@ -156,7 +156,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     }
 }
 
-// A key the walk inserts is absent from the pre-state trie: its claimed pre-value is none or 0x80; checked first.
+// An inserted key is absent pre-state: claim none or 0x80. Precedes the read-only exit: it alone binds a read.
 template <bool DeletionEnabled, class StateT>
 [[gnu::noinline]] bool GridMPT<DeletionEnabled, StateT>::claims_absent(const TrieNodeFlat& u) {
     const ByteView v = u.initial_value();
@@ -240,7 +240,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                         return {};
                     }
                     if (trie_upd.current_value().empty()) {
-                        // A read of an absent key inserts nothing; the next seek starts from this branch.
+                        // Insert nothing: an empty leaf's cascade could drop lines the seek still climbs.
                         last_was_delete_ = true;
                         break;
                     }

@@ -193,7 +193,7 @@ if(BUILD_TESTING)
       zilk_core/dev/cli/code_store_collision_len_test.cpp
     )
   endif()
-  # mem_builtins.cpp built for the host with the guests' flags (loops must not become the libc calls it replaces); -mstrict-align traps misaligned accesses that x86 hides, so the alignment sanitizer stands in. -O3 as in the guests.
+  # mem_builtins.cpp with the guests' flags and -O3; the alignment sanitizer stands in for -mstrict-align traps.
   if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(MEM_BUILTINS_HOST_FLAGS -fno-builtin -fno-tree-loop-distribute-patterns -fsanitize=alignment
                                 -fno-sanitize-recover=alignment
@@ -209,7 +209,7 @@ if(BUILD_TESTING)
     )
     target_link_options(zilkworm.tests PRIVATE -fsanitize=alignment)
   endif()
-  # addr_hash_orphan_test drives StateTransition::run (silkworm_dev); ld64 resolves the core<->types_zz archive cycle globally, --start-group is GNU-ld-only.
+  # addr_hash_orphan_test needs silkworm_dev; --start-group (core<->types_zz cycle) is GNU-ld-only, ld64 resolves it.
   if(APPLE)
     set(ZILK_TEST_LIBS silkworm_dev silkworm_core silkworm_types_zz)
   else()
@@ -217,7 +217,7 @@ if(BUILD_TESTING)
   endif()
   # kzg_pairing_test builds proofs and its reference pairing with blst.
   target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} blst::blst Catch2::Catch2WithMain)
-  # The blst cyclotomic squaring exists only inside evmone's patch script; the test extracts it with Python and runs it on a host BigInt-delegation emulation.
+  # The blst cyclotomic squaring lives only in evmone's patch script: Python extracts it for a host emulation.
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING)
     set(BLST_CYC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/blst_cyclotomic")
@@ -241,7 +241,7 @@ if(BUILD_TESTING)
   else()
     message(STATUS "blst cyclotomic differential test skipped (needs Python3 on a host build)")
   endif()
-  # The blst mul_mont_384 exists only inside evmone's patch script; the test extracts it with Python and runs it on a host BigInt-delegation emulation.
+  # Likewise blst mul_mont_384: extracted from evmone's patch script by Python, run on a host emulation.
   if(Python3_Interpreter_FOUND AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING)
     set(BLST_MONT384_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/blst_mont384")
     set(BLST_PATCH_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/cmake/patch_blst_airbender.sh")
@@ -267,7 +267,7 @@ if(BUILD_TESTING)
   endif()
   include(Catch)
   catch_discover_tests(zilkworm.tests)
-  # evmone's SP1 secp256k1 recovery on the host with -DSP1 over a stand-in for the SP1 syscalls; separate executable since SP1 changes what evmone compiles to, and keccak.c (C) stays without SP1.
+  # evmone's SP1 secp256k1 on the host over SP1 syscall stand-ins: a separate target, as -DSP1 changes evmone (not keccak.c).
   if(NOT SP1 AND NOT SP1TURBO AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING
      AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(SP1_SECP256K1_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/sp1_secp256k1")

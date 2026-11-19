@@ -1,4 +1,4 @@
-//! The guest commits one 32-byte value in a0..a7: the last validated block's hash (zero if none), which the host derives from the input alone.
+//! The guest commits the last validated block's hash in a0..a7; it binds the bundle's transition.
 
 use alloy_primitives::{keccak256, B256};
 use eyre::{bail, eyre, Result};
@@ -36,7 +36,7 @@ pub fn expected_for_file(input_file: &Path, is_test: bool) -> Result<Expected> {
     expected_for_mfbd(&bytes)
 }
 
-/// Walks an MFBD envelope as StateTransition::run_mfbd does: the committed hash is that of the last block without the expect-invalid flag.
+/// Walks an MFBD envelope as run_mfbd does: the hash committed is the last unflagged block's.
 pub fn expected_for_mfbd(envelope: &[u8]) -> Result<Expected> {
     if read_u32(envelope, 0)? != INPUT_MAGIC_MFBD || read_u32(envelope, 4)? != INPUT_VERSION_MFBD {
         bail!("input is not an MFBD v{} envelope", INPUT_VERSION_MFBD);
@@ -395,7 +395,7 @@ mod tests {
         assert!(expected_for_mfbd(&two_bundles).is_err());
     }
 
-    /// Mainnet block 24,491,136 from the 200-block corpus: its RLP header, an independent keccak of it, and the output words the guest commits.
+    /// Mainnet block 24,491,136: RLP header, an independent keccak, and the guest's output words.
     #[test]
     fn mainnet_header_hash() {
         let header = alloy_primitives::hex::decode(MAINNET_24491136_HEADER).unwrap();

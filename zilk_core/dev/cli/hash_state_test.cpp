@@ -530,7 +530,7 @@ TEST_CASE("HashState build_state_from_trie on the empty root derives nothing", "
 
 namespace {
 
-// Encode a 32-byte storage word the way the storage trie stores its leaf value: the RLP string of the big-endian.
+// Encode a 32-byte storage word as the storage trie stores its leaf value: the RLP string of the zero-trimmed word.
 [[nodiscard]] Bytes encode_storage_value(const evmc::bytes32& word) {
     alignas(8) uint8_t buf[32];
     std::memcpy(buf, word.bytes, 32);
@@ -1351,7 +1351,7 @@ TEST_CASE("HashState get_storage missing node leaves the read unconfirmed", "[ha
     CHECK(hs.unconfirmed_read_count() > 0u);
 }
 
-// Storage: the build-time-skip case is now caught on read.
+// Storage: the build skips a storage trie whose root node is absent, but a read into it is recorded.
 TEST_CASE("HashState get_storage records a read into a build-skipped storage root", "[hash_state]") {
     HashState hs;
 
@@ -2406,7 +2406,7 @@ TEST_CASE("check_root_hashstate rejects a BLOCKHASH read of an omitted in-range 
     CHECK_FALSE(zilkworm::check_root_hashstate(hs, prev_root, writes, forged_root));
 }
 
-// A PRUNED BOUNDARY in the pre-state is legitimate now (not a missing node), so a write that avoids it ACCEPTS.
+// A PRUNED BOUNDARY in the pre-state is legitimate: a write avoiding it ACCEPTS, a fold through it REJECTS.
 TEST_CASE("check_root_hashstate accepts an off-boundary write but rejects a fold through a "
           "pruned boundary", "[hash_state][accept]") {
     HashState hs;
@@ -3247,7 +3247,7 @@ TEST_CASE("HashState find_or_create_account on a confirmed-absent key is fresh, 
     CHECK(hs.unconfirmed_read_count() == 0u);
 }
 
-// find_or_create_account on a PRUNED-BOUNDARY key: a usable record is still returned.
+// find_or_create_account on a PRUNED-BOUNDARY key: a usable record, but the unprovable miss is an unconfirmed read.
 TEST_CASE("HashState find_or_create_account on a pruned-boundary key is usable but unconfirmed",
           "[hash_state]") {
     HashState hs;

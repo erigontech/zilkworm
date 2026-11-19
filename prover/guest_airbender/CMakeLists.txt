@@ -22,7 +22,7 @@ add_executable(z6m_guest
     src/start.S
 )
 
-# zilk_core headers (print.hpp, mphf_map.hpp, ...) dispatch on AIRBENDER, else fall back to the iostream host implementation.
+# zilk_core headers (print.hpp, mphf_map.hpp, ...) dispatch on AIRBENDER, else use the iostream host code.
 target_compile_definitions(z6m_guest PRIVATE AIRBENDER)
 
 option(USE_HASH_KEY "Enable node-store account recovery for witness preimage gaps" ON)
@@ -85,7 +85,7 @@ target_link_options(z6m_guest PRIVATE
     -Wl,-T,${LINKER_SCRIPT}
     -Wl,-e,_start
     -Wl,--gc-sections
-    # libstdc++'s unordered-container growth check is soft-float double on rv32im; hashtable_policy.cpp answers it in integers.
+    # Unordered-container growth check: soft-float in libstdc++ on rv32im, integer in hashtable_policy.cpp.
     -Wl,--wrap=_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEjjj
 )
 

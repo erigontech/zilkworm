@@ -1,4 +1,4 @@
-# Post-link check: fails if the ELF holds signed mulh/mulhsu/div/rem, which Airbender decodes as illegal; keep such arithmetic unsigned.
+# Post-link: fail on signed mulh/mulhsu/div/rem, which Airbender decodes as illegal.
 #
 cmake_minimum_required(VERSION 3.20)  # IN_LIST in script mode
 

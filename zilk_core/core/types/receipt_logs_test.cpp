@@ -35,7 +35,7 @@ namespace {
         };
     }
 
-    // The 576-byte DepositEvent data of EIP-6110: five offsets.
+    // The 576-byte EIP-6110 DepositEvent data: offsets, then lengths and padded fields; `bad_word` >= 0 corrupts one.
     Bytes deposit_data(std::mt19937& rng, int bad_word = -1) {
         Bytes data(576, 0);
         const auto put_word = [&](size_t pos, uint32_t v) {

@@ -46,7 +46,7 @@ struct MockInput {
     void read(uint32_t* dst, size_t count) {
         for (size_t i = 0; i < count; ++i) dst[i] = word();
     }
-    /// The contract of io.verify(): the words to dst.
+    /// The contract of io.verify(): store the words to dst, then check the Keccak-256 of their first `size` bytes.
     bool verify(uint32_t* dst, uint32_t size, const uint32_t* key) {
         ++verify_calls;
         read(dst, (size + 3) / 4);

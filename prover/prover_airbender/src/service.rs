@@ -64,7 +64,7 @@ struct WorkItem {
     bundle_path: PathBuf,
     execute: bool,
     prove: bool,
-    /// The `queued` post, which the `proving` post awaits: both are background tasks and a late `queued` would move the status back.
+    /// The `queued` post, awaited by the `proving` post: a late `queued` would move the status back.
     queued_post: Option<tokio::task::JoinHandle<()>>,
     /// The fetcher's preflight run; None with Z6M_CONCURRENT_PREFLIGHT, where the worker runs it alongside proving.
     preflight: Option<Result<VmRunOutcome>>,
@@ -162,7 +162,7 @@ impl AirbenderService {
         Ok(())
     }
 
-    /// Walks blocks forward, fetches each and enqueues it; never blocks on proving or Ethproofs (`queued` is a detached task).
+    /// Fetches and enqueues blocks in order; never blocks on proving or Ethproofs (`queued` is detached).
     async fn fetcher_loop(self: Arc<Self>, tx: mpsc::Sender<WorkItem>) -> Result<()> {
         let url = Url::parse(&self.config.rpc_url)?;
         let provider = ProviderBuilder::new().connect_http(url);
@@ -212,7 +212,7 @@ impl AirbenderService {
         let mut fetch_failures: u32 = 0;
         // The `queued` post of a block whose fetch failed and is retried: it is sent once.
         let mut retried_queued_post: Option<(u64, tokio::task::JoinHandle<()>)> = None;
-        // Set once the tip is reached; a run from --start-block works through its backlog first, until one cannot be fetched at all.
+        // Set at the tip; a --start-block run first clears its backlog, until a block cannot be fetched.
         let mut caught_up = self.config.start_block.is_none();
 
         'outer: loop {
@@ -232,7 +232,7 @@ impl AirbenderService {
                 }
             };
 
-            // At the tip, skip ahead when more than max_lag behind: stale blocks are worth little and witnesses can take far longer.
+            // At the tip, skip ahead when more than max_lag behind: stale blocks are worth little.
             let lag = latest.saturating_sub(next_block);
             if caught_up
                 && self.config.end_block.is_none()
@@ -268,7 +268,7 @@ impl AirbenderService {
                     block_number
                 );
 
-                // "queued" goes out in the background so its HTTP round trip overlaps the fetch and does not hold back "proving".
+                // "queued" is posted in the background so it delays neither the fetch nor "proving".
                 let mut queued_post = None;
                 if should_prove {
                     queued_post = match retried_queued_post.take() {
@@ -317,7 +317,7 @@ impl AirbenderService {
                     }
                 };
 
-                // The preflight runs as soon as the bundle exists, off the async runtime, so a queued block has it done before its turn.
+                // Preflight off the async runtime once the bundle exists, done by the block's turn.
                 let preflight = if should_prove && self.serial_preflight {
                     let svc = Arc::clone(&self);
                     let path = outcome.flat_bundle_path.clone();
@@ -352,8 +352,7 @@ impl AirbenderService {
                 caught_up = true;
             }
 
-            // next_block advances only past handled blocks: a lagging RPC reporting a lower latest must not re-prove blocks.
-            // Prefer newHeads push with a safety timeout, else tight polling: wake-up delay is on the block->proof latency path.
+            // next_block only passes handled blocks: a lagging RPC's lower latest must not re-prove.
             let mut ws_dead = false;
             if let Some((_, sub)) = new_heads.as_mut() {
                 tokio::select! {
@@ -378,7 +377,7 @@ impl AirbenderService {
         Ok(())
     }
 
-    /// Single consumer (one GPU); Ethproofs `proving`/`proved` are detached tasks so the loop returns to `rx.recv()` at once.
+    /// One consumer (one GPU); Ethproofs posts are detached so the loop is back at `rx.recv()` at once.
     async fn prover_worker_loop(
         self: Arc<Self>,
         mut rx: mpsc::Receiver<WorkItem>,
@@ -406,7 +405,7 @@ impl AirbenderService {
         Ok(())
     }
 
-    /// Proves one block; the proof is written and posted only if the preflight reached the exit point and the proof commits the block's hash.
+    /// Proves one block; the proof is kept only if the preflight reached the exit and it commits the block.
     async fn prove_item(
         self: &Arc<Self>,
         item: &WorkItem,
@@ -425,7 +424,7 @@ impl AirbenderService {
             });
         };
 
-        // Preflight before proving: a run ending in finish_error would be proved, then abort the process in the recursion layer (JIT panic).
+        // Preflight first: a run ending in finish_error is proved, then aborts the recursion layer.
         let mut preflight_handle = None;
         if self.serial_preflight {
             let run = preflight
@@ -532,7 +531,7 @@ impl AirbenderService {
 
     /// Why a preflight run rules its block out, if it does.
     fn preflight_failure(&self, run: &VmRunOutcome) -> Option<String> {
-        // The simulator bounds steps, the prover the timestamp: a run can reach the exit point past the prover's bound, which would cut it short.
+        // Steps bound the simulator, the timestamp the prover: past the latter a run is cut short.
         let bound = self.config.max_cycles.min(MAX_PROVABLE_CYCLES) as u64;
         if run.cycle_count >= bound {
             Some(format!(
@@ -583,7 +582,7 @@ impl AirbenderService {
         Ok(())
     }
 
-    /// The simulator's run before or while proving; only a run ending at the exit point with the block's hash as output lets the proof be kept.
+    /// The simulator's run; the proof is kept only if it ends at the exit with the block's hash.
     fn preflight_block(&self, block_number: u64, input_path: &Path) -> Result<VmRunOutcome> {
         let run = self.run_vm(input_path, self.config.max_cycles.min(MAX_PROVABLE_CYCLES))?;
         println!(
@@ -598,7 +597,7 @@ impl AirbenderService {
         Ok(run)
     }
 
-    /// Proves one block, returning the proof bytes and a `ProvingLog`; touches no Ethproofs state, and the worker writes `proof.bin`.
+    /// Proves one block into bytes and a `ProvingLog`; no Ethproofs state; the worker writes `proof.bin`.
     async fn prove_inner(&self, item: &WorkItem) -> Result<(Vec<u8>, ProvingLog)> {
         let prover = self
             .prover
@@ -607,7 +606,7 @@ impl AirbenderService {
         let block_number = item.block_number;
         let input_path = item.bundle_path.clone();
 
-        // Proving time is the prover's own, from handing it the input to the proof; fetch, conversion and preflight are excluded.
+        // Proving time is the prover's alone, input to proof; fetch, conversion and preflight are excluded.
         let proved = tokio::task::spawn_blocking(move || {
             let words = crate::build_oracle(&input_path, false)?;
             let mut prover = prover.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -617,7 +616,7 @@ impl AirbenderService {
         .map_err(|e| eyre::eyre!("proving task failed: {e}"))??;
         let proving_millis = (proved.elapsed.as_millis() as u64).max(1);
 
-        // A proof committing another block than the input's is never kept; proof.bin is written by the worker after the preflight.
+        // A proof committing another block is never kept; the worker writes proof.bin after the preflight.
         let expected = crate::public_output::expected_for_file(&item.bundle_path, false)?;
         crate::prove::check_output(&expected, &proved.output())?;
 

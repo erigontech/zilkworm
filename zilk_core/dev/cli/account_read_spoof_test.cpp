@@ -121,7 +121,7 @@ Bytes probe_call_value(const evmc::address& c) {
     return k;
 }
 
-// PUSH20 C; BALANCE; POP; PUSH1 1; PUSH1 1; SSTORE; STOP The purest case: the read result is DISCARDED.
+// PUSH20 C; BALANCE; POP; PUSH1 1; PUSH1 1; SSTORE; STOP: the read is DISCARDED, so only the clash check can tell.
 Bytes probe_balance_discarded(const evmc::address& c) {
     Bytes k;
     push20(k, c);

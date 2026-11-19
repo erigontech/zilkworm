@@ -45,7 +45,7 @@ inline uint32_t code_store_bits[kCodeStoreBits / 32];
 
 }  // namespace detail
 
-/// Reads the input blob (word 0 = byte count, then LE words), hashing code-store payloads as it reads; same bytes either way.
+/// Reads the input (byte count, then LE words), hashing code-store payloads on the way.
 inline std::pair<uint8_t*, size_t> read_input_from_csr()
 {
     uint32_t num_bytes = csr_read_word();

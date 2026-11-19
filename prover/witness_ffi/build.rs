@@ -23,7 +23,7 @@ fn env_nonempty(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Honors $CXX/$CC, else the default g++ if >= 14, else the newest versioned g++-NN (GNU/Linux only; macOS lets CMake pick AppleClang).
+/// $CXX/$CC, else g++ if >= 14, else the newest g++-NN (GNU/Linux; on macOS CMake picks AppleClang).
 fn pick_compilers() -> Option<(String, String)> {
     if let Some(cxx) = env_nonempty("CXX") {
         let cc = env_nonempty("CC").unwrap_or_else(|| {
@@ -64,7 +64,7 @@ fn main() {
         .to_path_buf();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // A custom rerun-if-changed disables the default rule, so list build.rs and the recursively watched C++ trees explicitly.
+    // A custom rerun-if-changed drops the default rule: list build.rs and the watched C++ trees explicitly.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", repo_root.join("zilk_core").display());
     println!("cargo:rerun-if-changed={}", repo_root.join("cmake").display());

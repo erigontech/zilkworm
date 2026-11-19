@@ -233,22 +233,22 @@ struct ExecutionLog {
     exec_time_secs: f64,
     freq_cycles_per_sec: u64,
     reached_end: bool,
-    /// The run parked at finish_success; any other guest stop is also a self-loop, which the VM reports as reached_end too.
+    /// Parked at finish_success; every other stop is a self-loop the VM reports as reached_end too.
     succeeded: bool,
     final_pc: u32,
     input_path: PathBuf,
 }
 
-/// Oracle for CSR 0x7C0: word 0 is the byte count (u32 LE), then the input bytes packed into LE u32 words, zero-padded.
 // Must match types_zz/flat_bundle.hpp.
 const INPUT_MAGIC_EJSN: u32 = 0x4E534A45;
 const INPUT_VERSION_EJSN: u32 = 1;
 
+/// Oracle for CSR 0x7C0: the byte count (u32 LE), then the input as LE u32 words, zero-padded.
 pub(crate) fn build_oracle(input_file: &Path, is_test: bool) -> Result<Vec<u32>> {
     let bytes = fs::read(input_file)
         .map_err(|e| eyre!("failed to read input file '{}': {}", input_file.display(), e))?;
 
-    // The guest dispatches on the leading 4-byte magic: MFBD files are enveloped on disk, EEST JSON is minified and EJSN-wrapped here.
+    // MFBD files come enveloped; EEST JSON is minified and EJSN-wrapped here.
     let bytes = if is_test {
         let value: serde_json::Value = serde_json::from_str(
             std::str::from_utf8(&bytes).map_err(|e| eyre!("invalid UTF-8 in test file: {}", e))?,
@@ -335,7 +335,7 @@ fn execute_block(
     let run = guest.run(oracle, max_cycles, flamegraph_path)?;
     let succeeded = run.succeeded(guest.exit_pc);
 
-    // A successful run parks in the exit self-loop with its output in a0..a7; a failed one parks in finish_error and commits nothing.
+    // Success parks at the exit with output in a0..a7; failure parks in finish_error, committing nothing.
     let expected = if succeeded {
         let expected = public_output::expected_for_file(input_path, is_test)?;
         public_output::check(&expected.block_hash, &run.output)?;
@@ -473,7 +473,7 @@ fn fsv_dir_note() -> String {
 const MERGE_WINDOW_VAR: &str = "RISCV_MERGE_WINDOW";
 
 fn main() -> Result<()> {
-    // 0 disables the JIT's fusion of word load/store runs (the guest jumps into such runs); set before any other thread starts.
+    // 0 disables JIT fusion of load/store runs (the guest jumps into them); set before other threads.
     if std::env::var_os(MERGE_WINDOW_VAR).is_none() {
         std::env::set_var(MERGE_WINDOW_VAR, "0");
     }
@@ -677,7 +677,7 @@ async fn run() -> Result<()> {
                 args.replay_threads,
             )?;
 
-            // Simulate first, as the service's preflight does: the prover proves any stop (finish_error, cycle bound), committing no block.
+            // Simulate first, like the preflight: the prover proves any stop, committing no block.
             let preflight = execute_block(
                 &guest,
                 &input_path,
@@ -686,7 +686,7 @@ async fn run() -> Result<()> {
                 is_test,
                 None,
             )?;
-            // The simulator bounds steps, the prover the timestamp (delegation calls advance it by more than 1): check the cycle count too.
+            // The simulator bounds steps, the prover the timestamp (delegations add > 1): check cycles.
             if !preflight.succeeded || preflight.cycle_count >= settings.cycles_bound as u64 {
                 bail!(
                     "preflight: block {} did not finish successfully within {} cycles (final_pc=0x{:08x} reached_end={} cycles={}); not proving",
@@ -806,7 +806,7 @@ async fn run() -> Result<()> {
             println!("Verifier accepted in {:.2?}", started.elapsed());
             println!("verifier output[0..8]  = {:08x?}", &output[..8]);
             println!("verifier output[8..16] = {:08x?}", &output[8..]);
-            // output[0..8] is the guest's own output; output[8..16] the recursion chain, which alone binds the proof to this guest.
+            // output[8..16] (recursion chain) alone binds the proof to this guest; [0..8] is its output.
             println!("CHAIN BINDING OK: output[8..16] is a chain hash of the key");
 
             // output[0..8] is the last validated block's hash; the proof binds its block only through it.

@@ -1,8 +1,8 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-// Unit test: a GENUINE account present in addr_hashes with a valid body + hash.
+// A GENUINE account in addr_hashes that the MPHF read path cannot reach (orphaned) must be rejected by sanitize().
 
-// The orphaned bundle is well-formed.
+// The orphaned bundle is well-formed: only C's MPHF slot is zeroed and its Account cache pre-filled.
 
 // The pre-state root (R) is computed from the genuine leaf, so it is the same for both bundles.
 

@@ -107,8 +107,7 @@ RUN cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
         -DUSE_HASH_KEY=${USE_HASH_KEY} \
     && cmake --build prover/guest_hypercube/build -j"$(nproc)"
 
-# Build prover binary (Rust, embeds guest ELF via build.rs).
-# Static libstdc++ (Z6M_STATIC_LIBSTDCXX) so the xpack-built prover runs on stock ubuntu:24.04.
+# Build the prover (embeds the guest ELF); static libstdc++ lets it run on stock ubuntu:24.04.
 ENV CC=/opt/xpack-gcc-bin/gcc \
     CXX=/opt/xpack-gcc-bin/g++ \
     Z6M_STATIC_LIBSTDCXX=1

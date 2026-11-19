@@ -1,4 +1,4 @@
-//! The guest binary and its simulator runs; the simulator decodes as the prover does (RV32IM without mulh, mulhsu, div, rem).
+//! The guest and its simulator, decoding as the prover does (RV32IM without mulh, mulhsu, div, rem).
 
 use eyre::{bail, eyre, Result};
 use field::baby_bear::base::BabyBearField;
@@ -69,7 +69,7 @@ pub struct Guest {
     pub files: GuestFiles,
     bin_words: Vec<u32>,
     instructions: Vec<Instruction>,
-    /// PC of finish_success's self-loop; every other guest stop (finish_error, fatal(), abort, trap handler) loops elsewhere.
+    /// PC of finish_success's self-loop; finish_error, fatal(), abort and traps loop elsewhere.
     pub exit_pc: u32,
 }
 
@@ -118,7 +118,7 @@ impl Guest {
         })
     }
 
-    /// Runs the guest on `oracle` (CSR 0x7C0 words) for at most `max_cycles`; unsupported instructions or reads past the input are errors.
+    /// Runs on `oracle` (CSR 0x7C0 words) for <= `max_cycles`; bad instructions or overreads fail.
     pub fn run(
         &self,
         oracle: Vec<u32>,

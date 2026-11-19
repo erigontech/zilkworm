@@ -48,8 +48,7 @@ ARG USE_HASH_KEY=ON
 WORKDIR /build/prover/guest_airbender
 RUN make z6m_guest USE_HASH_KEY=${USE_HASH_KEY}
 
-# Link witness_ffi's gcc-15 libstdc++ statically: it is newer than the runtime image's.
-# CUDAARCHS is the only arch control of gpu_native_build (its default "native" needs a GPU at build time).
+# Static libstdc++ (gcc-15's is newer than the runtime's); CUDAARCHS: gpu_native_build's only arch knob.
 WORKDIR /build/prover/prover_airbender
 ARG CUDA_ARCHS="80;89;90;120"
 ENV CUDAARCHS=${CUDA_ARCHS} \
@@ -75,7 +74,7 @@ COPY --from=airbender-builder /build/prover/guest_airbender/build/z6m_guest.text
 COPY --from=airbender-builder /opt/z6m/fsv /opt/z6m/fsv
 COPY prover/docker/airbender-entrypoint.sh /usr/local/bin/airbender-entrypoint
 
-# Run time: FSV_DIR, RISCV_MERGE_WINDOW=0 (no JIT fusion of the guest's store runs), RUST_MIN_STACK=1 GiB, default RECURSION_*_BLAKE.
+# RISCV_MERGE_WINDOW=0: no JIT store-run fusion; RUST_MIN_STACK=1 GiB; default RECURSION_*_BLAKE.
 ENV FSV_DIR=/opt/z6m/fsv \
     RISCV_MERGE_WINDOW=0 \
     RUST_MIN_STACK=1073741824 \

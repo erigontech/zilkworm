@@ -566,7 +566,7 @@ TEST_CASE("GridMPT<true, DirectState> insert descending a delete-emptied extensi
     check_delete_all_then_insert(pre, {{key_with_prefix({8, 0xf}), slot_value_rlp(3)}});
 }
 
-// After the eager fold of a delete-emptied line moves the seek's landing depth up.
+// When folding a delete-emptied line moves the seek's landing depth up, the cursor must follow it.
 TEST_CASE("GridMPT<true, DirectState> seek cursor after folding a delete-emptied line", "[trie][gridmpt]") {
     const Bytes32Map pre{{key_with_prefix({0xc, 0xf, 1}), slot_value_rlp(1)},
                          {key_with_prefix({0xc, 0xf, 7}), slot_value_rlp(2)}};

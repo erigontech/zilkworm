@@ -256,7 +256,7 @@ void expect_rejected(const Outcome& o, std::string_view why) {
 constexpr std::string_view kAccountWalkHalt = "USE_HASH_KEY: account walk hit missing/malformed node";
 constexpr std::string_view kSlotWalkHalt = "USE_HASH_KEY: slot walk hit missing/malformed node";
 
-/// The guest halts on `s`'s block with `blob` and `nodestore` as its witness, and `why`.
+/// The guest halts on `s`'s block with `blob` and `nodestore` as its witness, printing `why` (run in a child).
 void expect_halted(const Sealed& s, const std::vector<uint8_t>& blob, const std::vector<uint8_t>& nodestore,
                    std::string_view why) {
     const ChildRun r = run_envelope_in_child(make_envelope(s.chain, s.sr, blob, nodestore, s.network));
@@ -572,7 +572,7 @@ TEST_CASE("check_root rejects an account the witness invents", "[witness][bindin
     }
 }
 
-// A witness slot has an initial and a current value.
+// A witness slot has an initial and a current value; only the initial is bound, so execution must start from it.
 
 namespace {
 

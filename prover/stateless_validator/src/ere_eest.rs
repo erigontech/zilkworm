@@ -1,7 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! EEST canonical stateless-input adapter: decodes `statelessInputBytes` and derives the MFBD `keys` preimages from the EIP-7928 BAL.
+//! Decodes EEST `statelessInputBytes` and derives the MFBD `keys` preimages from the EIP-7928 BAL.
 
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_rlp::{Decodable, RlpDecodable};
@@ -130,7 +130,7 @@ mod smoke {
         );
     }
 
-    /// Set `Z6M_SIB_DIR=<dir of *.json>`: prints block#, tx count, max tx gas_limit and gas_used (EIP-7825 caps a tx at 2**24).
+    /// With `Z6M_SIB_DIR=<dir>`: prints block#, tx count, max tx gas_limit, gas_used (EIP-7825 cap 2**24).
     #[test]
     fn tx_gas_limits() {
         use alloy_consensus::{Transaction, TxEnvelope};

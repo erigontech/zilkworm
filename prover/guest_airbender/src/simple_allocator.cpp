@@ -20,7 +20,7 @@ extern uint8_t _sheap[];
 extern uint8_t _eheap[];
 }
 
-// Two pointers, not a struct: one gp-relative lw/sw each; externally_visible stops LTO folding heap_end; constinit avoids .init_array.
+// externally_visible keeps LTO from folding heap_end; constinit, as constructors before main allocate.
 #if defined(__GNUC__) && !defined(__clang__)
 #define GUEST_EXTERNALLY_VISIBLE __attribute__((externally_visible))
 #else
@@ -29,7 +29,7 @@ extern uint8_t _eheap[];
 constinit uint8_t* heap_next = _sheap;
 GUEST_EXTERNALLY_VISIBLE constinit uint8_t* heap_end = _eheap;
 
-// _sheap/_eheap are ALIGN(2097152) in link.x, so rounding heap_next up to any alignment up to that stays at or below heap_end.
+// _sheap/_eheap are 2 MiB-aligned (link.x): rounding heap_next to <= 2 MiB stays <= heap_end.
 static constexpr size_t kMaxAlign = 2097152;
 
 // Null when the request does not fit; throwing operator new forms must never return null, so they end the run.
@@ -100,7 +100,7 @@ void* operator new[](size_t size, std::align_val_t al, const std::nothrow_t&) no
     return bump_allocate_aligned(size, static_cast<size_t>(al));
 }
 
-// Every replaceable delete is empty (sized ones too) so LTO drops the calls and free-only destructor loops; not noinline.
+// Every delete is empty so LTO drops the calls and free-only destructor loops; do not mark them noinline.
 void operator delete(void*) noexcept {}
 void operator delete[](void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
@@ -142,7 +142,7 @@ void* realloc(void* ptr, size_t size) {
     }
     void* q = malloc(size);
     if (q != nullptr) {
-        // Old size is untracked: over-copying stays in flat RAM, callers zero the extension; memmove as the tail may overlap.
+        // Size untracked: over-copy stays in RAM, callers zero the rest; memmove, the tail may overlap.
         __builtin_memmove(q, ptr, size);
     }
     return q;

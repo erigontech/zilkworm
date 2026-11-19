@@ -42,7 +42,7 @@ impl StatelessValidatorZilkwormInput {
         Ok(Self { flat_bundle, public_values: Vec::new() })
     }
 
-    /// EEST statelessInputBytes constructor (Amsterdam only); `valid_block` is the fixture's validity expectation, which the input does not carry.
+    /// From EEST statelessInputBytes (Amsterdam only); `valid_block` comes from the fixture, not the input.
     pub fn from_ere_eest(input_bytes: &[u8], valid_block: bool) -> Result<Self> {
         let (fork_id, si) = ere_eest::decode_stateless_input(input_bytes)
             .context("decode EEST statelessInputBytes")?;
@@ -51,7 +51,7 @@ impl StatelessValidatorZilkwormInput {
         }
         // Network label carried in the MFBD; it must be known to the guest's kNetworkConfig.
         let fork = match si.chain_id {
-            1 => "Amsterdam",
+            1 => "Amsterdam", // generated EEST corpus: Amsterdam from genesis
             0x1a62c8cb6 => "glamsterdam-devnet-7",
             0x1a6a8cc6e => "glamsterdam-devnet-8",
             11155111 => "sepolia",
@@ -139,7 +139,7 @@ impl StatelessValidatorZilkwormInput {
             public_values.extend_from_slice(&si.chain_id.to_le_bytes());
             return Ok(Self { flat_bundle, public_values });
         }
-        // pre_state_root is the parent (last) witness header's state root; the rest are payload claims the guest recomputes.
+        // pre_state_root is the parent (last) header's root; the rest are claims the guest recomputes.
         let pre_state_root: [u8; 32] = {
             let mut slice = witness_headers
                 .last()

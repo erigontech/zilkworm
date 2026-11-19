@@ -54,7 +54,7 @@ SECTIONS
     _sirodata = LOADADDR(.rodata);
     _srodata = .;
 
-    /* gp window: hot objects within gp's 12-bit reach (less the 256-byte alignment and object size), farthest first below gp. */
+    /* gp window: hot objects within gp's 12-bit reach (less alignment and size), farthest first. */
     *(.rodata._ZN8silkworm10kEmptyHashE)
     *(.rodata._ZN6evmone6crypto9secp256k112_GLOBAL__N_1L6FP_ONEE)
     *(.rodata._ZN6evmone6crypto5bn2549Fq6Config3ksiE)
@@ -205,7 +205,7 @@ BUG(riscv-rt): .bss is not 4-byte aligned");
 ASSERT(_sheap % 4 == 0, "
 BUG(riscv-rt): start of .heap is not 4-byte aligned");
 
-/* The gp window assumes .rodata is aligned to at most 256 bytes: a more aligned input section shrinks the reach left to gp-relative accesses. */
+/* The gp window assumes .rodata aligned to <= 256 bytes; a more aligned section shrinks gp's reach. */
 ASSERT(ALIGNOF(.rodata) <= 256, "
 ERROR(z6m): .rodata is aligned above 256 bytes, which breaks the gp window");
 /* simple_allocator.cpp rounds its heap pointer up to alignments of up to 2 MiB and relies on it never passing _eheap. */

@@ -1,4 +1,4 @@
-//! Proves to the final recursion layer at 100-bit security, on a 1 GiB-stack thread; a panic fails the block and rebuilds the prover.
+//! Final-layer proofs (100-bit security) on a 1 GiB-stack thread; a panic rebuilds the prover.
 //!
 //! Adapted from matter-labs/airbender-platform crates/airbender-host/src/prover/gpu_prover.rs and
 //! matter-labs/ethereum-prover ethereum_prover/src/prover/gpu_prover.rs (MIT OR Apache-2.0).
@@ -100,7 +100,7 @@ pub fn output_words(artifact: &ProofArtifact) -> [u32; 8] {
     std::array::from_fn(|i| artifact.proof.register_final_values[10 + i].value)
 }
 
-/// Accepts a proof only if it commits the input's block; all-zero output means the guest failed (unless no block is expected, as for EEST).
+/// Keeps a proof only if it commits the input's block; zero output fails unless none is expected.
 pub fn check_output(expected: &Expected, output: &[u32; 8]) -> Result<()> {
     if expected.block_hash != B256::ZERO && output.iter().all(|w| *w == 0) {
         bail!("the proof's output is all zeroes: the block execution failed inside the guest");

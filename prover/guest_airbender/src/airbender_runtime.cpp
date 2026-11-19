@@ -34,7 +34,7 @@ static void copy_section(const uint8_t* src, uint8_t* dst, const uint8_t* end)
 
 static void init_memory()
 {
-    // .rodata also holds the gp window (link.x), zero-initialized objects included: copy it before anything addresses them gp-relative.
+    // .rodata holds the gp window (zero-initialized objects too): copy it before any gp-relative access.
     const uint8_t* sirodata = reinterpret_cast<const uint8_t*>(&_sirodata);
     uint8_t* srodata = reinterpret_cast<uint8_t*>(&_srodata);
     const uint8_t* erodata = reinterpret_cast<const uint8_t*>(&_erodata);

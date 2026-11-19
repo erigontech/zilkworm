@@ -1,6 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-// The rv32 dispatch runs SAR by moving 32-bit words: fused with a PUSH1 that gives the shift.
+// The rv32 dispatch runs SAR on 32-bit words, fused with a PUSH1 shift and alone with a stack shift.
 
 #include <cstdint>
 #include <random>

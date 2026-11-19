@@ -1,6 +1,6 @@
 //! The verification key (EVKEY001 v2) and proof verification against it.
 //!
-//! A proof is accepted only if its chain hash (output[8..16]) matches a key hash recomputed from the guest and FSV_DIR, never from the proof.
+//! A proof's chain hash (output[8..16]) must match a key from the guest and FSV_DIR, not the proof.
 //!
 //! Adapted from matter-labs/ethereum-prover ethereum_prover/src/verification_key_format.rs,
 //! verifier_artifacts.rs and verification.rs (MIT OR Apache-2.0).
@@ -96,7 +96,7 @@ impl VerificationKey {
     }
 }
 
-/// Verifies a proof file against the key; output[0..8] is the guest's public output, output[8..16] the recursion chain the key trusts.
+/// Verifies a proof file: output[0..8] is the guest's output, output[8..16] the chain the key trusts.
 pub fn verify_proof_file(proof_file: &[u8], key: &VerificationKey) -> Result<[u32; 16]> {
     let words = proof_words_from_file(proof_file)?;
     let output = std::thread::Builder::new()
@@ -125,7 +125,7 @@ pub fn verify_proof_file(proof_file: &[u8], key: &VerificationKey) -> Result<[u3
     Ok(output)
 }
 
-/// Selects the recursion verifier programs and so the chain hashes; anything but the default (Blake2s with compression) matches no published key.
+/// Picks the recursion verifiers and chain hashes; only the default (Blake2s) has a published key.
 const RECURSION_BLAKE_VARS: [&str; 4] = [
     "RECURSION_UNROLLED_BLAKE",
     "RECURSION_BRIDGE_BLAKE",

@@ -76,7 +76,7 @@ bytes32 walk(const Bytes32Map& pre, const std::map<bytes32, Bytes, Bytes32Less>&
     DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
 
     Bytes32Map post = pre;
-    std::vector<TrieNodeFlat> flat;
+    std::vector<TrieNodeFlat> flat;  // never reallocates: GridMPT keeps views into TrieNodeFlat::buf
     flat.reserve(updates.size());
     for (const auto& [k, v] : updates) {
         auto& node = flat.emplace_back(k);
@@ -117,7 +117,7 @@ TEST_CASE("GridMPT<true, DirectState> embedded leaves keep their bytes as more a
     CHECK(got == want);
 }
 
-// Each branch on the path keeps the lines of the children unfolded under it: 16 D + 1 lines.
+// Fills the grid to 16 D + 1 lines: each of the path's D branches keeps 15 unfolded children.
 TEST_CASE("GridMPT<true, DirectState> grid of 16 lines per branch level", "[trie][gridmpt]") {
     for (const unsigned levels : {4u, 5u, 8u, 9u, 15u, 16u}) {
         CAPTURE(levels);

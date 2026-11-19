@@ -38,8 +38,7 @@ struct HashStateAccountWrite {
     const Account* account{nullptr};
 };
 
-// Fold the writes over the built HashState and return whether to ACCEPT. `writes_sorted` MUST be sorted by
-// addr_hash (memcmp order); `prev_root` is the pre-state root, `header_state_root` the header's claimed root.
+// Folds the writes over the built HashState and returns whether to ACCEPT; `writes_sorted` must be in addr_hash order.
 [[nodiscard]] inline bool check_root_hashstate(
     const HashState& hash_state,
     const evmc::bytes32& prev_root,

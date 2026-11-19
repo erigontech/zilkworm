@@ -63,7 +63,7 @@ target_include_directories(z6m_debug PRIVATE
     "${Z6M_ROOT}/third_party/evmone/lib/evmone_precompiles"
 )
 
-# zilk_core/CMakeLists.txt sets QEMU_DEBUG only for its own subtree; without it here these sources fall back to the host <iostream> branch of print.hpp and clash with semihosting.hpp.
+# QEMU_DEBUG is set only in zilk_core's subtree; here too, else print.hpp's <iostream> branch clashes with semihosting.
 if(QEMU_DEBUG)
     target_compile_definitions(z6m_debug PRIVATE QEMU_DEBUG)
 endif()
@@ -101,7 +101,7 @@ endif()
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../zilk_core/dev/eest-known-failures.txt" EEST_KNOWN_FAILURES REGEX "^[^#]")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../zilk_core/dev/eest-known-failures.txt")
 
-# Driver script pipes the fixture into the QEMU payload (the runner dispatches on the leading 4-byte magic, MFBD or EJSN); one ctest per fixture file.
+# The driver pipes each fixture into the QEMU payload (dispatch on the 4-byte magic); one ctest per fixture.
 function(_register_eest_tests label ext fixtures_dir)
     set(script "${CMAKE_CURRENT_BINARY_DIR}/qemu_run_${label}.sh")
     file(WRITE  "${script}" "#!/bin/bash\n")

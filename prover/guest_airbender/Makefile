@@ -1,6 +1,6 @@
 BUILD_DIR := $(CURDIR)/build
 CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im.cmake
-# Node-store account recovery is on by default (mainnet witnesses lack the address of a block-deleted account); USE_HASH_KEY=OFF builds without it.
+# USE_HASH_KEY (node-store recovery) defaults on: mainnet witnesses omit block-deleted addresses.
 USE_HASH_KEY ?= ON
 LINKER_SCRIPT := $(CURDIR)/link.x
 START_ASM := start.S

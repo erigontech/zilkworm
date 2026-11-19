@@ -230,8 +230,7 @@ std::pair<uint64_t, bool> StateTransition::run_one_bundle(::zilkworm::FlatBundle
             failed_ = true;
             return {0, false};
         }
-        // A later block's root is rebuilt from the records the guest holds (check_root_new_block), so the first block's post-state must
-        // rebuild to its root from those records alone: the walk binds what the witness carries, not that it carries everything.
+        // Later roots come from held records alone, and the walk does not prove the witness complete: check here.
         if (first_root_check && bundle.block_rlps.size() > 1 &&
             bundle.direct.state_root_hash() != block.header.state_root) [[unlikely]] {
             sys_println(("ERROR: the witness is not the whole state of block " + std::to_string(i)).c_str());
@@ -664,7 +663,7 @@ bool StateTransition::check_root_new_block(DirectState& direct_state, BlockHeade
     std::vector<LeafRef> leaves;
     leaves.reserve(direct_state.addr_hashes().size() + direct_state.created_accounts().size());
 
-    // Every account the state holds is a leaf, empty ones too (EIP-161 deletes only via a transaction); each record says so, an address lookup would miss some.
+    // Every held account is a leaf, empty too (EIP-161 deletes via a tx only); use each record, not an address lookup.
     const auto existing = direct_state.addr_hashes();
     for (const auto& e : existing) {
         const Account* pa = direct_state.account_at_offset(e.entry_offset);

@@ -11,7 +11,7 @@ edition = "2021"
 name = "z6m_prover_airbender"
 path = "src/main.rs"
 
-# Airbender v3: zksync-airbender bd0d5153 (no upstream branch holds it; somnergy's v3/bd0d5153 keeps it fetchable); keep `deterministic_pow` off.
+# Airbender v3 (bd0d5153), fetchable via somnergy's v3/bd0d5153; keep `deterministic_pow` off.
 [dependencies]
 prover_pipeline = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff", default-features = false }
 full_statement_verifier = { git = "https://github.com/somnergy/zksync-airbender", rev = "bd0d515335062aee176bc41abe340701679279ff", default-features = false, features = ["host_utils", "unified_verifier_only"] }

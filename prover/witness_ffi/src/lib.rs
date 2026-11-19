@@ -40,7 +40,7 @@ fn convert(json: &[u8]) -> Result<Vec<u8>> {
     let mut len: usize = 0;
     let mut err: *mut c_char = ptr::null_mut();
 
-    // SAFETY: json outlives the call, the out pointers are valid locals, and the C side returns malloc'd buffers freed below.
+    // SAFETY: json outlives the call, out pointers are locals, C returns malloc'd buffers freed below.
     let rc = unsafe {
         z6m_json_witness_to_mfbd(json.as_ptr(), json.len(), &mut data, &mut len, &mut err)
     };

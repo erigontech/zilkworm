@@ -301,7 +301,7 @@ template <unsigned Off>
     if (kprefix::tag_orig[row] != b.orig) return 0;
     // tag_sb is 1..3 while tagged; masked so the index stays inside kHeadSlots whatever the row holds.
     const unsigned blocks = kprefix::tag_sb[row] & 3u;
-    if ((b.dirty & kprefix::kHeadSlots[blocks]) != 0) return 0;
+    if ((b.dirty & kprefix::kHeadSlots[blocks]) != 0) return 0;  // every slot change sets its dirty bit
     kprefix::tag_orig[row] = nullptr;
     return blocks;
 }
