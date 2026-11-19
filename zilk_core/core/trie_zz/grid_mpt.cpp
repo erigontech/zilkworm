@@ -329,22 +329,12 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                                 sys_println("ERROR: missing ext child rlp in node store (witness incomplete)");
                                 return {};
                             }
-                            if (rlp_opt->size() < 32) [[unlikely]] {
-                                failed_ = true;
-                                sys_println("ERROR: ext child hash ref to a node short enough to embed");
-                                return {};
-                            }
                             rlp = *rlp_opt;
                         }
                         if (!unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_)) [[unlikely]] {
                             ++missing_count_;
                             failed_ = true;
                             sys_println("ERROR: malformed ext child rlp in node store");
-                            return {};
-                        }
-                        if (grid_[depth_].kind != kBranch) [[unlikely]] {
-                            failed_ = true;
-                            sys_println("ERROR: ext child is not a branch");
                             return {};
                         }
                     }

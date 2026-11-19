@@ -2141,23 +2141,21 @@ TEST_CASE("HashState refuses a leaf that does not end at the key length where a 
 }
 
 // The fold refuses what a walk refuses, including the sibling a deletion collapses onto.
-TEST_CASE("GridMPT fold over HashState refuses the witness shapes a walk refuses",
+TEST_CASE("GridMPT over HashState refuses a collapse onto a sibling no read walked",
           "[hash_state][fold][witness_shape]") {
+    // Deleting A collapses the root onto slot 0x5. A's read stops at A, so only the fold resolves the sibling there.
     ShapeTrie t;
-    const auto fold = [&t](const evmc::bytes32& prev_root, const evmc::bytes32& key, ByteView value) {
+    const auto delete_a = [&t](const evmc::bytes32& prev_root) {
+        t.build_and_check_a(prev_root);
         std::vector<zilkworm::TrieNodeFlat> updates;
-        auto& node = updates.emplace_back(key);
-        REQUIRE(value.size() <= sizeof(node.buf));
+        auto& node = updates.emplace_back(t.kA.hash());
+        node.buf[0] = 0x80;
         node.current_off = 0;
-        node.current_len = static_cast<uint8_t>(value.size());
-        std::memcpy(node.buf, value.data(), value.size());
+        node.current_len = 1;
         zilkworm::GridMPT<true, HashState> trie(t.hs, prev_root);
         const evmc::bytes32 root = trie.calc_root_from_updates({updates.data(), updates.size()});
         return std::pair{trie.failed(), root};
     };
-    const uint8_t del = 0x80;
-    TestAccount aN;
-    aN.build(84);
 
     Key kL = key_with(0x5, 7, 1);
     kL.nib[1] = 0x3;
@@ -2166,33 +2164,18 @@ TEST_CASE("GridMPT fold over HashState refuses the witness shapes a walk refuses
     const LeafNode leafL = make_leaf(&kL.nib[2], 62, ByteView{aL.leaf_value});
     const evmc::bytes32 hL = t.hs.add_node(ByteView{zilkworm::encode_leaf(leafL)});
 
-    SECTION("a write through an extension to a leaf") {
-        const ExtensionNode ext = make_ext(&kL.nib[1], 1, ByteView{hL.bytes, 32});
-        const evmc::bytes32 hExt = t.hs.add_node(ByteView{zilkworm::encode_ext(ext)});
-        CHECK(fold(t.root_with(ByteView{hExt.bytes, 32}), kL.hash(), ByteView{aN.leaf_value}).first);
+    SECTION("a branch with one child") {
+        BranchNode one;
+        one.set_child(0x3, ByteView{hL.bytes, 32});
+        const evmc::bytes32 hOne = t.hs.add_node(ByteView{zilkworm::encode_branch(one)});
+        CHECK(delete_a(t.root_with(ByteView{hOne.bytes, 32})).first);
     }
-    SECTION("a write below a hash reference to a short node") {
+    SECTION("a hash reference to a short node") {
         const evmc::bytes32 hSb = t.hs.add_node(ByteView{short_branch()});
-        CHECK(fold(t.root_with(ByteView{hSb.bytes, 32}), key_with(0x5, 0, 0).hash(), ByteView{aN.leaf_value}).first);
+        CHECK(delete_a(t.root_with(ByteView{hSb.bytes, 32})).first);
     }
-    SECTION("a write through an extension to a hash reference to a short node") {
-        const evmc::bytes32 hSb = t.hs.add_node(ByteView{short_branch()});
-        const uint8_t seg[1]{0x0};
-        const evmc::bytes32 hExt = t.hs.add_node(ByteView{zilkworm::encode_ext(make_ext(seg, 1, ByteView{hSb.bytes, 32}))});
-        CHECK(fold(t.root_with(ByteView{hExt.bytes, 32}), key_with(0x5, 0, 0).hash(), ByteView{aN.leaf_value}).first);
-    }
-    BranchNode one;
-    one.set_child(0x3, ByteView{hL.bytes, 32});
-    const evmc::bytes32 hOne = t.hs.add_node(ByteView{zilkworm::encode_branch(one)});
-    SECTION("a write below a branch with one child") {
-        CHECK(fold(t.root_with(ByteView{hOne.bytes, 32}), kL.hash(), ByteView{aN.leaf_value}).first);
-    }
-    SECTION("a deletion collapsing the root onto a branch with one child") {
-        CHECK(fold(t.root_with(ByteView{hOne.bytes, 32}), t.kA.hash(), ByteView{&del, 1}).first);
-    }
-    SECTION("a deletion collapsing the root onto a hash reference to a short node") {
-        const evmc::bytes32 hSb = t.hs.add_node(ByteView{short_branch()});
-        CHECK(fold(t.root_with(ByteView{hSb.bytes, 32}), t.kA.hash(), ByteView{&del, 1}).first);
+    SECTION("a leaf that ends short of the key length") {
+        CHECK(delete_a(t.root_with(ByteView{hL.bytes, 32})).first);
     }
     SECTION("collapse_onto_extension_skips_its_child: the control") {
         // The extension's child is not in the witness; the collapse needs only its reference.
@@ -2202,7 +2185,7 @@ TEST_CASE("GridMPT fold over HashState refuses the witness shapes a walk refuses
         const uint8_t merged_path[2]{0x5, kL.nib[1]};
         const auto expected = std::bit_cast<evmc::bytes32>(silkworm::keccak256(
             ByteView{zilkworm::encode_ext(make_ext(merged_path, 2, ByteView{missing.bytes, 32}))}));
-        const auto [failed, root] = fold(t.root_with(ByteView{hExt.bytes, 32}), t.kA.hash(), ByteView{&del, 1});
+        const auto [failed, root] = delete_a(t.root_with(ByteView{hExt.bytes, 32}));
         CHECK_FALSE(failed);
         CHECK(eq32(root, expected));
     }

@@ -134,12 +134,6 @@ bool GridMPT<DeletionEnabled, StateT>::unfold_node_from_rlp(ByteView payload, un
     // A leaf or extension path is decoded straight into the line (both nodes start with their nibbles64
     // path); decode_node writes no branch field for those.
     Kind kind = decode_node(list, line.branch, is_leaf, line.leaf.path.nib, plen, second);
-    if (kind == kBranch && (line.branch.mask & (line.branch.mask - 1u)) == 0) [[unlikely]] {
-        // A branch holds two children or more; its value is always empty here.
-        failed_ = true;
-        pop_back();
-        return false;
-    }
     if (kind == kBranch) {
         // emplace_line initializes no union member and decode_node writes only the pre-existing BranchNode fields:
         // reset the origin fields explicitly.
@@ -287,6 +281,10 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
                 sys_println("Error: fold_line unexpected error unfolding non_emtpy_nib");
                 // No child to absorb: the line folds as the branch it is.
             } else if (grid_.back().kind == kBranch) {
+                if (grid_.back().branch.child_count() < 2) [[unlikely]] {  // no read walked this sibling
+                    failed_ = true;
+                    sys_println("Error: fold_line collapse onto a branch with fewer than two children");
+                }
                 auto clen = grid_line.branch.child_len[non_empty_nib];
                 const uint8_t* src = (clen == 32 && grid_line.branch.child_ptr[non_empty_nib])
                                          ? grid_line.branch.child_ptr[non_empty_nib]
