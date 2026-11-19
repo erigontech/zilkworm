@@ -61,7 +61,7 @@ void HashState::reserve_stores(std::uint32_t nodes, std::uint32_t codes,
 
 namespace {
 
-// Inverse of nibbles64::from_bytes32; short paths arrive pre-zeroed.
+// Inverse of nibbles64::from_bytes32.
 [[gnu::always_inline]] inline evmc::bytes32 path_to_bytes32(const nibbles64& p) noexcept {
     evmc::bytes32 out{};
     for (unsigned i = 0; i < 32; ++i) {
@@ -116,7 +116,7 @@ enum class ChildKind : std::uint8_t { kEmpty, kHash, kEmbedded, kBad };
     }
     if (b0 >= 0xc0 && b0 <= 0xf7) {  // embedded short list
         const std::ptrdiff_t payload = b0 - 0xc0;
-        if (payload > 31 || end - cur < 1 + payload) return ChildKind::kBad;
+        if (payload > 30 || end - cur < 1 + payload) return ChildKind::kBad;  // embedded: under 32 bytes
         ptr = cur;
         len = static_cast<std::uint8_t>(1 + payload);
         cur += 1 + payload;
@@ -129,6 +129,33 @@ enum class ChildKind : std::uint8_t { kEmpty, kHash, kEmbedded, kBad };
 [[gnu::always_inline]] inline bool ends_with_empty_value(const std::uint8_t* cur,
                                                          const std::uint8_t* end) noexcept {
     return end - cur == 1 && *cur == rlp::kEmptyStringCode;
+}
+
+// Occupied child slots of a branch, counted up to two; cur ends past slot 15 if all were read.
+struct BranchCount {
+    unsigned occupied;
+    bool bad;
+    const std::uint8_t* cur;
+};
+[[gnu::always_inline]] inline BranchCount count_branch_children(const std::uint8_t* cur,
+                                                                const std::uint8_t* end) noexcept {
+    BranchCount r{0, false, cur};
+    const std::uint8_t* ptr = nullptr;
+    std::uint8_t len = 0;
+    for (unsigned i = 0; i < 16 && r.occupied < 2; ++i) {
+        const ChildKind k = next_branch_child(r.cur, end, ptr, len);
+        if (k == ChildKind::kBad) {
+            r.bad = true;
+            return r;
+        }
+        if (k != ChildKind::kEmpty) ++r.occupied;
+    }
+    return r;
+}
+
+// The witness shape rule a leaf or extension must meet once a walk reaches it (execution-specs _check_secured_path).
+[[gnu::always_inline]] inline bool secured_path_fits(bool is_leaf, unsigned depth, unsigned plen) noexcept {
+    return is_leaf ? depth + plen == 64 : plen != 0 && depth + plen < 64;
 }
 
 // Avoids unpacking all 64 nibbles per walk.
@@ -195,6 +222,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
 
     // A loop, so extension chains don't recurse.
     const auto descend = [&](ByteView node_rlp) {
+        bool via_ext = false;
         while (true) {
             // rlp::decode_header: fast_decode_header misreads <8-byte nodes.
             auto oh = rlp::decode_header(node_rlp);
@@ -217,6 +245,10 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
                 // Depth-64 branch: no room for a nibble.
                 if (path.len >= 64) {
                     malformed_witness_ = true;
+                    return;
+                }
+                if (const BranchCount bc = count_branch_children(p, end); !bc.bad && bc.occupied < 2) {
+                    if (!ends_with_empty_value(bc.cur, end)) malformed_witness_ = true;
                     return;
                 }
                 sweep_stack_.push_back(SweepFrame{p, end, 0, path.len});
@@ -250,6 +282,13 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
                 malformed_witness_ = true;
                 return;
             }
+            if (is_leaf ? (second_len == 0 || second_len > kMaxLeafValueSize) : second_len != 32) {
+                // decode_node rejects any non-hash extension child.
+                malformed_witness_ = true;
+                return;
+            }
+            // Derive nothing below a node a walk must refuse; confirm_absent refuses it on use.
+            if (via_ext || !secured_path_fits(is_leaf, path.len, static_cast<unsigned>(n))) return;
             std::uint8_t* out = path.nib.data() + path.len;
             if (odd) *out++ = hp[0] & 0x0F;
             for (std::size_t i = 1; i < hp_len; ++i) {
@@ -259,28 +298,17 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             path.len = static_cast<std::uint8_t>(path.len + n);
 
             if (is_leaf) {
-                if (second_len == 0 || second_len > kMaxLeafValueSize) {
-                    malformed_witness_ = true;
-                    return;
-                }
-                // Zero stale nibbles past a short path.
-                if (path.len < 64) [[unlikely]]
-                    std::memset(path.nib.data() + path.len, 0, 64u - path.len);
                 emit_leaf(path_to_bytes32(path), ByteView{second, second_len});
                 return;
             }
 
-            // decode_node rejects any non-hash extension child.
-            if (second_len != 32) {
-                malformed_witness_ = true;
-                return;
-            }
             auto child = find_node_rlp(second);
-            if (!child) {
-                // Pruned boundary, not a missing node.
+            if (!child || child->size() < 32) {
+                // Pruned boundary, not a missing node; a short node is refused on use.
                 return;
             }
             node_rlp = *child;
+            via_ext = true;
         }
     };
 
@@ -324,8 +352,8 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
 
         if (k == ChildKind::kHash) {
             auto child = find_node_rlp(ptr);
-            if (!child) {
-                // Pruned boundary (partial witness): do not descend, do not count as missing.
+            if (!child || child->size() < 32) {
+                // Pruned boundary (partial witness), or a short node refused on use: do not descend.
                 // See docs/hashstate.md, "Fail-closed policy".
                 continue;
             }
@@ -399,6 +427,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
     const std::uint8_t* p = cur->data();
     std::size_t n = cur->size();
     unsigned consumed = 0;  // target nibbles matched so far
+    bool via_ext = false;
 
     while (true) {
         // As descend(): handles <8-byte embedded nodes.
@@ -420,18 +449,19 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
             const std::uint8_t* c = q;
             const std::uint8_t* ptr = nullptr;
             std::uint8_t len = 0;
+            if (const BranchCount bc = count_branch_children(q, end); bc.bad || bc.occupied < 2) return false;
             ChildKind k = ChildKind::kBad;
-            // Never reads items past the target slot.
             for (unsigned i = 0; i <= s; ++i) {
                 k = next_branch_child(c, end, ptr, len);
                 if (k == ChildKind::kBad) return false;
             }
+            via_ext = false;
             // Empty slot: nothing below this nibble.
             if (k == ChildKind::kEmpty) return true;
             ++consumed;
             if (k == ChildKind::kHash) {
                 auto child = find_node_rlp(ptr);
-                if (!child) return false;  // needed node missing -> cannot confirm
+                if (!child || child->size() < 32) return false;  // missing or refused -> cannot confirm
                 p = child->data();
                 n = child->size();
                 continue;
@@ -462,6 +492,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
         const unsigned plen = (odd ? 1u : 0u) + 2u * static_cast<unsigned>(hp_len - 1);
         if (plen > 64) return false;
         if (is_leaf && second_len == 0) return false;
+        if (via_ext || !secured_path_fits(is_leaf, consumed, plen)) return false;
 
         // Never reads past the path string.
         const unsigned remaining = 64u - consumed;
@@ -478,22 +509,19 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
                 ++b;
             }
         }
-        if (plen > remaining) return true;  // node path outlasts the key -> divergence -> absent
         consumed += plen;
 
         if (is_leaf) {
-            // Whole leaf path matched. Exactly consuming the key (consumed == 64) means the key
-            // is PRESENT (not proven absent); a shorter leaf leaves the key hanging past a
-            // terminal node (absent). A present key here is a cache-miss anomaly, so fail-closed.
-            return consumed == 64 ? false : true;
+            return false;  // the key is present, so a cache miss here fails closed
         }
 
         // decode_node rejects any non-hash extension child.
         if (second_len != 32) return false;
         auto child = find_node_rlp(second);
-        if (!child) return false;  // needed node missing -> cannot confirm
+        if (!child || child->size() < 32) return false;  // missing or refused -> cannot confirm
         p = child->data();
         n = child->size();
+        via_ext = true;
     }
 }
 

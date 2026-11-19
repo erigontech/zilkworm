@@ -124,6 +124,10 @@ Node root_progressive_bytes(ByteView bytes) {
     return mix_in_length(merkleize_progressive(pack(bytes)), bytes.size());
 }
 
+Node root_list(std::span<const Node> item_roots, size_t limit) {
+    return mix_in_length(merkleize(item_roots, limit), item_roots.size());
+}
+
 Node root_progressive_list(std::span<const Node> item_roots) {
     return mix_in_length(merkleize_progressive(item_roots), item_roots.size());
 }

@@ -281,6 +281,10 @@ inline void GridMPT<DeletionEnabled, StateT>::fold_line(unsigned depth) {
                 sys_println("Error: fold_line unexpected error unfolding non_emtpy_nib");
                 // No child to absorb: the line folds as the branch it is.
             } else if (grid_.back().kind == kBranch) {
+                if (grid_.back().branch.child_count() < 2) [[unlikely]] {  // no read walked this sibling
+                    failed_ = true;
+                    sys_println("Error: fold_line collapse onto a branch with fewer than two children");
+                }
                 auto clen = grid_line.branch.child_len[non_empty_nib];
                 const uint8_t* src = (clen == 32 && grid_line.branch.child_ptr[non_empty_nib])
                                          ? grid_line.branch.child_ptr[non_empty_nib]
@@ -745,6 +749,11 @@ inline UnfoldResult GridMPT<DeletionEnabled, StateT>::unfold_slot(unsigned slot)
             failed_ = true;
             sys_println("{\"err\":\"node_store_get_rlp_failed\"}");
             return UnfoldResult::kMissing;
+        }
+        if (rlp_opt->size() < 32) [[unlikely]] {  // a node under 32 bytes is embedded, never hashed
+            failed_ = true;
+            sys_println("{\"err\":\"hash ref to a node short enough to embed\"}");
+            return UnfoldResult::kUndefined;
         }
         rlp = *rlp_opt;
     } else {

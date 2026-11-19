@@ -50,6 +50,8 @@ Node root_bytes_fixed(ByteView bytes);
 Node root_byte_list(ByteView bytes, size_t limit);
 /// ProgressiveList[byte].
 Node root_progressive_bytes(ByteView bytes);
+/// List[T, limit] of composite T, or of Vector[byte, 32]: the item roots are the chunks either way.
+Node root_list(std::span<const Node> item_roots, size_t limit);
 /// ProgressiveList[T] of composite T, or of Vector[byte, 32]: the item roots are the chunks either way.
 Node root_progressive_list(std::span<const Node> item_roots);
 /// Container, from the field roots in declaration order.

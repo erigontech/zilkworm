@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // slib_input: the SSZ front end that decodes a statelessInputBytes blob (EIP-8025, tests-zkevm
-// v21.0.1) into a HashState. See docs/hashstate.md, "StatelessInputBytes parsing".
+// v21.0.7) into a HashState. See docs/hashstate.md, "StatelessInputBytes parsing".
 
 #pragma once
 

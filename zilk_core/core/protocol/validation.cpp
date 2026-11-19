@@ -128,6 +128,9 @@ ValidationResult pre_validate_common_base(const Transaction& txn, evmc_revision 
             // EIP-155 transaction before EIP-155 was activated
             return ValidationResult::kUnsupportedTransactionType;
         }
+        if (txn.type == TransactionType::kLegacy && *txn.chain_id > std::numeric_limits<uint64_t>::max()) {
+            return ValidationResult::kInvalidSignature;
+        }
         if (txn.chain_id.value() != chain_id) {
             return ValidationResult::kWrongChainId;
         }
