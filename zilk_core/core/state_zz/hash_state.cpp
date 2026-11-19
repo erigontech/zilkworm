@@ -153,10 +153,7 @@ struct BranchCount {
     return r;
 }
 
-// Witness shape rules a node must meet once a walk reaches it (execution-specs incremental_mpt.py).
-[[gnu::always_inline]] inline bool hashed_node_fits(ByteView node_rlp) noexcept {
-    return node_rlp.size() >= 32;
-}
+// The witness shape rule a leaf or extension must meet once a walk reaches it (execution-specs _check_secured_path).
 [[gnu::always_inline]] inline bool secured_path_fits(bool is_leaf, unsigned depth, unsigned plen) noexcept {
     return is_leaf ? depth + plen == 64 : plen != 0 && depth + plen < 64;
 }
@@ -306,7 +303,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             }
 
             auto child = find_node_rlp(second);
-            if (!child || !hashed_node_fits(*child)) {
+            if (!child || child->size() < 32) {
                 // Pruned boundary, not a missing node; a short node is refused on use.
                 return;
             }
@@ -355,7 +352,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
 
         if (k == ChildKind::kHash) {
             auto child = find_node_rlp(ptr);
-            if (!child || !hashed_node_fits(*child)) {
+            if (!child || child->size() < 32) {
                 // Pruned boundary (partial witness), or a short node refused on use: do not descend.
                 // See docs/hashstate.md, "Fail-closed policy".
                 continue;
@@ -474,7 +471,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
             ++consumed;
             if (k == ChildKind::kHash) {
                 auto child = find_node_rlp(ptr);
-                if (!child || !hashed_node_fits(*child)) return false;  // missing or refused -> cannot confirm
+                if (!child || child->size() < 32) return false;  // missing or refused -> cannot confirm
                 p = child->data();
                 n = child->size();
                 continue;
@@ -531,7 +528,7 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
         // decode_node rejects any non-hash extension child.
         if (second_len != 32) return false;
         auto child = find_node_rlp(second);
-        if (!child || !hashed_node_fits(*child)) return false;  // missing or refused -> cannot confirm
+        if (!child || child->size() < 32) return false;  // missing or refused -> cannot confirm
         p = child->data();
         n = child->size();
         via_ext = true;
