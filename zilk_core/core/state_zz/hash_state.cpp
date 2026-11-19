@@ -449,22 +449,12 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
             const std::uint8_t* c = q;
             const std::uint8_t* ptr = nullptr;
             std::uint8_t len = 0;
+            if (const BranchCount bc = count_branch_children(q, end); bc.bad || bc.occupied < 2) return false;
             ChildKind k = ChildKind::kBad;
-            // Reads items up to the target slot, or past it until a second child is seen.
-            unsigned occupied = 0;
-            for (unsigned i = 0; i < 16 && (i <= s || occupied < 2); ++i) {
-                const std::uint8_t* item_ptr = nullptr;
-                std::uint8_t item_len = 0;
-                const ChildKind ki = next_branch_child(c, end, item_ptr, item_len);
-                if (ki == ChildKind::kBad) return false;
-                if (ki != ChildKind::kEmpty) ++occupied;
-                if (i == s) {
-                    k = ki;
-                    ptr = item_ptr;
-                    len = item_len;
-                }
+            for (unsigned i = 0; i <= s; ++i) {
+                k = next_branch_child(c, end, ptr, len);
+                if (k == ChildKind::kBad) return false;
             }
-            if (occupied < 2) return false;
             via_ext = false;
             // Empty slot: nothing below this nibble.
             if (k == ChildKind::kEmpty) return true;
