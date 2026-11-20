@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.0-alpha.8 - tests-zkevm v21.0.7 for the ERE guest
+
+A small release: the ERE guest moves to tests-zkevm v21.0.7.
+
+- **tests-zkevm v21.0.7** (#157), for eth-act/ere-guests#110. The ERE guest hashes `NewPayloadRequest` as an EIP-7495 progressive container and `versioned_hashes` as `List[Bytes32, 4096]`, so its committed `new_payload_request_root` matches the v21.0.7 fixtures; a request with more than 4096 versioned hashes yields the all-zero result. The SSZ bytes are unchanged.
+- **Malformed witness nodes.** HashState refuses the v21.0.7 malformed-node shapes where a read reaches them, and GridMPT refuses them on a deletion's collapse sibling, which no read walks.
+- **Legacy chain id over 64 bits** is an invalid signature, as execution-specs types it `U64`. Such a transaction was already rejected, as a wrong chain id.
+- **Guests and keys.** All three guests change: `stateless-validator-zilkworm-sp1-v6.9.0` through all of the above, and `z6m_guest_hypercube_mfbd` and the Airbender guest through the chain-id rule in shared transaction validation and the GridMPT collapse checks. Keys published for alpha.7 do not verify alpha.8 proofs for any of the three; this release's keys are its published `.vk` assets.
+- **Validation.** eth-act/ere-guests#110 `executes_registered_guest` on SP1: 33,864/33,864.
+
+### Commits
+
+One commit since v0.1.0-alpha.7, by Somnath Banerjee @somnergy:
+
+- `1b12509` slib: tests-zkevm v21.0.7: progressive-container request root and the new witness rules (#157)
+
 ## v0.1.0-alpha.7 - SP1 v6.9.0 and a leaner HashState guest
 
 A small release: the SP1 and ERE bumps, one HashState performance PR, an ERE benchmark table and a build fix.
