@@ -122,10 +122,7 @@ std::vector<uint8_t> build_flat_bundle(
         }
     }
 
-    // Skip zero-length sections: an empty ByteView/vector has a null data()
-    // pointer, and memcpy is declared nonnull — passing null (even with size 0)
-    // is UB that a plain -O0/-O2 build no-ops but a UBSan Debug build flags/aborts.
-    // Copying nothing leaves `out` (zero-initialised) byte-identical either way.
+    // An empty ByteView has a null data(): memcpy(null, 0) is UB (UBSan aborts), so skip empty sections.
     if (!ancestors_rlp.empty()) {
         std::memcpy(out.data() + anc_off, ancestors_rlp.data(), ancestors_rlp.size());
     }
@@ -203,8 +200,7 @@ std::optional<FlatBundle> load_flat_bundle(std::span<uint8_t> blob) {
         }
     }
 
-    // The node-store and direct_state sections are bounded and disjoint here; their
-    // MphfMap layout is validated where the maps are built, in the DirectState constructor.
+    // MphfMap layouts are validated where the maps are built, in the DirectState constructor.
 
     silkworm::Block genesis;
     {

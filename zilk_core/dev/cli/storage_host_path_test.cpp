@@ -1,12 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The fused SLOAD and SSTORE host calls (evmone::state::Host::sload and ::sstore) against the
-// sequences they replace, access_storage() + get_storage() and access_storage() + set_storage().
-// The orderings they must keep are not covered by any fixture: a cold SLOAD that runs out of gas
-// reads nothing, because a stateless witness may omit a slot that the reference client never
-// read; and a revert of a cold SSTORE must undo the value change before the access that loaded
-// the slot, which then stays loaded: a read remains a read (EIP-7928).
+// The fused SLOAD and SSTORE host calls (evmone::state::Host::sload and ::sstore) against the sequences they replace.
 
 #include <array>
 #include <cstdint>
@@ -32,8 +26,7 @@ bytes32 word(uint8_t v) {
     return r;
 }
 
-// The pre-state value of a slot is its key's last byte plus one, so that every initial value is
-// non-zero and tells which slot was read. Counts the reads.
+// The pre-state value of a slot is its key's last byte plus one.
 class CountingView final : public evmone::state::StateView {
 public:
     mutable uint32_t storage_reads = 0;
@@ -61,7 +54,7 @@ struct Fixture {
     evmone::state::Transaction tx;
     evmone::state::Host host{EVMC_CANCUN, vm, state, block, block_hashes, tx};
 
-    Fixture() { state.get(kContract); }  // Loaded, as the account whose code runs.
+    Fixture() { state.get(kContract); }
 
     evmc::Host& h() { return host; }
     const StorageValue* slot(const bytes32& key) {
@@ -80,13 +73,11 @@ TEST_CASE("cold SLOAD out of gas reads no slot", "[storage_host]") {
     evmc_bytes32 buffer{};
     CHECK(f.h().sload(kContract, key, 2000, gas, buffer) == nullptr);
     CHECK(gas == -1);
-    // Nothing was fetched, but the slot stays warm: the access is not undone by the failure.
     CHECK(f.view.storage_reads == 0);
     REQUIRE(f.slot(key) != nullptr);
     CHECK(f.slot(key)->access_status == EVMC_ACCESS_WARM);
     CHECK_FALSE(f.slot(key)->loaded);
 
-    // The next access is warm and fetches, once.
     gas = 0;
     const auto* value = f.h().sload(kContract, key, 2000, gas, buffer);
     REQUIRE(value != nullptr);
@@ -162,7 +153,6 @@ TEST_CASE("SLOAD and SSTORE equal the sequences they replace", "[storage_host]")
             break;
         }
 
-        // The slots, including the access-only ones, are the same after every step.
         auto& sa = fused.state.get(kContract).storage;
         auto& sb = twin.state.get(kContract).storage;
         REQUIRE(sa.size() == sb.size());
@@ -194,7 +184,6 @@ TEST_CASE("reverting a cold SSTORE of a fresh slot keeps it loaded and cold", "[
     CHECK(f.slot(key)->original == word(5));
     CHECK(f.view.storage_reads == 1);
 
-    // Warm and loaded: a revert restores the value and the warm flag of the entry that stays.
     CHECK(f.h().sstore(kContract, key, word(7), access) == EVMC_STORAGE_MODIFIED);
     const auto cp2 = f.state.checkpoint();
     CHECK(f.h().sstore(kContract, key, word(8), access) == EVMC_STORAGE_ASSIGNED);

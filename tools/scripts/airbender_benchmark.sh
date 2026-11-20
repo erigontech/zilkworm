@@ -3,12 +3,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Runs the Airbender guest (via z6m_prover_airbender execute) against every
-# flat-bundle block in the given directory and reports gas/cycle statistics.
-# Mirrors tools/scripts/release_state_root_check.sh conventions.
-#
-# Expects the corpus layout produced by `make sp1-benchmark-corpus`:
-#   <blocks_dir>/<N>/flatWitnessBundle<N>.mfbd
+# Runs the Airbender guest (z6m_prover_airbender execute) over every <blocks_dir>/<N>/flatWitnessBundle<N>.mfbd and reports gas/cycle statistics.
 
 set -u
 
@@ -71,7 +66,6 @@ echo "Log dir:    $LOG_DIR" | tee -a "$SUMMARY_LOG"
 echo "Jobs:       $JOBS" | tee -a "$SUMMARY_LOG"
 echo "" | tee -a "$SUMMARY_LOG"
 
-# Collect block list
 BLOCK_LIST=()
 mapfile -t ALL_BLOCKS < <(ls "$BLOCKS_DIR" | sort -n)
 for block_num in "${ALL_BLOCKS[@]}"; do
@@ -120,7 +114,6 @@ done < <(
 FAILED=${#FAILED_BLOCKS[@]}
 PASSED=$(( TOTAL - FAILED ))
 
-# Aggregate gas/cycle stats from the per-block "Executed block" lines.
 python3 - "$BLOCK_LOG_DIR" <<'PY' | tee -a "$SUMMARY_LOG"
 import os, re, sys
 

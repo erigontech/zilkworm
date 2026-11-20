@@ -64,7 +64,6 @@ def compare(reth_dir, zilk_dir):
 
     all_tests = set(reth.keys()) | set(zilk.keys())
 
-    # Categorize
     both_success = []
     zilk_only_success = []
     reth_only_success = []
@@ -140,7 +139,6 @@ def compare(reth_dir, zilk_dir):
         print(f"Overall speedup: {total_reth/total_zilk:.2f}x in Zilkworm's favor" if total_zilk < total_reth
               else f"Overall: Reth {total_zilk/total_reth:.2f}x faster in aggregate")
 
-    # By category
     print(f"\n--- By Test Category ---")
     cats = defaultdict(lambda: {'zilk_wins': 0, 'reth_wins': 0, 'total': 0})
     for name, r, z in both_success:
@@ -170,7 +168,6 @@ def compare(reth_dir, zilk_dir):
         if len(reth_only_success) > 10:
             print(f"  ... and {len(reth_only_success) - 10} more")
 
-    # Verdict
     print(f"\n{'=' * 80}")
     print("VERDICT")
     print(f"{'=' * 80}")
@@ -196,7 +193,6 @@ if __name__ == '__main__':
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     base = sys.argv[1] if len(sys.argv) > 1 else os.path.join(repo_root, 'third_party/zkevm-benchmark-workload/zkevm-metrics')
 
-    # Find Reth and Zilkworm metric directories
     reth_dir = None
     zilk_dir = None
     for entry in os.listdir(base):
@@ -215,7 +211,6 @@ if __name__ == '__main__':
         print("ERROR: No Zilkworm metrics directory found")
         sys.exit(1)
 
-    # Find SP1 subdirectory
     for entry in os.listdir(reth_dir):
         if entry.startswith('sp1'):
             reth_dir = os.path.join(reth_dir, entry)

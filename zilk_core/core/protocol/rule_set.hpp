@@ -31,46 +31,26 @@ struct BlockReward {
 
 std::ostream& operator<<(std::ostream& out, const BlockReward& reward);
 
-// Abstract class representing a set of protocol rules.
 class RuleSet {
   public:
-    // Not copyable nor movable.
     RuleSet(const RuleSet& other) = delete;
     RuleSet& operator=(const RuleSet& other) = delete;
 
     virtual ~RuleSet() = default;
 
-    //! \brief Performs validation of block body that can be done prior to sender recovery and execution.
-    //! \brief See [YP] Sections 4.3.2 "Holistic Validity" and 11.1 "Ommer Validation".
-    //! \param [in] block: block to pre-validate.
-    //! \param [in] state: current state.
-    //! \note Shouldn't be used for genesis block.
+    //! Checks that need neither sender recovery nor execution; not for the genesis block.
     virtual ValidationResult pre_validate_block_body(const Block& block, const BlockState& state);
 
-    //! \brief See [YP] Section 4.3.4 "Block Header Validity".
-    //! \param [in] header: header to validate.
-    //! \param [in] state: current state.
-    //! \param [in] with_future_timestamp_check : whether to check header timestamp is in the future wrt host current
-    //! time \see https://github.com/erigontech/silkworm/issues/448
-    //! \note Shouldn't be used for genesis block.
+    //! Not for the genesis block; with_future_timestamp_check rejects headers ahead of the host clock.
     virtual ValidationResult validate_block_header(const BlockHeader& header, const BlockState& state,
                                                    bool with_future_timestamp_check);
 
-    //! \brief Performs validation of block ommers only.
-    //! \brief See [YP] Sections 11.1 "Ommer Validation".
-    //! \param [in] block: block to validate.
-    //! \param [in] state: current state.
     virtual ValidationResult validate_ommers(const Block& block, const BlockState& state);
 
-    //! \brief Initializes block execution by applying changes stipulated by the protocol
-    //! (e.g. DAO transfer, storing parent beacon root)
     virtual void initialize(const Block& block, ActiveState& direct) = 0;
 
-    //! \brief Finalizes block execution by applying changes stipulated by the protocol
-    //! (e.g. block rewards, withdrawals)
     virtual ValidationResult finalize(ActiveState& direct, const Block& block) = 0;
 
-    //! \brief See [YP] Section 11.3 "Reward Application".
     virtual evmc::address get_beneficiary(const BlockHeader& header);
 
     virtual BlockReward compute_reward(const Block& block);
@@ -81,17 +61,13 @@ class RuleSet {
 
     virtual ValidationResult validate_extra_data(const BlockHeader& header) const;
 
-    //! \brief Validates the difficulty and the seal of the header
-    //! \note Used by validate_block_header
     virtual ValidationResult validate_difficulty_and_seal(const BlockHeader& header, const BlockHeader& parent) = 0;
 
-    //! \brief Returns parent header (if any) of provided header
     static std::optional<BlockHeader> get_parent_header(const BlockState& state, const BlockHeader& header);
 
     const ChainConfig& chain_config_;
 
   private:
-    //! \brief See [YP] Section 11.1 "Ommer Validation"
     static bool is_kin(const BlockHeader& branch_header, const BlockHeader& mainline_header,
                        const evmc::bytes32& mainline_hash, unsigned int n, const BlockState& state,
                        std::vector<BlockHeader>& old_ommers);
@@ -101,7 +77,6 @@ class RuleSet {
 
 using RuleSetPtr = std::unique_ptr<RuleSet>;
 
-//! \brief Creates an instance of the proper Rule Set on behalf of chain configuration
 RuleSetPtr rule_set_factory(const ChainConfig& chain_config);
 
 }  // namespace silkworm::protocol

@@ -19,23 +19,19 @@ namespace {
 
     using ssz::Node;
 
-    // NewPayloadRequest {execution_payload, versioned_hashes, parent_beacon_block_root, execution_requests}.
     constexpr size_t kRequestFixed = 44;
     constexpr std::array<size_t, 3> kRequestOffsets{0, 4, 40};
     constexpr size_t kBeaconRootAt = 8;
 
-    // ExecutionPayloadV4, fixed part: the scalars at their offsets, the variable fields' offsets between them.
     constexpr size_t kPayloadFixed = 540;
     constexpr size_t kParentHashAt = 0, kFeeRecipientAt = 32, kStateRootAt = 52, kReceiptsRootAt = 84,
                      kLogsBloomAt = 116, kPrevRandaoAt = 372, kBlockNumberAt = 404, kGasLimitAt = 412,
                      kGasUsedAt = 420, kTimestampAt = 428, kBaseFeeAt = 440, kBlockHashAt = 472,
                      kBlobGasUsedAt = 512, kExcessBlobGasAt = 520, kSlotNumberAt = 532;
-    constexpr std::array<size_t, 4> kPayloadOffsets{436, 504, 508, 528};  // extra_data, transactions, withdrawals, block_access_list
+    constexpr std::array<size_t, 4> kPayloadOffsets{436, 504, 508, 528};
     constexpr size_t kMaxExtraDataBytes = 32;
-    constexpr size_t kWithdrawalSize = 44;  // index, validator_index, address, amount
+    constexpr size_t kWithdrawalSize = 44;
 
-    // ExecutionRequests {deposits, withdrawals, consolidations, builder_deposits, builder_exits}: the
-    // offsets, then each list as its fixed-size items back to back.
     constexpr size_t kRequestsFixed = 20;
     constexpr std::array<size_t, kRequestTypes> kRequestsOffsets{0, 4, 8, 12, 16};
     constexpr std::array<size_t, kRequestTypes> kRequestItemSize{192, 76, 116, 184, 68};
@@ -66,31 +62,29 @@ namespace {
         return ssz::root_container(fields);
     }
 
-    // The root of one request of `type`, from its SSZ bytes (the container layouts of
-    // execution-specs requests.py).
     Node request_root(size_t type, ByteView item) {
         switch (type) {
-            case 0: {  // DepositRequest {pubkey, withdrawal_credentials, amount, signature, index}
+            case 0: {
                 const std::array<Node, 5> f{root_fixed(item, 0, 48), root_fixed(item, 48, 32),
                                             ssz::root_u64(ssz::rd_u64(item, 80)), root_fixed(item, 88, 96),
                                             ssz::root_u64(ssz::rd_u64(item, 184))};
                 return ssz::root_container(f);
             }
-            case 1: {  // WithdrawalRequest {source_address, validator_pubkey, amount}
+            case 1: {
                 const std::array<Node, 3> f{root_fixed(item, 0, 20), root_fixed(item, 20, 48),
                                             ssz::root_u64(ssz::rd_u64(item, 68))};
                 return ssz::root_container(f);
             }
-            case 2: {  // ConsolidationRequest {source_address, source_pubkey, target_pubkey}
+            case 2: {
                 const std::array<Node, 3> f{root_fixed(item, 0, 20), root_fixed(item, 20, 48), root_fixed(item, 68, 48)};
                 return ssz::root_container(f);
             }
-            case 3: {  // BuilderDepositRequest {pubkey, withdrawal_credentials, amount, signature}
+            case 3: {
                 const std::array<Node, 4> f{root_fixed(item, 0, 48), root_fixed(item, 48, 32),
                                             ssz::root_u64(ssz::rd_u64(item, 80)), root_fixed(item, 88, 96)};
                 return ssz::root_container(f);
             }
-            default: {  // BuilderExitRequest {source_address, pubkey}
+            default: {
                 const std::array<Node, 2> f{root_fixed(item, 0, 20), root_fixed(item, 20, 48)};
                 return ssz::root_container(f);
             }

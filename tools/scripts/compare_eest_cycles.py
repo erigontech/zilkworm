@@ -26,11 +26,7 @@ import re
 import statistics
 import sys
 
-# `eest_runner.py` prefixes each prover stdout line with `[<shard>]`
-# (e.g. `[berlin]`, `[stStaticCall]`). The same file basename exists under
-# multiple forks (e.g. both `[osaka] test_invalid.rlp` and
-# `[prague] test_invalid.rlp`), so the shard prefix is required to key tests
-# uniquely. Without it, basename collisions silently merge unrelated tests.
+# Key tests by the `[<shard>]` prefix eest_runner.py adds: the same basename exists under multiple forks and would silently merge.
 RE_PASS = re.compile(
     r'\[([^\]]+)\] \[\d+/\d+\] PASS (\S+)\.(?:json|rlp) '
     r'\((?:gas_used=\d+, )?cycles=(\d+), prover_gas=(\d+), syscall_count=(\d+)\)'

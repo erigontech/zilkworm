@@ -1,16 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// Account leaf encoding and the trie's pre-value check:
-//  - Account::rlp_into / rlp_into_cache against a reference RLP encoding built with the generic
-//    silkworm encoder, over every bit length of the nonce and the balance, all destination
-//    alignments, with guard bytes around the output;
-//  - bytes_equal_any (the rv32 compare of a witness leaf value with the claimed pre-state value)
-//    over all lengths up to 112, all 16 alignment pairs and a difference at every position;
-//  - GridMPT rejecting a claimed pre-state value that differs from the hash-bound witness leaf in
-//    one byte, or in its length, at several leaf shapes and claim alignments.
-// The native test build sets -DEVMONE_RV32_DISPATCH_TEST, which compiles the rv32 account encoder
-// and bytes_equal_any on the host; without it, the encoder cases test the generic encoder.
+// Account leaf encoding and the trie's pre-value check.
 
 #include <algorithm>
 #include <cstdint>
@@ -136,11 +126,8 @@ TEST_CASE("Account leaf RLP matches the generic encoder", "[account][rlp]") {
         const Account acc = make_account(f);
         CAPTURE(f.nonce, intx::to_string(f.balance));
 
-        // The destination is at every alignment. The storage root is a bytes32 object, which is
-        // aligned (evmc_bytes32 is alignas(size_t)), so its words may be read directly.
         for (size_t dst_off = 0; dst_off < 4; ++dst_off) {
             for (size_t root_slot = 0; root_slot < 2; ++root_slot) {
-                // An unstamped cache (acc_rlp_sroot_off == 0) makes rlp_into encode.
                 alignas(evmc::bytes32) uint8_t root_buf[2 * sizeof(evmc::bytes32)];
                 auto* const root = new (root_buf + root_slot * sizeof(evmc::bytes32)) evmc::bytes32{f.storage_root};
                 alignas(8) uint8_t out[8 + kAccRlpBufSize + 8];
@@ -155,8 +142,6 @@ TEST_CASE("Account leaf RLP matches the generic encoder", "[account][rlp]") {
             }
         }
 
-        // The stamped cache: the bytes, the length and the storage root's offset, which the
-        // rlp_into fast path patches with the current root.
         const Account by_arg = acc;
         by_arg.rlp_into_cache(f.storage_root);
         const Account by_field = acc;
@@ -180,8 +165,7 @@ TEST_CASE("Account leaf RLP matches the generic encoder", "[account][rlp]") {
 
 namespace {
 
-// encode_account_into as it was before the fixed-layout encoder (the generic path that host builds
-// still use), kept verbatim as the reference for random and crafted accounts.
+// encode_account_into as it was before the fixed-layout encoder (the generic path that host builds still use).
 struct BaseEncoded { uint8_t len; uint8_t sroot_off; };
 BaseEncoded base_encode_account_into(uint8_t* dst, const Account& a, const uint8_t* storage_root) {
     intx::uint256 balance_v;
@@ -212,8 +196,7 @@ BaseEncoded base_encode_account_into(uint8_t* dst, const Account& a, const uint8
     return {static_cast<uint8_t>(p - dst), sroot_off};
 }
 
-// A 32-bit word of the kinds that matter to a top-word scan and to the minimal big-endian
-// bytes: zero, one-byte values on both sides of 0x80, every byte count, all-ones, random.
+// A 32-bit word of the kinds that matter to a top-word scan and to the minimal big-endian bytes: zero.
 uint32_t sparse_word(std::mt19937_64& rng) {
     static constexpr uint32_t kSpecial[] = {0,          0,          1,          0x7f,       0x80,
                                             0xff,       0x100,      0xffff,     0x10000,    0xffffff,
@@ -251,14 +234,13 @@ TEST_CASE("Account leaf RLP matches the previous encoder on random sparse accoun
         const size_t dst_off = iter % 4;
         alignas(8) uint8_t out[8 + kAccRlpBufSize + 8];
         std::memset(out, kGuard, sizeof(out));
-        const Account fresh = acc;  // unstamped cache: rlp_into encodes
+        const Account fresh = acc;
         const uint8_t len = fresh.rlp_into(out + 4 + dst_off, root);
         REQUIRE(len == base.len);
         REQUIRE(ByteView{out + 4 + dst_off, len} == ByteView{want, base.len});
         for (size_t i = 0; i < 4 + dst_off; ++i) REQUIRE(out[i] == kGuard);
         for (size_t i = 4 + dst_off + len; i < sizeof(out); ++i) REQUIRE(out[i] == kGuard);
 
-        // The stamp: length, storage root offset, and the cached bytes, whichever overload.
         const Account by_field = acc;
         REQUIRE(by_field.rlp_into_cache() == base.len);
         REQUIRE(by_field.acc_rlp_len == base.len);
@@ -275,8 +257,6 @@ TEST_CASE("bytes_equal_any at every length, alignment pair and difference", "[tr
     for (size_t n = 0; n <= 112; ++n) {
         for (size_t oa = 0; oa < 4; ++oa) {
             for (size_t ob = 0; ob < 4; ++ob) {
-                // Blocks end exactly at the strings' ends, so that an AddressSanitizer build
-                // reports any read past them.
                 std::vector<uint8_t> block_a(oa + n), block_b(ob + n);
                 uint8_t* const a = block_a.data() + oa;
                 uint8_t* const b = block_b.data() + ob;
@@ -305,14 +285,12 @@ TEST_CASE("bytes_equal_any agrees with memcmp on random data and ignores bytes o
     for (size_t iter = 0; iter < 200000; ++iter) {
         const size_t n = rng() % 300;
         const size_t oa = rng() % 8, ob = rng() % 8;
-        // Different junk before and after each string: the compare must not depend on it.
         std::vector<uint8_t> block_a(oa + n + 8), block_b(ob + n + 8);
         for (auto& x : block_a) x = static_cast<uint8_t>(rng());
         for (auto& x : block_b) x = static_cast<uint8_t>(rng());
         const uint8_t* const a = block_a.data() + oa;
         uint8_t* const b = block_b.data() + ob;
         std::memcpy(b, a, n);
-        // Several differences, or none, so that the first mismatching word varies.
         const size_t flips = (rng() % 3 == 0) ? 0 : 1 + rng() % 4;
         for (size_t f = 0; f < flips && n > 0; ++f) b[rng() % n] ^= static_cast<uint8_t>(1 + rng() % 255);
         const bool want = std::memcmp(a, b, n) == 0;
@@ -351,8 +329,7 @@ std::vector<uint8_t> build_node_store(const Bytes32Map& nodes) {
     return std::move(nb).finalize();
 }
 
-// A pre-state trie with a complete witness, against which one leaf is updated to `next` with a
-// claimed pre-state value given at a chosen alignment.
+// A pre-state trie with a complete witness.
 class PreValueTrie {
   public:
     explicit PreValueTrie(Bytes32Map pre)
@@ -364,8 +341,7 @@ class PreValueTrie {
 
     const Bytes32Map& pre() const { return pre_; }
 
-    // The root after updating `key` to `next`, given `claimed` as its pre-state value at
-    // `claim_off` bytes past a word boundary; all zero when calc_root rejects the claim.
+    // The root after updating `key` to `next`.
     bytes32 update(const bytes32& key, ByteView claimed, size_t claim_off, ByteView next) {
         alignas(8) uint8_t claim_buf[4 + 128];
         REQUIRE(claimed.size() <= 128);
@@ -400,8 +376,7 @@ bytes32 leaf_key(uint64_t i) {
     return keccak_bytes(ByteView{raw.bytes, 32});
 }
 
-// Every one-byte change of the claimed pre-state value, a byte added or removed, at every claim
-// alignment, must be rejected; the honest claim must give the canonical post root.
+// Every one-byte change of the claimed pre-state value, a byte added or removed, at every claim alignment.
 void check_pre_value_binding(PreValueTrie& t, const bytes32& key, ByteView next) {
     const Bytes honest = t.pre().at(key);
     const bytes32 expected = t.expected_root(key, next);
@@ -426,8 +401,6 @@ void check_pre_value_binding(PreValueTrie& t, const bytes32& key, ByteView next)
 
 TEST_CASE("GridMPT rejects a claimed account pre-state that differs from the witness leaf", "[trie][gridmpt]") {
     std::mt19937_64 rng{0x1eaf};
-    // Leaf counts give different leaf path lengths, so the witness value sits at different
-    // offsets in its node; nonce and balance lengths vary the value's size (70..110 bytes).
     for (const size_t n_leaves : std::initializer_list<size_t>{1, 2, 3, 6, 17}) {
         Bytes32Map pre;
         for (size_t i = 0; i < n_leaves; ++i) {
@@ -449,7 +422,6 @@ TEST_CASE("GridMPT rejects a claimed storage pre-value that differs from the wit
     for (const size_t n_leaves : std::initializer_list<size_t>{1, 2, 5, 17}) {
         Bytes32Map pre;
         for (size_t i = 0; i < n_leaves; ++i) {
-            // Slot values of 1..32 significant bytes, RLP strings as check_root builds them.
             Bytes v;
             silkworm::rlp::encode(v, random_u256_bits(rng, 8 * (1 + static_cast<unsigned>(i * 7 % 32))));
             pre[leaf_key(1000 + i)] = v;

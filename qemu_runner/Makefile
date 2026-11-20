@@ -1,7 +1,6 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# ========== Architecture selection ==========
 # Default to riscv32im, can be overridden: make ARCH=rv64
 ARCH ?= rv32
 
@@ -75,18 +74,15 @@ eest-blockchain-tests-json: xpack-elf-eest-json
 rerun-ctest-json: xpack-elf-eest-json
 	ctest --test-dir $(BUILD_DIR) --parallel --output-on-failure -V --timeout 7200
 
-# ========== Convenience targets ==========
 eest-rv32:
 	$(MAKE) ARCH=rv32 eest-blockchain-tests
 
 eest-rv64:
 	$(MAKE) ARCH=rv64 eest-blockchain-tests
 
-# ========== QEMU runners ==========
 gdb:
 	riscv-none-elf-gdb -q -ex "target remote :1234" -x .gdbinit $(ELF)
 
-## make rlp-qemu file-name=../prover/temp/blocks/2347866/uni...bin
 rlp-qemu: xpack-elf
 	@if [ -z "$(file-name)" ]; then echo "Usage: make rlp-qemu file-name=path/to.bin (ARCH=$(ARCH))"; exit 1; fi
 	@mkdir -p $(CURDIR)/temp

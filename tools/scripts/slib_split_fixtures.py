@@ -27,16 +27,7 @@ import sys
 
 
 def slug(s: str) -> str:
-    """Filesystem-safe slug for a fixture stem or pytest node id.
-
-    Collision-free under truncation: a plain 180-char cut used to drop the
-    distinguishing tail of long pytest node ids (in tests-zkevm-benchmark the
-    same stem exists in all three gas-budget dirs and only a trailing
-    `value_10M/30M/60M` differs, so 655 of 3464 cases silently overwrote each
-    other). When the sanitized name exceeds 180 chars, keep the head and append
-    a short digest of the FULL name, so distinct inputs always map to distinct
-    slugs while short names stay byte-identical to the old behavior.
-    """
+    """Filesystem-safe slug; names over 180 chars keep their head plus a digest of the full name."""
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     if len(safe) <= 180:
         return safe
@@ -59,7 +50,7 @@ def main() -> int:
 
     n_files = 0
     n_cases = 0
-    emitted: dict[str, int] = {}  # output path -> times seen (residual-duplicate guard)
+    emitted: dict[str, int] = {}
     for root, _dirs, files in os.walk(args.indir):
         # Skip the .meta sidecar (index.json / fixtures.ini), not test cases.
         if (os.sep + ".meta") in (root + os.sep):
@@ -80,10 +71,7 @@ def main() -> int:
             stem = os.path.splitext(fn)[0]
             for case_id, case in doc.items():
                 out = os.path.join(args.outdir, f"{slug(stem)}__{slug(case_id)}.json")
-                # Residual-duplicate guard: identical stem+case_id in two input
-                # files (never the truncation case, which slug() already
-                # disambiguates) would still overwrite. Emit a deterministic
-                # __dupN sibling instead so every input case survives.
+                # Identical stem+case_id in two input files: emit a __dupN sibling so every case survives.
                 seen = emitted.get(out, 0)
                 emitted[out] = seen + 1
                 if seen:

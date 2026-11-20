@@ -1,11 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// evmone::state::is_precompile rules out an address by its leading byte before it compares and indexes the
-// availability table. The answers must stay those of the full rule: an address is a precompile in a revision
-// iff it is one of the listed addresses (all below 2^16) and the revision is at least its first one. Checked
-// for every revision over the addresses 0 to 0x1FFFF, and over addresses with a non-zero byte at each other
-// position, whose last two bytes name a precompile (the table index uses only those two).
+// is_precompile rules out an address by its leading byte before the table lookup.
 
 #include <cstdint>
 #include <random>
@@ -30,8 +25,7 @@ constexpr Listed kListed[]{
     {0x0100, EVMC_OSAKA},
 };
 
-// The rule as the table encodes it, for an address given as its low 32 bits and a flag that the other
-// 16 bytes are zero.
+// The rule as the table encodes it.
 bool expected(evmc_revision rev, uint32_t low, bool high_zero) {
     if (!high_zero)
         return false;
@@ -65,14 +59,12 @@ TEST_CASE("is_precompile: a non-zero byte anywhere else rules the address out", 
     for (int r = 0; r <= EVMC_MAX_REVISION; ++r) {
         const auto revision = static_cast<evmc_revision>(r);
         for (const auto& l : kListed) {
-            // Last two bytes of a precompile, one other byte non-zero (every position, every value).
             for (size_t pos = 0; pos < 18; ++pos)
                 for (unsigned v = 1; v <= 255; ++v) {
                     evmc::address a = make(l.address);
                     a.bytes[pos] = static_cast<uint8_t>(v);
                     REQUIRE_FALSE(evmone::state::is_precompile(revision, a));
                 }
-            // Random non-zero high bytes with the same last two bytes.
             for (int i = 0; i < 50; ++i) {
                 evmc::address a = make(l.address);
                 bool any = false;
@@ -84,7 +76,6 @@ TEST_CASE("is_precompile: a non-zero byte anywhere else rules the address out", 
                     REQUIRE_FALSE(evmone::state::is_precompile(revision, a));
             }
         }
-        // Entirely random addresses.
         for (int i = 0; i < 2000; ++i) {
             evmc::address a{};
             for (auto& b : a.bytes)

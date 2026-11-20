@@ -13,7 +13,6 @@ bool is_valid_signature(const intx::uint256& r, const intx::uint256& s, bool hom
     if (r >= kSecp256k1n || s >= kSecp256k1n) {
         return false;
     }
-    // https://eips.ethereum.org/EIPS/eip-2
     if (homestead && s > kSecp256k1Halfn) {
         return false;
     }

@@ -9,24 +9,10 @@
 #include <zilk_core/core/state_zz/direct_state.hpp>
 #include <zilk_core/core/types_zz/flat_bundle.hpp>
 
-// Hashing the code store while the input is read, for the Airbender guest.
-//
-// The guest takes its input one word at a time from the oracle and sanitize() then hashes every
-// code-store payload again from memory: 142M payload words read, and loaded again to be absorbed.
-// Here the reader walks the code store's data section as it comes in, and for each payload over 32
-// bytes feeds the words to the hash while it stores them, which saves the second load. A payload
-// that hashes to the key stored with it is marked in a bitmap, and sanitize() skips the entries
-// marked, see CodeStoreVerified. Everything else is read as before and hashed by sanitize().
-//
-// The reader parses the headers in front of the data section from the words it has stored, with
-// the checks the loaders make later, and any doubt means plain reading from that word on: no
-// marks, no change in what the guest ends up with in memory, which is the input bytes in every
-// case. A mark claims only that the bytes of this very entry hash to the key beside them; whether
-// the entry belongs to the witness is up to the loaders, which run on the same memory.
+// Hashes code-store payloads as the input is read: a marked entry is skipped by sanitize(); any parse doubt falls back to plain reading, and a mark claims only that this entry's bytes hash to the key beside them.
 
 namespace zilkworm::code_store_stream {
 
-// Word-aligned field offsets and sizes of the headers parsed, from the start of the input.
 inline constexpr size_t kEnvelopeSize = kInputHeaderSizeMFBD;
 inline constexpr size_t kBundleHeaderEnd = kEnvelopeSize + sizeof(FlatBundleHeader);
 inline constexpr size_t kMphfHeaderSize = sizeof(MphfMapHeader);
@@ -42,25 +28,9 @@ static_assert(offsetof(PreStateMeta, code_store_size) == 32);
 static_assert(offsetof(MphfMapHeader, data_offset) == 48);
 static_assert(offsetof(MphfMapHeader, data_size) == 52);
 
-/// The words of the input are read in order, each stored at dst[i], through @p io:
-///   uint32_t io.word()                                       the next word;
-///   void io.read(uint32_t* dst, size_t n)                    the next n words to dst;
-///   bool io.verify(uint32_t* dst, uint32_t size, const uint32_t* key)
-///                                                            the next ceil(size / 4) words to dst,
-///                                                            true if the Keccak-256 of the first
-///                                                            size bytes of them equals the 8 words
-///                                                            at key.
-/// Every word is stored through a may_alias type, here and in the guest's io.read() and
-/// io.verify(), which gets dst and key from read_code_store() as pointers to that type: the
-/// guest reads the bytes back through the fields of the witness records (uint64_t, bool and
-/// others), which plain uint32_t stores would not be ordered against under strict aliasing.
+/// Io: word(), read(dst, n), verify(dst, size, key) -> keccak256 of the first `size` bytes equals the 8 words at key. All stores use a may_alias type so the guest's typed reads of the witness records are ordered under strict aliasing.
 
-/// Reads the data section of the code store, data_size bytes at dst (8-byte aligned), which starts
-/// with an 8-byte sentinel and goes on with entries [len:u64][key:32][payload][zeros to 8 bytes]
-/// where len = 32 + the payload's size. Sets in @p bits (n_bits of them) bit entry_offset / 8 of
-/// every entry whose payload hashes to its key. Returns the bytes read, at the entry whose header
-/// does not describe an entry of the section, or the end of the data: the rest is the caller's
-/// to read.
+/// Sets bit entry_offset / 8 of @p bits for every entry whose payload hashes to its key; returns the bytes read, stopping at an invalid entry header or the end of the data.
 template <class Io>
 uint32_t read_code_store(
     Io& io, uint32_t* dst_, uint32_t data_size, uint32_t* bits, uint32_t n_bits) {
@@ -79,21 +49,17 @@ uint32_t read_code_store(
         for (size_t k = 0; k < 8; ++k)
             e[2 + k] = io.word();
         const uint32_t room = data_size - off - 40;
-        // The same limits the layout check puts on an entry: len fits in 32 bits, which leaves
-        // the rounding to 8 bytes no wrap, and the padded payload fits in the section. The words
-        // are stored, so that the reader goes on from here.
+        // Same limits as the layout check: len fits 32 bits (no wrap rounding to 8) and the padded payload fits the section.
         if (hi != 0 || lo < 32) return off + 40;
         const uint32_t len = lo - 32;
         const uint32_t padded = (len + 7) & ~uint32_t{7};
         if (padded > room) return off + 40;
         w32* payload = e + 10;
         uint32_t words = padded / 4;
-        // A payload of 32 bytes or less is left to sanitize(), whose hashing of it is memoized.
         if (len > 32 && (off >> 3) < n_bits) {
             if (io.verify(payload, len, e + 2))
                 bits[off >> 8] |= uint32_t{1} << ((off >> 3) & 31);
-            // The hash took ceil(len / 4) words, which is one short of the padding when len mod 8
-            // is 1 to 4.
+            // The hash took ceil(len / 4) words, one short of the padding when len mod 8 is 1..4.
             payload += (len + 3) / 4;
             words -= (len + 3) / 4;
         }
@@ -104,16 +70,12 @@ uint32_t read_code_store(
     return off;
 }
 
-/// Reads the first @p full_words words of the input to dst (8-byte aligned), hashing the code
-/// store's payloads on the way if the input is a flat bundle of the layout the guest knows: one
-/// bundle, and headers down to the code store's that pass the checks of the loaders. @p handshake
-/// then holds the data section and @p bits, for sanitize(); on any other input it is left as it
-/// was. @p bits must start zeroed. Parses forward only, and never reads a word past @p full_words.
+/// Reads the first @p full_words words to dst (8-aligned), hashing code-store payloads if the input is a flat bundle the loaders' checks accept (then @p handshake and @p bits are set; @p bits must start zeroed); never reads past @p full_words.
 template <class Io>
 void read_input_words(Io& io, uint32_t* dst, size_t full_words, CodeStoreVerified& handshake,
                       uint32_t* bits, uint32_t n_bits) {
     const uint64_t limit = uint64_t{full_words} * 4;
-    size_t pos = 0;  // Words read.
+    size_t pos = 0;
     auto read_to = [&](uint64_t end_bytes) {
         const size_t end = static_cast<size_t>(end_bytes / 4);
         if (end > pos) io.read(dst + pos, end - pos);
@@ -125,7 +87,6 @@ void read_input_words(Io& io, uint32_t* dst, size_t full_words, CodeStoreVerifie
         return reinterpret_cast<const w32*>(dst)[byte_off / 4];
     };
 
-    // The MFBD envelope and the flat bundle header: one bundle, which starts right after.
     if (limit < kBundleHeaderEnd) return read_rest();
     read_to(kBundleHeaderEnd);
     const uint64_t direct_state_off = word_at(kEnvelopeSize + offsetof(FlatBundleHeader, direct_state_off));
@@ -136,7 +97,6 @@ void read_input_words(Io& io, uint32_t* dst, size_t full_words, CodeStoreVerifie
         direct_state_off % 8 != 0 || direct_state_off < sizeof(FlatBundleHeader))
         return read_rest();
 
-    // The pre-state header, at the direct state, the code store's behind it.
     const uint64_t meta = kEnvelopeSize + direct_state_off;
     if (meta + kPreStateMetaSize > limit) return read_rest();
     read_to(meta + kPreStateMetaSize);
@@ -147,7 +107,6 @@ void read_input_words(Io& io, uint32_t* dst, size_t full_words, CodeStoreVerifie
         code_store_size < kMphfHeaderSize)
         return read_rest();
 
-    // The code store's header: the data section lies behind it, inside the code store and the input.
     const uint64_t store = meta + code_store_off;
     if (store + kMphfHeaderSize > limit) return read_rest();
     read_to(store + kMphfHeaderSize);

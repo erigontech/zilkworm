@@ -18,7 +18,6 @@ namespace rlp {
     }
 
     DecodingResult decode(ByteView& from, evmc::address& address, Leftover mode) {
-        // SILKWORM_ASSERT(from.size() >= std::size(address.bytes));
         return decode(from, address.bytes, mode);
     }
 
@@ -76,7 +75,6 @@ evmc::address hex_to_address(std::string_view hex, bool return_zero_on_err) {
         if (return_zero_on_err) {
             return evmc::address{};
         }
-        // abort_due_to_assertion_failure("invalid hex encoding", __FILE__, __LINE__);
     }
     return bytes_to_address(*bytes);
 }

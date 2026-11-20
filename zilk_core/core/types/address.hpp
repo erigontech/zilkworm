@@ -16,19 +16,16 @@
 
 namespace silkworm {
 
-// Yellow Paper, Section 7
 evmc::address create_address(const evmc::address& caller, uint64_t nonce) noexcept;
 
-// https://eips.ethereum.org/EIPS/eip-1014
+// EIP-1014
 evmc::address create2_address(const evmc::address& caller, const evmc::bytes32& salt,
                               uint8_t (&code_hash)[32]) noexcept;
 
-// Converts bytes to evmc::address; input is cropped if necessary.
-// Short inputs are left-padded with 0s.
+// Crops long input, left-pads short input with zeros.
 evmc::address bytes_to_address(ByteView bytes);
 
-// Similar to HexToAddress in erigon-lib.
-// Terminates the program if hex is not a valid hex encoding, unless return_zero_on_err is true.
+// Terminates on invalid hex unless return_zero_on_err is true.
 evmc::address hex_to_address(std::string_view hex, bool return_zero_on_err = false);
 
 std::string address_to_hex(const evmc::address& address);

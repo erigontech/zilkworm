@@ -1,11 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// rv64im has no Zbb, so GCC lowers __builtin_bswap64/32 to calls into libgcc's __bswapdi2 /
-// __bswapsi2. Expand them inline instead: a call cannot share the mask constants between the
-// four swaps of a uint256, which is where most of the guest's byte swapping comes from.
-//
-// Force-included for every C and C++ translation unit; see cmake/riscv64im-sp1.cmake.
+// rv64im has no Zbb: expand bswap inline instead of calling libgcc __bswapdi2/__bswapsi2 (force-included everywhere).
 #pragma once
 #ifndef __ASSEMBLER__  // blst compiles its .S through the C driver, which sees this too.
 
@@ -22,7 +18,7 @@ z6m_bswap64(unsigned long long x)
         ((x << 8) & 0xff00ff00ff00ff00ULL) | ((x >> 8) & 0x00ff00ff00ff00ffULL);
     const unsigned long long b =
         ((a << 16) & 0xffff0000ffff0000ULL) | ((a >> 16) & 0x0000ffff0000ffffULL);
-    return (b << 32) | (b >> 32);  // The last step needs no mask.
+    return (b << 32) | (b >> 32);
 }
 
 static __inline__ __attribute__((always_inline, unused)) Z6M_BSWAP_CONSTEXPR unsigned int

@@ -1,30 +1,8 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Zilkworm unified build + runtime
-#
-# Builds from source:
-#   1. C++ guest ELF (RISC-V 64IM)
-#   2. Rust prover host binary
-#   3. sp1-gpu-server (CUDA proving server, from erigontech/sp1)
-#
-# Prerequisites:
-#   git submodule update --init --recursive
-#
-# Build:
-#   docker build --build-arg ZILKWORM_VERSION=0.1.0-alpha.1 -t somnergy/z6m_prover:0.1.0-alpha.1 .
-#
-# Build for specific GPU architecture (default: 89 = RTX 4090):
-#   docker build --build-arg CUDA_ARCHS="90" --build-arg ZILKWORM_VERSION=0.1.0-alpha.1 -t somnergy/z6m_prover:0.1.0-alpha.1 .
-#
-# Run (CPU):
-#   docker run --rm somnergy/z6m_prover:0.1.0-alpha.1 --help
-#
-# Run (GPU + DinD):
-#   docker run --gpus all --rm --network host \
-#     -v /var/run/docker.sock:/var/run/docker.sock \
-#     -e SP1_PROVER=cuda \
-#     somnergy/z6m_prover:0.1.0-alpha.1 execute --file-name /work/block.bin
+# Zilkworm unified build + runtime: C++ guest ELF (RV64IM), Rust prover, sp1-gpu-server.
+# Build: docker build --build-arg ZILKWORM_VERSION=<v> [--build-arg CUDA_ARCHS=<sm>] -t <tag> .
 
 ARG CUDA_ARCHS="89"
 ARG ZILKWORM_VERSION="dev"
@@ -101,11 +79,7 @@ RUN set -e; \
     ln -s "${version_dir}.content/bin" /opt/riscv-none-elf-gcc-bin
 ENV PATH="/opt/riscv-none-elf-gcc-bin:${PATH}"
 
-# Native GCC 15 (xpack) — the project-standard compiler for the C++ witness
-# converter that prover/witness_ffi/build.rs compiles into the prover.
-# Noble's stock apt tops out at gcc-14 and this stage can't move to a newer
-# Ubuntu while the runtime stage is 24.04, so use the same xpm mechanism as
-# the riscv toolchain above (pinned: this compiler defines the prover ABI).
+# Native GCC 15 (xpack): the prover ABI depends on it, so it is pinned; stock noble apt tops out at gcc-14.
 RUN --mount=type=cache,target=/root/.npm \
     xpm install @xpack-dev-tools/gcc@15.2.0-1.1 --global --verbose
 
@@ -113,7 +87,6 @@ RUN set -e; \
     version_dir="$(ls -1d /root/.local/xPacks/@xpack-dev-tools/gcc/*/ | head -1)"; \
     ln -s "${version_dir}.content/bin" /opt/xpack-gcc-bin
 
-# Rust 1.88.0
 ENV CARGO_HOME=/root/.cargo \
     RUSTUP_HOME=/root/.rustup \
     PATH="/root/.cargo/bin:${PATH}"
@@ -126,7 +99,6 @@ WORKDIR /src
 COPY . .
 
 # Build guest ELF (C++23 cross-compiled to rv64im)
-# USE_HASH_KEY=ON enables node-store account recovery.
 ARG USE_HASH_KEY=OFF
 RUN cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
         -DCMAKE_TOOLCHAIN_FILE=/src/prover/guest_hypercube/cmake/riscv64im-sp1.cmake \
@@ -135,12 +107,7 @@ RUN cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
         -DUSE_HASH_KEY=${USE_HASH_KEY} \
     && cmake --build prover/guest_hypercube/build -j"$(nproc)"
 
-# Build prover binary (Rust, embeds guest ELF via build.rs).
-# CC/CXX point witness_ffi's compiler probe at the xpack gcc-15; its
-# libstdc++ is newer than the runtime image's, so Z6M_STATIC_LIBSTDCXX=1
-# makes build.rs link libstdc++ statically — the prover then runs on stock
-# ubuntu:24.04 (verified: static binary needs only GLIBC <= 2.34; noble
-# ships 2.39).
+# Build the prover (embeds the guest ELF); static libstdc++ lets it run on stock ubuntu:24.04.
 ENV CC=/opt/xpack-gcc-bin/gcc \
     CXX=/opt/xpack-gcc-bin/g++ \
     Z6M_STATIC_LIBSTDCXX=1

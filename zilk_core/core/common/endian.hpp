@@ -4,11 +4,6 @@
 
 #pragma once
 
-/*
-Facilities to deal with byte order/endianness
-See https://en.wikipedia.org/wiki/Endianness
-*/
-
 #include <cstdint>
 #include <cstring>
 
@@ -21,69 +16,38 @@ namespace silkworm::endian {
 
 // NOLINTBEGIN(readability-identifier-naming)
 
-// Similar to boost::endian::load_big_u16
 const auto load_big_u16 = intx::be::unsafe::load<uint16_t>;
 
-// Similar to boost::endian::load_big_u32
 const auto load_big_u32 = intx::be::unsafe::load<uint32_t>;
 
-// Similar to boost::endian::load_big_u64
 const auto load_big_u64 = intx::be::unsafe::load<uint64_t>;
 
-// Similar to boost::endian::load_little_u16
 const auto load_little_u16 = intx::le::unsafe::load<uint16_t>;
 
-// Similar to boost::endian::load_little_u32
 const auto load_little_u32 = intx::le::unsafe::load<uint32_t>;
 
-// Similar to boost::endian::load_little_u64
 const auto load_little_u64 = intx::le::unsafe::load<uint64_t>;
 
-// Similar to boost::endian::store_big_u16
 const auto store_big_u16 = intx::be::unsafe::store<uint16_t>;
 
-// Similar to boost::endian::store_big_u32
 const auto store_big_u32 = intx::be::unsafe::store<uint32_t>;
 
-// Similar to boost::endian::store_big_u64
 const auto store_big_u64 = intx::be::unsafe::store<uint64_t>;
 
-// Similar to boost::endian::store_little_u16
 const auto store_little_u16 = intx::le::unsafe::store<uint16_t>;
 
-// Similar to boost::endian::store_little_u32
 const auto store_little_u32 = intx::le::unsafe::store<uint32_t>;
 
-// Similar to boost::endian::store_little_u64
 const auto store_little_u64 = intx::le::unsafe::store<uint64_t>;
 
 // NOLINTEND(readability-identifier-naming)
 
-//! \brief Transforms a uint64_t stored in memory with native endianness to it's compacted big endian byte form
-//! \param [in] value : the value to be transformed
-//! \return A ByteView (std::string_view) into an internal static buffer (thread specific) of the function
-//! \remarks each function call overwrites the buffer, therefore invalidating a previously returned result
-//! \remarks so each returned ByteView must be used immediately (before a further call to the same function).
-//! \remarks See Erigon TxIndex value
-//! \remarks A "compact" big endian form strips leftmost bytes valued to zero
+// Returned view aliases a thread-local buffer; valid only until the next call (both overloads).
 ByteView to_big_compact(uint64_t value);
 
-//! \brief Transforms a uint256 stored in memory with native endianness to it's compacted big endian byte form
-//! \param [in] value : the value to be transformed
-//! \return A ByteView (std::string_view) into an internal static buffer (thread specific) of the function
-//! \remarks each function call overwrites the buffer, therefore invalidating a previously returned result
-//! \remarks so each returned ByteView must be used immediately (before a further call to the same function)
-//! \remarks See Erigon TxIndex value
-//! \remarks A "compact" big endian form strips leftmost bytes valued to zero
 ByteView to_big_compact(const intx::uint256& value);
 
-//! \brief Parses unsigned integer from a compacted big endian byte form.
-//! \param [in] data : byte view of a compacted value.
-//! Its length must not be greater than the sizeof the UnsignedIntegral type; otherwise, kOverflow is returned.
-//! \param [out] out: the corresponding integer with native endianness.
-//! \return Success or kOverflow or kLeadingZero.
-//! \remarks A "compact" big endian form strips leftmost bytes valued to zero;
-//! if the input is not compact kLeadingZero is returned.
+// kOverflow if wider than T; kLeadingZero if not compact.
 template <UnsignedIntegral T>
 static DecodingResult from_big_compact(ByteView data, T& out) {
     if (data.size() > sizeof(T)) {
@@ -100,9 +64,6 @@ static DecodingResult from_big_compact(ByteView data, T& out) {
     }
 
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-    // Direct BE→native construction avoids memcpy + bswap.
-    // For ≤8 bytes: ~10 insns. For uint256: fills word-by-word from data end,
-    // avoids the expensive full bswap(uint256) (~96 insns on rv32).
     if constexpr (sizeof(T) <= 8)
     {
         T val = 0;
@@ -113,13 +74,10 @@ static DecodingResult from_big_compact(ByteView data, T& out) {
     }
     else if constexpr (sizeof(T) == 32)
     {
-        // Fill uint64_t words from BE data, right-aligned in uint256.
-        // words_[0] is least significant. data[0] is most significant byte.
-        // Process from the END of data in up to 8-byte chunks.
         out = 0;
         const size_t sz = data.size();
         const uint8_t* end = data.data() + sz;
-        size_t word_idx = 0;  // start from LSW
+        size_t word_idx = 0;
 
         size_t remaining = sz;
         while (remaining >= 8)

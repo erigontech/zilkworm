@@ -1,13 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// A host stand-in for prover/guest_hypercube/src/include/sp1_syscalls.hpp, for the test that
-// builds evmone's SP1 secp256k1 paths on the host (secp256k1_sp1_test.cpp): the syscalls those
-// paths use, computed in software, with the preconditions of SP1's precompiles checked, since the
-// guest relies on them and a violation there fails the proof, not the execution. secp256k1_add
-// takes two affine points of the curve with different x (neither the point at infinity, which the
-// guest encodes as zeros, nor a doubling), secp256k1_double one affine point of the curve, and
-// uint256_mulmod's x must not overlap its y or modulus. A violation aborts the test.
+// A host stand-in for prover/guest_hypercube/src/include/sp1_syscalls.hpp.
 #pragma once
 
 #include <cstddef>

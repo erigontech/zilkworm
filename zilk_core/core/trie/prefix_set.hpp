@@ -11,33 +11,21 @@
 
 namespace silkworm::trie {
 
-/**
- * A set of "nibbled" byte strings with the following property:
- *  If x ∈ S and x starts with y, then y ∈ S.
- *  Corresponds to RetainList in Erigon.
- */
+// If x is in the set and x starts with y, then y is in the set.
 class PrefixSet {
   public:
-    //! \brief Constructs an empty set.
     PrefixSet() = default;
 
-    // copyable
     PrefixSet(const PrefixSet& other) = default;
     PrefixSet& operator=(const PrefixSet& other) = default;
 
     void insert(ByteView key, bool marker = false);
     void insert(Bytes&& key, bool marker = false);
 
-    //! \brief Returns whether or not provided prefix is contained in any of the owned keys
-    //! \remarks Doesn't change the set logically, but is not marked const since it's not safe to call this method
-    //! concurrently. \see Erigon's RetainList::Retain
+    // Not const: unsafe to call concurrently.
     bool contains(ByteView prefix);
 
-    //! \brief Returns the next key with marker==true in the list
-    //! \see Erigon's RetainList::RetainWithMarker
-    //! \param [in] prefix : the prefix to search for
-    //! \param [in] invariant_prefix_len : when searching for next marked the scanned items must begin with this number
-    //! of identical bytes
+    // Scanned items must share the first invariant_prefix_len bytes with prefix.
     std::pair<bool, ByteView> contains_and_next_marked(ByteView prefix, size_t invariant_prefix_len = 0);
 
     size_t size() const { return keys_.size(); }

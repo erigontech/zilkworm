@@ -11,8 +11,8 @@
 enum { HEAP_ALIGN = _Alignof(max_align_t) };
 
 
-extern char __heap_start;   // from linker
-extern char __heap_end;     // from linker
+extern char __heap_start;
+extern char __heap_end;
 
 static uintptr_t cur_brk = 0;
 

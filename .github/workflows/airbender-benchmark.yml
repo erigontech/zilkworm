@@ -27,8 +27,7 @@ jobs:
       - name: Prepare local cargo cache
         run: |
           mkdir -p /cargo-cache/cargo /cargo-cache/target-airbender
-          # Wipe extracted crate sources:
-          # this only forces re-extraction, not re-download.
+          # Wipe extracted crate sources: forces re-extraction, not re-download.
           rm -rf /cargo-cache/cargo/registry/src
           cat > /cargo-cache/cargo/config.toml <<'TOML'
           [net]
@@ -69,8 +68,7 @@ jobs:
         run: rm -rf prover/prover_airbender/target/release/build prover/prover_airbender/target/release/.fingerprint
 
       - name: Build guest ELF and prover
-        # Execution only: the CPU-only prover, as in airbender-eest.yml (the default gpu feature
-        # needs the CUDA toolkit, which this runner does not have).
+        # Execution only: CPU prover (the default gpu feature needs a CUDA toolkit this runner lacks).
         run: |
           make z6m_guest_airbender
           cd prover/prover_airbender && cargo build --release --no-default-features

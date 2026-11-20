@@ -93,7 +93,6 @@ impl EthproofsClient {
         });
         let this = self.clone();
 
-        // Spawn another task to avoid retries to impact block execution
         tokio::spawn(async move {
             let url = format!("{}/proofs/proving", this.endpoint);
             let request_body =
@@ -154,7 +153,6 @@ impl EthproofsClient {
 
         let this = self.clone();
 
-        // Spawn another task to avoid retries to impact block execution
         tokio::spawn(async move {
             let url = format!("{}/proofs/proved", this.endpoint);
             let request_body =
@@ -163,7 +161,6 @@ impl EthproofsClient {
             println!("EthProofs proved request:");
             println!("  URL: {}", url);
             println!("  Headers: Content-Type: application/json, Authorization: Bearer [REDACTED]");
-            // println!("  Body: {}", request_body);
 
             let response = this
                 .client

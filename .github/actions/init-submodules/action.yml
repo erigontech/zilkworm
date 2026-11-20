@@ -31,9 +31,7 @@ runs:
         git config --global --add safe.directory '*'
         git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
 
-        # Clean up stale evmone/evmc submodule state (evmc was inlined into evmone).
-        # On self-hosted runners with a cached submodule checkout, git refuses to
-        # transition the submodule gitlink into a regular directory.
+        # Clean up stale evmc submodule state: git refuses to turn a submodule gitlink into a regular directory.
         if [ -d third_party/evmone/.git ] || [ -f third_party/evmone/.git ]; then
           git -C third_party/evmone submodule deinit -f evmc 2>/dev/null || true
         fi
@@ -47,7 +45,5 @@ runs:
 
         git submodule update --init --recursive $depth_arg
 
-        # Restore evmc/ from evmone's HEAD. git submodule update is a no-op when
-        # HEAD already matches the target commit, so evmc/ files we deleted would
-        # not be re-materialized without this explicit checkout.
+        # Restore evmc/ from evmone's HEAD: submodule update is a no-op when HEAD already matches.
         git -C third_party/evmone checkout HEAD -- evmc

@@ -6,13 +6,11 @@ use sp1_sdk::SP1Stdin;
 use std::fs;
 use std::path::Path;
 
-// Mirrors zilk_core/core/types_zz/input_envelope.hpp.
+// Must match types_zz/input_envelope.hpp.
 const INPUT_MAGIC_EJSN: u32 = 0x4E534A45; // "EJSN"
 const INPUT_VERSION_EJSN: u32 = 1;
 
-/// Build an SP1Stdin carrying an EJSN-wrapped EEST blockchain_test JSON.
-/// The guest does ONE `read_vec()` and feeds the bytes to StateTransition,
-/// which dispatches on the leading 4-byte magic.
+/// EJSN-wrapped EEST blockchain_test JSON; the guest reads it with a single `read_vec()`.
 pub fn build_stdin_from_eth_tests(path: &Path) -> Result<SP1Stdin> {
     let mut stdin = SP1Stdin::new();
     let raw = fs::read_to_string(path)?;
@@ -28,9 +26,7 @@ pub fn build_stdin_from_eth_tests(path: &Path) -> Result<SP1Stdin> {
     Ok(stdin)
 }
 
-/// Build an SP1Stdin carrying an MFBD-wrapped FlatBundle. The on-disk file
-/// is already MFBD-wrapped post-converter — we just slurp it raw and write
-/// a single Vec into SP1Stdin.
+/// MFBD-wrapped FlatBundle read raw from disk as a single Vec.
 pub fn build_stdin_from_mfbd(path: &Path) -> Result<SP1Stdin> {
     let mut stdin = SP1Stdin::new();
     let raw = fs::read(path)?;

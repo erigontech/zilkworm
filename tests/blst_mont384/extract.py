@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
-"""extract.py SCRIPT PREFIX OUT
-
-Copies the airbender_384 block (the BigInt-CSR Montgomery arithmetic that patch_blst_airbender.sh
-splices into blst) out of the patch script, so that the host test compiles the exact text the
-guest compiles. The CSR instruction becomes a call to the emulator in bigint_emu.h, the
-fallback MUL_MONT_IMPL(384) include is dropped and every name is prefixed, so two versions of
-the block can live in one translation unit.
-"""
+"""extract.py SCRIPT PREFIX OUT: copies the prefixed airbender_384 block out of patch_blst_airbender.sh."""
 import re
 import sys
 

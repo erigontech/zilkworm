@@ -29,10 +29,7 @@ use url::Url;
 
 pub const Z6M_ELF: Elf = include_elf!("z6m_guest");
 
-/// Wall-clock ms since the Unix epoch. Used by the inline phase-boundary
-/// markers (BEGIN_FETCH / BEGIN_EXEC / END_EXEC) emitted from the live
-/// service loop, all of which tag a `now_ms=` field. fetcher.rs emits its
-/// own BEGIN_BUNDLE marker with an equivalent SystemTime capture.
+/// Wall-clock ms since the Unix epoch, for the `now_ms=` phase markers.
 #[inline]
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -41,7 +38,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Guest-committed public values (see docs/architecture.md for encoding details).
 #[derive(Debug, Clone)]
 struct PublicValues {
     gas_used: u64,
@@ -66,7 +62,6 @@ impl PublicValues {
     }
 }
 
-// Dynamic prover enum to handle both CPU and CUDA provers
 enum DynamicProver {
     Env(CpuProver),
     Cuda(CudaProver),
@@ -106,7 +101,6 @@ impl DynamicProver {
     ) -> Result<(SP1ProofWithPublicValues, u64)> {
         match (self, pk) {
             (DynamicProver::Env(prover), DynProvingKey::Env(env_pk)) => {
-                // Pre-execute to get cycle count
                 let (mut output, report) = prover
                     .execute(Z6M_ELF, stdin.clone())
                     .await
@@ -114,7 +108,6 @@ impl DynamicProver {
                 let _gas_used = output.read::<u64>();
                 let cycle_count = report.total_instruction_count();
 
-                // Now prove
                 let proof_result = match mode {
                     SP1ProofMode::Core => prover.prove(env_pk, stdin.clone()).core().await,
                     SP1ProofMode::Compressed => {
@@ -150,9 +143,7 @@ impl DynamicProver {
         }
     }
 
-    /// Execute the guest ELF for a single block and return public values plus
-    /// execution report. Mirrors `Prover::execute` for both backends so the
-    /// service can race a CPU and CUDA client without branching at call sites.
+    /// Mirrors `Prover::execute` for both backends so call sites need not branch.
     async fn execute(
         &self,
         stdin: SP1Stdin,
@@ -259,11 +250,9 @@ pub struct ProvingLog {
 }
 
 pub struct Z6mProverService {
-    /// Respects the `SP1_PROVER` env var (CUDA when set, CPU otherwise). Used
-    /// for proving and as one half of the execute fallback race.
+    /// CUDA when `SP1_PROVER` is set, CPU otherwise.
     client1: Arc<Mutex<DynamicProver>>,
-    /// Always a `CpuProver`. Used as the second contender for execution work
-    /// so executes never wait for the (possibly busy) primary client.
+    /// Always a `CpuProver`, so executes never wait for the busy primary client.
     client2: Arc<Mutex<DynamicProver>>,
     proving_key: DynProvingKey,
     config: AppConfig,
@@ -282,8 +271,6 @@ impl Z6mProverService {
         let proving_key = prover_client.setup(Z6M_ELF).await;
         let eth_client = config.ethproofs.clone().map(EthproofsClient::new);
         let client1: Arc<Mutex<DynamicProver>> = Arc::new(Mutex::new(prover_client));
-        // Always-CPU sibling client. Used so executes can run on a free client
-        // while client1 is busy proving (or vice versa).
         let cpu_for_exec = ProverClient::builder().cpu().build().await;
         let client2: Arc<Mutex<DynamicProver>> =
             Arc::new(Mutex::new(DynamicProver::Env(cpu_for_exec)));
@@ -309,8 +296,6 @@ impl Z6mProverService {
         std::fs::create_dir_all(opts.pk_path.parent().unwrap_or_else(|| Path::new(".")))?;
         std::fs::create_dir_all(opts.vk_path.parent().unwrap_or_else(|| Path::new(".")))?;
         let _cfg = bincode::config::standard();
-        // let mut fpk = BufWriter::new(File::create(&opts.pk_path)?);
-        // bincode::serde::encode_into_std_write(&pk, &mut fpk, _cfg)?;
         let mut fvk = BufWriter::new(File::create(&opts.vk_path)?);
         bincode::serde::encode_into_std_write(&vk, &mut fvk, _cfg)?;
         info!(
@@ -357,21 +342,7 @@ impl Z6mProverService {
         };
 
         let _cfg = bincode::config::standard();
-        // let pk: DynProvingKey = {
-        //     let mut r = BufReader::new(File::open(&opts.pk_path)?);
-        //     bincode::serde::decode_from_std_read(&mut r, _cfg)?
-        // };
 
-        // Lock the client for exclusive proving access
-        // let client = self.client1.lock().await;
-
-        // let start = Instant::now();
-        // let proof_mode = match opts.proof_type.as_str() {
-        //     "core" => SP1ProofMode::Core,
-        //     "groth16" => SP1ProofMode::Groth16,
-        //     "plonk" => SP1ProofMode::Plonk,
-        //     _ => SP1ProofMode::Compressed,
-        // };
         println!("=========  SPIDEY SPIEDY prove_block  ============");
 
         let client = ProverClient::builder().cuda().build().await;
@@ -382,29 +353,6 @@ impl Z6mProverService {
             }
             Err(err) => println!("ERROR {err}"),
         }
-        // let proof = client.core(&pk, stdin.clone(), [0; 4]).await.unwrap();
-        // let _compressed = client.compress(&pk.verifying_key(), proof, vec![]).await.unwrap();
-
-        // let pk = client.setup(Z6M_ELF).await;
-        // let (mut proof, cycle_count) = client.prove(&pk, &stdin, proof_mode).await.unwrap();
-        // let proving_millis = start.elapsed().as_millis() as u64;
-        // let gas_used = proof.public_values.read::<u64>();
-
-        // // Drop the client lock here so other operations can proceed
-        // drop(client);
-
-        // let proof_path = self.write_proof(&opts, &proof)?;
-        // let log = ProvingLog {
-        //     block_number: opts.block_number,
-        //     gas_used,
-        //     cycle_count,
-        //     proof_path: proof_path.clone(),
-        //     proof_type: opts.proof_type.clone(),
-        //     proving_millis,
-        //     message: String::from("Success"),
-        // };
-        // self.persist_proving_logs(&opts.data_dir, &log)?;
-        // Ok(log)
 
         let log = ProvingLog {
             block_number: opts.block_number,
@@ -418,9 +366,7 @@ impl Z6mProverService {
         Ok(log)
     }
 
-    // Per-block proving driver. The caller owns the prover lock guard and
-    // hands it in so dispatch logic stays in `run_service`. The guard is
-    // dropped before any file I/O so another block can grab the prover ASAP.
+    // The caller owns the prover guard; it is dropped before file I/O so the next block can start.
     async fn prove_block_with_client(
         opts: &ProveOptions,
         guard: tokio::sync::OwnedMutexGuard<DynamicProver>,
@@ -455,7 +401,6 @@ impl Z6mProverService {
         };
 
         let _cfg = bincode::config::standard();
-        // Write proof to file
         let proof_path = opts
             .data_dir
             .join(opts.block_number.to_string())
@@ -465,7 +410,7 @@ impl Z6mProverService {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Call proving hook. Spawned so that ethproofs latency never delays proving.
+        // Spawned so Ethproofs latency never delays proving.
         if let Some(client) = eth_client {
             let client = client.clone();
             let block_number = opts.block_number;
@@ -481,16 +426,12 @@ impl Z6mProverService {
 
         let start = Instant::now();
 
-        // Apply timeout only to the prove operation. The caller-owned guard
-        // is what serialises prover access; we don't re-lock here.
         let proof_result = tokio::time::timeout(
-            Duration::from_secs(1800), // 30 minutes timeout
+            Duration::from_secs(1800),
             guard.prove(&proving_key.clone(), &stdin, proof_mode),
         )
         .await;
 
-        // Explicitly drop the guard before processing results so the next
-        // block can take the lock while we persist artifacts.
         drop(guard);
 
         let proving_millis = start.elapsed().as_millis() as u64;
@@ -521,9 +462,7 @@ impl Z6mProverService {
                 let mut fp = BufWriter::new(File::create(&proof_path)?);
                 bincode::serde::encode_into_std_write(&proof, &mut fp, cfg)?;
 
-                // Call proved hook
                 if let Some(client) = eth_client {
-                    // Read proof bytes back from file
                     let proof_bytes = std::fs::read(&proof_path)?;
 
                     let client = client.clone();
@@ -545,7 +484,6 @@ impl Z6mProverService {
                     message: String::from("Success"),
                 };
 
-                // Write log to file
                 Self::persist_proving_logs_static(&opts.data_dir, &log)?;
                 Ok(log)
             }
@@ -560,10 +498,8 @@ impl Z6mProverService {
                     message: String::from("FAILED"),
                 };
 
-                // Write log to file
                 Self::persist_proving_logs_static(&opts.data_dir, &log)?;
 
-                // Proving operation failed
                 println!(
                     "[{}] Error trying to prove block {}: {}",
                     Self::format_timestamp(),
@@ -574,7 +510,6 @@ impl Z6mProverService {
                 bail!("Proving failed: {}", err)
             }
             Err(_timeout_err) => {
-                // Timeout occurred
                 let err_msg = format!("Proving timed out after {} seconds", 1800);
                 println!("[{}] {}", Self::format_timestamp(), err_msg);
                 bail!("{}", err_msg)
@@ -627,14 +562,10 @@ impl Z6mProverService {
 
         info!("Service starting from block: {}", next_block);
 
-        // Handles for tasks dispatched per block. We only join them when the
-        // loop is about to exit (end_block reached) so each iteration advances
-        // as soon as a prover lock is acquired, not when the work finishes.
+        // Joined only at loop exit (end_block) so each iteration advances once a prover lock is acquired.
         let mut in_flight: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         loop {
-            // Bounds: in end_block mode, stop once we're past it. In live mode
-            // (no end_block) we wait for the RPC to expose the next block.
             if let Some(end) = service.end_block {
                 if next_block > end {
                     break;
@@ -683,15 +614,10 @@ impl Z6mProverService {
                 continue;
             }
 
-            // Live service: regenerate the flat bundle on every block so that
-            // a stale `flatWitnessBundle<N>.mfbd` from a prior run never sneaks
-            // past the freshly-fetched RPC data.
+            // Live service: always rebuild so a stale flatWitnessBundle<N>.mfbd never masks fresh RPC data.
             let data_dir = self.config.data_dir.clone();
 
-            // BEGIN_FETCH: just before the RPC fetch starts. block_ts_ms is
-            // unknown at this point (header hasn't been fetched) — it's
-            // attached to BEGIN_BUNDLE inside fetcher.rs once the header is in
-            // hand.
+            // BEGIN_FETCH precedes the RPC fetch; block_ts_ms is attached later to BEGIN_BUNDLE in fetcher.rs.
             println!(
                 "BEGIN_FETCH block={} now_ms={}",
                 block_number,
@@ -735,7 +661,6 @@ impl Z6mProverService {
                     block_number
                 );
 
-                // Call queued hook before we even wait for the lock.
                 if let Some(client) = &self.eth_client {
                     let client = client.clone();
                     tokio::spawn(async move { client.queued(block_number).await });
@@ -782,9 +707,7 @@ impl Z6mProverService {
                     block_number
                 );
 
-                // Race the two clients: whichever lock resolves first owns
-                // this block's execution. tokio Mutex::lock_owned is
-                // cancel-safe — dropping the loser's future cleanly aborts.
+                // Race the two clients; `Mutex::lock_owned` is cancel-safe, so dropping the loser's future aborts cleanly.
                 let c1 = self.client1.clone();
                 let c2 = self.client2.clone();
                 let guard = tokio::select! {
@@ -807,8 +730,7 @@ impl Z6mProverService {
                             return;
                         }
                     };
-                    // BEGIN_EXEC: stdin built, guard acquired, just before the
-                    // prover execute. END_EXEC fires the moment execute returns.
+                    // BEGIN_EXEC follows stdin build and guard acquire; END_EXEC fires when execute returns.
                     println!(
                         "BEGIN_EXEC block={} now_ms={}",
                         block_number,
@@ -830,7 +752,6 @@ impl Z6mProverService {
                     let cycle_count = report.total_instruction_count();
                     let prover_gas = report.gas().unwrap_or_default();
                     let syscall_count = report.total_syscall_count();
-                    // Release the prover lock before file I/O.
                     drop(guard);
 
                     if gas_used == 0 {
@@ -864,8 +785,7 @@ impl Z6mProverService {
             next_block += 1;
         }
 
-        // Drain in-flight task handles so the process doesn't drop unfinished
-        // proves/executes when end_block is reached.
+        // Drain in-flight tasks so end_block does not drop unfinished proves/executes.
         for h in in_flight.drain(..) {
             let _ = h.await;
         }
@@ -873,7 +793,6 @@ impl Z6mProverService {
         Ok(())
     }
 
-    // Helper method to get block number with retry logic
     async fn get_block_number_with_retry<P>(provider: &P, max_retries: u32) -> Result<u64>
     where
         P: Provider,
@@ -922,10 +841,8 @@ impl Z6mProverService {
             None => 1,
         };
 
-        // Create ONE CpuProver upfront and reuse for all blocks
         let client = ProverClient::builder().cpu().build().await;
 
-        // Resolve log path once before the loop
         let log_path = execution_log_file
             .unwrap_or_else(|| data_dir.join("executionLogs.log"));
 
@@ -995,9 +912,7 @@ impl Z6mProverService {
             bail!("--test-dir {} is not a directory", test_dir.display());
         }
 
-        // Collect all EEST test files recursively: .mfbd bundles produced by
-        // eest_to_flat_bundle, or raw .json fixtures. The guest dispatches on
-        // the leading magic, so both extensions are valid inputs.
+        // .mfbd bundles or raw .json fixtures; the guest dispatches on the leading magic.
         let mut test_files: Vec<PathBuf> = Vec::new();
         Self::collect_test_files(&test_dir, &mut test_files)?;
         test_files.sort();
@@ -1008,7 +923,6 @@ impl Z6mProverService {
 
         info!("starting EEST test-service mode, {} test files from {}", test_files.len(), test_dir.display());
 
-        // Create ONE CpuProver upfront and reuse for all tests
         let client = ProverClient::builder().cpu().build().await;
 
         let log_path = execution_log_file
@@ -1022,7 +936,6 @@ impl Z6mProverService {
         for (i, test_file) in test_files.iter().enumerate() {
             let file_name = test_file.file_name().unwrap_or_default().to_string_lossy();
 
-            // Skip files exceeding size limit
             if max_file_size > 0 {
                 if let Ok(meta) = std::fs::metadata(test_file) {
                     if meta.len() > max_file_size {
@@ -1069,7 +982,6 @@ impl Z6mProverService {
             let prover_gas = report.gas().unwrap_or_default();
             let syscall_count = report.total_syscall_count();
 
-            // Guest return protocol (see "Public output" docs/architecture.md).
             const RUN_FAILURE: u64 = u64::MAX;
             const RUN_SKIPPED: u64 = u64::MAX - 1;
             let gas_used = match result {
@@ -1151,10 +1063,6 @@ impl Z6mProverService {
         } else {
             build_stdin_from_mfbd(&input_path)?
         };
-        // Use CPU executor for the service
-        // let client = ProverClient::from_env().await;
-
-        // let mut sp1_core_opts_default = SP1CoreOpts::default();
 
         let client = ProverClient::builder().cpu().build().await;
         let (mut output, report) = client.execute(Z6M_ELF, stdin.clone()).await.unwrap();

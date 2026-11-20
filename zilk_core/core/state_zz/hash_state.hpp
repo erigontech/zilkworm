@@ -1,8 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// HashState: the SSZ-input-path state substrate, parallel to DirectState.
-// See docs/hashstate.md, "HashState".
+// HashState: the SSZ-input-path state backend, parallel to DirectState.
 
 #pragma once
 
@@ -17,39 +16,25 @@
 #include <evmc/evmc.hpp>
 
 #include <zilk_core/core/common_zz/hash_index.hpp>
-#include <zilk_core/core/common_zz/index_key.hpp>  // hash_key8, storage_key8
-#include <zilk_core/core/common_zz/keccak_prefix.hpp>  // kprefix::Resume, the GridMPT walk-state seam
-// Reuse the Bytes/ByteView/bytes32 aliases from DirectState.
+#include <zilk_core/core/common_zz/index_key.hpp>
+#include <zilk_core/core/common_zz/keccak_prefix.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
-// Primary state_keeps_prevalue_check trait (defaults true); specialised to false for
-// HashState at the bottom of this header so the trie fold compiles the pre-value /
-// read-only check out for the HashState instantiation.
 #include <zilk_core/core/state_zz/active_state.hpp>
 
 namespace zilkworm {
 
-// Derives from silkworm::BlockState (as DirectState does, direct_state.hpp:69) so it can
-// later stand in as ActiveState for the block-running code that receives the state as a
-// `const BlockState&` (rule sets, header validation). The three BlockState virtuals plus
-// the header/blockhash store below give HashState the block-header side of that interface,
-// mirroring DirectState verbatim so the eventual retype is a drop-in.
+// Derives from BlockState so it can stand in for DirectState wherever a `const BlockState&` is taken.
 class HashState : public BlockState {
   public:
-    // Outcome of build_state_from_trie: kMissingNode iff the seeding account root was absent.
-    // See docs/hashstate.md, "Fail-closed policy".
-    // kMalformed (tests-zkevm): over-64-nibble path or undecodable node.
+    // kMissingNode iff the seeding account root was absent; kMalformed: over-64-nibble path or undecodable node.
     enum class BuildStatus : std::uint8_t { kOk, kMissingNode, kMalformed };
 
-    // Sizes are best-effort hints for the open-addressed tables (~2x -> load factor
-    // <= 0.5). HashIndex has no default ctor, so all four are initialized in the .cpp; the
-    // account and storage arenas are front-padded there too (see below).
     explicit HashState(std::uint32_t expected_nodes = 1024,
                        std::uint32_t expected_codes = 256,
                        std::uint32_t expected_accounts = 1024,
                        std::uint32_t expected_storage_slots = 4096);
 
-    // The node and code stores hold views (into owned_bytes_ or a borrowed input blob), so
-    // a copy would point back into the source's storage.
+    // The stores hold views into owned_bytes_ or the input blob, so a copy would dangle.
     HashState(const HashState&) = delete;
     HashState& operator=(const HashState&) = delete;
 
@@ -60,17 +45,12 @@ class HashState : public BlockState {
     void reserve_stores(std::uint32_t nodes, std::uint32_t codes,
                         std::uint32_t accounts, std::uint32_t storage_slots);
 
-    // Store a copy of `rlp` under its real keccak256 and return that hash. A repeated node
-    // is deduped (no second copy) and the same hash is returned. Defined in the .cpp
-    // because it computes keccak.
+    // Stores a copy under its keccak256 and returns the hash; a repeated node is deduped.
     evmc::bytes32 add_node(ByteView rlp);
 
-    // Store a copy of `code` under its real keccak256 (the code_hash) and return it; deduped.
     evmc::bytes32 add_code(ByteView code);
 
-    // As add_node / add_code, but the store keeps a view of the caller's bytes instead of a
-    // copy: `rlp` / `code` must stay alive and unchanged for as long as this HashState is
-    // used. parse_stateless_input feeds the decoded input blob through these.
+    // Borrowed: `rlp` / `code` must outlive this HashState.
     evmc::bytes32 add_node_borrowed(ByteView rlp);
     evmc::bytes32 add_code_borrowed(ByteView code);
 
@@ -81,15 +61,12 @@ class HashState : public BlockState {
         return std::nullopt;
     }
 
-    // DirectState::find_node_rlp seam shape.
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
         return find_node_rlp(node_hash.bytes);
     }
 
-    // GridMPT's keccak-prefix seam (DirectState::find_node_rlp(hash, request) / take_walk_state()):
-    // HashState hashes no node at unfold time and keeps no walk states, so a snapshot request is
-    // ignored and no resume state is ever handed out.
+    // A snapshot request is ignored: HashState keeps no walk states, so no resume state is handed out.
     template <class SnapRequestFn>
     [[gnu::always_inline]] inline std::optional<ByteView>
     find_node_rlp(const evmc::bytes32& node_hash, SnapRequestFn&&) const noexcept {
@@ -102,8 +79,7 @@ class HashState : public BlockState {
     }
     kprefix::Resume take_walk_state(const uint8_t*, unsigned) const noexcept { return {nullptr, 0}; }
 
-    // Hot lookup: matches DirectState::read_code miss semantics — hit -> ByteView over
-    // the stored code, miss -> EMPTY ByteView (NOT optional).
+    // A miss returns an EMPTY ByteView (not optional), as DirectState::read_code does.
     [[gnu::always_inline]] inline ByteView
     find_code(const evmc::bytes32& code_hash) const noexcept {
         if (auto v = code_index_.find(code_hash.bytes)) return ByteView{v->data, v->size};
@@ -112,18 +88,15 @@ class HashState : public BlockState {
 
     std::uint32_t node_count() const noexcept { return node_index_.size(); }
     std::uint32_t code_count() const noexcept { return code_index_.size(); }
-    // Node, code, account, storage; for sizing tests.
     std::array<std::uint32_t, 4> index_capacities() const noexcept {
         return {node_index_.capacity(), code_index_.capacity(), account_index_.capacity(),
                 storage_index_.capacity()};
     }
 
-    // Derive the account and storage caches from prev_root in one read-only trie sweep.
-    // See docs/hashstate.md, "Building state from the trie".
+    // Derives the account and storage caches from prev_root in one read-only trie sweep.
     BuildStatus build_state_from_trie(const evmc::bytes32& prev_root);
 
-    // Account-cache lookup by addr_hash; a miss returns nullptr and is confirmed.
-    // See docs/hashstate.md, "Account and storage caches".
+    // A miss returns nullptr after confirming absence; an unprovable miss is counted.
     [[gnu::always_inline]] inline const Account*
     get_account(const evmc::bytes32& addr_hash) const noexcept {
         if (auto off = account_index_.find(addr_hash.bytes)) {
@@ -133,8 +106,7 @@ class HashState : public BlockState {
         return nullptr;
     }
 
-    // Storage-cache lookup by (addr_hash, slot_hash); a miss reads zero and is confirmed.
-    // See docs/hashstate.md, "Account and storage caches".
+    // A miss reads zero after confirming absence; an unprovable miss is counted.
     [[gnu::always_inline]] inline evmc::bytes32
     get_storage(const evmc::bytes32& addr_hash, const evmc::bytes32& slot_hash) const noexcept {
         // 8-aligned: note_storage_miss_ casts the slot half.
@@ -151,47 +123,23 @@ class HashState : public BlockState {
     }
 
     std::uint32_t account_count() const noexcept { return account_index_.size(); }
-    // Distinct (addr_hash, slot_hash) storage entries the last sweep cached.
     std::uint32_t storage_count() const noexcept { return storage_index_.size(); }
-    // Leaves the last sweep reached (decodable or not). account_count() is the subset
-    // that decoded into a cached Account; the difference is undecodable leaves.
     std::uint32_t leaf_count() const noexcept { return leaf_count_; }
-    // Storage leaves reached across all storage passes of the last sweep (diagnostic,
-    // parallel to leaf_count_ but for the storage tries).
     std::uint32_t storage_slot_count() const noexcept { return storage_slot_count_; }
-    // Genuinely broken seeding ACCOUNT root the last sweep found ABSENT from the store (B2).
-    // > 0 means the anchor of the whole witness was missing — the accept gate must reject.
-    // A pruned CHILD boundary (a bare hash ref into an omitted subtree) is NOT counted here;
-    // it is caught at read time (unconfirmed_read_count_) or fold time (non-matching root).
+    // Seeding account root absent from the store: > 0 means the witness anchor is missing and the accept gate must reject (a pruned child boundary is caught at read or fold time).
     std::uint32_t missing_count() const noexcept { return missing_count_; }
-    // Read misses (get_account / get_storage) whose confirmation walk could NOT prove the
-    // key absent because a node it needed was missing from the store. Reset by
-    // build_state_from_trie, then accumulated across the reads that follow it. Surfaced the
-    // same way as missing_count(): the accept gate accepts only when BOTH are zero, i.e.
-    // every read either hit the cache or was confirmed genuinely empty (fail-closed).
+    // Read misses that could not be proven absent (a needed node was missing); the accept gate accepts only when this and missing_count() are both zero.
     std::uint32_t unconfirmed_read_count() const noexcept { return unconfirmed_read_count_; }
-    // Memoized proven-absent slots (diagnostic).
     std::uint32_t absent_slot_count() const noexcept { return absent_slots_.size(); }
 
-    // --- silkworm::BlockState interface + BLOCKHASH store ------------------------------
-    // See docs/hashstate.md, "Block headers and BLOCKHASH".
-
-    // Record a header under its keccak hash, for read_header() and the BLOCKHASH walk.
     void insert_header(const BlockHeader& header);
 
-    // SOUNDNESS-CRITICAL: an ancestor's hash is the parent hash of its child, walked back from `header`
-    // through the headers held, each keyed by its own hash, so every hash returned is bound to the
-    // block. A header the walk does not reach is never returned, whatever its number. A walk that does
-    // not reach block n's own header sets ancestor_missing() and records an unconfirmed read: the
-    // witness does not hold the ancestor the block read. The walk is memoized per block.
-    static constexpr std::size_t kBlockHashDepth = 256;  // the ancestors BLOCKHASH reaches
+    // SOUNDNESS-CRITICAL: hashes are walked back by parent hash through the held headers from `header`, so every returned hash is bound to the block; an unreachable ancestor sets ancestor_missing() and records an unconfirmed read.
+    static constexpr std::size_t kBlockHashDepth = 256;
     evmc::bytes32 get_block_hash(const BlockHeader& header, BlockNum n) const noexcept;
     bool ancestor_missing() const noexcept { return ancestor_missing_; }
 
-    // read_header: the header cached under `block_hash`, else nullopt (block_num is unused,
-    // exactly as in DirectState). read_body / total_difficulty are the DirectState stubs:
-    // always false / always nullopt — the slib path needs neither
-    // (direct_state.cpp:696-701, :724-730).
+    // block_num is unused (as in DirectState); read_body / total_difficulty are stubs (always false / nullopt).
     std::optional<BlockHeader> read_header(BlockNum block_num,
                                            const evmc::bytes32& block_hash) const noexcept override;
     [[nodiscard]] bool read_body(BlockNum block_num, const evmc::bytes32& block_hash,
@@ -199,19 +147,11 @@ class HashState : public BlockState {
     std::optional<intx::uint256> total_difficulty(uint64_t block_num,
                                                   const evmc::bytes32& block_hash) const noexcept override;
 
-    // --- Write overlay + mutators + address-keyed readers -----------------------------
-    // See docs/hashstate.md, "Write overlay".
-
-    // Address-keyed readers (overlay-then-built). A built-cache miss routes through
-    // get_account / get_storage, so an unprovable miss is recorded fail-closed.
+    // A built-cache miss routes through get_account / get_storage, so an unprovable miss is recorded fail-closed.
     const Account* read_account(const evmc::address& addr) const noexcept;
     evmc::bytes32 read_storage(const evmc::address& addr,
                                const evmc::bytes32& key) const noexcept;
-    // read_code: resolve the account, then its code_hash -> in-block created-code overlay,
-    // else the witness code store (find_code). FAIL-CLOSED: a non-empty code_hash that
-    // resolves to no bytes bumps unconfirmed_read_count_ — HashState has no sanitize-time
-    // code binding like DirectState (direct_state.cpp:762-777), so the accept gate rejects a
-    // witness that omitted an account's bytecode instead of silently executing empty code.
+    // FAIL-CLOSED: a non-empty code_hash resolving to no bytes bumps unconfirmed_read_count_, so the accept gate rejects a witness that omits bytecode.
     ByteView read_code(const evmc::address& addr) const noexcept;
     ByteView read_code(const evmc::address& addr, const evmc::bytes32& /*code_hash*/) const noexcept {
         return read_code(addr);
@@ -220,18 +160,13 @@ class HashState : public BlockState {
     uint64_t get_nonce(const evmc::address& addr) const noexcept;
     bool has_storage(const evmc::address& addr) const noexcept;
 
-    // Mutators — signatures identical to DirectState (direct_state.hpp:140-285).
     void apply_state_diff(const evmone::state::StateDiff& diff);
     void set_balance(const evmc::address& addr, const intx::uint256& value);
     void add_to_balance(const evmc::address& addr, const intx::uint256& addend);
     void subtract_from_balance(const evmc::address& addr, const intx::uint256& subtrahend);
     void set_nonce(const evmc::address& addr, uint64_t nonce);
     void set_code(const evmc::address& addr, ByteView code);
-    // Keeps `code` by its keccak for read_code: a read of an account whose code the witness omits is
-    // served when the block derives those bytes elsewhere (EIP-8025 optional proofs). The
-    // authorizations' delegation markers go in before their transaction runs: evmone sets them
-    // inside it, and a same-marker read there never reaches the diff. Sound by the hash binding:
-    // the bytes returned hash to the account's code_hash.
+    // Keeps `code` by its keccak so a read of an account whose code the witness omits is served when the block derives it elsewhere; sound by the hash binding.
     void note_created_code(ByteView code);
     void destruct(const evmc::address& addr);
 
@@ -243,11 +178,7 @@ class HashState : public BlockState {
     const FlatHashSet<evmc::address>& touched() const noexcept { return touched_; }
     void clear_touched() noexcept { touched_.clear(); }
 
-    // find_or_create_account: overlay hit -> return it; built hit -> copy-on-write into the
-    // overlay; total miss -> materialize a fresh (deleted) record AND confirm absence down
-    // the account trie (confirm_absent). An unprovable miss (pruned boundary) bumps
-    // unconfirmed_read_count_ so the accept gate rejects, but a usable record is ALWAYS
-    // returned (never null) — the analog of DirectState::materialize_absent_account_.
+    // A total miss materializes a fresh (deleted) record and confirms absence; an unprovable miss bumps unconfirmed_read_count_, yet a usable record is always returned.
     Account* find_or_create_account(const evmc::address& addr);
 
     [[gnu::always_inline]] inline bool
@@ -264,13 +195,10 @@ class HashState : public BlockState {
     void apply_code_diff(const evmc::address& addr, Account& pa,
                          const evmc::bytes& code);
 
-    // Single-block slib runs have no cross-block journal; keep the names so the mutators and
-    // apply_state_diff port from DirectState line-for-line (direct_state.cpp:678-694).
     void journal_address_changed(const evmc::address&) noexcept {}
     void journal_slot_changed(const evmc::address&, const evmc::bytes32&) noexcept {}
 
-    // Side-effect-free built-cache probe (NO confirm-on-miss) for the mutators and the write
-    // gather — a get_account here would bump unconfirmed_read_count_ on a legitimate miss.
+    // Side-effect-free probe (no confirm-on-miss): get_account here would bump unconfirmed_read_count_ on a legitimate miss.
     [[gnu::always_inline]] inline const Account*
     find_built_account(const evmc::bytes32& addr_hash) const noexcept {
         if (auto off = account_index_.find(addr_hash.bytes))
@@ -278,8 +206,7 @@ class HashState : public BlockState {
         return nullptr;
     }
 
-    // Side-effect-free probe (no confirm-on-miss): does the pre-state storage hold this slot?
-    // See docs/hashstate.md, "Write overlay".
+    // Side-effect-free probe (no confirm-on-miss) of the pre-state storage.
     [[gnu::always_inline]] inline bool
     find_built_storage(const evmc::bytes32& addr_hash,
                        const evmc::bytes32& slot_hash) const noexcept {
@@ -289,8 +216,6 @@ class HashState : public BlockState {
         return storage_index_.find(key).has_value();
     }
 
-    // Overlay gather accessors (mirror DirectState hpp:234-241) — read-only views for tests
-    // and the write-set gather.
     const FlatHashMap<evmc::address, Account>& created_accounts() const noexcept {
         return created_accounts_;
     }
@@ -304,22 +229,14 @@ class HashState : public BlockState {
         return storage_wiped_.contains(addr);
     }
 
-    // Compile-compat stub (§2f), mirroring DirectState::state_root_hash()
-    // (direct_state.hpp:160 / direct_state.cpp:638). The slib accept path uses
-    // check_root_hashstate (an incremental fold over prev_root), never the Yellow-Paper
-    // full-trie root, and always passes check_state_root=false into Blockchain, so this is
-    // never executed on the HashState path. It exists only so blockchain.cpp:95 compiles
-    // under the DirectState->ActiveState retype; returning nullopt is fail-closed (a caller
-    // that ever reaches it gets kWrongStateRoot).
+    // Never executed on the HashState path; nullopt is fail-closed (a caller reaching it gets kWrongStateRoot).
     std::optional<evmc::bytes32> state_root_hash() const { return std::nullopt; }
 
   private:
     // Explicit-stack DFS over one trie, calling emit_leaf(path, value) at each leaf.
-    // See docs/hashstate.md, "Building state from the trie".
     template <class EmitLeaf>
     bool sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf);
 
-    // See docs/hashstate.md, "Building state from the trie".
     struct SweepFrame {
         const std::uint8_t* cur;
         const std::uint8_t* end;
@@ -328,38 +245,20 @@ class HashState : public BlockState {
     };
 
     // Single-path walk toward target_hash; true only when it proves the key absent below root.
-    // See docs/hashstate.md, "Read-miss confirmation".
     bool confirm_absent(const evmc::bytes32& root, const evmc::bytes32& target_hash) const noexcept;
 
-    // Miss handlers for get_account / get_storage: count a miss that cannot be proven empty.
-    // See docs/hashstate.md, "Read-miss confirmation".
+    // Counts a miss that cannot be proven empty.
     void note_account_miss_(const evmc::bytes32& addr_hash) const noexcept;
     void note_storage_miss_(const std::uint8_t (&key)[64]) const noexcept;
 
-    // Decode `leaf_value` (an account-leaf RLP) and cache it under `addr_hash`. Bumps
-    // leaf_count_ for every leaf reached; on a successful decode also inserts into the
-    // account cache and returns a pointer to the cached Account (valid only until the next
-    // emit grows the arena — build_state_from_trie reads its storage_root immediately). A leaf whose
-    // value does not decode as an account (e.g. a small embedded non-account leaf) is
-    // counted, not cached, and returns nullptr — never a crash.
+    // Decodes an account leaf into the cache; the pointer is valid only until the next emit grows the arena; an undecodable leaf is counted, not cached (nullptr).
     const Account* emit_account_(const evmc::bytes32& addr_hash, ByteView leaf_value);
 
-    // Decode a storage-trie leaf value and cache the resulting 32-byte word under
-    // (account_key || slot_hash). `leaf_value` is the trie leaf's value content, i.e. the
-    // RLP string of the big-endian, zero-trimmed word (direct_state.cpp:627,
-    // rlp::encode(zeroless_view(value))) — the mirror of how emit_account_'s leaf_value is
-    // the account list RLP. Strips that one string header and right-aligns the payload into
-    // the word; a value wider than 32 bytes (malformed) is counted but not cached. Bumps
-    // storage_slot_count_ for every storage leaf reached.
+    // Caches the 32-byte word of a storage leaf (RLP string, big-endian zero-trimmed); a value wider than 32 bytes is counted, not cached.
     void emit_slot_(const evmc::bytes32& account_key, const evmc::bytes32& slot_hash,
                     ByteView leaf_value);
 
-    // Node and code stores: the index maps the content's keccak256 straight to a view of
-    // the bytes, so a lookup is one probe with no length decode. The bytes live either in the
-    // caller's input blob (add_*_borrowed) or in owned_bytes_ (add_node / add_code), whose
-    // elements never move once added. `data` is never null for a stored entry (an empty
-    // input is pointed at kNoBytes), so a stored view never equals HashIndex's empty
-    // sentinel, the value-initialized {nullptr, 0}.
+    // Views of node/code bytes keyed by keccak256; `data` is never null for a stored entry (empty input points at kNoBytes), so a stored view never equals the empty-bucket sentinel.
     struct StoredBytes {
         const std::uint8_t* data = nullptr;
         std::uint32_t size = 0;
@@ -377,49 +276,31 @@ class HashState : public BlockState {
     HashIndex<32, &hash_key8_at, StoredBytes> node_index_;
     HashIndex<32, &hash_key8_at, StoredBytes> code_index_;
 
-    // Account cache — the "recovered" pre-state bucket the design (§1.1) calls for: the
-    // accounts build_state_from_trie unfolds out of the node trie. Arena entry layout is a bare
-    // Account POD (fixed 256 B, alignof 8) at an 8-aligned offset; the index maps the
-    // 32-byte addr_hash (the trie path) to that offset. Front-padded 8 bytes in the ctor
-    // so the first real offset is >= 8 (never the HashIndex empty-bucket sentinel, 0).
+    // Account cache: bare Account POD (256 B, alignof 8) at 8-aligned arena offsets, front-padded 8 bytes so no offset equals the empty-bucket sentinel 0.
     std::vector<std::uint8_t> accounts_arena_;
     HashIndex<32, &hash_key8_at> account_index_;
 
-    // Storage cache — the recovered per-account slot overlay (the role DirectState fills
-    // with overflow_slots_ + inline blob slots). One combined store rather than a table
-    // per account: the index key is the 64-byte addr_hash || slot_hash (storage_key8), the
-    // arena holds a bare 32-byte word per entry at an 8-aligned offset (32 is a multiple of
-    // 8). Front-padded 8 bytes in the ctor so the first real offset is >= 8 (never the
-    // HashIndex empty-bucket sentinel, 0).
+    // Storage cache keyed by addr_hash || slot_hash: a bare 32-byte word per entry, front-padded 8 bytes so no offset equals the empty-bucket sentinel 0.
     std::vector<std::uint8_t> storage_arena_;
     HashIndex<64, &storage_key8_at> storage_index_;
 
-    // The headers the witness carries and the chain's genesis, keyed by their hash: read_header()
-    // and the BLOCKHASH walk resolve through it.
     FlatHashMap<evmc::bytes32, BlockHeader> headers_;
     // Set once a block asked for the hash of an ancestor the headers held do not lead to.
     mutable bool ancestor_missing_{false};
-    // The BLOCKHASH walk of the block ancestors_number_/ancestors_anchor_ identify, memoized: the
-    // hashes of the contiguous run of held headers below it, the parent's first (get_block_hash).
+    // Memoized BLOCKHASH walk: the contiguous held headers below the block, parent first.
     mutable std::vector<evmc::bytes32> ancestors_;
     mutable BlockNum ancestors_number_{0};
     mutable evmc::bytes32 ancestors_anchor_{};
 
-    // The account-trie root the last build_state_from_trie ran from, stored so a read miss can
-    // seed a confirm_absent walk down the account trie (the storage passes confirm against each
-    // account's own storage_root instead). Zero until the first build.
+    // Account-trie root of the last build; seeds confirm_absent on a read miss. Zero until the first build.
     evmc::bytes32 prev_root_{};
 
-    // Diagnostics for the last build_state_from_trie sweep. missing_count_ mirrors GridMPT's
-    // homonym (mpt.hpp:235): every referenced node absent from an included trie is counted,
-    // so an incomplete witness is observable rather than silently skipped.
+    // missing_count_ counts every referenced node absent from an included trie, so an incomplete witness is observable.
     std::uint32_t missing_count_{0};
-    bool malformed_witness_{false};  // over-64-nibble path or undecodable node
+    bool malformed_witness_{false};
     std::uint32_t leaf_count_{0};
     std::uint32_t storage_slot_count_{0};
-    // Read-miss confirmations that could not prove absence (a needed node was missing).
-    // mutable: reads are logically const over the caches but still record this diagnostic.
-    // Reset by build_state_from_trie so it scopes to the reads following one build.
+    // mutable: const reads record misses here; reset by build_state_from_trie.
     mutable std::uint32_t unconfirmed_read_count_{0};
 
     // Proven misses only; cleared per build.
@@ -428,41 +309,27 @@ class HashState : public BlockState {
     // Reserved once in the ctor; not reentrant.
     std::vector<SweepFrame> sweep_stack_;
 
-    // --- Write overlay (S2): copy-on-write over the pristine built caches ---------------
-    // Reuses DirectState's container TYPES exactly (direct_state.hpp:82-89) so the later
-    // DirectState->ActiveState retype is a drop-in. Keyed by the 20-byte address (as
-    // DirectState is), while the built caches above are keyed by the 32-byte addr_hash;
-    // reads consult the overlay first, the built cache second.
-    // Leaf changes must set modified (gather skip).
-    FlatHashMap<evmc::address, Account> created_accounts_;                                  // every loaded account, read or written
+    // Write overlay: copy-on-write over the built caches, keyed by 20-byte address (the built caches use addr_hash); reads consult the overlay first. Leaf changes must set modified.
+    FlatHashMap<evmc::address, Account> created_accounts_;
     FlatHashMap<evmc::address, FlatHashMap<evmc::bytes32, evmc::bytes32>> overflow_slots_;  // every storage write (zeros RETAINED — divergence a)
-    FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;                                  // in-block created code (fills the old TODO)
-    FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;              // key8-collision spill
-    FlatHashSet<evmc::address> touched_;                                                    // EIP-158 touch set
-    // DIVERGENCE (b): per-account storage-wiped marker replacing DirectState's in-place
-    // inline-slot wipe (direct_state.cpp:410-412, :568). A wiped account reads all pre-state
-    // (built-cache) slots as zero and its storage fold seeds from kEmptyRoot.
+    FlatHashMap<uint64_t, CreatedCodeEntry> created_code_;
+    FlatHashMap<evmc::bytes32, std::vector<uint8_t>> created_code_collisions_;
+    FlatHashSet<evmc::address> touched_;
+    // A wiped account reads all pre-state slots as zero and folds its storage from kEmptyRoot.
     FlatHashSet<evmc::address> storage_wiped_;
 
-    // In-block created-code lookup by code_hash (created_code_ + collision spill); miss -> empty.
-    // See docs/hashstate.md, "Created code lookup".
+    // In-block created-code lookup by code_hash; a miss returns empty.
     ByteView find_created_code_(const evmc::bytes32& code_hash) const noexcept;
     void stash_created_code_(const evmc::bytes32& code_hash, ByteView code);
 
-    // Non-recording overlay-or-built lookup (the DirectState lookup_account_ analog): NO
-    // materialize, NO confirm. Returns nullptr when the address is in neither store.
+    // Non-recording lookup: no materialize, no confirm; nullptr when in neither store.
     const Account* lookup_account_(const evmc::address& addr) const noexcept;
-    // Read resolver shared by read_account / read_code / get_balance / get_nonce: overlay hit
-    // (nullptr if deleted), else get_account(keccak(addr)) — which records an unprovable miss.
+    // Overlay hit (nullptr if deleted), else get_account(keccak(addr)), which records an unprovable miss.
     const Account* resolve_for_read_(const evmc::address& addr) const noexcept;
-    // Materialize a fresh (deleted) overlay record for a total miss (DirectState analog,
-    // direct_state.cpp:327-335). Non-const: it writes the overlay.
     Account* materialize_absent_account_(const evmc::address& addr);
     bool revive_if_deleted_slow(const evmc::address& addr, Account& pa);
 };
 
-// HashStateView: the per-transaction evmone read view over HashState, mirroring DirectStateView.
-// See docs/hashstate.md, "HashStateView".
 class HashStateView final : public evmone::state::StateView {
   public:
     explicit HashStateView(HashState& s) noexcept : state_{s} {}
@@ -480,10 +347,9 @@ class HashStateView final : public evmone::state::StateView {
         };
     }
 
-    /// Borrowed from the code store, which lives for the whole block, so the EVM can read the
-    /// EIP-7702 delegation prefix without materializing the contract.
+    /// Borrowed from the code store, which lives for the whole block.
     evmc::bytes_view get_account_code(const evmc::address& addr) const noexcept override {
-        return state_.read_code(addr);  // ByteView derives from evmc::bytes_view.
+        return state_.read_code(addr);
     }
 
     evmc::bytes32 get_storage(const evmc::address& addr, const evmc::bytes32& key) const noexcept override {
@@ -494,12 +360,7 @@ class HashStateView final : public evmone::state::StateView {
     HashState& state_;
 };
 
-// The HashState fold (GridMPT<*, HashState>) drops the pre-value bind + read-only
-// short-circuit: HashState's accept update set carries no initial_value and no
-// read-only entries (reads are bound to prev_root at derive time). This specialises
-// the active_state.hpp trait so grid_mpt.cpp's `if constexpr` compiles that block out
-// for HashState while keeping it verbatim for DirectState. Kept here (not in mpt.hpp)
-// so the DirectState build has no dependency on HashState at all.
+// HashState's accept update set carries no initial_value and no read-only entries (reads are bound to prev_root at derive time), so the fold drops the pre-value check.
 template <>
 inline constexpr bool state_keeps_prevalue_check<HashState> = false;
 

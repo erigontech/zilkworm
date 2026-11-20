@@ -1,16 +1,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Publishes the Airbender GPU prover image (prover/Dockerfile, target airbender) for every commit
-# merged to main, tagged with the commit: ghcr.io/erigontech/zilkworm-airbender:<sha> (full and
-# short) and :main for the latest. A manual run on another branch pushes only the commit tags. The
-# image runs as is on a GPU host or on vast.ai; see docs/airbender-docker-service.md. A pull
-# request that changes the image's build builds it without pushing, to show that it still builds
-# on the runner.
-#
-# release.yml calls it with a release tag: the release commit's image (built here if the commit
-# has none yet) is tagged :<release tag>, and the guest and its verification key are taken from it
-# for the release (tools/scripts/airbender_release_assets.sh).
+# Publishes the Airbender prover image (prover/Dockerfile, target airbender): :<sha> and :main from main; release.yml calls it to tag :<release tag>.
 name: Airbender Prover Image
 
 on:
@@ -130,9 +121,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # A release is tagged with its commit (resolved from the tag, not the triggering event)
-          # and the release tag; :main moves only with main, never in a release (even one
-          # dispatched from main).
+          # A release is tagged with its commit and the release tag; :main moves only with main.
           tags: |
             type=sha,format=long,prefix=,enable=${{ inputs.release_tag == '' }}
             type=sha,prefix=,enable=${{ inputs.release_tag == '' }}
@@ -152,8 +141,7 @@ jobs:
           file: prover/Dockerfile
           target: airbender
           push: ${{ github.event_name != 'pull_request' }}
-          # ZILKWORM_REVISION names the verification key the entrypoint computes; CUDA_ARCHS keeps
-          # the Dockerfile's default ("80;89;90;120": A100, Ada, Hopper, RTX Blackwell).
+          # ZILKWORM_REVISION names the verification key the entrypoint computes; CUDA_ARCHS keeps the Dockerfile default.
           build-args: |
             ZILKWORM_REVISION=${{ steps.rev.outputs.sha }}
           tags: ${{ steps.meta.outputs.tags }}

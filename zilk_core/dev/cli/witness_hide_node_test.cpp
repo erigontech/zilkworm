@@ -1,30 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// Regression test for a witness-validation soundness gap (PR #90 review):
-//
-//   A read-only account (or storage slot) that EXISTS under prev_root can be
-//   OMITTED from the flat witness. The EVM read path then returns it as
-//   empty/non-existent, and check_root used to fold only the accounts and
-//   slots the witness carries: the omitted one's subtree hash flowed through
-//   unchanged, the root came out as prev_root, and the witness was accepted.
-//
-// check_root now walks every such read as a claim that the key is absent: the
-// record DirectState makes for an address the witness does not carry, and each
-// slot it reads as zero for want of a witness slot (DirectState::AbsentRead).
-// The walk shows the key absent along the witness's nodes, or reaches the leaf
-// the witness left out, or a node it left out, and rejects. With USE_HASH_KEY
-// the read path recovers the account or slot from the node store instead, and
-// the EVM sees it.
-//
-// Setup mirrors a real trie: account W is witnessed, account A's leaf is in
-// the node store but its preimage is missing from the keys (the USE_HASH_KEY
-// witness bug); the storage twin hides slot S2 behind C's storage_root.
-// MissingAccountNode_* keeps the original hiding (leaf_A absent). The honest
-// twins read an account or slot the trie does not have, whose proof of absence
-// runs through the hidden one's leaf.
-//
-// Standalone test (no gtest); exit code = failure count, like mphf_map_test.cpp.
+// Regression test: a read-only account omitted from the witness is rejected.
 
 #include <algorithm>
 #include <array>
@@ -114,8 +90,7 @@ bytes32 find_word(uint8_t from, Pred pred) {
     return make_word(from);
 }
 
-// Build the canonical account RLP via the SAME encoder the flat state uses,
-// so the trie-leaf value is byte-identical to what check_root compares against.
+// Build the canonical account RLP via the SAME encoder the flat state uses.
 Bytes account_rlp(const evmc::address& addr, uint64_t nonce, uint64_t balance,
                   const bytes32& storage_root = silkworm::kEmptyRoot,
                   const bytes32& code_hash = silkworm::kEmptyHash) {
@@ -154,7 +129,7 @@ Bytes make_leaf_rlp(const bytes32& hashed_key, ByteView value) {
     leaf.path.len = 63;
     std::memcpy(leaf.path.nib.data(), full.nib.data() + 1, 63);
     leaf.value = value;
-    return Bytes{encode_leaf(leaf)};  // copy out of the shared static buffer
+    return Bytes{encode_leaf(leaf)};
 }
 
 // RLP scalar encoding of a storage value — the storage-trie leaf value bytes.
@@ -170,9 +145,7 @@ void add_node(MphfBuilder<32>& nb, const bytes32& hash, const Bytes& node_rlp) {
     nb.add(hash_key8(hash), ByteView{body.data(), body.size()});
 }
 
-// Independent oracle: canonical state-trie root over the given (hashed_key, rlp)
-// leaves, via silkworm::trie::HashBuilder (a different trie implementation than
-// GridMPT). Leaves must be supplied sorted by hashed key.
+// Independent oracle: canonical state-trie root over the given (hashed_key, rlp) leaves.
 bytes32 hashbuilder_root(std::vector<std::pair<bytes32, Bytes>> leaves) {
     std::sort(leaves.begin(), leaves.end(), [](const auto& x, const auto& y) {
         return std::memcmp(x.first.bytes, y.first.bytes, 32) < 0;
@@ -212,9 +185,7 @@ bool check_root_accepts(DirectState& direct, const BlockHeader& parent, const by
 }
 
 #if USE_HASH_KEY
-// Mirrors check_root's per-account storage recompute: flat slots (initial +
-// current-if-changed), overflow slots (current only) and recovered slots
-// (initial + current-if-changed).
+// Mirrors check_root's per-account storage recompute: flat slots (initial + current-if-changed), overflow slots.
 bytes32 recompute_storage_root(DirectState& direct, const evmc::address& addr,
                                const bytes32& anchor) {
     std::vector<TrieNodeFlat> upds;
@@ -260,8 +231,7 @@ bytes32 recompute_storage_root(DirectState& direct, const evmc::address& addr,
 }
 #endif
 
-// prev_root R commits to accounts W and A (first nibbles distinct; leaf1 is leaf_W, leaf2 leaf_A); the
-// witness carries W alone, and the node store holds R, leaf_W and leaf_A.
+// prev_root R commits to accounts W and A (first nibbles distinct; leaf1 is leaf_W, leaf2 leaf_A).
 struct HiddenAccount {
     evmc::address W;
     evmc::address A;
@@ -310,7 +280,6 @@ void HiddenReadOnlyAccount_RejectedByCheckRoot() {
                 "S5: leaf_A present in node store (preimage hidden from keys)");
     direct.insert_header(h.parent);
 
-    // The EVM reads A as BALANCE does, through DirectStateView::get_account.
     const auto seen = DirectStateView{direct}.get_account(h.A);
     std::println("    [observed] get_account(A) = {}", seen ? "present" : "absent");
 #if USE_HASH_KEY
@@ -327,8 +296,7 @@ void HiddenReadOnlyAccount_RejectedByCheckRoot() {
 #endif
 }
 
-// Honest twin: the witness carries W; B, which the trie does not have, shares its first nibble with A,
-// so the proof of its absence is leaf_A, which only that walk unfolds.
+// Honest twin: the witness carries W; B, which the trie does not have.
 void HonestAbsentAccount_AcceptedByCheckRoot() {
     HiddenAccount h = hidden_account();
     const unsigned a_nib = first_nibble(keccak_addr32(h.A));
@@ -344,16 +312,14 @@ void HonestAbsentAccount_AcceptedByCheckRoot() {
                 "H4: check_root accepts the block that read B, absent from prev_root, as absent");
 }
 
-// Account C (first nibble distinct from anchor account E) holds slots S1 and S2, whose hashed keys
-// differ in the first nibble (leaf1 and leaf2 of `storage`); the witness carries C with S1 alone, and the
-// node store holds both tries.
+// Account C (first nibble distinct from anchor account E) holds slots S1 and S2.
 struct HiddenSlot {
     evmc::address C;
     evmc::address E;
     bytes32 S1;
     bytes32 S2;
     bytes32 V1{make_word(0xAA)};
-    bytes32 V2{make_word(0xBB)};  // the 'hidden' value committed by storage_root
+    bytes32 V2{make_word(0xBB)};
     TwoLeafTrie storage;
     TwoLeafTrie accounts;
     std::vector<uint8_t> prestate;
@@ -413,7 +379,6 @@ void HiddenStorageSlot_RejectedByCheckRoot() {
     expect_true(check_root_accepts(direct, h.parent, h.accounts.root),
                 "G2b: check_root accepts the block that read the recovered S2");
 
-    // Write both the witnessed and the recovered slot.
     Account* paC = direct.read_account(h.C);
     expect_true(paC != nullptr, "T6: account C readable");
     const bytes32 V1n = make_word(0xA1);
@@ -426,7 +391,6 @@ void HiddenStorageSlot_RejectedByCheckRoot() {
     expect_true(recompute_storage_root(direct, h.C, h.storage.root) == post1,
                 "G3: storage recompute matches oracle after writing recovered slot");
 
-    // A zero write deletes the recovered slot's leaf.
     direct.set_storage_slot(h.C, *paC, h.S2, bytes32{});
     expect_true(direct.read_storage(h.C, h.S2) == bytes32{}, "T8: zeroed slot S2 reads back 0");
     const bytes32 post2 = hashbuilder_root({{keccak_bytes32(h.S1), scalar_rlp(V1n)}});
@@ -439,8 +403,7 @@ void HiddenStorageSlot_RejectedByCheckRoot() {
 #endif
 }
 
-// Honest twin: S3, which C's storage trie does not have, shares its first nibble with S2, so the proof of
-// its absence is leaf_S2, which only that walk unfolds.
+// Honest twin: S3, which C's storage trie does not have, shares its first nibble with S2.
 void HonestAbsentSlot_AcceptedByCheckRoot() {
     HiddenSlot h = hidden_slot();
     const unsigned s2_nib = first_nibble(keccak_bytes32(h.S2));
@@ -457,8 +420,7 @@ void HonestAbsentSlot_AcceptedByCheckRoot() {
 }
 
 #if USE_HASH_KEY
-// Blocker regression: account whose ONLY slots are recovered ones, driven
-// through the REAL StateTransition::check_root.
+// Blocker regression: account whose ONLY slots are recovered ones.
 void RecoveredSlotsOnlyAccount_RealCheckRoot() {
     const evmc::address D = make_addr(0x44, 0x00);
     const bytes32 S1 = make_word(0x01);
@@ -482,11 +444,9 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
     br.set_child(kS2.bytes[0] >> 4, ByteView{hashS2.bytes, 32});
     const Bytes sroot_rlp{encode_branch(br)};
 
-    // D carries ZERO flat slots; storage_root still commits S1+S2.
     DirectState::AccountInfo info = make_info(D, 1, 777);
     std::memcpy(info.account.storage_root, SR.bytes, 32);
 
-    // Anchor account E: first-nibble-distinct so prev_root is a branch.
     const bytes32 kD = keccak_addr32(D);
     evmc::address E = make_addr(0x55, 0x00);
     bytes32 kE = keccak_addr32(E);
@@ -527,7 +487,6 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
     parent.state_root = R;
     direct.insert_header(parent);
 
-    // 'Execution': the only touched slot is the recovered S2.
     expect_true(direct.read_storage(D, S2) == V2, "U4: hidden slot S2 recovered");
     Account* paD = direct.read_account(D);
     expect_true(paD != nullptr, "U5: account D readable");
@@ -540,14 +499,11 @@ void RecoveredSlotsOnlyAccount_RealCheckRoot() {
 
     expect_true(check_root_accepts(direct, parent, R_post),
                 "G5: real check_root keeps recovered-only storage recompute");
-    // Flat/overflow empty, so the merge root is the recovered slot alone.
     expect_true(direct.account_storage_root(D) == hashbuilder_root({{kS2, scalar_rlp(V2n)}}),
                 "G6: account_storage_root merges written recovered slot");
 }
 
-// The code store holds `code` and, with `decoys`, other codes no account uses: where the guest seals
-// the code store (code_store_seal.hpp), the lengths and keys of all entries but the first are zeroed
-// then, so a recovered contract's code is found through the index sanitize() keeps, not the map.
+// The code store holds `code` and, with `decoys`, other codes no account uses: where the guest seals the code store.
 std::vector<uint8_t> make_code_store(const bytes32& code_hash, const Bytes& code, unsigned decoys = 0) {
     MphfBuilder<32> cb{kMphfCodeStoreMagic, kMphfMapVersion};
     std::vector<uint8_t> body;
@@ -563,8 +519,7 @@ std::vector<uint8_t> make_code_store(const bytes32& code_hash, const Bytes& code
     return std::move(cb).finalize();
 }
 
-// R4 regression: a recovered contract must bind its code from the code store,
-// not execute as empty code.
+// R4 regression: a recovered contract must bind its code from the code store, not execute as empty code.
 void HiddenContractAccount_CodeBoundFromCodeStore() {
     const evmc::address W = make_addr(0x66, 0x00);
     evmc::address K = make_addr(0x77, 0x00);
@@ -574,7 +529,7 @@ void HiddenContractAccount_CodeBoundFromCodeStore() {
         K = make_addr(0x77, b);
         kK = keccak_addr32(K);
     }
-    const Bytes code{0x60, 0x01, 0x60, 0x00, 0x55, 0x00};  // PUSH1 1 PUSH1 0 SSTORE STOP
+    const Bytes code{0x60, 0x01, 0x60, 0x00, 0x55, 0x00};
     const bytes32 code_hash = keccak_bytes(code);
 
     const Bytes wRlp = account_rlp(W, 0, 1000);
@@ -588,11 +543,8 @@ void HiddenContractAccount_CodeBoundFromCodeStore() {
     const Bytes root_rlp{encode_branch(br)};
     expect_true(keccak_bytes(root_rlp) == R, "V1: hand-built account root matches R");
 
-    // Flat state = {W}; K's preimage is hidden but its code IS in the code store.
     std::vector<uint8_t> code_store = make_code_store(code_hash, code, /*decoys=*/4);
     {
-        // The seal keeps the length and key of the first entry in data order: K's code must be another for
-        // its lookup to go through the sealed index (it is the third today).
         const MphfMap cs{reinterpret_cast<MphfMapHeader*>(code_store.data())};
         uint64_t first = UINT64_MAX;
         cs.for_each_offset([&](uint64_t off) noexcept { first = std::min(first, off); });
@@ -636,7 +588,7 @@ void MissingAccountNode_RejectedByValidator() {
     HiddenAccount h = hidden_account();
     MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
     add_node(nb, h.trie.root, h.trie.root_rlp);
-    add_node(nb, keccak_bytes(h.trie.leaf1), h.trie.leaf1);  // leaf_W; leaf_A omitted
+    add_node(nb, keccak_bytes(h.trie.leaf1), h.trie.leaf1);
     std::vector<uint8_t> nodestore = std::move(nb).finalize();
 
     DirectState direct{std::span<uint8_t>{h.prestate}, std::span<uint8_t>{nodestore}};
@@ -645,12 +597,11 @@ void MissingAccountNode_RejectedByValidator() {
     direct.insert_header(h.parent);
 
 #if USE_HASH_KEY
-    // fatal() exits; observe from a child.
     std::fflush(stdout);
     const pid_t pid = fork();
     if (pid == 0) {
         (void)direct.read_account(h.A);
-        _exit(0);  // only if fatal() did not fire
+        _exit(0);
     }
     int status = 0;
     const bool reaped = pid > 0 && waitpid(pid, &status, 0) == pid;

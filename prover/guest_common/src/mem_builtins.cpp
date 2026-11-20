@@ -1,20 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// memcpy, memmove, memset and memcmp for the zkVM guests: SP1 (rv64im) and Airbender (rv32im).
-// Both count every instruction retired as a cycle and reject unaligned word access, so these work
-// in aligned machine words, 8 or 4 bytes, and spend their branches on the shapes the guests ask for
-// most. A jump into a run of copies or stores stands in for a loop counter wherever the count is
-// small: a branch costs no more than any other instruction. No access is unaligned, none touches a
-// word that holds no byte of the ranges, and every copy runs lowest address first or reads its
-// source before it stores, as the overlapping copies memmove() forwards to memcpy() need.
-//
-// Each guest compiles this file with -fno-builtin, so that GCC does not turn the loops back into
-// the calls they implement, and is told apart by its own macro:
-//  - SP1 links the functions as the __wrap_ targets of its -Wl,--wrap flags;
-//  - Airbender defines them directly, and copies 32-byte blocks with its CSR MEMCOPY delegation:
-//    the large copies between ends 32-byte aligned to each other, and the large zero fills.
-// The host tests set ZILK_MEM_NAME, ZILK_MEM_WORD and ZILK_MEM_BLOCK32 themselves.
+// mem* for SP1 and Airbender, aligned words only; built -fno-builtin, else GCC loops back into them.
 
 #include <cstddef>
 #include <cstdint>
@@ -46,25 +33,20 @@ extern "C" void csr_memcopy32(void* dst, const void* src);
 
 namespace
 {
-/// The unit every access here is done in: one machine word, which is what SP1 bills as one memory
-/// record. may_alias because the words are read out of byte buffers, which strict aliasing would
-/// otherwise forbid.
+/// One machine word; may_alias because words are read out of byte buffers.
 using word_alias [[gnu::may_alias]] = ZILK_MEM_WORD;
 using u32_alias [[gnu::may_alias]] = uint32_t;
 
 constexpr auto WORD_SIZE = sizeof(word_alias);
 constexpr auto WORD_BITS = WORD_SIZE * 8;
-constexpr auto N32 = 32 / WORD_SIZE;  // Words in 32 bytes.
+constexpr auto N32 = 32 / WORD_SIZE;
 using N32_SEQ = std::make_index_sequence<N32>;
 
-// The most words memcpy() copies between aligned ends by one jump into a run, before it turns to
-// loops (or to blocks): 256 bytes on SP1, 128 on Airbender.
+// The most words memcpy() copies by one jump into a run before looping: 256 bytes on SP1, 128 on Airbender.
 constexpr size_t COPY_RUN_WORDS = 32;
 
-// The fixed-count sequences below are folds over an index sequence: written as loops, even fully
-// unrolled ones, they cost SP1's memcpy() an instruction on some paths.
+// Index-sequence folds, not loops: even unrolled loops cost SP1's memcpy() an instruction on some paths.
 
-/// Copies words [0, sizeof...(I)) of @p s to @p d.
 template <size_t... I>
 [[gnu::always_inline]] inline void copy_n(
     word_alias* d, const word_alias* s, std::index_sequence<I...>) noexcept
@@ -73,8 +55,7 @@ template <size_t... I>
 }
 
 #if ZILK_MEM_BLOCK32
-/// Copies the 32 bytes at @p src to @p dst, both 32-byte aligned and not the same place, by
-/// Airbender's CSR MEMCOPY delegation: about 4 instructions.
+/// Copies 32 bytes, both ends 32-byte aligned and distinct, by Airbender's CSR MEMCOPY delegation.
 [[gnu::always_inline]] inline void block32(void* dst, const void* src) noexcept
 {
 #if defined(__riscv) && __riscv_xlen == 32
@@ -87,18 +68,14 @@ template <size_t... I>
 #endif
 }
 
-/// The block the large zero fills copy from. prover/guest_airbender/link.x places it by its mangled
-/// name next to the global pointer, where its address takes one instruction.
+/// The zero block the large zero fills copy from; link.x places it by mangled name next to the global pointer.
 alignas(32) const word_alias zeros32[N32] = {};
 
-/// Copies @p blocks (0..MAX) 32-byte blocks to @p d, lowest first, by a jump into a run of
-/// block32() based at the end of the range: the blocks from @p s on, or with STEP 0 each from the
-/// one block at @p s.
+/// Copies 0..MAX 32-byte blocks lowest first by a jump into a run of block32(); STEP 0 copies one block repeatedly.
 template <size_t MAX, size_t STEP>
 [[gnu::always_inline]] inline void blocks_upto(
     word_alias* d, const word_alias* s, size_t blocks) noexcept
 {
-    // Integer arithmetic, as in copy_words_upto().
     auto* de = reinterpret_cast<word_alias*>(
         reinterpret_cast<uintptr_t>(d) + blocks * 32 - MAX * 32);
     auto* se = s;
@@ -127,8 +104,7 @@ template <size_t MAX, size_t STEP>
 void* memcpy_rest(void* dest, const void* src, size_t n) noexcept;
 #endif
 
-/// Stores the low-order @p len (1..WORD_SIZE-1) bytes of @p v at the word-aligned @p d, leaving the
-/// rest of the destination word unchanged.
+/// Stores the low @p len (1..WORD_SIZE-1) bytes of @p v at word-aligned @p d; the rest is kept.
 [[gnu::always_inline]] inline void scatter_aligned(uint8_t* d, word_alias v, size_t len) noexcept
 {
     [[assume(len >= 1 && len < WORD_SIZE)]];  // Keeps the len * 8 shift inside the word.
@@ -138,8 +114,7 @@ void* memcpy_rest(void* dest, const void* src, size_t n) noexcept;
     w[0] = (w[0] & ~mask) | (v & mask);
 }
 
-/// Copies @p n (0..MAX) bytes one at a time, lowest first, by a jump into a run of byte copies
-/// based at the end of the range: about 10 instructions to dispatch and 2 a byte.
+/// Copies 0..MAX bytes lowest first by a jump into a run of byte copies.
 template <size_t MAX>
 [[gnu::always_inline]] inline void copy_bytes(uint8_t* d, const uint8_t* s, size_t n) noexcept
 {
@@ -164,14 +139,12 @@ template <size_t MAX>
     // clang-format on
 }
 
-/// Copies words [0, @p words) of @p s to @p d, @p words <= MAX, lowest first, by a jump into a run
-/// based at the end of the range.
+/// Copies @p words (<= MAX) words lowest first by a jump into a run.
 template <size_t MAX>
 [[gnu::always_inline]] inline void copy_words_upto(
     word_alias* d, const word_alias* s, size_t words) noexcept
 {
-    // Integer arithmetic: for words < MAX the bases lie before d and s, and the run below only
-    // reaches into [d, d + words).
+    // For words < MAX the bases lie before d and s, and the run only reaches into [d, d + words).
     auto* de = reinterpret_cast<word_alias*>(
         reinterpret_cast<uintptr_t>(d) + words * WORD_SIZE - MAX * WORD_SIZE);
     const auto* se = reinterpret_cast<const word_alias*>(
@@ -197,14 +170,11 @@ template <size_t MAX>
     // clang-format on
 }
 
-/// Copies @p words words of any count: 16 a loop iteration, then the rest by a jump into a run.
-/// Advances @p d and @p s past them.
+/// Copies any count of words (16 a loop iteration, the rest by a jump) and advances @p d and @p s.
 [[gnu::always_inline]] inline void copy_words(
     word_alias*& d, const word_alias*& s, size_t words) noexcept
 {
-    // The empty asm hides where d and s come from. Otherwise GCC addresses the words after the
-    // loop from the original src, which it copies to another register on entry to memcpy(): one
-    // instruction on every call.
+    // The empty asm hides where d and s come from; else GCC re-addresses from a copy of src, one instruction per call.
     asm("" : "+r"(d), "+r"(s));
     const auto* const end = d + (words & ~size_t{15});
 #pragma GCC unroll 1
@@ -222,8 +192,7 @@ template <size_t MAX>
     s += rest;
 }
 
-/// Stores the re-laned words v[I] .. v[I + 1] into dw[I + 1]: each the high bytes of v[I] and the
-/// low bytes of v[I + 1], @p lo bits up.
+/// Stores re-laned words (high bytes of v[I], low bytes of v[I + 1], @p lo bits up) into dw[I + 1].
 template <size_t... I>
 [[gnu::always_inline]] inline void store_relaned(
     word_alias* dw, const word_alias* v, size_t lo, size_t hi, std::index_sequence<I...>) noexcept
@@ -231,9 +200,7 @@ template <size_t... I>
     ((dw[I + 1] = (v[I] >> hi) | (v[I + 1] << lo)), ...);
 }
 
-/// Copies 32 bytes when @p d and @p s are not both word-aligned: the source words are re-laned
-/// into registers, then written as aligned words or, with @p d unaligned, with masked ends. Reads
-/// all of the source before the first store, so any overlap is fine.
+/// Copies 32 bytes between ends not both word-aligned: re-lane in registers, loading all before the first store.
 template <size_t... I>
 [[gnu::always_inline]] inline void copy32_any(
     uint8_t* d, const uint8_t* s, std::index_sequence<I...>) noexcept
@@ -268,15 +235,13 @@ template <size_t... I>
     dw[N32] = (dw[N32] & mask) | (v[N32 - 1] >> hi);
 }
 
-/// Copies @p n >= 16 bytes between ends not both word-aligned: bytes up to the first destination
-/// word boundary, whole words (re-laned when the source is out of phase), a masked last word.
+/// Copies @p n >= 16 bytes, ends not both aligned: head bytes, re-laned words, a masked last word.
 [[gnu::always_inline]] inline void* copy_unaligned(void* dest, const void* src, size_t n) noexcept
 {
     auto* d = static_cast<uint8_t*>(dest);
     const auto* s = static_cast<const uint8_t*>(src);
 
-    // An address between 4-byte aligned ends (on rv64), mostly 4 bytes past a word boundary on
-    // both sides, as at offset 12 of a 32-byte word: five aligned 4-byte copies.
+    // 4-byte aligned ends on rv64, mostly 4 bytes past a word boundary on both sides: five aligned 4-byte copies.
     if (WORD_SIZE > 4 && n == 20 &&
         (reinterpret_cast<uintptr_t>(d) | reinterpret_cast<uintptr_t>(s)) % 4 == 0)
     {
@@ -290,7 +255,6 @@ template <size_t... I>
         return dest;
     }
 
-    // Head: bytes up to the first destination word boundary.
     if (const auto phase = reinterpret_cast<uintptr_t>(d) % WORD_SIZE; phase != 0)
     {
         const auto head = WORD_SIZE - phase;
@@ -314,10 +278,7 @@ template <size_t... I>
     }
     else
     {
-        // Source out of phase: read aligned words and re-lane each pair into one output word. The
-        // last iteration reads the word holding the last copied byte, never one beyond. Unrolled
-        // four-fold: rolled costs SP1 4% more over its copies, eight-fold (what -funroll-loops
-        // picks by itself) 0.3% less for 216 more bytes of code.
+        // Out of phase: re-lane aligned word pairs, never past the last copied byte's word.
         const auto lo = phase * 8;
         const auto hi = WORD_BITS - lo;
         const auto* sw = reinterpret_cast<const word_alias*>(s - phase);
@@ -345,16 +306,13 @@ template <size_t... I>
 }
 }  // namespace
 
-// Not __restrict, on purpose: memmove() forwards forward-copyable overlapping ranges here, and
-// __restrict also lets GCC turn the word loops into a call to memcpy, which -Wl,--wrap makes
-// recursive on SP1.
+// Not __restrict: GCC would turn word loops into a memcpy call, recursive under -Wl,--wrap on SP1.
 extern "C" void* ZILK_MEM_NAME(memcpy)(void* dest, const void* src, size_t n) noexcept
 {
     auto* d = static_cast<uint8_t*>(dest);
     const auto* s = static_cast<const uint8_t*>(src);
     const auto both = reinterpret_cast<uintptr_t>(d) | reinterpret_cast<uintptr_t>(s);
 
-    // Both word-aligned: words, then a masked write of the partial last one.
     if (both % WORD_SIZE == 0)
     {
         auto* dw = reinterpret_cast<word_alias*>(d);
@@ -388,8 +346,7 @@ extern "C" void* ZILK_MEM_NAME(memcpy)(void* dest, const void* src, size_t n) no
         return dest;
     }
 
-    // Short and unaligned: bytes. The word path costs some 40 instructions before its first whole
-    // word, the bytes 10 and 2 a byte.
+    // Short and unaligned: bytes; the word path costs more before its first whole word.
     if (n < 16)
     {
         copy_bytes<15>(d, s, n);
@@ -403,9 +360,7 @@ extern "C" void* ZILK_MEM_NAME(memcpy)(void* dest, const void* src, size_t n) no
 #endif
 }
 
-// Copies forward through memcpy() whatever a forward copy gets right: dest below src, or the
-// ranges apart. Above an overlapping src it copies backward, in words where it can: Airbender's
-// guest moves megabytes this way, SP1's a few bytes.
+// Forward via memcpy() when dest is below src or disjoint; otherwise backward, in words where possible.
 extern "C" void* ZILK_MEM_NAME(memmove)(void* dest, const void* src, size_t n) noexcept
 {
     auto* d = static_cast<uint8_t*>(dest);
@@ -413,8 +368,7 @@ extern "C" void* ZILK_MEM_NAME(memmove)(void* dest, const void* src, size_t n) n
     if (d <= s || d >= s + n) [[likely]]
         return ZILK_MEM_NAME(memcpy)(dest, src, n);
 
-    // From the end, so each source byte is read before the store that overwrites it: bytes until
-    // the end of dest is word-aligned, then whole words, then bytes.
+    // From the end, so each source byte is read before the store that overwrites it.
     d += n;
     s += n;
     while (n != 0 && reinterpret_cast<uintptr_t>(d) % WORD_SIZE != 0)
@@ -446,7 +400,6 @@ extern "C" void* ZILK_MEM_NAME(memmove)(void* dest, const void* src, size_t n) n
         }
         else
         {
-            // The word holding the last source bytes, then each lower word re-laned with it.
             const auto lo = phase * 8;
             const auto hi = WORD_BITS - lo;
             const auto* sw = reinterpret_cast<const word_alias*>(s - phase);
@@ -470,10 +423,7 @@ extern "C" void* ZILK_MEM_NAME(memmove)(void* dest, const void* src, size_t n) n
 
 namespace
 {
-/// Stores @p v to words [0, @p words) of @p d, @p words <= MAX, highest first, by a jump into a run
-/// of stores. Highest first, as GCC emitted the run Airbender's guest had: its JIT fuses ascending
-/// runs of word stores on the assumption that no jump lands inside one, unless the prover sets
-/// RISCV_MERGE_WINDOW=0 as z6m_prover_airbender does.
+/// Stores @p v to @p words (<= MAX) words highest first, so Airbender's JIT cannot fuse them into a run.
 template <size_t MAX>
 [[gnu::always_inline]] inline void fill_words_upto(
     word_alias* d, word_alias v, size_t words) noexcept
@@ -505,8 +455,7 @@ template <size_t MAX>
 
 constexpr size_t FILL_RUN_WORDS = 256 / WORD_SIZE;
 
-/// Stores @p v to @p words words of any count: by a jump into a run up to 256 bytes, else 16 a loop
-/// iteration and the rest by a jump; zeros by blocks where there are blocks.
+/// Any word count: a jump into a run up to 256 bytes, else 16 per iteration; zeros by blocks if possible.
 [[gnu::always_inline]] inline void fill_words(word_alias* d, word_alias v, size_t words) noexcept
 {
     if (words <= FILL_RUN_WORDS)
@@ -515,7 +464,7 @@ constexpr size_t FILL_RUN_WORDS = 256 / WORD_SIZE;
         return;
     }
 #if ZILK_MEM_BLOCK32
-    if (v == 0)  // Words up to a 32-byte boundary, blocks copied from the zero block, words.
+    if (v == 0)
     {
         const auto lead = ((0 - reinterpret_cast<uintptr_t>(d)) % 32) / WORD_SIZE;
         fill_words_upto<N32 - 1>(d, 0, lead);
@@ -549,8 +498,7 @@ constexpr size_t FILL_RUN_WORDS = 256 / WORD_SIZE;
     fill_words_upto<15>(d, v, words % 16);
 }
 
-/// Stores the low-order @p len (1..WORD_SIZE-1) bytes of @p v to the word-aligned @p d, leaving the
-/// rest of the word unchanged.
+/// Stores the low @p len (1..WORD_SIZE-1) bytes of @p v at word-aligned @p d; the rest is kept.
 [[gnu::always_inline]] inline void fill_partial(word_alias* d, word_alias v, size_t len) noexcept
 {
     [[assume(len >= 1 && len < WORD_SIZE)]];  // Keeps the len * 8 shift inside the word.
@@ -558,7 +506,6 @@ constexpr size_t FILL_RUN_WORDS = 256 / WORD_SIZE;
     d[0] = (d[0] & ~mask) | (v & mask);
 }
 
-/// Stores @p v to the words [0, sizeof...(I)) of @p d.
 template <size_t... I>
 [[gnu::always_inline]] inline void fill_n(
     word_alias* d, word_alias v, std::index_sequence<I...>) noexcept
@@ -566,7 +513,6 @@ template <size_t... I>
     ((d[I] = v), ...);
 }
 
-/// Stores @p v, a byte repeated across the word, to [d, d + n).
 [[gnu::always_inline]] inline void fill(uint8_t* d, word_alias v, size_t n) noexcept
 {
     const auto phase = reinterpret_cast<uintptr_t>(d) % WORD_SIZE;
@@ -578,8 +524,7 @@ template <size_t... I>
             fill_n(dw, v, N32_SEQ{});
             return;
         }
-        // On Airbender 64 bytes as well, one of the sizes its guest clears most: 16 stores, 12
-        // instructions less than the jump into the run.
+        // On Airbender 64 bytes as well: 16 stores beat the jump into the run.
         if (WORD_SIZE == 4 && n == 64)
         {
             fill_n(dw, v, std::make_index_sequence<16>{});
@@ -593,7 +538,6 @@ template <size_t... I>
         return;
     }
 
-    // Short and unaligned: bytes.
     if (n < 16)
     {
 #pragma GCC unroll 1
@@ -602,7 +546,6 @@ template <size_t... I>
         return;
     }
 
-    // Head: the top bytes of the first word, masked; then words and a partial last one as above.
     auto* dw = reinterpret_cast<word_alias*>(d - phase);
     const auto head_mask = ~word_alias{0} << (phase * 8);
     dw[0] = (dw[0] & ~head_mask) | (v & head_mask);
@@ -627,8 +570,7 @@ extern "C" void* ZILK_MEM_NAME(memset)(void* dest, int c, size_t n) noexcept
 
 namespace
 {
-/// Returns the memcmp() result at the first of the @p N bytes at @p p and @p q that differ, which
-/// there is: byte loads, cheaper than shifting two words apart.
+/// memcmp() result at the first differing byte of the @p N at @p p and @p q (byte loads beat shifts).
 template <size_t N = WORD_SIZE>
 [[gnu::always_inline]] inline int first_difference(const uint8_t* p, const uint8_t* q) noexcept
 {
@@ -641,9 +583,7 @@ template <size_t N = WORD_SIZE>
     return static_cast<int>(p[N - 1]) - static_cast<int>(q[N - 1]);
 }
 
-/// Returns the next WORD_SIZE bytes of an operand read in aligned words, advancing @p w to the word
-/// holding the byte after them. Unaligned, @p cur carries the word @p w points to and @p lo is the
-/// operand's offset in it, in bits.
+/// Next WORD_SIZE operand bytes via aligned words; unaligned, @p cur is *@p w, @p lo the bit offset.
 template <bool ALIGNED>
 [[gnu::always_inline]] inline word_alias next(
     const word_alias*& w, word_alias& cur, unsigned lo) noexcept
@@ -659,9 +599,7 @@ template <bool ALIGNED>
     }
 }
 
-/// Compares @p n bytes of @p p and @p q, not both word-aligned: whole words re-laned, then bytes.
-/// The last whole word of an unaligned operand comes in part from the word holding its last byte
-/// compared, never from one beyond.
+/// Compares @p n bytes, not both aligned: re-laned words (never past the last byte's word), bytes.
 template <bool P_ALIGNED, bool Q_ALIGNED>
 [[gnu::always_inline]] inline int compare_unaligned(
     const uint8_t* p, const uint8_t* q, size_t n) noexcept
@@ -700,7 +638,7 @@ extern "C" int ZILK_MEM_NAME(memcmp)(const void* a, const void* b, size_t n) noe
     {
         const auto* pw = reinterpret_cast<const word_alias*>(p);
         const auto* qw = reinterpret_cast<const word_alias*>(q);
-        if (n == 32)  // Hashes.
+        if (n == 32)
         {
 #pragma GCC unroll 8
             for (size_t i = 0; i < N32; ++i)
@@ -730,7 +668,6 @@ extern "C" int ZILK_MEM_NAME(memcmp)(const void* a, const void* b, size_t n) noe
             if (pw[i] != qw[i])
                 return first_difference(p + i * WORD_SIZE, q + i * WORD_SIZE);
         }
-        // The word holding the last n % WORD_SIZE bytes, masked to them.
         if (const auto rest = n % WORD_SIZE; rest != 0)
         {
             const auto mask = (word_alias{1} << (rest * 8)) - 1;
@@ -742,7 +679,7 @@ extern "C" int ZILK_MEM_NAME(memcmp)(const void* a, const void* b, size_t n) noe
         return 0;
     }
 
-    // Short and unaligned: bytes, ahead of the word setup that would cost more than it saves.
+    // Short and unaligned: bytes, ahead of the costlier word setup.
     if (n < 16)
     {
         for (size_t i = 0; i < n; ++i)
@@ -762,11 +699,7 @@ extern "C" int ZILK_MEM_NAME(memcmp)(const void* a, const void* b, size_t n) noe
 #if ZILK_MEM_BLOCK32
 namespace
 {
-/// What memcpy() leaves to this out-of-line function: between ends 32-byte aligned to each other
-/// (and apart), words up to the 32-byte boundary, blocks, then words; any other large copy between
-/// word-aligned ends in words; and the copies between unaligned ends. Out of line because block32()
-/// binds x10..x12, and kept to one function because with two, either inside memcpy(), GCC moves
-/// memcpy()'s arguments to other registers on every call.
+/// memcpy()'s out-of-line rest: blocks, words, unaligned ends; one function, as block32() binds x10..x12.
 [[gnu::noinline]] void* memcpy_rest(void* dest, const void* src, size_t n) noexcept
 {
     if ((reinterpret_cast<uintptr_t>(dest) | reinterpret_cast<uintptr_t>(src)) % WORD_SIZE != 0)
@@ -774,8 +707,7 @@ namespace
 
     auto* dw = static_cast<word_alias*>(dest);
     const auto* sw = static_cast<const word_alias*>(src);
-    // block32() must not copy onto itself, which memmove() forwards for an EVM MCOPY with equal
-    // offsets, and GCC may emit for a self-assignment.
+    // block32() must not copy onto itself, which memmove() forwards for an EVM MCOPY with equal offsets.
     if (dest != src &&
         (reinterpret_cast<uintptr_t>(dw) ^ reinterpret_cast<uintptr_t>(sw)) % 32 == 0)
     {

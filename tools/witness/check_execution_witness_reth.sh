@@ -70,9 +70,7 @@ rustup show active-toolchain 2>/dev/null | grep -qE "1\.(9[3-9]|[0-9]{3,})" \
 echo "Using project dir: $DIR"
 mkdir -p "$DIR/src" && cd "$DIR"
 
-# --- Clone + patch paradigmxyz/stateless so calculate_state_root surfaces every
-# --- blinded-node position (addr_hash + slot_hash + missing-node nibble path)
-# --- instead of swallowing the first error and returning a generic string.
+# --- Clone + patch paradigmxyz/stateless so calculate_state_root surfaces every blinded-node position.
 STATELESS_REV=e5480e71a8031641ff471cad9dc482a7a14b32d5
 STATELESS_DIR="$DIR/stateless-patch"
 if [ ! -d "$STATELESS_DIR/.git" ]; then

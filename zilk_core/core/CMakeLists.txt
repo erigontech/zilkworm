@@ -54,16 +54,6 @@ silkworm_library(
 
 target_compile_features(silkworm_core PUBLIC cxx_std_23)
 
-# unit tests
-# set(TEST_TARGET silkworm_core_test)
-
-# if(SILKWORM_WASM_API)
-#   # Stub clang exception handlers on WASM after Catch2 3.x due to https://github.com/WebAssembly/wasi-sdk/issues/329
-#   target_sources(${TEST_TARGET} PRIVATE "${SILKWORM_MAIN_SRC_DIR}/wasm/exception_handling_stub.cpp")
-#   # Skip generation of RPATH linker option for wasm-ld present by default after building Catch2 v3.6.0 from sources
-#   set_target_properties(${TEST_TARGET} PROPERTIES SKIP_BUILD_RPATH TRUE)
-# endif()
-
 if(SILKWORM_CORE_ONLY)
   if(MSVC)
     target_compile_options(${TEST_TARGET} PRIVATE /EHa- /EHsc)

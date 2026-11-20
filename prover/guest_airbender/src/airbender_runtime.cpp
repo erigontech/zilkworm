@@ -7,12 +7,10 @@
 
 extern "C"
 {
-    // Linker-provided section boundaries
     extern uint32_t _sstack, _estack;
     extern uint32_t _sidata, _sdata, _edata;
     extern uint32_t _sirodata, _srodata, _erodata;
 
-    // C++ global constructor/destructor arrays (from .init_array/.fini_array)
     extern void (*__preinit_array_start[])(void);
     extern void (*__preinit_array_end[])(void);
     extern void (*__init_array_start[])(void);
@@ -36,8 +34,7 @@ static void copy_section(const uint8_t* src, uint8_t* dst, const uint8_t* end)
 
 static void init_memory()
 {
-    // .rodata also holds the gp window (link.x), zero-initialized objects included: it is copied
-    // before anything addresses them gp-relative.
+    // .rodata holds the gp window (zero-initialized objects too): copy it before any gp-relative access.
     const uint8_t* sirodata = reinterpret_cast<const uint8_t*>(&_sirodata);
     uint8_t* srodata = reinterpret_cast<uint8_t*>(&_srodata);
     const uint8_t* erodata = reinterpret_cast<const uint8_t*>(&_erodata);

@@ -1,18 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The RLP header read of fast_decode_header (one 32-bit load of a word-aligned payload, four copied
-// bytes otherwise). The guest takes that path on rv32 only; the native test build sets
-// -DEVMONE_RV32_DISPATCH_TEST, which compiles it on the host (a build without the macro runs the
-// 8-byte memcpy read, and these tests then check that read against itself). Checked
-//  - against a verbatim copy of the 8-byte memcpy header read it replaces, on every first byte with
-//    up to three length bytes, at every payload alignment and on short payloads;
-//  - end to end, through GridMPT, against the canonical root of silkworm::trie::HashBuilder, on
-//    batches whose consecutive keys share exactly p nibbles for p around every word boundary of an
-//    8-byte or 4-byte compare, and on random batches with clustered keys (regression tests for the
-//    seek's prefix compare, which this change leaves as it was);
-//  - with forged node RLP, which must be rejected at every alignment as it is at the aligned one,
-//    and with a tampered witness, which must never yield the canonical root.
+// The RLP header read of fast_decode_header (one 32-bit load of a word-aligned payload, four copied bytes otherwise).
 
 #include <algorithm>
 #include <array>
@@ -46,9 +34,7 @@ using silkworm::ByteView;
 
 namespace {
 
-// ---------------------------------------------------------------------------------------------
 // fast_decode_header against the code it replaced.
-// ---------------------------------------------------------------------------------------------
 
 // fast_decode_header as it was before the word load: an 8-byte memcpy, bytes 0..3 used.
 silkworm::rlp::Header ref_decode_header(ByteView& from) noexcept {
@@ -99,15 +85,11 @@ void compare_decode(const uint8_t* bytes, size_t size, unsigned misalign) {
 
 }  // namespace
 
-// Every first byte with random bytes after it, at every alignment and on both sides of the size
-// check. A first byte whose length field has more than three bytes (0xbb..0xbf, 0xfb..0xff)
-// shifts by a negative amount in the original and in the word-load version alike, which is not
-// defined on the host; the guest's shift takes the amount mod 32 and so does not differ either, but
-// those first bytes are not compared here.
+// Every first byte with random bytes after it, at every alignment and on both sides of the size check.
 TEST_CASE("fast_decode_header equals the 8-byte memcpy read", "[trie][gridmpt][wordload]") {
     std::mt19937_64 rng{0x6d77'6c01};
     for (unsigned first = 0; first < 256; ++first) {
-        if (first >= 0x80 && (first & 0x3F) > 58) continue;  // four or more length bytes
+        if (first >= 0x80 && (first & 0x3F) > 58) continue;
         for (size_t size : {size_t{0}, size_t{1}, size_t{3}, size_t{4}, size_t{7}, size_t{8}, size_t{9}, size_t{16}}) {
             for (unsigned misalign = 0; misalign < 4; ++misalign) {
                 for (int rep = 0; rep < 8; ++rep) {
@@ -133,7 +115,6 @@ TEST_CASE("fast_decode_header decodes encoded headers at every alignment", "[tri
             silkworm::rlp::encode_header(enc, {.list = list, .payload_length = len});
             const size_t header_size = enc.size();
             for (unsigned misalign = 0; misalign < 4; ++misalign) {
-                // Random payload bytes follow, at least 8 of them.
                 Bytes buf = enc;
                 for (int i = 0; i < 12; ++i) buf.push_back(static_cast<uint8_t>(rng()));
                 Placed p{buf.size(), misalign};
@@ -152,9 +133,7 @@ TEST_CASE("fast_decode_header decodes encoded headers at every alignment", "[tri
 
 namespace {
 
-// ---------------------------------------------------------------------------------------------
 // Roots through GridMPT against HashBuilder.
-// ---------------------------------------------------------------------------------------------
 
 struct Bytes32Less {
     bool operator()(const bytes32& a, const bytes32& b) const noexcept {
@@ -164,9 +143,6 @@ struct Bytes32Less {
 using Bytes32Map = std::map<bytes32, Bytes, Bytes32Less>;
 
 // A storage-leaf value RLP: a short integer, or (always, with `big`) 32 bytes with a non-zero first byte.
-// A leaf below a deep branch is embedded in it when its RLP is under 32 bytes, and an embedded node
-// of under 8 bytes is not decoded (fast_decode_header takes a payload that short for a string), which
-// the base does as well: crafted trees with such leaves use big values.
 Bytes value_rlp(std::mt19937_64& rng, bool big = false) {
     Bytes out;
     if (big || rng() % 3 == 0) {
@@ -214,8 +190,7 @@ struct Op {
     Bytes now;
 };
 
-// A key sharing exactly `shared` nibbles with `base`: the nibble at index `shared` differs, the
-// rest is `fill`.
+// A key sharing exactly `shared` nibbles with `base`: the nibble at index `shared` differs, the rest is `fill`.
 bytes32 key_sharing(const bytes32& base, size_t shared, std::mt19937_64& rng) {
     bytes32 k{};
     for (auto& b : k.bytes) b = static_cast<uint8_t>(rng());
@@ -235,8 +210,7 @@ bytes32 key_sharing(const bytes32& base, size_t shared, std::mt19937_64& rng) {
     return k;
 }
 
-// Runs `ops` (sorted here) against a complete witness of `pre` and returns the root. `post` is
-// filled with the trie the ops produce.
+// Runs `ops` (sorted here) against a complete witness of `pre` and returns the root.
 struct RunResult {
     bytes32 got;
     bytes32 expected;
@@ -296,8 +270,7 @@ void check_ops(const Bytes32Map& pre, const std::vector<Op>& ops) {
     REQUIRE(r.got == r.expected);
 }
 
-// Every shared-prefix length at which a word-wise prefix compare changes behaviour: a word boundary, one
-// either side of it, and the ends.
+// Every shared-prefix length at which a word-wise prefix compare changes behaviour: a word boundary.
 const std::vector<size_t> kShared = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 23, 24, 25, 31, 32,
                                      33, 47, 48, 49, 55, 56, 57, 60, 61, 62, 63};
 
@@ -306,10 +279,7 @@ const std::vector<size_t> kShared = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 1
 
 }  // namespace
 
-// Three keys: a, b sharing exactly p nibbles with a, c sharing exactly q with a. The pre trie holds a and b
-// (a branch p nibbles down) or a only; the batch updates both and adds c, so the seek between consecutive
-// keys compares prefixes of every length against a branch of every depth. A regression test of the seek's
-// compare, which this change leaves as it was.
+// Three keys: a, b sharing exactly p nibbles with a, c sharing exactly q with a.
 TEST_CASE("GridMPT roots match HashBuilder for prefixes around every word boundary", "[trie][gridmpt][wordload]") {
     std::mt19937_64 rng{0x6d77'6c03};
     for (const size_t p : kShared) {
@@ -331,10 +301,8 @@ TEST_CASE("GridMPT roots match HashBuilder for prefixes around every word bounda
             Bytes32Map pre_ab{{a, va}, {b, vb}};
             CHECK_OPS(true, pre_ab, {{a, va, va2}, {b, vb, vb2}, {c, {}, vc}});
             CHECK_OPS(false, pre_ab, {{a, va, va2}, {b, vb, vb2}, {c, {}, vc}});
-            // b modified only, c inserted: the seek after b compares against b's path.
             CHECK_OPS(true, pre_ab, {{b, vb, vb2}, {c, {}, vc}});
             CHECK_OPS(false, pre_ab, {{b, vb, vb2}, {c, {}, vc}});
-            // deletes
             CHECK_OPS(true, pre_ab, {{a, va, {}}, {c, {}, vc}});
             CHECK_OPS(true, pre_ab, {{a, va, {}}, {b, vb, {}}, {c, {}, vc}});
             CHECK_OPS(true, pre_ab, {{b, vb, {}}, {c, {}, vc}});
@@ -348,9 +316,7 @@ TEST_CASE("GridMPT roots match HashBuilder for prefixes around every word bounda
     }
 }
 
-// The same with a key that goes on past the branch: b shares exactly p nibbles with a, d shares exactly r > p
-// with b, so after b (or d) the seek's compare reaches all of the parent's path and the leaf has to be split,
-// the case where the compare's length decides between "same child" and "common parent".
+// The same with a key that goes on past the branch.
 TEST_CASE("GridMPT roots match HashBuilder when the next key shares the whole parent path",
           "[trie][gridmpt][wordload]") {
     std::mt19937_64 rng{0x6d77'6c07};
@@ -382,9 +348,7 @@ TEST_CASE("GridMPT roots match HashBuilder when the next key shares the whole pa
     }
 }
 
-// Random pre tries and batches over keys drawn from a few clusters whose members share long prefixes
-// (so branches sit deep and the compare runs over many words), with modified, deleted and inserted
-// keys.
+// Random pre tries and batches over keys drawn from a few clusters whose members share long prefixes.
 TEST_CASE("GridMPT roots match HashBuilder on random clustered batches", "[trie][gridmpt][wordload]") {
     std::mt19937_64 rng{0x6d77'6c04};
     for (int iter = 0; iter < 150; ++iter) {
@@ -394,7 +358,7 @@ TEST_CASE("GridMPT roots match HashBuilder on random clustered batches", "[trie]
             for (auto& b : c.bytes) b = static_cast<uint8_t>(rng());
         const auto draw = [&] {
             const bytes32& c = centres[rng() % clusters];
-            return key_sharing(c, rng() % 49, rng);  // pairs sharing 56+ nibbles are out of reach
+            return key_sharing(c, rng() % 49, rng);
         };
 
         Bytes32Map pre;
@@ -423,16 +387,13 @@ TEST_CASE("GridMPT roots match HashBuilder on random clustered batches", "[trie]
         for (auto& [k, op] : ops) v.push_back(op);
         INFO("iter=" << iter << " pre=" << pre.size() << " ops=" << v.size());
         CHECK_OPS(true, pre, v);
-        // GridMPT<false, DirectState> takes no deletes: turn them into updates.
         for (auto& op : v)
             if (op.now.empty()) op.now = value_rlp(rng);
         CHECK_OPS(false, pre, v);
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // Forged witness nodes.
-// ---------------------------------------------------------------------------------------------
 
 namespace {
 
@@ -477,10 +438,8 @@ Bytes full_branch() {
 
 }  // namespace
 
-// A valid node unfolds, and a forged one does not, whatever the payload's alignment: the header read must
-// not make acceptance depend on it. Covers outer headers with one, two and three length bytes.
+// A valid node unfolds, and a forged one does not, whatever the payload's alignment.
 TEST_CASE("unfold_node_from_rlp accepts and rejects the same at every alignment", "[trie][gridmpt][wordload]") {
-    // Valid nodes: leaf (1-byte length header: 0xf8 xx), branch (0xf9 xx xx), extension.
     const std::vector<Bytes> valid = {leaf_with_value(4), leaf_with_value(40), full_branch()};
     REQUIRE(valid[0][0] < 0xf8);
     REQUIRE(valid[1][0] == 0xf8);
@@ -488,12 +447,8 @@ TEST_CASE("unfold_node_from_rlp accepts and rejects the same at every alignment"
     for (const auto& node : valid)
         for (unsigned m = 0; m < 4; ++m) CHECK(unfolds_at(node.data(), node.size(), m));
 
-    // Forged: a header length off by one or two, a truncated node, a string header in place of the list, an
-    // empty list followed by junk. The verdict must be the same at every alignment; the ones that cannot
-    // be a node at all (not a list, empty, cut inside the header or the path) must be rejected.
     for (const auto& node : valid) {
-        std::vector<std::pair<Bytes, bool>> forged;  // node, must be rejected
-        // The last byte of the header is the low byte of the length (or the length itself, in the short form).
+        std::vector<std::pair<Bytes, bool>> forged;
         const size_t last = node[0] == 0xf9 ? 2 : node[0] == 0xf8 ? 1 : 0;
         for (int delta : {-1, 1, 2}) {
             Bytes f = node;
@@ -505,12 +460,12 @@ TEST_CASE("unfold_node_from_rlp accepts and rejects the same at every alignment"
         forged.emplace_back(Bytes{node.begin(), node.begin() + 3}, true);
         {
             Bytes f = node;
-            f[0] = static_cast<uint8_t>(f[0] - 0x40);  // 0xf8 -> 0xb8, 0xe7 -> 0xa7: a string, not a list
+            f[0] = static_cast<uint8_t>(f[0] - 0x40);
             forged.emplace_back(f, true);
         }
         {
             Bytes f = node;
-            f[0] = 0xc0;  // an empty list followed by junk
+            f[0] = 0xc0;
             forged.emplace_back(f, true);
         }
         for (const auto& [f, must_reject] : forged) {
@@ -540,12 +495,7 @@ TEST_CASE("unfold_node_from_rlp verdict is alignment independent under byte flip
     }
 }
 
-// A witness node is bound to its hash: with one byte of a node flipped under the original hash, the node
-// is not used, whatever the byte (the header bytes the word load reads included), so the root of the
-// batch is not the canonical one. The batch touches every leaf but `a`, so no node but the one holding
-// `a` is left unread (it stays a hash in its parent, and a flip in it changes nothing), and the root
-// cannot be rebuilt from the batch alone. Each node is therefore either read, and then every flip of it
-// is rejected, or unread, and then none is; at most one node is unread.
+// A witness node is bound to its hash: with one byte of a node flipped under the original hash, the node is not used.
 TEST_CASE("a tampered witness never yields the canonical root", "[trie][gridmpt][wordload]") {
     std::mt19937_64 rng{0x6d77'6c06};
     const bytes32 a = [&] {
@@ -563,15 +513,13 @@ TEST_CASE("a tampered witness never yields the canonical root", "[trie][gridmpt]
     for (const auto& [k, v] : pre)
         if (std::memcmp(k.bytes, a.bytes, 32) != 0) ops.push_back({k, v, value_rlp(rng)});
 
-    {  // The untampered batch gives the canonical root.
+    {
         const auto r = run_ops<true>(pre, ops);
         REQUIRE(r.got == r.expected);
         REQUIRE(r.missing == 0);
     }
 
 #ifdef NDEBUG
-    // A tampered node makes failed() true in a Debug build, where calc_root_from_updates asserts on it
-    // before the batch is applied; the release build is the one that has to reject the root.
     size_t tampers = 0;
     size_t unread_nodes = 0;
     Bytes32Map nodes;

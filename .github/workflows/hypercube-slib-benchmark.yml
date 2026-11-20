@@ -1,7 +1,6 @@
 name: HyperCube slib Benchmark
 
-# HashState/slib SP1 cycle benchmark on tests-zkevm-benchmark@v0.8.2; manual and non-blocking.
-# See docs/hashstate.md, "SP1 cycle benchmark".
+# HashState/slib SP1 cycle benchmark; manual and non-blocking.
 
 on:
   workflow_dispatch:
@@ -73,9 +72,7 @@ jobs:
           path: test-fixtures-cache/zkevm_benchmark
           key: zkevm-benchmark-fixtures-tests-zkevm-benchmark-v0.8.2
 
-      # Builds the flag-ON (Z6M_HASH_STATE) guest + prover and runs the benchmark.
-      # continue-on-error: keeping it non-fatal means the artifacts below still
-      # upload even when the run fails.
+      # continue-on-error keeps the artifacts below uploading when the run fails.
       - name: Run slib benchmark
         id: bench
         continue-on-error: true

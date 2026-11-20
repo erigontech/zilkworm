@@ -51,7 +51,7 @@ ExecutionProcessor::ExecutionProcessor(const Block& block, protocol::RuleSet& ru
         .chain_id = config.chain_id,
         .excess_blob_gas = block.header.excess_blob_gas.value_or(0),
         .blob_base_fee = block.header.blob_gas_price(config).value_or(0),
-        .slot_number = block.header.slot_number.value_or(0),  // EIP-7843
+        .slot_number = block.header.slot_number.value_or(0),
     };
     for (const auto& o : block.ommers)
         evm1_block_.ommers.emplace_back(evmone::state::Ommer{o.beneficiary, static_cast<uint32_t>(block.header.number - o.number)});
@@ -103,10 +103,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
                                                .y_parity = authorization.y_parity,
                                                .r = authorization.r,
                                                .s = authorization.s});
-        // The authorization's delegation marker, kept by its hash before the transaction runs:
-        // evmone sets it on the authority inside the transaction, and a same-marker read there may
-        // find the bytes omitted from the witness (EIP-8025 optional proofs). Address zero clears
-        // and writes no marker.
+        // Kept by hash before the tx runs: in-tx reads may find its bytes omitted from the witness; address zero writes none.
         if (!evmc::is_zero(authorization.address)) {
             uint8_t marker[23];
             std::memcpy(marker, eip7702::kDelegationBytes, 3);
@@ -118,9 +115,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     const auto rev = revision();
     const auto non_zero_bytes = txn.data_non_zero_bytes();
 
-    // Amsterdam (EIP-2780/8037): g0 is regular gas only. The EIP-7623 floor follows the
-    // EIP-7976/7981 token rules. The transaction state-gas limit is all above the cap constant
-    // (EIP-8037), as in evmone's validate_transaction().
+    // Amsterdam: g0 is regular gas only; the tx state-gas limit is everything above the cap constant (EIP-8037).
     evmone::state::TransactionProperties tx_props;
     if (rev >= EVMC_AMSTERDAM) {
         const auto cost = protocol::amsterdam_tx_gas_cost(txn, non_zero_bytes);
@@ -132,7 +127,6 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
                     .min_gas_cost = cost.floor};
     } else {
         const auto g0 = protocol::intrinsic_gas(txn, rev, non_zero_bytes);
-        // EIP-7623: Increase calldata cost
         const int64_t floor_cost =
             rev >= EVMC_PRAGUE ? static_cast<int64_t>(protocol::floor_cost(txn, non_zero_bytes)) : 0;
         tx_props = {.execution_gas_limit =
@@ -155,7 +149,6 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     }
     ++tx_index_;
 
-    // Prepare the receipt using the result from evmone.
     receipt.type = txn.type;
     receipt.success = evm1_receipt.status == EVMC_SUCCESS;
     receipt.cumulative_gas_used = cumulative_gas_used_;
@@ -169,8 +162,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
 }
 
 uint64_t ExecutionProcessor::available_gas() const noexcept {
-    // EIP-7778/8037 (Amsterdam): the block gas consumed so far is the maximum
-    // of the two accounting dimensions.
+    // Amsterdam: block gas so far is the maximum of the two dimensions (EIP-7778/8037).
     if (sum_regular_block_gas_ != 0 || sum_state_block_gas_ != 0) {
         const auto used = std::max(sum_regular_block_gas_, sum_state_block_gas_);
         return block_.header.gas_limit - static_cast<uint64_t>(used);
@@ -186,7 +178,6 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
     const evmc_revision rev{revision()};
     rule_set_.initialize(block_, direct_);
 
-    // Block-start system calls (EIP-4788 beacon roots, EIP-2935 history storage)
     {
         ActiveStateView state_view{direct_};
         BlockHashes block_hashes{*this};
@@ -204,8 +195,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
     cumulative_gas_used_ = 0;
 
 #if defined(AIRBENDER) || defined(SP1)
-    // Recover all senders up front so that their signatures share inversions; validation and
-    // execution then read the cached results (identical to recovering each one lazily).
+    // Recovered up front so the signatures share inversions; later reads hit the cache.
     Transaction::recover_senders(block_.transactions);
 #endif
 
@@ -214,8 +204,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     for (const auto& txn : block_.transactions) {
         if (rev >= EVMC_AMSTERDAM) {
-            // EIP-8037 "Transaction validation" rule 2: per-dimension worst-case
-            // inclusion check with bare tx.gas_limit (execution-specs#2892).
+            // EIP-8037 rule 2: per-dimension worst-case inclusion check with bare tx.gas_limit.
             constexpr int64_t kTxMaxGasLimit = 0x1000000;  // 2**24, EIP-7825
             const auto block_gas_limit = static_cast<int64_t>(block_.header.gas_limit);
             const auto gas_limit = static_cast<int64_t>(txn.gas_limit);
@@ -224,8 +213,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
                 return ValidationResult::kBlockGasLimitExceeded;
             }
         }
-        // Amsterdam replaces the cumulative available-gas inclusion rule with the
-        // per-dimension check above, so the per-tx budget is the whole block.
+        // The per-dimension check above replaces cumulative available gas, so the per-tx budget is the whole block.
         const uint64_t gas_available =
             rev >= EVMC_AMSTERDAM ? block_.header.gas_limit : available_gas();
         const ValidationResult err{protocol::validate_transaction(txn, direct_, gas_available)};
@@ -241,11 +229,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
     // EIP-7928: the withdrawals and the block-end system calls share the last index.
     const auto post_block_index = static_cast<uint32_t>(block_.transactions.size() + 1);
     if (rev >= EVMC_AMSTERDAM) {
-        // Finalize via evmone so withdrawals and the EIP-161 sweep produce a
-        // StateDiff the BAL can record; rule_set_.finalize mutates DirectState
-        // in place and leaves nothing to record. Amsterdam is always
-        // post-merge, so the block reward is absent. The withdrawals are applied
-        // before the block-end system calls.
+        // Finalize via evmone, not rule_set_.finalize, so the BAL gets a StateDiff; no block reward post-merge.
         ActiveStateView state_view{direct_};
         const auto fin_diff =
             evmone::state::finalize(state_view, rev, block_.header.beneficiary,
@@ -257,8 +241,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
 
     // Block-end system calls (EIP-7002 withdrawals, EIP-7251 consolidations) + requests hash validation
     if (rev >= EVMC_PRAGUE && block_.header.requests_hash) {
-        // Collect deposit requests from logs (EIP-6110), in block order: receipt by receipt, each
-        // receipt's logs in order (the receipts own the logs; no block-wide copy of them is made).
+        // Deposit requests (EIP-6110) in block order: receipt by receipt, logs in order.
         FlatRequests flat_requests;
         for (const Receipt& receipt : receipts) {
             if (!flat_requests.extract_deposits_from_logs(receipt.logs))
@@ -286,7 +269,6 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
             const auto type = static_cast<FlatRequestType>(static_cast<uint8_t>(req.type()));
             flat_requests.add_request(type, Bytes{req.data()});
         }
-        // Validate requests hash
         if (flat_requests.calculate_sha256() != block_.header.requests_hash)
             return ValidationResult::kRequestsRootMismatch;
     }
@@ -316,8 +298,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
     }
 
     if (rev >= EVMC_BYZANTIUM) {
-        // Prior to Byzantium (EIP-658), receipts contained the root of the state after each individual transaction.
-        // We don't calculate such intermediate state roots and thus can't verify the receipt root before Byzantium.
+        // Pre-Byzantium receipts carry per-tx state roots, which are not computed: their receipt root is unverifiable.
         static constexpr auto kEncoder = [](Bytes& to, const Receipt& r) { rlp::encode(to, r); };
         evmc::bytes32 receipt_root{trie::root_hash(receipts, kEncoder)};
         if (receipt_root != header.receipts_root) {
@@ -325,7 +306,7 @@ ValidationResult ExecutionProcessor::execute_block(std::vector<Receipt>& receipt
         }
     }
 
-    Bloom bloom{};  // zero initialization
+    Bloom bloom{};
     for (const Receipt& receipt : receipts) {
         // execute_transaction sets the bloom of a receipt without logs to all zeros.
         if (!receipt.logs.empty()) {

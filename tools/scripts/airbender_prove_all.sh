@@ -3,12 +3,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Proves every MFBD flat-bundle block in the given corpus directory with the
-# Airbender GPU prover, to the final recursion layer. Sequential — the GPU is
-# the bottleneck. Resumable: blocks whose proof.bin already exists are skipped.
-#
-# Corpus layout (from `make sp1-benchmark-corpus`):
-#   <blocks_dir>/<N>/flatWitnessBundle<N>.mfbd
+# Proves every MFBD block in the corpus directory with the Airbender GPU prover, sequentially (the GPU is the bottleneck); resumable: blocks with an existing proof.bin are skipped.
 
 set -u
 

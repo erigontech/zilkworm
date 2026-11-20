@@ -21,12 +21,9 @@ bool PrefixSet::contains(ByteView prefix) {
         return false;
     }
 
-    // Key uniqueness and sorting
     ensure_sorted();
 
-    // We optimize for the case when contains() queries are issued with increasing prefixes,
-    // e.g. contains("00"), contains("04"), contains("0b"), contains("0b05"), contains("0c"), contains("0f"), ...
-    // instead of some random order.
+    // Optimised for queries with increasing prefixes.
     while (index_ > 0 && keys_[index_].first > prefix) {
         --index_;
     }
@@ -48,11 +45,9 @@ std::pair<bool, ByteView> PrefixSet::contains_and_next_marked(ByteView prefix, s
 
     invariant_prefix_len = std::min(invariant_prefix_len, prefix.size());
 
-    // Lookup next marked created key
     for (size_t i{index_}, e{keys_.size()}; i < e; ++i) {
         auto& item{keys_[i]};
 
-        // Check we're in the same invariant part of the prefix
         if (invariant_prefix_len && std::memcmp(&prefix[0], &item.first[0], invariant_prefix_len) != 0) {
             break;
         }

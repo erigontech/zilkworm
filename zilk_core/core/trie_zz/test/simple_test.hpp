@@ -156,6 +156,6 @@ class TestCase {
     static void TEST_CASE_UNIQUE(test_func_)()
 
 #define SECTION(name) \
-    if (true) /* Allow section to create new scope */
+    if (true)
 
 }  // namespace simple_test

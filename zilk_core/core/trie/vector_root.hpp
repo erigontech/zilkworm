@@ -13,8 +13,7 @@
 
 namespace silkworm::trie {
 
-// Lexicographic order for RLP-encoded integers is the same as their natural order,
-// save for 0, which, due to its RLP encoding, should be placed between 0x7f and 0x80.
+// RLP integers sort as their values except 0, which sorts between 0x7f and 0x80.
 inline size_t adjust_index_for_rlp(size_t i, size_t len) {
     if (i > 0x7f) {
         return i;
@@ -25,8 +24,7 @@ inline size_t adjust_index_for_rlp(size_t i, size_t len) {
     return i + 1;
 }
 
-// Trie root hash of RLP-encoded values, the keys are RLP-encoded integers.
-// See Section 4.3.2. "Holistic Validity" of the Yellow Paper.
+// Keys are the RLP-encoded indices of the values.
 template <class Value, std::invocable<Bytes&, const Value&> Encoder>
 evmc::bytes32 root_hash(const std::vector<Value>& v, const Encoder& value_encoder) {
     Bytes index_rlp;

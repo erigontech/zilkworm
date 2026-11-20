@@ -13,7 +13,6 @@ namespace zilkworm::ssz {
 
 namespace {
 
-    // zero_hashes[d] roots an all-zero subtree of depth d.
     const std::array<Node, 64>& zero_hashes() {
         static const std::array<Node, 64> table = [] {
             std::array<Node, 64> t{};
@@ -62,7 +61,6 @@ Node merkleize(std::span<const Node> chunks, std::optional<size_t> limit) {
     const size_t depth = depth_for(count);
     if (chunks.empty()) return zero[depth];
 
-    // Fold the chunks a level at a time; an odd node pairs with the zero subtree of its level.
     const size_t real_depth = depth_for(chunks.size());
     std::vector<Node> layer(chunks.begin(), chunks.end());
     std::vector<Node> next;
@@ -73,7 +71,6 @@ Node merkleize(std::span<const Node> chunks, std::optional<size_t> limit) {
         if (i < layer.size()) next.push_back(hash_nodes(layer[i], zero[level]));
         layer.swap(next);
     }
-    // The levels above the chunks pair the running root with zero subtrees.
     Node root = layer[0];
     for (size_t level = real_depth; level < depth; ++level) root = hash_nodes(root, zero[level]);
     return root;

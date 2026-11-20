@@ -12,8 +12,6 @@
 
 namespace silkworm::rlp {
 
-// std::span to RLP overloads
-
 template <typename T>
 size_t length_items(const std::span<const T>& v) {
     return std::accumulate(v.begin(), v.end(), size_t{0}, [](size_t sum, const T& x) { return sum + length(x); });
@@ -40,8 +38,6 @@ void encode(Bytes& to, const std::span<const T>& v) {
     encode_items(to, v);
 }
 
-// std::vector to RLP overloads
-
 template <typename T>
 size_t length_items(const std::vector<T>& v) {
     return length_items(std::span<const T>{v.data(), v.size()});
@@ -61,8 +57,6 @@ template <typename T>
 void encode(Bytes& to, const std::vector<T>& v) {
     encode(to, std::span<const T>{v.data(), v.size()});
 }
-
-// variadic arguments to RLP overloads
 
 template <typename Arg1, typename Arg2>
 size_t length_items(const Arg1& arg1, const Arg2& arg2) {
@@ -100,19 +94,12 @@ void encode(Bytes& to, const Arg1& arg1, const Arg2& arg2, const Args&... args) 
     encode_items(to, arg1, arg2, args...);
 }
 
-// RlpBytes to RLP overloads
-
-/**
- * RlpBytes represents a raw RLP-encoded list item.
- * It is useful when RLP structure has a dynamic list with elements of different types.
- * Each item can be encoded separately and then assembled using the methods below.
- */
+// A raw, already RLP-encoded list item.
 struct RlpBytes {
     Bytes data;
     explicit RlpBytes(Bytes data1) : data(std::move(data1)) {}
 };
 
-//! see RlpBytes
 struct RlpByteView {
     ByteView data;
     explicit RlpByteView(ByteView data1) : data(data1) {}

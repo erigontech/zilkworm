@@ -16,8 +16,7 @@ use tokio::time::sleep;
 use tracing::{debug, warn};
 use url::Url;
 
-/// Geth's `debug_executionWitness` response format.
-/// Headers are JSON objects, codes/state can be maps (hash→hex) or lists.
+/// Geth's `debug_executionWitness` response; codes/state are maps or lists.
 #[derive(Deserialize, Debug)]
 struct GethExecutionWitness {
     #[serde(default)]
@@ -30,9 +29,7 @@ struct GethExecutionWitness {
     keys: serde_json::Value,
 }
 
-/// Convert a geth witness response into the alloy `ExecutionWitness` format.
 fn convert_geth_witness(geth: GethExecutionWitness) -> Result<ExecutionWitness> {
-    // Headers: JSON objects → RLP-encoded bytes
     let headers: Vec<Bytes> = geth
         .headers
         .into_iter()
@@ -69,10 +66,7 @@ fn convert_geth_witness(geth: GethExecutionWitness) -> Result<ExecutionWitness> 
     })
 }
 
-/// Extract a flat list of `Bytes` from a JSON value that is either:
-/// - a map (`{"hash": "0xdata", ...}`) → take the values
-/// - an array (`["0xdata", ...]`) → take each element
-/// - null → empty vec
+/// Values of a map or elements of an array; null is empty.
 fn extract_bytes_from_value(value: &serde_json::Value) -> Result<Vec<Bytes>> {
     match value {
         serde_json::Value::Object(map) => map
@@ -100,7 +94,6 @@ fn extract_bytes_from_value(value: &serde_json::Value) -> Result<Vec<Bytes>> {
     }
 }
 
-/// Fetch execution witness from a geth node using a raw JSON-RPC call.
 async fn fetch_geth_execution_witness(
     rpc_url: &str,
     block_number: u64,
@@ -133,7 +126,6 @@ async fn fetch_geth_execution_witness(
     serde_json::from_value(result.clone()).wrap_err("failed to deserialize geth ExecutionWitness")
 }
 
-/// Fetch geth execution witness with retry logic, converting to alloy format.
 async fn fetch_geth_execution_witness_with_retry(
     rpc_url: &str,
     block_number: u64,
@@ -169,11 +161,7 @@ pub struct FetchRequest<'a> {
     pub data_dir: PathBuf,
     pub save_all_responses: bool,
     pub geth: bool,
-    /// When true, regenerate the flat bundle even if a cached
-    /// `flatWitnessBundle<N>.mfbd` already exists on disk. Also drops the
-    /// cached block / block-RLP / witness JSON intermediates so the bundle
-    /// is rebuilt from a fresh RPC fetch. Used by the live prover service so
-    /// `--execute-every 1` always operates on a freshly-built bundle.
+    /// Discard cached artifacts and rebuild the flat bundle from a fresh RPC fetch.
     pub force_rebuild: bool,
 }
 
@@ -181,8 +169,7 @@ pub struct FetchOutcome {
     pub block_number: u64,
     pub block_directory: PathBuf,
     pub flat_bundle_path: PathBuf,
-    /// Milliseconds spent converting the execution witness into the flat bundle (witness
-    /// generation, which Ethproofs counts in the proving time); 0 when the bundle was cached.
+    /// Witness-to-bundle conversion time (counted in Ethproofs proving time); 0 when cached.
     pub witness_millis: u64,
 }
 
@@ -314,8 +301,7 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
     }
     let bundle_bytes = z6m_witness_ffi::json_witness_to_flat_bundle(&witness_input)
         .wrap_err("witness JSON to flat-bundle conversion failed")?;
-    // Written whole or not at all: an existing bundle is reused as is (above), so a write cut
-    // short by a crash must not leave one behind.
+    // Written whole or not at all: an existing bundle is reused as is.
     let partial_path = flat_bundle_path.with_extension("mfbd.partial");
     fs::write(&partial_path, &bundle_bytes)?;
     fs::rename(&partial_path, &flat_bundle_path)?;
@@ -335,7 +321,6 @@ pub async fn fetch_block_and_witness(request: FetchRequest<'_>) -> Result<FetchO
     })
 }
 
-// Helper functions for network retry logic
 async fn get_block_number_with_retry<P>(provider: &P, max_retries: u32) -> Result<u64>
 where
     P: Provider,
@@ -351,7 +336,7 @@ where
                     return Err(err.into());
                 }
 
-                let delay = Duration::from_secs(2_u64.pow(attempts.min(5))); // Exponential backoff, max 32 seconds
+                let delay = Duration::from_secs(2_u64.pow(attempts.min(5)));
                 warn!(
                     attempt = attempts,
                     max_retries = max_retries,

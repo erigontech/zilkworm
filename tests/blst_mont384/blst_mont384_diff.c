@@ -1,14 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// Differential test of the guest's blst mul_mont_384 (a 768-bit product and a two-round
-// reduction) against the single-round version it replaced, both compiled from the patch
-// script's own text and run on an emulation of the BigInt delegation, plus an exact model of the
-// Montgomery product. Compiled as C: it is the blst code, not C++.
-//
-// The domain is what the guest's callers pass: at least one operand below p (blst keeps every
-// Fp value reduced, and raw 384-bit encodings are only multiplied by RR or by 1). Two operands
-// near 2^384 are outside it and only counted: the new reduction drops the 769th bit.
+// Differential test of the guest's blst mul_mont_384.
 #include "bigint_emu.h"
 #include "blst_mont384_diff.h"
 
@@ -42,7 +34,7 @@ static void ref_init(void)
     limb_t bw = 0;
     for (int i = 0; i < 12; i++) { llimb_t d = (llimb_t)0 - x[i] - bw; RNP[i] = (limb_t)d; bw = (limb_t)(d >> 63); }
 }
-/* HEAD-equivalent exact model: q = (a*b + m*p)/2^384, one conditional subtraction, truncated to 384 bits */
+// HEAD-equivalent exact model: q = (a*b + m*p)/2^384, one conditional subtraction, truncated to 384 bits
 static void ref_mont(limb_t ret[12], const limb_t a[12], const limb_t b[12], int *sub, int *tie)
 {
     limb_t T[24], m[24], mp[25], U[26];
@@ -74,7 +66,7 @@ static void gen_struct(limb_t a[12])
     }
     if (!lt_p(a) && (rnd32() & 1)) a[11] = RP[11] - 1 - (rnd32() & 0xff);
 }
-static void gen_tz(limb_t a[12], limb_t b[12])       /* a*b == 0 mod 2^k for k around 64..256 */
+static void gen_tz(limb_t a[12], limb_t b[12])
 {
     int k = rnd32() % 300, ka = rnd32() % (k + 1), kb = k - ka;
     gen_reduced(a); gen_reduced(b);
@@ -87,8 +79,7 @@ static void gen_tz(limb_t a[12], limb_t b[12])       /* a*b == 0 mod 2^k for k a
 static const limb_t RRc[12] = { 0x1c341746, 0xf4df1f34, 0x09d104f1, 0x0a76e6a6, 0x4c95b6d5, 0x8de5476c,
                                 0x939d83c0, 0x67eb88a9, 0xb519952d, 0x9a793e85, 0x92cae3aa, 0x11988fe5 };
 
-/* a*b*R^-1 = w mod p for a small w and a random b: a = w * R / b, by Fermat's inverse in the
- * Montgomery domain on the exact model. */
+// a*b*R^-1 = w mod p for a small w and a random b: a = w * R / b.
 #define NSMALL 64
 static limb_t SA[NSMALL][12], SB[NSMALL][12];
 static void mont_mul_ref(limb_t r[12], const limb_t a[12], const limb_t b[12])
@@ -101,30 +92,28 @@ static void gen_small_results(void)
     static const limb_t one[12] = {1};
     for (int k = 0; k < NSMALL; k++) {
         limb_t w[12] = {0}, wm[12], bm[12], acc[12], inv[12];
-        int bits = k < 4 ? k : (int)(rnd32() % 385);   /* w = 0, 1, 2, 3, then any length */
+        int bits = k < 4 ? k : (int)(rnd32() % 385);
         if (k >= 4) {
             for (int i = 0; i < 12; i++)
                 w[i] = i * 32 + 32 <= bits ? rnd32() : i * 32 < bits ? rnd32() & ((1u << (bits - i * 32)) - 1) : 0;
             if (!lt_p(w)) w[11] = 0;
         } else w[0] = (limb_t)k;
         gen_reduced(SB[k]);
-        mont_mul_ref(bm, SB[k], RRc);                  /* b * R */
-        mont_mul_ref(acc, RRc, one);                   /* R mod p */
-        limb_t e[12];                                  /* p - 2 */
+        mont_mul_ref(bm, SB[k], RRc);
+        mont_mul_ref(acc, RRc, one);
+        limb_t e[12];
         memcpy(e, RP, 48); e[0] -= 2;
         for (int i = 383; i >= 0; i--) {
             mont_mul_ref(acc, acc, acc);
             if ((e[i / 32] >> (i % 32)) & 1) mont_mul_ref(acc, acc, bm);
         }
-        memcpy(inv, acc, 48);                          /* R / b */
-        mont_mul_ref(wm, w, RRc);                      /* w * R */
-        mont_mul_ref(SA[k], inv, wm);                  /* w * R / b */
+        memcpy(inv, acc, 48);
+        mont_mul_ref(wm, w, RRc);
+        mont_mul_ref(SA[k], inv, wm);
     }
 }
 
-/* a*b = v mod 2^256 for a chosen v, with a, b below p: a odd, b = v / a mod 2^256 below, random above.
- * Round 1 of the reduction adds a carry into t1 exactly when the low 256 bits of the product are
- * not all zero, so v with a single bit or word set is what tells the zero test from a partial one. */
+// a*b = v mod 2^256 for a chosen v, with a, b below p: a odd, b = v / a mod 2^256 below, random above.
 static void mul_lo256(limb_t r[8], const limb_t x[8], const limb_t y[8])
 {
     limb_t t[16];
@@ -136,7 +125,7 @@ static void gen_lo256(limb_t a[12], limb_t b[12], const limb_t v[8])
     limb_t x[8] = {1}, t[8], tm[8];
     gen_reduced(a);
     a[0] |= 1;
-    for (int it = 0; it < 8; it++) {            /* x = a^-1 mod 2^256 by Newton's iteration */
+    for (int it = 0; it < 8; it++) {
         mul_lo256(t, a, x);
         limb_t bw = 0;
         for (int i = 0; i < 8; i++) { llimb_t d = (llimb_t)(i == 0 ? 2 : 0) - t[i] - bw; tm[i] = (limb_t)d; bw = (limb_t)(d >> 63); }
@@ -144,7 +133,7 @@ static void gen_lo256(limb_t a[12], limb_t b[12], const limb_t v[8])
         memcpy(x, t, 32);
     }
     gen_reduced(b);
-    mul_lo256(b, v, x);                         /* writes b[0..7] only */
+    mul_lo256(b, v, x);
 }
 static unsigned long n_in, n_out, n_out_diff, n_sub, n_tie, n_c0z, n_tsmall;
 static unsigned long base_min_csr, cand_max_csr, base_csr_sum, cand_csr_sum;
@@ -188,7 +177,6 @@ static void check(const limb_t* a, const limb_t* b, const char* tag)
         n_tsmall += (unsigned long)z;
     }
     if (memcmp(c, h, 48)) { dump(tag, a, b); return; }
-    // ret may alias either operand
     memcpy(t, a, 48); cand_mul_mont_384(t, t, b, NULL, 0); if (memcmp(t, h, 48)) { dump("ret==a", a, b); return; }
     memcpy(t, b, 48); cand_mul_mont_384(t, a, t, NULL, 0); if (memcmp(t, h, 48)) { dump("ret==b", a, b); return; }
     if (lt_p(a)) {
@@ -229,7 +217,7 @@ int blst_mont384_difftest(long n, unsigned long long seed, struct blst_mont384_s
     memset(E[ne], 0, 48); E[ne][11] = 0x80000000u; ne++;
     for (int i = 0; i < ne; i++) for (int j = 0; j < ne; j++) check(E[i], E[j], "edge");
     limb_t a[12], b[12];
-    for (int bit = 0; bit < 256 && !failed; bit++) {          // a*b = 2^bit, 2^256 - 2^bit, one word k * 2^32j
+    for (int bit = 0; bit < 256 && !failed; bit++) {
         limb_t v[8] = {0};
         v[bit / 32] = 1u << (bit % 32);
         gen_lo256(a, b, v); check(a, b, "lo256 bit"); check(b, a, "lo256 bit");
@@ -254,8 +242,7 @@ int blst_mont384_difftest(long n, unsigned long long seed, struct blst_mont384_s
                 gen_reduced(b); b[11] = RP[11] - (rnd32() & 3); if (!lt_p(b)) b[11] -= 4;
                 check(a, b, "nearp"); break;
         case 9: gen_any(a); gen_any(b); check(a, b, "any*any"); break;
-        case 10: {  // operands whose product is a small value: the quotient is want + p after
-                    // the fast path, and its top word ties p's
+        case 10: {
             int k = (int)(rnd32() % NSMALL);
             check(SA[k], SB[k], "smallres");
             check(SB[k], SA[k], "smallres");

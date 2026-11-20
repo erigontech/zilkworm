@@ -2,32 +2,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Standalone verifier for `debug_executionWitness` preimage completeness.
-
-Reads a witness JSON (either the raw RPC envelope or the bare result object) and
-reports leaves whose preimage is missing from `witness.keys[]`.
-
-The script does two things:
-
-  1. Walks the account trie (and each non-empty storage subtrie) and reports every
-     leaf whose preimage is missing from keys[]. This is a *superset* of the actual
-     missing keys — a leaf in the witness may be a sibling along a different path
-     and not strictly required to have its preimage included. Cross-reference with
-    the EVM's access trace to identify true violations.
-
-  2. Classifies a specific address via --check-addr as `present`, `absent`, or
-     `blinded`. Use this when you already know (from execution) which addresses
-     were accessed: any `--check-addr` whose 20-byte form is *not* in keys[] is a
-     witness under-supply, regardless of `present`/`absent` verdict.
-
-Usage:
-    python3 verify_witness_preimages.py executionWitness25350549.json
-    python3 verify_witness_preimages.py executionWitness25350549.json \\
-        --check-addr 0x0e0c281ff05d34729cd764dcfc4fa999b720407c
-
-Requires: pycryptodome (pip install pycryptodome)
-"""
+"""Reports trie leaves whose preimage is missing from a witness's keys[] (a superset of true violations) and classifies --check-addr as present/absent/blinded. Requires pycryptodome."""
 from __future__ import annotations
 import argparse, json, sys
 from typing import Any
@@ -136,10 +111,8 @@ def main() -> int:
     addr_set = {k for k in keys if len(k) == 20}
     slot_set = {k for k in keys if len(k) == 32}
 
-    # Index trie nodes by hash.
     store = {k256(bytes.fromhex(h[2:])): bytes.fromhex(h[2:]) for h in w["state"]}
 
-    # Pre-state root from the parent header.
     hdr_rlp = bytes.fromhex(w["headers"][-1][2:])
     hdr, _ = rlp_decode(hdr_rlp)
     state_root = bytes(hdr[3])

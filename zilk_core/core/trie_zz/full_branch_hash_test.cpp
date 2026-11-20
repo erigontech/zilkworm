@@ -1,10 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// fold_line() hashes a full branch that differs from its witness node only in hash references straight
-// from that node and the new hashes (BranchNode::full_branch_hash(), ethash_keccak256_full_branch()).
-// The digest must equal the keccak of encode_branch() for every set of changed slots, from the start and
-// resumed from every saved state the update allows, and every other branch must take encode_branch().
+// fold_line() hashes a full branch differing from its witness node only in hash references.
 
 #include <array>
 #include <bit>
@@ -39,8 +35,7 @@ void fill_full_branch(uint8_t* at, std::mt19937_64& rng) {
     at[3 + 16 * 33] = 0x80;
 }
 
-// Mirrors unfold_node_from_rlp(): the list payload after a header of `header` bytes is decoded, then
-// the origin recorded.
+// Mirrors unfold_node_from_rlp(): the list payload after a header of `header` bytes is decoded.
 BranchNode unfold(const uint8_t* node, size_t size, size_t header = 3) {
     BranchNode b;
     bool is_leaf{};
@@ -64,14 +59,11 @@ bool same(const ethash::hash256& a, const ethash::hash256& b) { return std::memc
 
 }  // namespace
 
-// All 2^16 sets of changed slots, on a new random node each, with the new hashes in child[] (an
-// update's) or, for some changed slots, at an odd address outside the node (child_ptr, which
-// encode_branch() prefers). Resumed from the state of every number of blocks before the first changed
-// slot: slots 8 and 12 straddle a block boundary and count as the block they start in.
+// All 2^16 sets of changed slots, on a new random node each, with the new hashes in child[].
 TEST_CASE("full branch hash: every set of changed slots", "[trie][gridmpt][kprefix]") {
     std::mt19937_64 rng(11);
     alignas(256) static uint8_t node[544];
-    alignas(8) static uint8_t witness[16 * 33 + 1];  // new hashes as witness references, at odd addresses
+    alignas(8) static uint8_t witness[16 * 33 + 1];
     const size_t row = 17;
     size_t resumed = 0;
     for (int pass = 0; pass < 2; ++pass) {
@@ -101,7 +93,6 @@ TEST_CASE("full branch hash: every set of changed slots", "[trie][gridmpt][kpref
             }
         }
     }
-    // Per pass, the masks with no slot changed in the first block, the first two, the first three.
     CHECK(resumed == 2 * (4096 + 128 + 8));
 }
 
@@ -112,7 +103,6 @@ TEST_CASE("full branch hash: branches it does not take", "[trie][gridmpt][kprefi
     new_hash.fill(0xee);
 
     SECTION("a witness node that is not 8-aligned") {
-        // The node store bounds-checks its entries but does not align them; the word reads need it.
         for (size_t off = 1; off < 8; ++off) {
             fill_full_branch(buf + off, rng);
             BranchNode b = unfold(buf + off, kNode);
@@ -129,9 +119,9 @@ TEST_CASE("full branch hash: branches it does not take", "[trie][gridmpt][kprefi
         BranchNode b = unfold(buf, kNode);
         b.delete_child(4);
         CHECK_FALSE(hashes_from_witness(b));
-        b.set_child(4, ByteView{buf, 5});  // an embedded child where a hash was
+        b.set_child(4, ByteView{buf, 5});
         CHECK_FALSE(hashes_from_witness(b));
-        b.set_child(4, ByteView{new_hash.data(), 32});  // a hash again
+        b.set_child(4, ByteView{new_hash.data(), 32});
         CHECK(hashes_from_witness(b));
         CHECK(same(b.full_branch_hash(nullptr, 0), keccak_of_encoding(b)));
     }
@@ -142,7 +132,6 @@ TEST_CASE("full branch hash: branches it does not take", "[trie][gridmpt][kprefi
         CHECK_FALSE(hashes_from_witness(b));
     }
     SECTION("a branch that is not full") {
-        // 15 hash children, an empty slot 6.
         Bytes inner;
         for (unsigned i = 0; i < 16; ++i) {
             if (i == 6) {
@@ -162,9 +151,6 @@ TEST_CASE("full branch hash: branches it does not take", "[trie][gridmpt][kprefi
         CHECK_FALSE(hashes_from_witness(b));
     }
     SECTION("a 532-byte branch with a 4-byte list header") {
-        // fa 00 02 10: a length with a leading zero, which fast_decode_header() takes. 15 hash
-        // references and an embedded node of 32 bytes (df and 31 bytes) fill 527 bytes, so the node
-        // is 532 bytes with every slot of length class 32, but its slots are not at 3 + 33 i.
         uint8_t* const p = buf;
         p[0] = 0xfa;
         p[1] = 0x00;
@@ -186,7 +172,6 @@ TEST_CASE("full branch hash: branches it does not take", "[trie][gridmpt][kprefi
         b.set_child(3, ByteView{new_hash.data(), 32});
         CHECK(b.same_layout_as_orig());
         CHECK_FALSE(hashes_from_witness(b));
-        // encode_branch() walks the slots: slot 3's hash is at 4 + 33 * 3 + 1.
         Bytes want{ByteView{p, kNode}};
         std::memcpy(want.data() + 4 + 33 * 3 + 1, new_hash.data(), 32);
         CHECK(Bytes{encode_branch(b)} == want);

@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
-"""extract.py SCRIPT OUTDIR
-
-Copies the two versions of cyclotomic_sqr_fp12 out of patch_blst_airbender.sh, so that the host
-test compiles the exact text the guest compiles and the exact text of blst v0.3.17 it replaces:
-  OUTDIR/base_block.inc  blst's original (old_cyclotomic), function renamed base_cyclotomic_sqr_fp12
-  OUTDIR/cand_block.inc  the fused version, with the CSR instruction routed to the emulator in
-                         bigint_emu.h and coverage counters spliced into the rare paths
-"""
+"""extract.py SCRIPT OUTDIR: writes OUTDIR/base_block.inc (blst's original) and OUTDIR/cand_block.inc (the fused version) from patch_blst_airbender.sh."""
 import os
 import re
 import sys
@@ -32,7 +25,6 @@ if not (blk.startswith(head) and blk.endswith(tail)):
     sys.exit('new_cyclotomic is not wrapped in #ifdef AIRBENDER_BIGINT_CSR ... #else')
 blk = blk[len(head):-len(tail)]
 
-# the CSR instruction becomes a call to the emulator
 i = blk.index('limb_t _cyc_csr(')
 j = blk.index('{', i)
 depth = 0
@@ -53,7 +45,6 @@ def splice(blk, pattern, repl):
     return blk
 
 
-# coverage: how often the out-of-line subtraction is called and taken, and the q estimates
 blk = splice(blk, r'^(    limb_t tmp\[12\], borrow = 0;)$', r'\1 cov_reduce_calls++;')
 blk = splice(blk, r'^(    if \(!?borrow\))$', r'    cov_reduce_taken += !borrow;\n\1')
 blk = splice(blk, r'^(    q =\s+\(h3 >= .*;)$', r'\1 cov_q[q]++;')

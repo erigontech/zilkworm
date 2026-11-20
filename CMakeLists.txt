@@ -50,10 +50,7 @@ option(SILKWORM_FUZZER_SANITIZERS "CLang sanitizer options for fuzzers" OFF)
 option(SILKWORM_USE_MIMALLOC "Enable using mimalloc for dynamic memory management" ON)
 option(SILKWORM_ALLOW_UNUSED_VAR_WARNINGS "Turn unused variable errors into warnings" OFF)
 
-# Compile-time selection of the trie fold's read-side state backend. OFF (default) =>
-# ActiveState is DirectState and the build is byte/behaviour-identical to today. ON =>
-# ActiveState is HashState (the SSZ/slib input path). Defines the Z6M_HASH_STATE macro
-# for all targets created below (zilk_core, zilkworm.tests, ...); see active_state.hpp.
+# Selects the trie fold's state backend: OFF => DirectState, ON => HashState (SSZ/slib input); defines Z6M_HASH_STATE.
 option(Z6M_HASH_STATE "Use the HashState (SSZ/slib) read-side state backend instead of DirectState" OFF)
 if(Z6M_HASH_STATE)
   add_compile_definitions(Z6M_HASH_STATE)
@@ -66,8 +63,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/compiler_settings.cmake)
 
 add_subdirectory(third_party)
 
-# Unit-test framework. Placed before compiler_warnings.cmake so Catch2
-# builds without the project's -Werror set.
+# Before compiler_warnings.cmake so Catch2 builds without the project's -Werror.
 if(BUILD_TESTING)
   include(FetchContent)
   FetchContent_Declare(
@@ -90,15 +86,9 @@ endif()
 
 add_subdirectory(zilk_core)
 
-# Aggregate Catch2 unit-test target. New *_test.cpp files join its source
-# list; each TEST_CASE is registered with ctest individually. Defined here
-# (not in zilk_core/) so projects embedding zilk_core with BUILD_TESTING=ON
-# but without Catch2 (qemu_runner) are unaffected.
+# Aggregate Catch2 target; each TEST_CASE is registered with ctest individually. Defined here so qemu_runner (no Catch2) is unaffected.
 if(BUILD_TESTING)
-  # The Airbender guest's bump allocator defines the global operator new/delete and malloc, so it
-  # cannot be linked into a host test: it would replace the allocator of the whole process. The
-  # test compiles its text with those names mapped to guest_*, so it runs the guest file itself
-  # (a change to it shows up here) without taking over the host's allocation.
+  # The guest's global operator new/malloc would replace the host's allocator, so the test compiles the guest file with those names mapped to guest_*.
   set(GUEST_ALLOCATOR_SRC ${CMAKE_CURRENT_SOURCE_DIR}/prover/guest_airbender/src/simple_allocator.cpp)
   set(GUEST_ALLOCATOR_TEST_SOURCES)
   if(EXISTS ${GUEST_ALLOCATOR_SRC})
@@ -109,14 +99,12 @@ if(BUILD_TESTING)
     string(REPLACE "operator delete[]" "guest_delete_array" guest_allocator_text "${guest_allocator_text}")
     string(REPLACE "operator new" "guest_new" guest_allocator_text "${guest_allocator_text}")
     string(REPLACE "operator delete" "guest_delete" guest_allocator_text "${guest_allocator_text}")
-    # The throwing operator new ends the run at finish_error when the heap is exhausted; the
-    # guest's rv32 finish_error cannot run on the host, so the test build maps it to a throw.
+    # The guest's rv32 finish_error cannot run on the host; the test build maps it to a throw.
     set(guest_allocator_prelude "#include <cerrno>\n#include <cstddef>\n#include <cstdint>\n#include <cstdlib>\n#include <new>\n#define GUEST_ALLOCATOR_HOST_TEST 1\n")
     foreach(name malloc free calloc realloc memalign aligned_alloc posix_memalign
                  _malloc_r _free_r _realloc_r _calloc_r _memalign_r)
       string(APPEND guest_allocator_prelude "#define ${name} guest_${name}\n")
     endforeach()
-    # configure_file leaves the output alone when the content is unchanged, so no needless rebuilds.
     file(WRITE ${GUEST_ALLOCATOR_TEST_SRC}.in "${guest_allocator_prelude}${guest_allocator_text}")
     configure_file(${GUEST_ALLOCATOR_TEST_SRC}.in ${GUEST_ALLOCATOR_TEST_SRC} COPYONLY)
     set(GUEST_ALLOCATOR_TEST_SOURCES ${GUEST_ALLOCATOR_TEST_SRC} zilk_core/dev/cli/guest_allocator_test.cpp)
@@ -205,12 +193,7 @@ if(BUILD_TESTING)
       zilk_core/dev/cli/code_store_collision_len_test.cpp
     )
   endif()
-  # The guests' memcpy and friends (prover/guest_common/src/mem_builtins.cpp), built for the host with
-  # the guests' code-generation flags: the loops must not be turned into the libc calls the file
-  # replaces. The guests are built with -mstrict-align, where a misaligned word access traps but x86
-  # runs it silently, so the alignment sanitizer stands in for it. Both test files build it at the
-  # -O3 it always gets in the guests: its word loops depend on the order of their loads and stores,
-  # which only an optimizer could get wrong.
+  # mem_builtins.cpp with the guests' flags and -O3; the alignment sanitizer stands in for -mstrict-align traps.
   if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(MEM_BUILTINS_HOST_FLAGS -fno-builtin -fno-tree-loop-distribute-patterns -fsanitize=alignment
                                 -fno-sanitize-recover=alignment
@@ -226,8 +209,7 @@ if(BUILD_TESTING)
     )
     target_link_options(zilkworm.tests PRIVATE -fsanitize=alignment)
   endif()
-  # addr_hash_orphan_test drives StateTransition::run (silkworm_dev). ld64 resolves the
-  # silkworm_core<->types_zz archive cycle globally; --start-group is GNU-ld-only.
+  # addr_hash_orphan_test needs silkworm_dev; --start-group (core<->types_zz cycle) is GNU-ld-only, ld64 resolves it.
   if(APPLE)
     set(ZILK_TEST_LIBS silkworm_dev silkworm_core silkworm_types_zz)
   else()
@@ -235,9 +217,7 @@ if(BUILD_TESTING)
   endif()
   # kzg_pairing_test builds proofs and its reference pairing with blst.
   target_link_libraries(zilkworm.tests PRIVATE ${ZILK_TEST_LIBS} blst::blst Catch2::Catch2WithMain)
-  # The Airbender guest's blst cyclotomic squaring only exists inside evmone's patch script. The
-  # test extracts the script's text with Python and runs it on a host emulation of the BigInt
-  # delegation, so it needs a host toolchain with Python.
+  # The blst cyclotomic squaring lives only in evmone's patch script: Python extracts it for a host emulation.
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING)
     set(BLST_CYC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/blst_cyclotomic")
@@ -261,9 +241,7 @@ if(BUILD_TESTING)
   else()
     message(STATUS "blst cyclotomic differential test skipped (needs Python3 on a host build)")
   endif()
-  # The Airbender guest's blst mul_mont_384 only exists inside evmone's patch script. The test
-  # extracts the script's text with Python and runs it on a host emulation of the BigInt
-  # delegation, so it needs a host toolchain with Python.
+  # Likewise blst mul_mont_384: extracted from evmone's patch script by Python, run on a host emulation.
   if(Python3_Interpreter_FOUND AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING)
     set(BLST_MONT384_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/blst_mont384")
     set(BLST_PATCH_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/cmake/patch_blst_airbender.sh")
@@ -289,11 +267,7 @@ if(BUILD_TESTING)
   endif()
   include(Catch)
   catch_discover_tests(zilkworm.tests)
-  # evmone's SP1 secp256k1 recovery, built on the host with -DSP1 over a software stand-in for the
-  # SP1 syscalls that checks the preconditions of SP1's precompiles (tests/sp1_secp256k1). A
-  # separate executable, since SP1 changes what evmone's sources compile to; without the rv32
-  # paths' EVMONE_RV32_DISPATCH_TEST, which would build the Airbender ecrecover_batch() instead.
-  # keccak.c is C and stays without SP1, which would make it issue the keccak syscall.
+  # evmone's SP1 secp256k1 on the host over SP1 syscall stand-ins: a separate target, as -DSP1 changes evmone (not keccak.c).
   if(NOT SP1 AND NOT SP1TURBO AND NOT AIRBENDER AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING
      AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(SP1_SECP256K1_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/sp1_secp256k1")
@@ -309,16 +283,13 @@ if(BUILD_TESTING)
     target_include_directories(sp1_secp256k1_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/evmone/lib")
     target_link_libraries(sp1_secp256k1_test PRIVATE intx::intx evmc::evmc_cpp Catch2::Catch2WithMain)
     catch_discover_tests(sp1_secp256k1_test)
-    # CI builds only zilkworm.tests before running ctest.
     add_dependencies(zilkworm.tests sp1_secp256k1_test)
   endif()
-  # evmone's host test of the Airbender blst patch is registered with ctest too; CI builds only
-  # this target before running ctest.
+  # evmone's host test of the Airbender blst patch: CI builds only zilkworm.tests before ctest.
   if(TARGET blst_airbender_patch_test)
     add_dependencies(zilkworm.tests blst_airbender_patch_test)
   endif()
-  # So is witness_hide_node_test, a standalone executable (zilk_core/dev/cli): without this, ctest
-  # reports it Not Run and the job fails.
+  # So is witness_hide_node_test: without this, ctest reports it Not Run and the job fails.
   if(TARGET witness_hide_node_test)
     add_dependencies(zilkworm.tests witness_hide_node_test)
   endif()

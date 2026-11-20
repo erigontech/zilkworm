@@ -10,8 +10,7 @@
 #include <zilk_core/core/common/base.hpp>
 
 namespace silkworm::protocol {
-// Gas fee schedule—see Appendix G of the Yellow Paper
-// https://ethereum.github.io/yellowpaper/paper.pdf
+// Gas fee schedule: Yellow Paper Appendix G
 namespace fee {
 
     inline constexpr uint64_t kAccessListStorageKeyCost{1'900};  // EIP-2930
@@ -33,16 +32,13 @@ namespace fee {
 }  // namespace fee
 
 inline constexpr uint64_t kMinGasLimit{5000};
-// https://github.com/ethereum/go-ethereum/blob/v1.13.4/params/protocol_params.go#L28
-// EIP-1985: Sane limits for certain EVM parameters
+// EIP-1985
 inline constexpr uint64_t kMaxGasLimit{INT64_MAX};  // 2^63-1
 
 inline constexpr size_t kMaxCodeSize{0x6000};                // EIP-170
 inline constexpr size_t kMaxInitCodeSize{2 * kMaxCodeSize};  // EIP-3860
 
-// EIP-7934: maximum block size constraints. kMaxBeaconBlockSize is the CL
-// gossip protocol cap; kBeaconBlockSafetyMargin reserves space for beacon
-// block content; kMaxRlpBlockSize is the resulting EL block RLP cap.
+// EIP-7934: kMaxRlpBlockSize is the EL block RLP cap left after the beacon block safety margin.
 inline constexpr size_t kMaxBeaconBlockSize      = 10 * 1024 * 1024;  // EIP-7934
 inline constexpr size_t kBeaconBlockSafetyMargin =  2 * 1024 * 1024;  // EIP-7934
 inline constexpr size_t kMaxRlpBlockSize         = kMaxBeaconBlockSize - kBeaconBlockSafetyMargin;

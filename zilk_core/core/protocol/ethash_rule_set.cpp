@@ -12,35 +12,10 @@
 
 namespace silkworm::protocol {
 
-// Ethash ProofOfWork verification
 ValidationResult EthashRuleSet::validate_difficulty_and_seal(const BlockHeader& header, const BlockHeader& parent) {
     (void)header;
     (void)parent;
     return ValidationResult::kOk;
-    // const bool parent_has_uncles{parent.ommers_hash != kEmptyListHash};
-    // if (header.difficulty != difficulty(header.number, header.timestamp, parent.difficulty,
-    //                                     parent.timestamp, parent_has_uncles, *chain_config_)) {
-    //     return ValidationResult::kWrongDifficulty;
-    // }
-    //
-    // if (!std::get<EthashConfig>(chain_config_.rule_set_config).validate_seal) {
-    //     return ValidationResult::kOk;
-    // }
-    //
-    // const int epoch_number{static_cast<int>(header.number / ethash::epoch_length)};
-    // if (!epoch_context_ || epoch_context_->epoch_number != epoch_number) {
-    //     epoch_context_.reset();  // Firstly release the obsoleted context
-    //     epoch_context_ = ethash::create_epoch_context(epoch_number);
-    // }
-    //
-    // const auto nonce{endian::load_big_u64(header.nonce.data())};
-    // const auto seal_hash(header.hash(/*for_sealing =*/true));
-    // const auto diff256{intx::be::store<ethash::hash256>(header.difficulty)};
-    // const auto sealh256{ethash::hash256_from_bytes(seal_hash.bytes)};
-    // const auto mixh256{ethash::hash256_from_bytes(header.prev_randao.bytes)};
-    //
-    // const auto ec{ethash::verify_against_difficulty(*epoch_context_, sealh256, mixh256, nonce, diff256)};
-    // return ec ? ValidationResult::kInvalidSeal : ValidationResult::kOk;
 }
 
 ValidationResult EthashRuleSet::validate_extra_data(const BlockHeader& header) const {
@@ -90,7 +65,6 @@ BlockReward EthashRuleSet::compute_reward(const Block& block) {
     intx::uint256 miner_reward{base};
     std::vector<intx::uint256> ommer_rewards;
     ommer_rewards.reserve(block.ommers.size());
-    // Accumulate the rewards for the miner and any included uncles
     for (const BlockHeader& ommer : block.ommers) {
         const intx::uint256 ommer_reward{((8 + ommer.number - block_num) * base) >> 3};
         ommer_rewards.push_back(ommer_reward);

@@ -112,10 +112,6 @@ ValidationResult RuleSet::validate_ommers(const Block& block, const BlockState& 
 ValidationResult RuleSet::validate_block_header(const BlockHeader& header, const BlockState& state,
                                                 bool with_future_timestamp_check) {
     if (with_future_timestamp_check) {
-        // const std::time_t now{std::time(nullptr)};
-        // if (header.timestamp > static_cast<uint64_t>(now)) {
-        //     return ValidationResult::kFutureBlock;
-        // }
     }
 
     if (header.gas_used > header.gas_limit) {
@@ -202,8 +198,7 @@ ValidationResult RuleSet::validate_block_header(const BlockHeader& header, const
         }
     }
 
-    // EIP-7928 + EIP-7843 (Amsterdam): block_access_list_hash and slot_number
-    // are mandatory post-Amsterdam and forbidden pre-Amsterdam.
+    // EIP-7928/7843 (Amsterdam): block_access_list_hash and slot_number are mandatory from Amsterdam, forbidden before.
     if (rev < EVMC_AMSTERDAM) {
         if (header.block_access_list_hash || header.slot_number) {
             return ValidationResult::kFieldBeforeFork;
@@ -213,7 +208,6 @@ ValidationResult RuleSet::validate_block_header(const BlockHeader& header, const
             return ValidationResult::kMissingField;
         }
     }
-    // return ValidationResult::kOk;
     return validate_difficulty_and_seal(header, *parent);
 }
 
@@ -265,13 +259,7 @@ BlockReward RuleSet::compute_reward(const Block&) {
 }
 
 RuleSetPtr rule_set_factory(const ChainConfig& chain_config) {
-    // SILKWORM_ASSERT(chain_config.valid_pre_merge_config());
 
-    // RuleSetPtr rule_set{pre_merge_rule_set(chain_config)};
-    // if (chain_config.terminal_total_difficulty) {
-    //     rule_set = std::make_unique<MergeRuleSet>(std::move(rule_set), chain_config);
-    // }
-    // return rule_set;
     return std::make_unique<MergeRuleSet>(std::make_unique<EthashRuleSet>(chain_config), chain_config);
 }
 

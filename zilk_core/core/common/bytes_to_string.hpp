@@ -4,8 +4,6 @@
 
 #pragma once
 
-// Utilities for type casting
-
 #include <span>
 #include <string_view>
 
@@ -14,7 +12,6 @@
 
 namespace silkworm {
 
-// Cast between pointers to char and unsigned char (i.e. uint8_t)
 inline char* byte_ptr_cast(uint8_t* ptr) { return reinterpret_cast<char*>(ptr); }
 inline const char* byte_ptr_cast(const uint8_t* ptr) { return reinterpret_cast<const char*>(ptr); }
 inline uint8_t* byte_ptr_cast(char* ptr) { return reinterpret_cast<uint8_t*>(ptr); }

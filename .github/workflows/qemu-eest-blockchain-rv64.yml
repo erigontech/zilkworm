@@ -27,9 +27,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
           TZ: Etc/UTC
-        # The CI image ships build-essential, cmake, ninja, git/git-lfs,
-        # python3, conan, riscv-none-elf-gcc and rustup. Only qemu-system-misc
-        # has to be added here.
+        # The CI image ships the toolchain; only qemu-system-misc is added here.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends qemu-system-misc

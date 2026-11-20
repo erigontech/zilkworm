@@ -1,32 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// A taken jump on the rv32 dispatch paths tests one bound, the scanned prefix of the code, with the
-// JUMPDEST map and the code start held by the interpreter loop (CodeAnalysis::check_jumpdest_in()
-// and the landing address of the fused PUSH2 JUMP/JUMPI, compare, selector, SWAP1 JUMP and plain
-// JUMP handlers). This test covers it at two levels. The rv32 test build sets
-// -DEVMONE_RV32_DISPATCH_TEST, which compiles the byte map, the lazy scan and those handlers on the
-// host. Every other build (EVMONE_JUMP_SKIPS_JUMPDEST) resumes a taken jump after the JUMPDEST it
-// lands on and runs PUSH2 JUMP, PUSH2 JUMPI and the comparisons before them as one step, which the
-// same forms cover.
-//
-// Analysis: check_jumpdest_in() against a reference scan, interleaved at random with
-// check_jumpdest() on one analysis (they share the scan bound, as the frames of one contract do),
-// on codes around the cases a single bound can get wrong: a JUMPDEST in the last byte, a PUSH cut
-// off by the code end (the scan overshoots the end, and the bound is clamped), targets at and past
-// the end, 2^31 and 2^32 - 1.
-//
-// Execution: every jump form runs at every gas limit up to past its landing, for the target
-// positions a jump can get wrong (a valid JUMPDEST, a PUSH opcode, a 0x5b in push data, the code
-// end and positions up to 40 past it, 0xffff, 2^31, 2^32 - 1, and a valid low word under a nonzero
-// high word), laid out with the jump first (a cold scan) or last (the scan done by an earlier jump
-// over the whole code, then a warm check), with and without a PUSH cut off by the code end, and
-// with the jump back to position 0. The outcome (status, gas left, output) comes from a model of
-// the separate instructions: JUMP's check follows its charge, and the landing JUMPDEST's charge
-// follows the check, except where a taken jump pays for the JUMPDEST it lands on itself
-// (EVMONE_JUMP_SKIPS_JUMPDEST: every build but the rv32 dispatch), which charges it before the check.
-// With the environment variable JUMPDEST_SINGLE_BOUND_DIGEST set, the execution tests print a digest
-// of every outcome, to compare two builds of the interpreter.
+// A taken jump on the rv32 dispatch paths tests one bound, the scanned prefix of the code.
 
 #include <algorithm>
 #include <cstdint>
@@ -73,8 +47,7 @@ bool expected(const std::vector<bool>& valid, uint64_t position) {
     return position < valid.size() && valid[position];
 }
 
-// Queries the positions in the given order on a fresh analysis, each by check_jumpdest() or by
-// check_jumpdest_in(), then the targets at and beyond the code end.
+// Queries the positions in the given order on a fresh analysis, each by check_jumpdest() or by check_jumpdest_in().
 void check_order(const bytes& code, const std::vector<bool>& valid,
                  const std::vector<uint32_t>& order, std::mt19937_64& rng) {
     const auto analysis =
@@ -100,14 +73,13 @@ void check_code(const bytes& code, std::mt19937_64& rng) {
     const auto valid = reference_jumpdests(code);
     std::vector<uint32_t> order(code.size());
     std::iota(order.begin(), order.end(), uint32_t{0});
-    check_order(code, valid, order, rng);  // Ascending: each query lands at the scan bound.
+    check_order(code, valid, order, rng);
     std::reverse(order.begin(), order.end());
-    check_order(code, valid, order, rng);  // Descending: the first query scans everything.
+    check_order(code, valid, order, rng);
     std::shuffle(order.begin(), order.end(), rng);
     check_order(code, valid, order, rng);
     if (!code.empty()) {
         const auto last = static_cast<uint32_t>(code.size() - 1);
-        // Far, then back below the bound, then above what is classified, then the end again.
         check_order(code, valid, {last, 0, last / 2, last, 0}, rng);
         check_order(code, valid, {0, last / 4, last / 2, last}, rng);
     }
@@ -121,7 +93,6 @@ TEST_CASE("jumpdest check_jumpdest_in: fixed codes", "[jumpdest_in]") {
     check_code({kJumpdest, kJumpdest, kJumpdest}, rng);
     check_code({kPush1, kJumpdest, kJumpdest}, rng);
     check_code({kPush32, kJumpdest, kJumpdest}, rng);
-    // A PUSH cut off by the code end, after a JUMPDEST: the scan runs past the end by up to 32.
     for (unsigned op = kPush1; op <= kPush32; ++op) {
         for (size_t have = 0; have <= static_cast<size_t>(op - kPush1) + 1; ++have) {
             for (const size_t lead : {size_t{0}, size_t{1}, size_t{7}, size_t{8}, size_t{9}}) {
@@ -140,7 +111,6 @@ TEST_CASE("jumpdest check_jumpdest_in: every length around the scan step", "[jum
         bytes last_only(size, 0x01);
         last_only.back() = kJumpdest;
         check_code(last_only, rng);
-        // A truncated PUSH32 at the end of dense JUMPDESTs, then of plain opcodes.
         for (const uint8_t fill : {kJumpdest, uint8_t{0x01}}) {
             bytes code(size, fill);
             code.back() = kPush32;
@@ -157,7 +127,6 @@ TEST_CASE("jumpdest check_jumpdest_in: random codes", "[jumpdest_in]") {
         bytes code(rng() % 300);
         for (auto& b : code)
             b = (rng() % 4) ? pool[rng() % std::size(pool)] : static_cast<uint8_t>(rng());
-        // Half of the codes end in a PUSH cut off by the code end.
         if (!code.empty() && (rng() & 1))
             code.back() = static_cast<uint8_t>(kPush1 + rng() % 32);
         check_code(code, rng);
@@ -175,11 +144,11 @@ enum : uint8_t {
     DUP1 = 0x80, SWAP1 = 0x90, RETURN = 0xf3
 };
 
-constexpr uint64_t kFallthrough = 0xbb;  // returned by the block the jump falls through to
-constexpr uint64_t kLanded = 0xaa;       // returned by the block a valid jump lands on
+constexpr uint64_t kFallthrough = 0xbb;
+constexpr uint64_t kLanded = 0xaa;
 
 constexpr uint64_t kDigestStart = 1469598103934665603ull;
-uint64_t digest = kDigestStart;  // FNV-1a over every outcome of a test case
+uint64_t digest = kDigestStart;
 
 void mix(uint64_t v) {
     for (int i = 0; i < 8; ++i) {
@@ -235,7 +204,7 @@ struct Runner {
 };
 
 // Returns the top item plus nothing: MSTORE it at 0 and RETURN 32 bytes; 18 gas with the memory.
-constexpr int64_t kReturnCost = 3 + 3 + 3 + 3 + 3 + 3;  // PUSH1 v PUSH1 0 MSTORE PUSH1 32 PUSH1 0
+constexpr int64_t kReturnCost = 3 + 3 + 3 + 3 + 3 + 3;
 void return_value(bytes& code, uint64_t v) {
     put(code, {PUSH1, static_cast<uint8_t>(v), PUSH1, 0, MSTORE, PUSH1, 32, PUSH1, 0, RETURN});
 }
@@ -249,11 +218,11 @@ bytes word(uint64_t v) {
 // The instructions of one jump form with a placeholder destination.
 struct Group {
     bytes code;
-    int64_t cost = 0;     // gas of its instructions up to and including the jump
-    size_t dst_at = 0;    // where the destination's bytes start
-    size_t width = 0;     // how many bytes it has (2 for PUSH2, 3, 4, 32)
-    bool taken = true;    // the jump is made (always for JUMP, depends on the condition for JUMPI)
-    bool jump = false;    // the form has JUMP, not JUMPI: no condition, a jump never falls through
+    int64_t cost = 0;
+    size_t dst_at = 0;
+    size_t width = 0;
+    bool taken = true;
+    bool jump = false;
 };
 
 enum class Form {
@@ -316,7 +285,7 @@ Group make_group(Form f, bool taken) {
         g.code.push_back(JUMPI);
         g.cost = 3 + 3 + 10;
         break;
-    case Form::push2_jumpi_wide_cond:  // the condition is nonzero in its top word only
+    case Form::push2_jumpi_wide_cond:
         push32(g.code, taken ? uint256{1} << 255 : uint256{0});
         dst(PUSH2, 2);
         g.code.push_back(JUMPI);
@@ -345,7 +314,7 @@ Group make_group(Form f, bool taken) {
         g.code.push_back(JUMPI);
         g.cost = 3 + 3 + 3 + 10;
         break;
-    case Form::selector:  // PUSH4 sel, then DUP1 PUSH4 sel EQ PUSH2 dst JUMPI
+    case Form::selector:
         put(g.code, {PUSH4, 0xa9, 0x05, 0x9c, 0xbb, DUP1, PUSH4, 0xa9, 0x05, 0x9c,
             static_cast<uint8_t>(taken ? 0xbb : 0xbc), EQ});
         dst(PUSH2, 2);
@@ -361,7 +330,7 @@ Group make_group(Form f, bool taken) {
         g.code.push_back(JUMPI);
         g.cost = 3 + 3 + 10;
         break;
-    case Form::swap1_jump3:  // dst, then 7 on top: SWAP1 brings dst to the top
+    case Form::swap1_jump3:
         dst(PUSH3, 3);
         put(g.code, {PUSH1, 7, SWAP1, JUMP});
         g.cost = 3 + 3 + 3 + 8;
@@ -382,25 +351,24 @@ Group make_group(Form f, bool taken) {
 
 // The cut-off PUSH the code can end with: none, or opcode op with have data bytes.
 struct Tail {
-    int op = 0;  // 0: none
+    int op = 0;
     size_t have = 0;
 };
 
 struct Program {
     bytes code;
     Group group;
-    bool at_end = false;  // the group is last and jumps back to the block above it
+    bool at_end = false;
     Tail tail;
-    int64_t pre = 0;      // gas of what runs before the group
-    size_t target = 0;    // the JUMPDEST the block that returns kLanded starts with
+    int64_t pre = 0;
+    size_t target = 0;
     size_t opcode_pos = 0, data_pos = 0;
-    size_t last_jumpdest = 0;  // a JUMPDEST just before the cut-off PUSH; 0: none
+    size_t last_jumpdest = 0;
 };
 
-constexpr int64_t kLandedCost = 1 + kReturnCost;  // JUMPDEST, then the return block
+constexpr int64_t kLandedCost = 1 + kReturnCost;
 
-// Layout, with the group at the front (a cold scan from 0) or at the end (jumped to by a jump over
-// the whole code first, so the scan bound is the code end when the group runs).
+// Layout, with the group at the front (a cold scan from 0) or at the end.
 Program build(Form f, bool taken, bool at_end, Tail tail) {
     Program p;
     p.group = make_group(f, taken);
@@ -415,18 +383,16 @@ Program build(Form f, bool taken, bool at_end, Tail tail) {
     } else {
         p.group.dst_at += c.size();
         c.insert(c.end(), p.group.code.begin(), p.group.code.end());
-        // The fall-through block.
         return_value(c, kFallthrough);
     }
     p.target = c.size();
     c.push_back(JUMPDEST);
     return_value(c, kLanded);
-    // 0x5b bytes inside PUSH32 data: never a destination.
     p.data_pos = c.size() + 5;
     push32(c, uint256{0x5b5b5b5b5b5b5b5b, 0x5b5b5b5b5b5b5b5b, 0x5b5b5b5b5b5b5b5b,
                       0x5b5b5b5b5b5b5b5b});
     c.push_back(POP);
-    p.opcode_pos = c.size();  // a PUSH1, not a JUMPDEST
+    p.opcode_pos = c.size();
     put(c, {PUSH1, 7, POP});
     if (at_end) {
         const auto body = c.size();
@@ -489,10 +455,10 @@ Outcome model(const Program& p, const uint256& dst, int64_t g) {
             tail_cost = kLandedCost;
             output = word(kLanded);
         } else if (p.last_jumpdest != 0 && dst == uint256{p.last_jumpdest}) {
-            tail_cost = 1 + (p.tail.op != 0 ? 3 : 0);  // JUMPDEST, then the cut-off PUSH
+            tail_cost = 1 + (p.tail.op != 0 ? 3 : 0);
         } else {
 #if EVMONE_JUMP_SKIPS_JUMPDEST
-            if (g < head + 1)  // The landing JUMPDEST's charge, made before the check.
+            if (g < head + 1)
                 return oog;
 #endif
             return {EVMC_BAD_JUMP_DESTINATION, 0, {}};
@@ -556,8 +522,6 @@ TEST_CASE("jumps check one scanned bound: every form, target and gas limit", "[j
                     continue;
                 for (const bool at_end : {false, true}) {
                     for (const auto& tail : tails) {
-                        // The second revision only on the plain layouts: gas costs of these
-                        // instructions do not change across revisions.
                         const auto revs = tail.op == 0 ? std::vector<evmc_revision>{kRevs[0], kRevs[1]}
                                                        : std::vector<evmc_revision>{kRevs[0]};
                         checks += check_program(r, build(f, taken, at_end, tail), f, revs);
@@ -572,8 +536,6 @@ TEST_CASE("jumps check one scanned bound: every form, target and gas limit", "[j
 
 namespace {
 
-// Jumps back to 0, where the code starts with a JUMPDEST: the loop runs while GAS is above 256.
-// Back is the way the loop jumps back. Returns the code and the gas of one iteration besides the
 // back jump; the exit block returns kFallthrough.
 enum class Back { cmp_jumpi, push2_jump, push3_jump, swap1_jump, plain_jumpi };
 
@@ -582,14 +544,13 @@ bytes loop_code(Back back) {
     c.push_back(JUMPDEST);
     put(c, {PUSH2, 0x01, 0x00, GAS, GT});
     switch (back) {
-    case Back::cmp_jumpi:  // GT PUSH2 0 JUMPI, fused with the compare
+    case Back::cmp_jumpi:
         put(c, {PUSH2, 0, 0, JUMPI});
         break;
-    case Back::plain_jumpi:  // PUSH3 0 JUMPI is not fused
+    case Back::plain_jumpi:
         put(c, {PUSH3, 0, 0, 0, JUMPI});
         break;
     default: {
-        // Leave the loop when GAS is not above 256: GT ISZERO PUSH2 exit JUMPI, then jump back.
         put(c, {ISZERO, PUSH2, 0, 0, JUMPI});
         const auto exit_at = c.size() - 3;
         if (back == Back::push2_jump)
@@ -620,22 +581,22 @@ Outcome loop_model(Back back, int64_t g) {
         return left >= 0;
     };
     for (;;) {
-        if (!spend(1 + 3 + 2))  // JUMPDEST, PUSH2, GAS
+        if (!spend(1 + 3 + 2))
             return oog;
-        const int64_t seen = left;  // GAS pushes what is left after its own charge
+        const int64_t seen = left;
         if (!spend(3))  // GT
             return oog;
         bool again;
         if (cmp_exit) {
-            if (!spend(3 + 10))  // PUSH2 or PUSH3, JUMPI
+            if (!spend(3 + 10))
                 return oog;
             again = seen > 256;
         } else {
-            if (!spend(3 + 3 + 10))  // ISZERO, PUSH2, JUMPI
+            if (!spend(3 + 3 + 10))
                 return oog;
             const bool exit = !(seen > 256);
             if (exit) {
-                if (!spend(1 + kReturnCost))  // JUMPDEST and the return block
+                if (!spend(1 + kReturnCost))
                     return oog;
                 return {EVMC_SUCCESS, left, word(kFallthrough)};
             }
@@ -649,7 +610,6 @@ Outcome loop_model(Back back, int64_t g) {
                 return oog;
             return {EVMC_SUCCESS, left, word(kFallthrough)};
         }
-        // The jump lands on JUMPDEST at 0, which the next round charges.
     }
 }
 
@@ -665,7 +625,6 @@ TEST_CASE("jumps back to position 0 run the loop the model runs", "[jumpdest_in]
             std::vector<int64_t> limits;
             for (int64_t g = 0; g <= 400; ++g)
                 limits.push_back(g);
-            // Up to 30000 gas: the SWAP1 loop leaves an item per round, so 1024 rounds overflow.
             for (const int64_t g : {1000, 1001, 4093, 5000, 20000, 30000})
                 limits.push_back(g);
             for (const auto g : limits) {

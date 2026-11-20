@@ -6,11 +6,7 @@
 #   CACHE_DIR/KEY/         extracted contents
 #   CACHE_DIR/KEY/.sha256  sentinel file recording the verified sha256
 #
-# Re-running is a no-op when the sentinel already matches. Tarballs are kept
-# alongside the extracted dirs so re-extraction (after `make clean` or a
-# manual rm of CACHE_DIR/KEY/) doesn't re-download. The trade-off is roughly
-# 2x local disk usage vs. extracted-only; CI caches only *.tar.gz to stay
-# under cache budget and re-extracts on each run.
+# Re-running is a no-op when the sentinel already matches.
 #
 # Usage: tools/test-fixtures.sh [--download-only] [MANIFEST [CACHE_DIR [KEY...]]]
 #   --download-only   download & sha256-verify the tarballs, skip extraction
@@ -47,9 +43,7 @@ sha256() {
 
 mkdir -p "$cache"
 
-# Read & parse the manifest up-front so parse errors abort the script
-# (process substitution would mask them under `set -e`). python3 instead of
-# jq: the CI image guarantees python3.
+# Parse the manifest up-front: process substitution would mask parse errors under `set -e`.
 if ! manifest_entries=$(python3 - "$manifest" "${keys[@]}" <<'PYEOF'
 import json, sys
 manifest, keys = sys.argv[1], sys.argv[2:]
@@ -70,15 +64,12 @@ if [[ -z "$manifest_entries" ]] && (( ${#keys[@]} > 0 )); then
 	exit 1
 fi
 
-# Clean up the in-progress iteration's tmp paths on any exit (including
-# Ctrl-C / SIGTERM) so a leftover .tmp doesn't accumulate across runs.
-# The :+ expansions keep the trap a no-op while the paths are still unset.
+# Remove the in-progress tmp paths on any exit, including Ctrl-C / SIGTERM.
 tar_path=""
 out_dir=""
 trap 'rm -f "${tar_path:+${tar_path}.tmp}" 2>/dev/null; rm -rf "${out_dir:+${out_dir}.tmp}" 2>/dev/null' EXIT
 
-# ensure_tarball NAME URL WANT: download & verify $tar_path unless it already
-# matches WANT.
+# ensure_tarball NAME URL WANT: download & verify $tar_path unless it already matches WANT.
 ensure_tarball() {
 	if [[ -f "$tar_path" ]] && [[ "$(sha256 "$tar_path")" == "$3" ]]; then
 		echo "$1: tarball cached (sha256 ${3:0:12})"
@@ -119,10 +110,7 @@ while IFS=$'\t' read -r name url want paths_str; do
 	echo "$name: extracting"
 	rm -rf "$out_dir.tmp" "$out_dir"
 	mkdir -p "$out_dir.tmp"
-	# Optional per-entry `paths` allowlist restricts extraction to just those
-	# tar members (e.g. only fixtures/blockchain_tests instead of the whole
-	# archive), sparing disk. An empty allowlist extracts everything, so
-	# entries without `paths` keep their original behavior.
+	# Optional per-entry `paths` allowlist restricts extraction to those tar members.
 	read -r -a paths_arr <<< "$paths_str"
 	if (( ${#paths_arr[@]} )); then
 		tar --no-same-owner --no-same-permissions -xzf "$tar_path" -C "$out_dir.tmp" "${paths_arr[@]}"

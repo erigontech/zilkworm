@@ -1,11 +1,7 @@
 // Copyright 2026 The Zilkworm Authors (modifications)
 // Copyright 2025 The Original Silkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The blockchain-test runner: StateTransition's EJSN input, which runs EEST blockchain-test
-// JSON fixtures, over DirectState built from "pre" or, under Z6M_HASH_STATE, over HashState
-// built from each block's statelessInputBytes. Block inputs that are not tests (MFBD) are
-// handled in state_transition.cpp.
+// The blockchain-test runner: StateTransition's EJSN input, which runs EEST blockchain-test JSON fixtures.
 
 #include "state_transition.hpp"
 
@@ -32,13 +28,11 @@
 #include <zilk_core/print.hpp>
 
 #ifdef Z6M_HASH_STATE
-// The slib runner arm (S6): parse blocks[i].statelessInputBytes -> HashState -> execute ->
-// gather -> accept. These headers are HashState-only (each guarded so the DirectState build
-// pulls in nothing from them).
-#include <zilk_core/core/state_zz/hash_state.hpp>      // HashState, HashStateView
-#include <zilk_core/core/state_zz/slib_input.hpp>      // run_slib, SlibRunResult
-#include <zilk_core/core/state_zz/slib_payload.hpp>    // decode_slib_payload, slib_payload_root, slib_payload_block
-#include <zilk_core/dev/check_root_hashstate.hpp>      // check_root_hashstate gather overload
+// The slib runner arm: parse blocks[i].statelessInputBytes -> HashState -> execute -> gather -> accept.
+#include <zilk_core/core/state_zz/hash_state.hpp>
+#include <zilk_core/core/state_zz/slib_input.hpp>
+#include <zilk_core/core/state_zz/slib_payload.hpp>
+#include <zilk_core/dev/check_root_hashstate.hpp>
 #endif
 
 namespace silkworm::cmd::state_transition {
@@ -64,23 +58,12 @@ namespace {
         kSkipped
     };
 
-    /// Marker indicating the test expects an RLP / structural rejection that
-    /// completes before insert_block returns a ValidationResult (e.g. malformed
-    /// RLP, oversized block). Used in @ref exception_map to express "matched at
-    /// the RLP-decode short-circuit, not via a ValidationResult."
+    /// Marker for an RLP/structural rejection that completes before insert_block returns a ValidationResult.
     inline constexpr auto kPreInsertReject = static_cast<ValidationResult>(-1);
 
-    /// Map an EEST @c expectException string ("TransactionException.X" /
-    /// "BlockException.Y") to the silkworm ValidationResult set that satisfies
-    /// it. The runner requires an exact match: if silkworm rejects via a code
-    /// outside the mapped set, the test fails. This catches implementations
-    /// that bypass the spec-required pre-validate gate and rely on an
-    /// incidental post-execute check (state-root mismatch, gas-used mismatch).
+    /// Map an EEST @c expectException string.
     const std::unordered_map<std::string_view, std::vector<ValidationResult>>& exception_map() {
         static const std::unordered_map<std::string_view, std::vector<ValidationResult>> m{
-            // Transaction-level rejections (must fire in pre-validate / per-tx validate).
-            // evmone unifies both gates under INTRINSIC_GAS_TOO_LOW (`gas_limit < max(total_intrinsic, min_cost)`),
-            // so the umbrella category accepts either silkworm enum.
             {"TransactionException.INTRINSIC_GAS_TOO_LOW",                  {ValidationResult::kIntrinsicGas, ValidationResult::kFloorCost}},
             {"TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST",     {ValidationResult::kFloorCost}},
             {"TransactionException.INSUFFICIENT_ACCOUNT_FUNDS",             {ValidationResult::kInsufficientFunds}},
@@ -92,9 +75,6 @@ namespace {
             {"TransactionException.PRIORITY_GREATER_THAN_MAX_FEE_PER_GAS",  {ValidationResult::kMaxPriorityFeeGreaterThanMax}},
             {"TransactionException.SENDER_NOT_EOA",                         {ValidationResult::kSenderNoEOA}},
             {"TransactionException.INVALID_CHAINID",                        {ValidationResult::kWrongChainId, kPreInsertReject}},
-            // Bad r/s reject at the pre-validate signature gate; a bad v or an
-            // over-32-byte r/s cannot decode as a signature field, so the block
-            // fails RLP decode first - EEST classifies both as INVALID_SIGNATURE_VRS.
             {"TransactionException.INVALID_SIGNATURE_VRS",                  {ValidationResult::kInvalidSignature, kPreInsertReject}},
             {"TransactionException.GAS_ALLOWANCE_EXCEEDED",                 {ValidationResult::kBlockGasLimitExceeded}},
             {"TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM",              {ValidationResult::kMaxTransactionGasLimitExceeded}},
@@ -113,7 +93,6 @@ namespace {
             {"TransactionException.TYPE_4_TX_CONTRACT_CREATION",            {ValidationResult::kProhibitedContractCreation}},
             {"TransactionException.TYPE_4_EMPTY_AUTHORIZATION_LIST",        {ValidationResult::kEmptyAuthorizations}},
 
-            // Block-level rejections.
             {"BlockException.INVALID_GASLIMIT",                             {ValidationResult::kInvalidGasLimit, ValidationResult::kGasAboveLimit}},
             {"BlockException.INVALID_BASEFEE_PER_GAS",                      {ValidationResult::kWrongBaseFee}},
             {"BlockException.INCORRECT_BLOB_GAS_USED",                      {ValidationResult::kWrongBlobGasUsed}},
@@ -125,38 +104,22 @@ namespace {
             {"BlockException.SYSTEM_CONTRACT_CALL_FAILED",                  {ValidationResult::kRequestsProcessingFailure}},
             {"BlockException.SYSTEM_CONTRACT_EMPTY",                        {ValidationResult::kRequestsProcessingFailure}},
             {"BlockException.INVALID_VERSIONED_HASHES",                     {ValidationResult::kWrongBlobCommitmentVersion}},
-            // EIP-7928: malformed BAL bytes (wrong account order, duplicate account, etc.).
-            // evmone canonicalises (sort + dedup) when rebuilding; the resulting hash
-            // diverges from the header's, so silkworm reports kBlockAccessListHashMismatch
-            // via the same code path as semantic BAL violations.
-            // A post-fork header missing the BAL-hash field short-circuits in
-            // rlp::decode (the trailing optionals misparse) -> kPreInsertReject.
             {"BlockException.INVALID_BAL_HASH",                             {ValidationResult::kBlockAccessListHashMismatch, kPreInsertReject}},
-            // Pre-fork header carrying post-fork fields: EEST names the resulting
-            // hash divergence INVALID_BLOCK_HASH; we reject it semantically.
             {"BlockException.INVALID_BLOCK_HASH",                           {ValidationResult::kFieldBeforeFork, ValidationResult::kMissingField, kPreInsertReject}},
             {"BlockException.INVALID_BLOCK_ACCESS_LIST",                    {ValidationResult::kBlockAccessListHashMismatch, ValidationResult::kBlockAccessListGasExceeded}},
             {"BlockException.BLOCK_ACCESS_LIST_GAS_LIMIT_EXCEEDED",         {ValidationResult::kBlockAccessListGasExceeded}},
             {"BlockException.INCORRECT_BLOCK_FORMAT",                       {ValidationResult::kFieldBeforeFork, ValidationResult::kMissingField, ValidationResult::kBlockAccessListHashMismatch, kPreInsertReject}},
             {"BlockException.GAS_USED_OVERFLOW",                            {ValidationResult::kWrongBlockGas, ValidationResult::kBlockGasLimitExceeded}},
             {"BlockException.INVALID_GAS_USED",                             {ValidationResult::kWrongBlockGas}},
-            // RLP-shape rejections short-circuit in rlp::decode / size check
-            // before insert_block runs. Mark them with a sentinel so the runner
-            // can match without consulting a ValidationResult.
             {"BlockException.RLP_STRUCTURES_ENCODING",                      {kPreInsertReject}},
             {"BlockException.RLP_BLOCK_LIMIT_EXCEEDED",                     {kPreInsertReject}},
         };
         return m;
     }
 
-    /// Returns true iff @p got is one of the silkworm ValidationResults that
-    /// satisfies any pipe-separated alternative in @p expectation. Unknown
-    /// tokens are ignored (the other alternatives in a `A|B` composite can
-    /// still match); if no token resolves to a ValidationResult set containing
-    /// @p got, the match fails — there is no permissive fallback, so an
-    /// EEST fixture pinning a new exception string forces a map update.
+    /// True iff @p got satisfies a pipe-separated alternative of @p expectation; unknown tokens are ignored.
     bool strict_exception_match(ValidationResult got, std::string_view expectation) {
-        if (expectation.empty()) return false;  // Empty expectation is never valid.
+        if (expectation.empty()) return false;
         const auto& m = exception_map();
         size_t pos = 0;
         while (pos <= expectation.size()) {
@@ -174,25 +137,16 @@ namespace {
         return false;
     }
 
-    /// Same as @ref strict_exception_match but for the pre-insert reject path
-    /// (RLP decode or oversized-block short-circuit): returns true iff at least
-    /// one alternative in @p expectation resolves to a set containing
-    /// @ref kPreInsertReject.
+    /// Same as @ref strict_exception_match but for the pre-insert reject path.
     bool strict_exception_match_pre_insert(std::string_view expectation) {
         return strict_exception_match(kPreInsertReject, expectation);
     }
 
-    // [[maybe_unused]]: under Z6M_HASH_STATE the DirectState blockchain_test arm that calls
-    // this is compiled out (the slib arm replaces it, S6), leaving this helper defined but
-    // unreferenced — which -Werror=unused-function would reject. It still compiles cleanly
-    // under the flag (Blockchain / DirectState remain complete types), so keep it for S6.
+    // [[maybe_unused]]: under Z6M_HASH_STATE the DirectState blockchain_test arm that calls this is compiled out.
     [[maybe_unused]] Status run_json_block(const nlohmann::json& json_block, Blockchain& blockchain, DirectState& direct) {
         bool invalid{json_block.contains("expectException")};
         const std::string expectation = invalid ? json_block["expectException"].get<std::string>() : std::string{};
 
-        // Helper to verify a rejection matches expectation when invalid is true.
-        // For pre-insert rejections (RLP / oversize), pass nullopt; otherwise pass
-        // the silkworm ValidationResult.
         const auto check_strict = [&](std::optional<ValidationResult> got) -> bool {
             if (!got.has_value()) {
                 return strict_exception_match_pre_insert(expectation);
@@ -200,12 +154,7 @@ namespace {
             return strict_exception_match(*got, expectation);
         };
 
-        // Common diagnostic helper. @p rejection_mode identifies which gate fired
-        // (real ValidationResult name, or one of the pre-insert short-circuits).
         const auto fail_strict = [&](std::string_view rejection_mode) {
-            // Not std::format: this was the only use in the guest, and it alone linked in Ryu, the
-            // unicode tables and the libstdc++ locale and facet machinery, about 0.5 MB of text and
-            // 190 KB of .rodata that the guest copies to RAM at the start of every block.
             sys_println(("STRICT: rejected via " + std::string(rejection_mode) + " but expected " +
                          expectation).c_str());
         };
@@ -226,11 +175,8 @@ namespace {
         Block block;
         ByteView view{*rlp};
 
-        /// The CL gossip protocol constraint of the maximum block size (EIP-7934).
         constexpr size_t MAX_BLOCK_SIZE = 10 * 1024 * 1024;
-        /// The safety margin for beacon block content (EIP-7934).
         constexpr size_t SAFETY_MARGIN = 2 * 1024 * 1024;
-        /// The maximum EL block size when RLP encoded (EIP-7934).
         constexpr size_t MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN;
 
         if (view.size() > MAX_RLP_BLOCK_SIZE) {
@@ -257,7 +203,6 @@ namespace {
             sys_println("Failure to decode RLP");
             return Status::kFailed;
         }
-        // Only after decode: the fork gate needs the block's number/timestamp.
         if (rlp->size() > kMaxRlpBlockSize && blockchain.config().revision(block.header.number, block.header.timestamp) >= EVMC_OSAKA) {
             if (invalid) {
                 if (!check_strict(std::nullopt)) {
@@ -298,7 +243,7 @@ namespace {
         size_t passed{0};
         size_t failed{0};
         size_t skipped{0};
-        uint64_t gas{0};  // of the blocks the passed cases executed: the prover reports it per run
+        uint64_t gas{0};
 
         constexpr RunResults() = default;
 
@@ -328,14 +273,9 @@ namespace {
 
 #ifdef Z6M_HASH_STATE
     // True for EIP-8025 stateless witness-validation negatives, matched by EEST node-id.
-    // See docs/hashstate.md, "Scoring witness-validation negatives".
     [[nodiscard]] bool is_stateless_witness_negative(std::string_view fixture_name) {
         if (fixture_name.find("eip8025_optional_proofs") == std::string_view::npos)
             return false;
-        // test_witness_header_ssz_*: a witness header padded to the ByteList limit or past it, 256
-        // headers that fail the chain check, 257 that fail to decode: rejected, as the spec does,
-        // for a valid block. test_validation_state_unchanged_*: only the `missing_*` variants drop
-        // a proof the block reads; the `complete_witness` ones must be accepted.
         return fixture_name.find("::test_validation_codes_missing_") != std::string_view::npos ||
                fixture_name.find("::test_validation_state_missing_") != std::string_view::npos ||
                (fixture_name.find("::test_validation_state_unchanged_") != std::string_view::npos &&
@@ -354,10 +294,7 @@ namespace {
         uint32_t unconfirmed_reads{0};
     };
 
-    // Runs `block` on the state `blob` carries, anchored at `prev_root`, and folds its writes over that
-    // root. The witness headers must chain by parent hash and end at the block's parent, as
-    // validate_headers requires: BLOCKHASH walks back from the block through them.
-    // See docs/hashstate.md, "Slib arm".
+    // Runs `block` on the state `blob` carries, anchored at `prev_root`, and folds its writes over that root.
     SibBlockOutcome run_sib_block(ByteView blob, Block& block, const ChainConfig& config,
                                   const evmc::bytes32& prev_root) {
         ::zilkworm::HashState hs;
@@ -397,7 +334,6 @@ namespace {
         }
         for (const BlockHeader& ancestor : ancestors) hs.insert_header(ancestor);
 
-        // Blockchain inserts its "genesis" header: the parent, already held.
         Block parent;
         parent.header = ancestors.back();
         Blockchain blockchain{hs, config, parent};
@@ -405,7 +341,6 @@ namespace {
             err != ValidationResult::kOk) {
             return {SibBlockOutcome::kRejected, err, hs.unconfirmed_read_count()};
         }
-        // The accept check folds the block's writes over prev_root and requires every read confirmed.
         if (!::zilkworm::check_root_hashstate(hs, prev_root, block.header.state_root)) {
             sys_println(std::format("ERROR: HashState accept failed: expected state_root {}, missing_count={} "
                                     "unconfirmed_read_count={}",
@@ -416,7 +351,6 @@ namespace {
         return {SibBlockOutcome::kAccepted, ValidationResult::kOk, 0};
     }
 
-    // The network a statelessInputBytes chain id selects, as the host adapter maps it; chain id 1 is the
     // generated EEST corpus, Amsterdam from genesis.
     const char* network_for_chain_id(uint64_t chain_id) {
         switch (chain_id) {
@@ -434,10 +368,8 @@ namespace {
     RunResults blockchain_test([[maybe_unused]] std::string_view fixture_name,
                                const nlohmann::json& json_test) {
 #ifdef Z6M_HASH_STATE
-        // slib arm: each block's statelessInputBytes builds a fresh HashState, the block runs on it and
-        // the accept check folds its writes over the parent root. See docs/hashstate.md, "Slib arm".
         const bool witness_negative = is_stateless_witness_negative(fixture_name);
-        uint64_t gas_used = 0;  // of the accepted blocks
+        uint64_t gas_used = 0;
         const auto run_slib_arm = [&]() -> Status {
             const auto network{json_test["network"].get<std::string>()};
             const auto config_it{test::kNetworkConfig.find(network)};
@@ -459,7 +391,6 @@ namespace {
                 sys_println("Failure to decode genesisRLP");
                 return Status::kFailed;
             }
-            // Block 0 anchors at the genesis state root; each accepted block advances the anchor.
             evmc::bytes32 prev_root = genesis_block.header.state_root;
 
             size_t block_index = 0;
@@ -486,7 +417,6 @@ namespace {
                     sys_println(std::format("STRICT: rejected via {} but expected {}", rejection_mode, expectation));
                 };
 
-                // The block RLP gates of run_json_block.
                 std::optional<Bytes> rlp{from_hex(json_block["rlp"].get<std::string>())};
                 if (!rlp) {
                     if (invalid) {
@@ -502,8 +432,8 @@ namespace {
                 }
                 Block block;
                 ByteView view{*rlp};
-                constexpr size_t MAX_BLOCK_SIZE = 10 * 1024 * 1024;  // EIP-7934 CL gossip cap.
-                constexpr size_t SAFETY_MARGIN = 2 * 1024 * 1024;    // EIP-7934 beacon margin.
+                constexpr size_t MAX_BLOCK_SIZE = 10 * 1024 * 1024;
+                constexpr size_t SAFETY_MARGIN = 2 * 1024 * 1024;
                 constexpr size_t MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN;
                 if (view.size() > MAX_RLP_BLOCK_SIZE) {
                     if (invalid) {
@@ -553,9 +483,6 @@ namespace {
                             return Status::kFailed;
                         }
                         if (!check_strict(o.err)) {
-                            // A witness that prunes an account a validation gate reads rejects for another
-                            // reason; only then is the label waived, and the waiver is logged.
-                            // See docs/hashstate.md, "Expected-invalid label relaxation".
                             if (o.unconfirmed_reads == 0) {
                                 fail_strict(magic_enum::enum_name<ValidationResult>(o.err));
                                 return Status::kFailed;
@@ -581,7 +508,7 @@ namespace {
                 ++block_index;
             }
             return Status::kPassed;
-        };  // run_slib_arm
+        };
 
         const Status natural = run_slib_arm();
         if (!witness_negative) {
@@ -589,16 +516,14 @@ namespace {
             results.gas = gas_used;
             return results;
         }
-        // Witness negative: PASS iff the slib arm rejected, FAIL iff it accepted every block.
-        // See docs/hashstate.md, "Scoring witness-validation negatives".
         if (natural == Status::kPassed) {
             sys_println("STRICT: stateless witness-validation NEGATIVE was ACCEPTED "
                         "(a correct stateless verifier must REJECT it) -> FAIL");
             return Status::kFailed;
         }
         if (natural == Status::kFailed)
-            return Status::kPassed;  // correctly rejected the deliberately-broken witness.
-        return natural;  // kSkipped: cannot classify (selected fixtures always carry one).
+            return Status::kPassed;
+        return natural;
 #else
         const auto network{json_test["network"].get<std::string>()};
         const auto config_it{test::kNetworkConfig.find(network)};
@@ -616,7 +541,6 @@ namespace {
             return Status::kFailed;
         }
 
-        // blob must outlive direct.
         std::vector<uint8_t> blob;
         std::optional<DirectState> direct;
         std::optional<Blockchain> blockchain;
@@ -646,7 +570,6 @@ namespace {
             if (!blocks[i].contains("expectException")) {
                 accepted.push_back(i);
             } else if (i + 1 < blocks.size()) {
-                // Nothing undoes a rejected block, so the accepted blocks rerun on a fresh pre-state.
                 if (!load_pre_state()) {
                     return Status::kFailed;
                 }
@@ -723,10 +646,7 @@ uint64_t StateTransition::run_ejsn() {
 }
 
 
-// A raw statelessInputBytes blob: the block comes out of its NewPayloadRequest, the pre-state root out
-// of the parent header the witness carries, and the result is the SSZ StatelessValidationResult. A
-// rejected block is a result with successful_validation false, not a failed run; only an input that
-// does not decode leaves the result zero.
+// A raw statelessInputBytes blob: the block comes out of its NewPayloadRequest.
 uint64_t StateTransition::run_sib() {
 #ifdef Z6M_HASH_STATE
     sib_ = true;
@@ -760,14 +680,11 @@ uint64_t StateTransition::run_sib() {
         sys_println(std::format("block rejected: {} mismatch", why));
         return 0;
     }
-    // EIP-7934 caps the block RLP from Osaka. The payload carries no RLP: the rebuilt block's
-    // canonical encoding is what the cap applies to.
     if (rlp::length(*block) > kMaxRlpBlockSize &&
         config_it->second.revision(block->header.number, block->header.timestamp) >= EVMC_OSAKA) {
         sys_println("block rejected: exceeds kMaxRlpBlockSize");
         return 0;
     }
-    // The parent header, last of the witness headers, anchors the pre-state root.
     BlockHeader parent;
     if (dec->headers.empty()) {
         sys_println("block rejected: witness carries no headers");

@@ -1,13 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// ADDMOD handler against (x + y) mod m computed in 512 bits and against intx::addmod (the code
-// the handler falls back to). The rv32 fast path takes x < m and y < m: it adds over 32-bit
-// words and subtracts m once into m's own stack slot, so the cases below aim at its edges: a
-// carry out of bit 256, x + y equal to m, m - 1 and 2m - 1, equal top words with random words
-// below, carry and borrow chains across every word boundary, m of one to 256 bits, and
-// operands at or above m (which it must decline, leaving m untouched). The native build sets
-// -DEVMONE_RV32_DISPATCH_TEST, which compiles that path on the host.
+// ADDMOD handler against (x + y) mod m computed in 512 bits and against intx::addmod.
 
 #include <array>
 #include <cstdint>
@@ -24,8 +17,7 @@ using intx::uint256;
 constexpr uint64_t kPoison = 0xa5a5a5a5a5a5a5a5;
 const uint256 kPoisonSlot{kPoison, kPoison, kPoison, kPoison};
 
-// The stack of an instruction under test: x on top, then y, then m, with a poisoned slot below
-// that the instruction must not touch.
+// The stack of an instruction under test: x on top, then y, then m.
 struct Slots {
     alignas(32) std::array<uint256, 4> s;
 
@@ -55,8 +47,7 @@ uint256 rnd_bits(std::mt19937_64& rng, unsigned bits) {
     return x | (uint256{1} << (bits - 1));
 }
 
-// A value built from 32-bit words drawn from the edges of the word range, so that carries and
-// borrows travel through every word boundary.
+// A value built from 32-bit words drawn from the edges of the word range.
 uint256 patterned(std::mt19937_64& rng) {
     static constexpr uint32_t pool[] = {0, 1, 2, 0x7fffffff, 0x80000000, 0x80000001, 0xfffffffe,
         0xffffffff};
@@ -85,7 +76,6 @@ std::vector<uint256> moduli(std::mt19937_64& rng) {
 std::vector<uint256> operands(const uint256& m, std::mt19937_64& rng) {
     std::vector<uint256> out{0, 1, 2, ~uint256{0}, ~uint256{0} - 1, m, m + 1, m - 1, m - 2, m + 7,
         m - 8, m >> 1, (m >> 1) + 1};
-    // Equal top 32-bit word, random words below: the compare falls through to a lower word.
     {
         uint256 v = rnd256(rng);
         v[3] = m[3];
@@ -116,11 +106,11 @@ std::vector<uint256> partners(const uint256& x, const uint256& m, std::mt19937_6
     std::vector<uint256> out;
     if (m != 0) {
         const uint256 r = x % m;
-        out.push_back(m - r);              // x + y == m (mod 2^256 when x < m)
-        out.push_back(m - 1 - r);          // x + y == m - 1
-        out.push_back(m - 2 - r);          // x + y == m - 2
-        out.push_back(m - 1 + (m - r));    // x + y == 2m - 1 (carry for a large m)
-        out.push_back(m - 1);              // largest reduced y
+        out.push_back(m - r);
+        out.push_back(m - 1 - r);
+        out.push_back(m - 2 - r);
+        out.push_back(m - 1 + (m - r));
+        out.push_back(m - 1);
         out.push_back(m - 1 - (rng() % 4));
     }
     return out;
@@ -138,7 +128,6 @@ void check_handler(const uint256& x, const uint256& y, const uint256& m, Counts&
     INFO("x=" << intx::hex(x) << " y=" << intx::hex(y) << " m=" << intx::hex(m));
     REQUIRE(f.s[1] == want);
     if (m != 0) REQUIRE(f.s[1] == intx::addmod(x, y, m));
-    // The two popped operands stay as they were; nothing below the result is touched.
     REQUIRE(f.s[3] == x);
     REQUIRE(f.s[2] == y);
     REQUIRE(f.s[0] == kPoisonSlot);
@@ -158,8 +147,7 @@ void check_handler(const uint256& x, const uint256& y, const uint256& m, Counts&
 #endif
 
 #ifdef ADDMOD_WORDS_PATH
-// addmod_reduced on its own: true exactly for x < m and y < m (so never for m == 0), then m
-// holds the sum mod m; false leaves m, x and y untouched.
+// addmod_reduced alone: true exactly for x < m and y < m, then m holds the sum mod m.
 void check_reduced(const uint256& x, const uint256& y, const uint256& m) {
     alignas(32) uint256 ms = m, xs = x, ys = y;
     const bool took = evmone::instr::core::addmod_reduced(reinterpret_cast<evmone::word32*>(&ms),
@@ -186,7 +174,6 @@ TEST_CASE("ADDMOD handler matches (x + y) mod m on edge moduli and operands") {
             }
         }
     }
-    // The test must reach the cases it is written for.
     REQUIRE(c.reduced > 100000);
     REQUIRE(c.carry > 1000);
     REQUIRE(c.sum_eq_m > 100);
@@ -223,9 +210,9 @@ TEST_CASE("ADDMOD by zero gives zero and an unreduced operand takes the fallback
     check_handler(0, 0, 0, c);
     check_handler(x, y, 1, c);
     check_handler(x, y, 2, c);
-    check_handler(y, y, y, c);  // x == y == m
+    check_handler(y, y, y, c);
     check_handler(y, y, y - 1, c);
-    check_handler(x, 0, x, c);  // x == m, y == 0
+    check_handler(x, 0, x, c);
     check_handler(0, x, x, c);
     check_handler(x, y, uint256{1} << 255, c);
 }
@@ -244,7 +231,7 @@ TEST_CASE("addmod_reduced takes exactly x < m and y < m, and leaves m alone othe
         const uint256 x = (rng() % 2) ? patterned(rng) : rnd256(rng);
         const uint256 y = (rng() % 2) ? patterned(rng) : rnd256(rng);
         check_reduced(x, y, m);
-        if (m != 0) check_reduced(x % m, y % m, m);  // the domain it is written for
+        if (m != 0) check_reduced(x % m, y % m, m);
     }
 }
 #endif

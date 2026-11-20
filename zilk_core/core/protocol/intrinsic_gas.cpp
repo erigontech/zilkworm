@@ -67,25 +67,21 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn, size_t non_zero_bytes) n
     static constexpr int64_t kInitcodeWordCost = 2;
     static constexpr int64_t kAccessListAddressFloorTokens = 80;      // 20 bytes x 4.
     static constexpr int64_t kAccessListStorageKeyFloorTokens = 128;  // 32 bytes x 4.
-    // EIP-8038: the access-list entries prepay the cold access minus the warm access still
-    // charged when the transaction touches the prepaid address/slot. COLD_STORAGE_ACCESS is
-    // only a rename of COLD_SLOAD_COST, so the storage-key entry is not repriced.
+    // EIP-8038: access-list entries prepay the cold access minus the warm access still charged on touch; storage keys are not repriced.
     static constexpr int64_t kAccessListAddressCost =
         evmone::instr::COLD_ACCOUNT_ACCESS_AMSTERDAM - evmone::instr::WARM_ACCESS;
     static constexpr int64_t kAccessListStorageKeyCost =
         evmone::instr::COLD_STORAGE_ACCESS - evmone::instr::WARM_ACCESS;
     static constexpr int64_t kPrecompileEcrecover = 3000;
     static constexpr int64_t kAuthTupleBytes = 101;  // chain_id 8 + addr 20 + nonce 8 + v/r/s 65.
-    // EIP-8037: EXECUTION_PER_AUTH_BASE_COST = AUTH_TUPLE_BYTES x DATA_TOKEN_FLOOR
-    //   + PRECOMPILE_ECRECOVER + COLD_ACCOUNT_ACCESS + 2 x WARM_ACCESS (7816).
+    // EIP-8037: EXECUTION_PER_AUTH_BASE_COST (7816).
     static constexpr int64_t kExecutionPerAuthBaseCost =
         kAuthTupleBytes * kDataTokenFloor + kPrecompileEcrecover +
         evmone::instr::COLD_ACCOUNT_ACCESS_AMSTERDAM +
         2 * evmone::instr::WARM_ACCESS;
 
     const bool is_create = !txn.to;
-    // A tx with an unrecoverable sender is rejected on signature grounds; the
-    // self-transfer discount not applying here cannot make a valid tx invalid.
+    // An unrecoverable sender is rejected on signature grounds, so the self-transfer discount is moot.
     const auto sender = txn.sender();
     const bool is_self_transfer = txn.to && sender && *txn.to == *sender;
     const bool has_value = txn.value != 0;
@@ -95,8 +91,7 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn, size_t non_zero_bytes) n
     const int64_t num_tokens = 4 * non_zero + zero;
     const int64_t data_cost = num_tokens * kDataTokenStandard;
 
-    // Recipient cost depends on the transaction kind. A self-transfer touches nothing. The
-    // created account's NEW_ACCOUNT state gas is state-dependent and charged at the top frame.
+    // A self-transfer touches nothing; the created account's NEW_ACCOUNT state gas is charged at the top frame.
     int64_t recipient_regular = 0;
     int64_t init_code_gas = 0;
     if (is_create) {
@@ -108,8 +103,7 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn, size_t non_zero_bytes) n
         if (has_value) recipient_regular += kTxValueCost;
     }
 
-    // The counts and their products are unsigned: Airbender's v3 machine has no signed multiply,
-    // which a signed widening product of these small values compiles to on rv32.
+    // Unsigned products: Airbender's v3 machine has no signed multiply.
     const auto num_addresses = static_cast<uint64_t>(txn.access_list.size());
     uint64_t num_storage_keys = 0;
     for (const AccessListEntry& e : txn.access_list) {
@@ -121,20 +115,17 @@ TxGasCost amsterdam_tx_gas_cost(const Transaction& txn, size_t non_zero_bytes) n
         num_addresses * kAccessListAddressFloorTokens + num_storage_keys * kAccessListStorageKeyFloorTokens);
     const int64_t access_list_cost = access_list_regular + access_list_tokens * kDataTokenFloor;
 
-    // Only the state-independent per-authorization base cost is charged here; the ACCOUNT_WRITE
-    // regular gas and the NEW_ACCOUNT/AUTH_BASE state gas are charged at the top frame.
+    // Only the state-independent per-authorization base cost is charged here; the rest is charged at the top frame.
     const auto num_auth = static_cast<uint64_t>(txn.authorizations.size());
     const auto auth_regular = static_cast<int64_t>(num_auth * kExecutionPerAuthBaseCost);  // unsigned: see above
 
-    // Decomposed regular-gas intrinsic base (EIP-2780), which also anchors the calldata floor so
-    // the floor never undercuts the transaction's own intrinsic base (EELS #3120).
+    // EIP-2780 regular-gas base; the calldata floor must not undercut it.
     const int64_t base_regular = kTxBaseCost + recipient_regular;
 
     const int64_t regular =
         base_regular + init_code_gas + data_cost + access_list_cost + auth_regular;
 
-    // Floor cost (EIP-7623 / EIP-7976): every calldata byte plus access-list tokens at the floor
-    // rate, anchored on base_regular. floor_tokens = len(data) x DATA_TOKEN_STANDARD + AL tokens.
+    // EIP-7623/7976 floor: calldata bytes plus access-list tokens at the floor rate, anchored on base_regular.
     const int64_t floor_tokens =
         static_cast<int64_t>(txn.data.size()) * kDataTokenStandard + access_list_tokens;
     const int64_t floor = floor_tokens * kDataTokenFloor + base_regular;

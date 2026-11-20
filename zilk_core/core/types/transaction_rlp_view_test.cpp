@@ -1,11 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// A decoded transaction keeps views of its own bytes: the transaction-trie value and the unsigned items
-// before the signature. The transactions root and the signing hashes are taken from them instead of
-// from a re-encoding, which is only exact if the decoder accepts nothing but canonical encodings. These
-// tests check the views against the encoders for every transaction type and header size, that every
-// non-canonical encoding is still rejected, and that a transaction built in code still uses the encoders.
+// A decoded transaction keeps views of its own bytes.
 
 #include <cstdint>
 #include <memory>
@@ -130,20 +125,19 @@ namespace {
         CHECK(payload(decoded) == signing(txn));
         CHECK(payload(decoded) == signing(decoded));
 
-        // Built in code: no views, the encoders are used.
         CHECK(views_empty(txn));
         CHECK(payload(txn) == signing(txn));
     }
 
     std::vector<Transaction> every_type(Fixture& f, ByteView data, bool creation) {
         std::vector<Transaction> txns;
-        txns.push_back(f.make(TransactionType::kLegacy, data, creation));  // v 27
+        txns.push_back(f.make(TransactionType::kLegacy, data, creation));
         txns.push_back(f.make(TransactionType::kLegacy, data, creation));
         REQUIRE(txns.back().set_v(28));
         txns.push_back(f.make(TransactionType::kLegacy, data, creation));
-        REQUIRE(txns.back().set_v(37));  // chain id 1
+        REQUIRE(txns.back().set_v(37));
         txns.push_back(f.make(TransactionType::kLegacy, data, creation));
-        REQUIRE(txns.back().set_v((intx::uint256{1} << 70) * 2 + 36));  // a chain id of 2^70, odd parity
+        REQUIRE(txns.back().set_v((intx::uint256{1} << 70) * 2 + 36));
         txns.push_back(f.make(TransactionType::kAccessList, data, creation));
         txns.push_back(f.make(TransactionType::kDynamicFee, data, creation));
         if (!creation) {
@@ -213,8 +207,6 @@ namespace {
 
 TEST_CASE("decoded transaction views: every type and header size") {
     Fixture f;
-    // Calldata of 0 and 1 bytes (0x05, 0x85), the short/long form boundary at 55 and 56, one to four
-    // length bytes in the list header (255, 256, 65535, 65536 and beyond 2^24).
     for (const size_t n : {size_t{0}, size_t{1}, size_t{55}, size_t{56}, size_t{255}, size_t{256}, size_t{65'535},
                            size_t{65'536}}) {
         DYNAMIC_SECTION("calldata " << n) {
@@ -238,8 +230,6 @@ TEST_CASE("decoded transaction views: every type and header size") {
 }
 
 TEST_CASE("decoded transaction views: the payload header at its size boundaries") {
-    // Calldata sizes that put the unsigned list payload within a few bytes of 56, 2^8, 2^16 and 2^24,
-    // where the list header takes one to five bytes.
     for (const size_t boundary : {size_t{56}, size_t{256}, size_t{65'536}, size_t{16'777'216}}) {
         const size_t step{boundary > 100'000 ? size_t{20} : size_t{5}};
         for (size_t d{boundary - 120}; d < boundary - 10; d += step) {
@@ -264,7 +254,6 @@ TEST_CASE("decoded transaction views: set_v, reset and copies") {
     CHECK(copy.rlp_encoded().data() == decoded.rlp_encoded().data());
     CHECK(copy.rlp_unsigned().size() == decoded.rlp_unsigned().size());
 
-    // Changing the fields invalidates the views: the payload must follow the fields.
     REQUIRE(decoded.set_v(37));
     CHECK(views_empty(decoded));
     CHECK(payload(decoded) == signing(decoded));
@@ -297,7 +286,7 @@ TEST_CASE("decoded transaction views: a failed decode leaves them empty") {
     REQUIRE(!views_empty(txn));
 
     Bytes bad{good};
-    bad.push_back(0x80);  // trailing byte after the string
+    bad.push_back(0x80);
     CHECK(!decode_block_tx(bad, txn));
     CHECK(views_empty(txn));
 
@@ -309,7 +298,7 @@ TEST_CASE("decoded transaction views: a failed decode leaves them empty") {
 
 TEST_CASE("decoded transaction views: the canonical lists the negative cases are built from decode") {
     Transaction txn;
-    const Bytes typed{typed_tx(dynamic_fee_items())};  // the views point into it
+    const Bytes typed{typed_tx(dynamic_fee_items())};
     CHECK(decode_block_tx(typed, txn));
     CHECK(Bytes{txn.rlp_encoded()} == encoded(txn, false));
 
@@ -339,24 +328,24 @@ TEST_CASE("decoded transaction views: non-canonical encodings are rejected") {
     };
 
     SECTION("integers with a leading zero") {
-        CHECK(rejected(typed_with(1, Bytes{0x82, 0x00, 0x07})));  // nonce
-        CHECK(rejected(typed_with(4, Bytes{0x83, 0x00, 0x52, 0x08})));  // gas limit
-        CHECK(rejected(typed_with(6, Bytes{0x82, 0x00, 0x05})));  // value
-        CHECK(rejected(typed_with(9, Bytes{0x00})));  // y parity
-        CHECK(rejected(typed_with(10, Bytes{0x82, 0x00, 0x0b})));  // r
+        CHECK(rejected(typed_with(1, Bytes{0x82, 0x00, 0x07})));
+        CHECK(rejected(typed_with(4, Bytes{0x83, 0x00, 0x52, 0x08})));
+        CHECK(rejected(typed_with(6, Bytes{0x82, 0x00, 0x05})));
+        CHECK(rejected(typed_with(9, Bytes{0x00})));
+        CHECK(rejected(typed_with(10, Bytes{0x82, 0x00, 0x0b})));
         CHECK(legacy_rejected(legacy_with(0, Bytes{0x82, 0x00, 0x07})));
         CHECK(legacy_rejected(legacy_with(7, Bytes{0x82, 0x00, 0x0b})));
     }
     SECTION("a single byte below 0x80 as a string") {
         CHECK(rejected(typed_with(1, Bytes{0x81, 0x05})));
-        CHECK(rejected(typed_with(7, Bytes{0x81, 0x05})));  // calldata
+        CHECK(rejected(typed_with(7, Bytes{0x81, 0x05})));
         CHECK(legacy_rejected(legacy_with(5, Bytes{0x81, 0x05})));
         CHECK(legacy_rejected(legacy_with(4, Bytes{0x81, 0x05})));
     }
     SECTION("a long form below 56") {
         CHECK(rejected(typed_with(7, Bytes{0xb8, 0x03, 0x01, 0x02, 0x03})));
         CHECK(legacy_rejected(legacy_with(5, Bytes{0xb8, 0x03, 0x01, 0x02, 0x03})));
-        CHECK(rejected(typed_with(8, Bytes{0xf8, 0x00})));  // access list
+        CHECK(rejected(typed_with(8, Bytes{0xf8, 0x00})));
     }
     SECTION("a long form with a leading zero or a length that does not fit") {
         CHECK(rejected(typed_with(7, Bytes{0xb9, 0x00, 0x03, 0x01, 0x02, 0x03})));
@@ -370,21 +359,19 @@ TEST_CASE("decoded transaction views: non-canonical encodings are rejected") {
         CHECK(rejected(typed_with(5, Bytes{0x81, 0x01})));
         CHECK(rejected(typed_with(9, Bytes{0x02})));
         CHECK(rejected(typed_with(9, Bytes{0x81, 0x01})));
-        // An access list entry whose storage key is 31 bytes, and one with a key of the wrong item kind.
         const Bytes entry{list_of({address_item(), list_of({str(Bytes(31, 0))})})};
         CHECK(rejected(typed_with(8, list_of({entry}))));
         const Bytes entry2{list_of({address_item(), list_of({item(1)})})};
         CHECK(rejected(typed_with(8, list_of({entry2}))));
-        // An entry with a trailing item.
         const Bytes entry3{list_of({address_item(), list_of({}), item(1)})};
         CHECK(rejected(typed_with(8, list_of({entry3}))));
-        CHECK(legacy_rejected(legacy_with(6, item(26))));  // v
+        CHECK(legacy_rejected(legacy_with(6, item(26))));
         CHECK(legacy_rejected(legacy_with(6, item(0))));
     }
     SECTION("an inner list length that does not match its items") {
         const Bytes list{list_of(dynamic_fee_items())};
         const Bytes tx_body{static_cast<uint8_t>(TransactionType::kDynamicFee)};
-        const ByteView items{ByteView{list}.substr(1)};  // the list is short enough for a one-byte header
+        const ByteView items{ByteView{list}.substr(1)};
         REQUIRE(list[0] >= 0xc0);
         REQUIRE(list[0] < 0xf8);
 
@@ -419,7 +406,7 @@ TEST_CASE("decoded transaction views: non-canonical encodings are rejected") {
     }
     SECTION("a typed transaction cut off before its last field") {
         Items items{dynamic_fee_items()};
-        items.resize(5);  // up to the gas limit
+        items.resize(5);
         CHECK(rejected(typed_tx(items)));
     }
 }
@@ -432,7 +419,7 @@ TEST_CASE("decoded transaction views: blob and set code transactions without a r
         check_views(txn);
 
         Transaction decoded;
-        const Bytes wire{encoded(txn, true)};  // the views point into it
+        const Bytes wire{encoded(txn, true)};
         REQUIRE(decode_block_tx(wire, decoded));
         CHECK(!decoded.to);
         const intx::uint256 base_fee{1};
@@ -505,7 +492,6 @@ TEST_CASE("compute_transaction_root: decoded, built and mixed bodies agree") {
         CHECK(protocol::compute_transaction_root(built) == kEmptyRoot);
     }
 
-    // Sizes around the points where the trie's key order changes (0x7f, 0x80).
     for (const size_t n : {size_t{1}, size_t{2}, size_t{3}, size_t{16}, size_t{126}, size_t{127}, size_t{128}, size_t{129},
                            size_t{300}}) {
         DYNAMIC_SECTION(n << " transactions") {
@@ -521,13 +507,11 @@ TEST_CASE("compute_transaction_root: decoded, built and mixed bodies agree") {
             const evmc::bytes32 expected{protocol::compute_transaction_root(built)};
             CHECK(protocol::compute_transaction_root(decoded) == expected);
 
-            // Mixed: one built transaction among decoded ones takes the encoding path.
             BlockBody mixed{decoded};
             mixed.transactions[n / 2] = built.transactions[n / 2];
             CHECK(views_empty(mixed.transactions[n / 2]));
             CHECK(protocol::compute_transaction_root(mixed) == expected);
 
-            // The signing payloads of a decoded body are those of the built one.
             for (size_t i{0}; i < n; ++i) {
                 CHECK(payload(decoded.transactions[i]) == signing(built.transactions[i]));
             }
@@ -569,7 +553,7 @@ TEST_CASE("decoded transaction views: random mutations accept only canonical enc
                 case 4:
                     wire.resize(pos);
                     break;
-                default:  // interesting header bytes
+                default:
                     wire[pos] = static_cast<uint8_t>(std::array<uint8_t, 8>{0x00, 0x80, 0x81, 0xb8, 0xf8, 0xbc, 0xfc, 0xc0}[rng() % 8]);
                     break;
             }
@@ -582,7 +566,6 @@ TEST_CASE("decoded transaction views: random mutations accept only canonical enc
             continue;
         }
         ++accepted;
-        // Accepted: it is the canonical encoding of what it decoded to, so the views are the encoders' bytes.
         REQUIRE(encoded(txn, true) == wire);
         REQUIRE(Bytes{txn.rlp_encoded()} == encoded(txn, false));
         REQUIRE(payload(txn) == signing(txn));

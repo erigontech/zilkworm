@@ -37,8 +37,7 @@ elseif((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR ("${CMAKE_CXX_COMPILER_ID}" MAT
     add_compile_options(-Wno-error=mismatched-new-delete)
 
     if(AIRBENDER)
-      # The guest's word accesses to typed objects go through named may_alias types, as in evmone
-      # (see third_party/CMakeLists.txt): level 1 rejects any other cast to a word pointer.
+      # Word accesses to typed objects go through named may_alias types; level 1 rejects any other cast to a word pointer.
       add_compile_options(-Wstrict-aliasing=1)
     endif()
 

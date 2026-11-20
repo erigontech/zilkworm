@@ -8,7 +8,6 @@
 
 namespace silkworm::protocol {
 
-//! \see EthashRuleSet
 struct EthashConfig {
     bool validate_seal{true};
 

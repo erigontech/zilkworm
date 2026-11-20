@@ -1,20 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// ECRECOVER's public key recovery against the plain Straus-Shamir ecc::msm(). The native build
-// sets -DEVMONE_RV32_DISPATCH_TEST, which compiles the guest's ecrecover_msm_single() on the host:
-// GLV halves, width-12 NAFs over the precomputed odd multiples of G and phi(G), width-5 NAFs over
-// the odd multiples of R and phi(R) put on a common z (so that the accumulator runs on the curve
-// y^2 = x^3 + 7 Zg^6 and the G digits are added with the scale applied), in-place point operations.
-// The branches that matter are the exceptional ones, which random signatures never reach: a digit
-// that meets the same point (a doubling inside a mixed addition), one that meets its negation (the
-// sum cancels and the next digit restarts it, in the scaled coordinates for a G digit) and a sum
-// that ends at the point at infinity. Those are reached by choosing the scalars (u1, u2) and the
-// point R = (r, y) so that digits of G, phi(G), R and phi(R) land on the same multiples of G, and
-// deriving the signature (h, r, s) from them: u1 = -h/r, u2 = s/r. The reference does not depend on
-// the build, so the test holds without the macro too. The macro also builds the guest's
-// ecrecover_batch(), which recovers the senders of a block with its inversions shared: the last case
-// checks it against ecrecover().
+// ECRECOVER's public key recovery against the plain Straus-Shamir ecc::msm().
 
 #include <array>
 #include <cstdint>
@@ -56,8 +42,7 @@ struct Sig {
     bool parity;
 };
 
-/// The recovery of ecrecover(), with the point multiplication by the plain ecc::msm(): nullopt when
-/// the signature is rejected or the recovered point is the point at infinity.
+/// The recovery of ecrecover(), with the point multiplication by the plain ecc::msm().
 std::optional<AffinePoint> reference(const Sig& sig, RecoveryMode mode) {
     const auto r = Fr::from_bytes(sig.r);
     const auto s = mode == RecoveryMode::strict ? Fr::from_bytes<Fr::Range::half>(sig.s) :
@@ -90,9 +75,7 @@ Sig sig_for(const uint256& u1, const uint256& u2, const AffinePoint& R) {
     return sig;
 }
 
-/// Checks one signature against the reference, in both recovery modes and through ecrecover()'s
-/// address. Returns whether the malleable recovery has no result: the point at infinity or an
-/// invalid input.
+/// Checks one signature against the reference, in both recovery modes and through ecrecover()'s address.
 bool check(const Sig& sig, const std::string& what) {
     INFO(what);
     bool none = false;
@@ -116,9 +99,7 @@ bool check(const Sig& sig, const std::string& what) {
 
 AffinePoint multiple_of_g(const uint256& k) { return ecc::to_affine(ecc::mul<Curve>(G, k)); }
 
-/// The points R of the exceptional-case families: small and 2^k +- 1 multiples of G (their digits
-/// meet G's), phi(G) and its multiples, and random ones. Both y parities of each are used by the
-/// callers, which gives -R.
+/// The points R of the exceptional-case families: small and 2^k +- 1 multiples of G (their digits meet G's).
 std::vector<AffinePoint> points(std::mt19937_64& rng) {
     std::vector<AffinePoint> out{G};
     for (const uint64_t j : {2u, 3u, 4u, 5u, 7u, 9u, 15u, 16u, 17u, 31u, 33u, 1023u, 1025u, 2047u, 2049u})
@@ -150,8 +131,7 @@ struct CraftedRow {
     const char* label;
 };
 
-// The 52 inputs that reach, by each kind of digit (G, phi(G), R, phi(R)), a doubling, a
-// cancellation followed by a restart (by a digit of each kind) and a sum ending at infinity.
+// The 52 inputs that reach, by each kind of digit (G, phi(G), R, phi(R)), a doubling.
 const CraftedRow CRAFTED[] = {
     {"8641998106234453aa5f9d6a3178f4f7b812e00b817a776265dfdd31b93e29a9",
      "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -322,12 +302,10 @@ TEST_CASE("secp256k1 recovery: the crafted exceptional-case inputs") {
     size_t infinity = 0;
     for (const auto& row : CRAFTED) {
         infinity += check(from_row(row), row.label) ? size_t{1} : size_t{0};
-        // The same input with R negated: the same exceptional digits with the signs swapped.
         auto flipped = from_row(row);
         flipped.parity = !flipped.parity;
         check(flipped, std::string{row.label} + " (-R)");
     }
-    // The "final-inf" rows end at the point at infinity, which ecrecover() rejects.
     REQUIRE(infinity >= 5);
 }
 
@@ -341,7 +319,6 @@ TEST_CASE("secp256k1 recovery: random signatures") {
 }
 
 TEST_CASE("secp256k1 recovery: random scalars over random points") {
-    // Valid signatures: R with a real x, so that the whole multiplication runs.
     std::mt19937_64 rng{7};
     size_t done = 0;
     while (done < 1500) {
@@ -357,14 +334,7 @@ TEST_CASE("secp256k1 recovery: random scalars over random points") {
 }
 
 TEST_CASE("secp256k1 recovery: small scalars over small multiples of G") {
-    // Q = (k1 + j k2) G: the digits of u1 over G and of u2 over R = jG are the same few points, so
-    // doublings, cancellations and restarts occur throughout. Its 73,964 recoveries are checked in
-    // the malleable mode against k1 G + k2 R from tables of the small multiples: with check(), its
-    // full reference multiplications, second mode and address, the case took 18 minutes of a Debug
-    // build and 23 of the sanitizer build, where ctest stops a test at 25. Neither the mode nor the
-    // address reaches the multiplication, and the other cases check both.
     std::mt19937_64 rng{11};
-    // k P for k from -20 to 20, at index k + 20 (index 20 the point at infinity).
     const auto multiples = [](const AffinePoint& p) {
         std::array<ecc::ProjPoint<Curve>, 41> m{};
         for (size_t k = 1; k <= 20; ++k) {
@@ -378,8 +348,6 @@ TEST_CASE("secp256k1 recovery: small scalars over small multiples of G") {
     for (const auto& pt : points(rng)) {
         for (const bool odd : {false, true}) {
             const auto R = with_parity(pt, odd);
-            // Affine, the point at infinity as (0, 0): the mixed addition below takes every pair,
-            // where the projective one asserts that its points are not each other's negation.
             const auto rp = multiples(R);
             std::array<AffinePoint, 41> r;
             for (size_t i = 0; i < r.size(); ++i)
@@ -393,7 +361,6 @@ TEST_CASE("secp256k1 recovery: small scalars over small multiples of G") {
                     const auto got =
                         secp256k1::secp256k1_ecdsa_recover(sig.h, sig.r, sig.s, sig.parity, RecoveryMode::malleable);
                     const auto q = ecc::add(g[static_cast<size_t>(k1 + 20)], r[static_cast<size_t>(k2 + 20)]);
-                    // k2 = 0 makes s = 0, which is rejected, as the point at infinity is.
                     if (k2 == 0 || q == 0) {
                         REQUIRE(!got.has_value());
                         ++infinity;
@@ -411,8 +378,6 @@ TEST_CASE("secp256k1 recovery: small scalars over small multiples of G") {
 }
 
 TEST_CASE("secp256k1 recovery: lattice scalars over points that share their digits") {
-    // u = a + b lambda with short a and b: its GLV halves are (a, b), so the G digits of a and the
-    // phi(G) digits of b, and the R and phi(R) digits of u2, are chosen digit by digit.
     std::mt19937_64 rng{13};
     std::vector<uint256> shorts;
     for (const uint64_t v : {0u, 1u, 2u, 3u, 5u, 15u, 16u, 17u, 31u, 33u, 1023u, 1025u, 2047u, 2049u, 4097u}) {
@@ -447,8 +412,6 @@ TEST_CASE("secp256k1 recovery: lattice scalars over points that share their digi
 }
 
 TEST_CASE("secp256k1 recovery: the sum ends at the point at infinity") {
-    // R = jG and u1 = -j u2: Q = u1 G + u2 R = O after all the digits, whatever u2, which ecrecover
-    // rejects. The last addition cancels the accumulator, whichever kind of digit it is.
     std::mt19937_64 rng{17};
     size_t rejected = 0;
     size_t total = 0;
@@ -456,7 +419,6 @@ TEST_CASE("secp256k1 recovery: the sum ends at the point at infinity") {
         const auto R0 = multiple_of_g(j);
         for (const bool odd : {false, true}) {
             const auto R = with_parity(R0, odd);
-            // y(R) is +-y(jG): u1 = -/+ j u2.
             const bool same = R.y == R0.y;
             for (int i = 0; i < 40; ++i) {
                 const auto u2 = i < 8 ? uint256{static_cast<uint64_t>(i + 1)} : random_uint256(rng) >> (rng() % 200);
@@ -468,7 +430,6 @@ TEST_CASE("secp256k1 recovery: the sum ends at the point at infinity") {
         }
     }
     REQUIRE(rejected > total / 2);
-    // And one more or less than the cancelling u1: a point right next to the cancellation.
     for (const uint64_t j : {1u, 3u, 2047u}) {
         const auto R = multiple_of_g(j);
         for (int i = 0; i < 20; ++i) {
@@ -483,14 +444,6 @@ TEST_CASE("secp256k1 recovery: the sum ends at the point at infinity") {
 }
 
 TEST_CASE("secp256k1 recovery: exceptional cases on negated G and phi(G) digits") {
-    // G digits whose sign differs from the sign of their half are added as the negated table point
-    // (x, -y) without -y being computed (madd_inplace's NegY, and the restart that stores -y after
-    // scaling): u1 = -V (and -V lambda for the phi(G) half) has a negative half, so every digit of V
-    // is negated. With u2 = 2^m the R digit 1 sits at bit m, as V's top digit d does, so with
-    // R = -d G (or -d phi(G)) the accumulator meets the negated table point itself (a doubling inside
-    // the NegY addition), and with R = +d G it meets its negation (cancellation: the next, negated
-    // digit f restarts the sum at bit 0). Both parities of R give both. Random d and f, the table's
-    // extremes among them, and m from 0 (both digits at the same bit) to 100.
     std::mt19937_64 rng{19};
     std::vector<uint64_t> ds{3, 5, 1023, 1025, 2045, 2047};
     for (int i = 0; i < 6; ++i)
@@ -517,12 +470,9 @@ TEST_CASE("secp256k1 recovery: exceptional cases on negated G and phi(G) digits"
             }
         }
     }
-    // With m = 0 and R = +d G the sum is the point at infinity, which ecrecover() rejects.
     REQUIRE(n == 2 * 5 * ds.size() * 2);
     REQUIRE(infinity >= 2 * ds.size() / 2);
 
-    // A negated G digit and a negated phi(G) digit around the same cancellation: u1 = -d 2^m - e
-    // lambda has the halves (-d 2^m, -e), so the phi(G) digit e sits at bit 0.
     for (const unsigned m : {30u, 60u, 90u}) {
         for (int i = 0; i < 6; ++i) {
             const uint64_t d = (rng() % 2045 + 3) | 1;
@@ -557,12 +507,6 @@ TEST_CASE("secp256k1 recovery: rejected inputs") {
 }
 
 TEST_CASE("secp256k1 recovery: a batch recovers what each signature recovers alone") {
-    // ecrecover_batch() shares inversions across its signatures: on Airbender (compiled here with
-    // EVMONE_RV32_DISPATCH_TEST) r^-1 mod n, 1/(2y), the rounds of the odd-multiple tables and the
-    // final Z^-1; on SP1 r^-1. A signature that is rejected (r or s out of range, r not the x of a
-    // point, a sum at infinity) must neither take part nor disturb the others, and the batch must
-    // recover the others exactly as ecrecover() does. The exceptional-case families of the cases
-    // above, mixed with invalid inputs, in batches of every composition.
     std::mt19937_64 rng{19};
     std::vector<Sig> sigs;
     for (const auto& row : CRAFTED) {
@@ -580,7 +524,6 @@ TEST_CASE("secp256k1 recovery: a batch recovers what each signature recovers alo
         const auto R = with_parity(pt, (rng() & 1) != 0);
         for (int i = 0; i < 4; ++i)
             sigs.push_back(sig_for(random_uint256(rng) % Curve::ORDER, random_uint256(rng) % Curve::ORDER, R));
-        // Sums at infinity: u1 = -j u2 over R = j G (R = G here for the j = 1 point).
         const auto u2 = random_uint256(rng) >> 4;
         sigs.push_back(sig_for(neg_mod_n(u2), u2, with_parity(G, false)));
     }
@@ -630,7 +573,7 @@ TEST_CASE("secp256k1 recovery: a batch recovers what each signature recovers alo
         for (int t = 0; t < 150; ++t) {
             std::vector<size_t> idx(rng() % 24);
             for (auto& i : idx)
-                i = rng() % sigs.size();  // repeats included
+                i = rng() % sigs.size();
             run(idx, "random " + std::to_string(t));
         }
         std::vector<size_t> rejected;

@@ -34,7 +34,6 @@ inline ValidationResult MergeRuleSet::validate_block_header(const BlockHeader& h
 }
 
 ValidationResult MergeRuleSet::validate_difficulty_and_seal(const BlockHeader& header, const BlockHeader&) {
-    // SILKWORM_ASSERT(header.difficulty == 0);
     return header.nonce == BlockHeader::NonceType{} ? ValidationResult::kOk : ValidationResult::kInvalidNonce;
 }
 
@@ -46,8 +45,7 @@ void MergeRuleSet::initialize(const Block& block, ActiveState& direct) {
         }
         return;
     }
-    // Post-merge system calls are handled by ExecutionProcessor
-    // using evmone's system_call_block_start().
+    // System calls are handled by ExecutionProcessor.
 }
 
 ValidationResult MergeRuleSet::finalize(ActiveState& direct, const Block& block) {
@@ -58,7 +56,7 @@ ValidationResult MergeRuleSet::finalize(ActiveState& direct, const Block& block)
     }
 
     if (block.withdrawals) {
-        // See EIP-4895: Beacon chain push withdrawals as operations
+        // EIP-4895
         for (const Withdrawal& w : *block.withdrawals) {
             const auto amount_in_wei{intx::uint256{w.amount} * intx::uint256{kGiga}};
             direct.add_to_balance(w.address, amount_in_wei);

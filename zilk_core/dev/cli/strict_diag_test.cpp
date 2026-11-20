@@ -1,14 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The STRICT diagnostic of the EEST JSON runner (run_json_block's fail_strict) is built by string
-// concatenation, not std::format, so the guest links no Ryu/unicode/locale code (about 190 KB of
-// .rodata that is copied to RAM at the start of every block). Differential test against the
-// std::format version it replaced: the bytes written for a rejected-but-unexpected block must be
-// identical, for every rejection gate and for crafted and random expectation strings. Also checks
-// that evmone's "advanced" option is still available in this native build (only the Airbender
-// guest compiles it out, EVMONE_ADVANCED=0) and that the baseline interpreter runs (the "cgoto"
-// option is covered by cmp_jumpi_fusion_test).
+// The STRICT diagnostic of the EEST JSON runner (run_json_block's fail_strict) is built by string concatenation.
 
 #include <cstdint>
 #include <cstring>
@@ -74,8 +66,7 @@ std::string orphan_block_rlp_hex() {
     return silkworm::to_hex(rlp);
 }
 
-/// Runs one EEST-style blockchain test with a single block through StateTransition::run (the
-/// guest's entry point for EJSN input) and returns what it printed.
+/// Runs one EEST-style blockchain test with a single block through StateTransition::run.
 std::string run_block(const std::string& block_rlp_hex, const std::string& expect_exception,
                       bool* failed = nullptr) {
     nlohmann::json block{{"rlp", block_rlp_hex}};
@@ -103,8 +94,7 @@ std::string run_block(const std::string& block_rlp_hex, const std::string& expec
     return cap.buf.str();
 }
 
-/// The line sys_println writes natively for the std::format diagnostic that fail_strict used to
-/// print. sys_println takes a c_str(), so the text stops at the first NUL.
+/// The line sys_println writes natively for the std::format diagnostic.
 std::string old_diag_line(std::string_view mode, const std::string& expectation) {
     const std::string s = std::format("STRICT: rejected via {} but expected {}", mode, expectation);
     return "stdout: " + std::string(s.c_str()) + "\n";
@@ -154,7 +144,7 @@ TEST_CASE("STRICT diagnostic: rlp-decode gate matches the std::format output byt
           "[strict_diag][state_transition]") {
     for (const auto& e : crafted_expectations()) {
         bool failed = false;
-        const auto out = run_block("c0", e, &failed);  // valid hex, not a block
+        const auto out = run_block("c0", e, &failed);
         CAPTURE(e);
         REQUIRE(failed);
         REQUIRE(contains_line(out, old_diag_line("rlp-decode", e)));
@@ -164,7 +154,6 @@ TEST_CASE("STRICT diagnostic: rlp-decode gate matches the std::format output byt
 TEST_CASE("STRICT diagnostic: validation gate prints the ValidationResult name",
           "[strict_diag][state_transition]") {
     const auto block = orphan_block_rlp_hex();
-    // Learn the rejection from the run that does not expect it, then check the STRICT text.
     bool failed = false;
     const auto plain = run_block(block, "", &failed);
     REQUIRE(failed);
@@ -188,8 +177,6 @@ TEST_CASE("STRICT diagnostic: random expectation strings match the std::format o
           "[strict_diag][state_transition]") {
     std::mt19937_64 rng{0x57121C7};
     for (int i = 0; i < 300; ++i) {
-        // Valid UTF-8 only (the JSON layer rejects the rest): printable ASCII, control characters
-        // other than NUL (except once in a while), '{', '}' and '%'.
         std::string e;
         const auto len = 1 + rng() % 120;
         for (uint64_t k = 0; k < len; ++k) {
@@ -215,7 +202,6 @@ TEST_CASE("STRICT diagnostic: random expectation strings match the std::format o
 
 TEST_CASE("STRICT diagnostic: matching expectations still pass without a diagnostic",
           "[strict_diag][state_transition]") {
-    // Mapped to the pre-insert reject marker, so a bad-hex block is a pass: no STRICT line.
     bool failed = true;
     const auto out = run_block("zz", "BlockException.INCORRECT_BLOCK_FORMAT", &failed);
     REQUIRE_FALSE(failed);
@@ -224,14 +210,12 @@ TEST_CASE("STRICT diagnostic: matching expectations still pass without a diagnos
 
 TEST_CASE("evmone: the advanced option exists natively, the baseline interpreter runs",
           "[strict_diag][evmone]") {
-    // Separate instance: the option switches the interpreter of the one it is set on.
     evmc::VM advanced_vm{evmc_create_evmone()};
     REQUIRE(advanced_vm.set_option("advanced", "") == EVMC_SET_OPTION_SUCCESS);
 
     evmc::VM vm{evmc_create_evmone()};
     REQUIRE(vm.set_option("not-an-option", "") == EVMC_SET_OPTION_INVALID_NAME);
 
-    // PUSH1 7 PUSH1 0 MSTORE8 PUSH1 1 PUSH1 0 RETURN -> one byte 0x07.
     const uint8_t code[] = {0x60, 0x07, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00, 0xf3};
     evmc::MockedHost host;
     evmc_message msg{};
@@ -241,6 +225,5 @@ TEST_CASE("evmone: the advanced option exists natively, the baseline interpreter
     REQUIRE(r.status_code == EVMC_SUCCESS);
     REQUIRE(r.output_size == 1);
     REQUIRE(r.output_data[0] == 0x07);
-    // 4 x PUSH1 (3) + MSTORE8 (3 + 3 memory expansion) + RETURN (0)
     REQUIRE(r.gas_left == 100000 - (3 * 4 + 3 + 3));
 }

@@ -22,7 +22,6 @@
 #include <zilk_core/core/common/empty_hashes.hpp>
 #include <zilk_core/core/common_zz/keccak_memo.hpp>
 
-// intx does not include operator<< overloading for uint<N>
 namespace intx {
 
 template <unsigned N>
@@ -35,11 +34,7 @@ inline std::ostream& operator<<(std::ostream& out, const uint<N>& value) {
 
 namespace silkworm {
 
-//! \brief Strips leftmost zeroed bytes from byte sequence
-//! \param [in] data : The view to process.
-//! \pre data.data() must be 8-byte aligned and data.size() must be a multiple of 8
-//! (an empty view is allowed).
-//! \return A new view of the sequence
+// Pre: data 8-byte aligned, size a multiple of 8 (empty allowed).
 [[gnu::always_inline]] inline ByteView zeroless_view(ByteView data) noexcept {
     const uint8_t* p = data.data();
     const size_t n = data.size();
@@ -50,18 +45,14 @@ namespace silkworm {
         uint64_t w;
         std::memcpy(&w, std::assume_aligned<8>(p + skip), sizeof(w));
         if (w != 0) {
-            // little-endian: buffer byte i is the i-th low byte of w.
-            // Each term is true while the first non-zero byte lies *beyond*
-            // the bytes it covers, so the true terms form a prefix whose
-            // length == index of the first non-zero byte (0..7).
-            // mask covers bytes +1 advances past byte
-            skip += static_cast<size_t>((w & 0xFFu)              == 0) +  // [0]        -> 1
-                    ((w & 0xFFFFu)              == 0) +                   // [0..1]     -> 2
-                    ((w & 0xFFFFFFu)            == 0) +                   // [0..2]     -> 3
-                    ((w & 0xFFFFFFFFu)          == 0) +                   // [0..3]     -> 4
-                    ((w & 0xFFFFFFFFFFu)        == 0) +                   // [0..4]     -> 5
-                    ((w & 0xFFFFFFFFFFFFu)      == 0) +                   // [0..5]     -> 6
-                    ((w & 0xFFFFFFFFFFFFFFu)    == 0);                    // [0..6]     -> 7
+            // Each term holds while the first non-zero byte lies beyond its mask; the terms sum to that byte's index.
+            skip += static_cast<size_t>((w & 0xFFu)              == 0) +
+                    ((w & 0xFFFFu)              == 0) +
+                    ((w & 0xFFFFFFu)            == 0) +
+                    ((w & 0xFFFFFFFFu)          == 0) +
+                    ((w & 0xFFFFFFFFFFu)        == 0) +
+                    ((w & 0xFFFFFFFFFFFFu)      == 0) +
+                    ((w & 0xFFFFFFFFFFFFFFu)    == 0);
             // (no 8th term: w != 0 guarantees the answer is <= 7)
             return ByteView{p + skip, n - skip};
         }
@@ -98,10 +89,8 @@ inline bool is_valid_address(std::string_view s) {
     return is_valid_hex(s);
 }
 
-//! \brief Returns a string representing the hex form of provided string of bytes
 std::string to_hex(ByteView bytes, bool with_prefix = false);
 
-//! \brief Returns a string representing the hex form of provided integral
 template <typename T>
     requires(std::is_integral_v<T> && std::is_unsigned_v<T>)
 std::string to_hex(T value, bool with_prefix = false) {
@@ -119,24 +108,18 @@ std::string to_hex(T value, bool with_prefix = false) {
     return hexed;
 }
 
-//! \brief Abridges a string to given length and eventually adds an ellipsis if input length is gt required length
 std::string abridge(std::string_view input, size_t length);
 
 std::optional<uint8_t> decode_hex_digit(char ch) noexcept;
 
 std::optional<Bytes> from_hex(std::string_view hex) noexcept;
 
-// Parses a string input value representing a size in
-// human-readable format with qualifiers. eg "256MB"
 std::optional<uint64_t> parse_size(const std::string& sizestr);
 
-// Converts a number of bytes in a human-readable format
 std::string human_size(uint64_t bytes, const char* unit = "B");
 
-// Compares two strings for equality with case insensitivity
 bool iequals(std::string_view a, std::string_view b);
 
-// The length of the longest common prefix of a and b.
 size_t prefix_length(ByteView a, ByteView b);
 
 // keccak256("") — union blocks constexpr bit_cast of kEmptyHash
@@ -161,7 +144,6 @@ inline ethash::hash256 keccak256(ByteView view) {
     return ethash::keccak256(view.data(), size);
 }
 
-//! \brief Create an intx::uint256 from a string supporting both fixed decimal and scientific notation
 template <UnsignedIntegral Int>
 constexpr Int from_string_sci(const char* str) {
     auto s = str;
@@ -181,7 +163,6 @@ constexpr Int from_string_sci(const char* str) {
             break;
         }
         if (num_digits++ > std::numeric_limits<Int>::digits10) {
-            // intx::throw_<std::out_of_range>(s);
         }
         if (count_decimals) {
             ++num_decimal_digits;
@@ -190,7 +171,6 @@ constexpr Int from_string_sci(const char* str) {
         const auto d = intx::from_dec_digit(c);
         m = m * Int{10} + d;
         if (m < d) {
-            // intx::throw_<std::out_of_range>(s);
         }
     }
     if (!c) {
@@ -203,11 +183,9 @@ constexpr Int from_string_sci(const char* str) {
         const auto d = intx::from_dec_digit(c);
         e = e * 10 + d;
         if (e < d) {
-            // intx::throw_<std::out_of_range>(s);
         }
     }
     if (e < num_decimal_digits) {
-        // intx::throw_<std::out_of_range>(s);
     }
 
     auto x = m;

@@ -3,14 +3,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Stages a release's Airbender assets from the prover image built for the release commit:
-#   z6m_guest_airbender.bin, .text   the rv32 guest the image proves with
-#   z6m_guest_airbender.vk           its verification key (EVKEY001 v2), which `verify` and the
-#                                    Ethproofs verifier check proofs against
-# The key is computed by the image's own prover, on the CPU (no GPU needed; about a minute on
-# 16 cores), from the guest and the image's recursion verifier programs.
-#
-#   tools/scripts/airbender_release_assets.sh IMAGE OUT_DIR
+# Stages a release's Airbender assets (guest .bin/.text and its EVKEY001 verification key, computed on CPU by the image's prover) from the image built for the release commit.
 set -euo pipefail
 
 if [ $# -ne 2 ]; then

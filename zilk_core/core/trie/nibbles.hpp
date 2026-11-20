@@ -8,14 +8,9 @@
 
 namespace silkworm::trie {
 
-//! \brief Transforms a string of Nibbles into a string of Bytes
-//! \def A Nibble's value is [0..16)
-//! \see Erigon's CompressNibbles
+// Nibble values are in [0..16).
 Bytes pack_nibbles(ByteView unpacked);
 
-//! \brief Transforms a string of bytes into a string of Nibbles
-//! \def A Nibble's value is [0..16)
-//! \see Erigon's DecompressNibbles
 Bytes unpack_nibbles(ByteView data);
 
 }  // namespace silkworm::trie

@@ -2,7 +2,6 @@
 # Copyright 2025 The Original Silkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# https://stackoverflow.com/a/62311397/1009546
 
 function(get_all_targets var)
   set(targets)

@@ -8,7 +8,6 @@
 
 namespace silkworm {
 
-// Error codes for RLP and other decoding
 enum class [[nodiscard]] DecodingError {
     kOverflow,
     kLeadingZero,
@@ -20,11 +19,11 @@ enum class [[nodiscard]] DecodingError {
     kUnexpectedList,
     kUnexpectedListElements,
     kInvalidVInSignature,         // v != 27 && v != 28 && v < 35, see EIP-155
-    kUnsupportedTransactionType,  // EIP-2718
+    kUnsupportedTransactionType,
     kInvalidFieldset,
     kUnexpectedEip2718Serialization,
-    kInvalidHashesLength,  // trie::Node decoding
-    kInvalidMasksSubsets,  // trie::Node decoding
+    kInvalidHashesLength,
+    kInvalidMasksSubsets,
 };
 
 using DecodingResult = std::expected<void, DecodingError>;

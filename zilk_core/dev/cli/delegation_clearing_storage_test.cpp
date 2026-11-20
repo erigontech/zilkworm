@@ -1,13 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// EIP-7702 resets an authority's code and code hash; its storage must survive. The wipe in
-// DirectState::apply_code_diff belongs to contract creation alone.
-//
-// A clear used to take the wipe whenever the delegation came from an earlier block, and the
-// root still came out right unless the run had written, or later read, that storage. So these
-// cases assert through mirror_check_root, whose `missing` count also covers the storage-trie
-// walk the guest now performs on a clear.
+// EIP-7702 resets an authority's code and code hash; its storage must survive.
 
 #include <cstdint>
 #include <memory>
@@ -90,7 +83,6 @@ TEST_CASE("clearing a pre-state EIP-7702 delegation preserves storage",
     CHECK(f.state->read_storage(kAuthority, kSlot) == kValue);
     CHECK(f.state->read_code(kAuthority).empty());
 
-    // slot_count > 0 now, so check_root walks the storage trie; `missing` proves it resolves.
     const MirrorRoot m = f.mirror();
     CHECK_FALSE(m.clashed);
     CHECK(m.missing == 0);
@@ -100,7 +92,6 @@ TEST_CASE("clearing a pre-state EIP-7702 delegation preserves storage",
 TEST_CASE("clearing a delegation preserves slots written earlier in the same block",
           "[state_zz][eip7702]") {
     Fixture f{designation(kDelegate)};
-    // The write lands in overflow_slots_ — the tier the wipe erases.
     f.apply_diff(designation(kDelegate), {{kFreshSlot, kFreshValue}});
     REQUIRE(f.state->read_storage(kAuthority, kFreshSlot) == kFreshValue);
 
@@ -140,8 +131,6 @@ TEST_CASE("deploying contract code wipes storage", "[state_zz][eip7702]") {
     f.apply_diff(code);
     CHECK(f.state->read_storage(kAuthority, kSlot) == bytes32{});
 
-    // The read of the wiped slot claims nothing of the pre-state's storage trie, and the post-state's
-    // storage is empty.
     const MirrorRoot m = f.mirror();
     CHECK_FALSE(m.rejected);
     CHECK(m.missing == 0);

@@ -1,8 +1,4 @@
-//! The guest binary and its runs on Airbender's RISC-V simulator.
-//!
-//! The simulator decodes the guest as the prover does: the base layer proves the user program on
-//! the full-unsigned machine (RV32IM without mulh, mulhsu, div and rem), so a binary that executes
-//! one of those fails here too instead of panicking the prover.
+//! The guest and its simulator, decoding as the prover does (RV32IM without mulh, mulhsu, div, rem).
 
 use eyre::{bail, eyre, Result};
 use field::baby_bear::base::BabyBearField;
@@ -22,8 +18,7 @@ use std::time::{Duration, Instant};
 /// RAM bound of the simulator in bytes: the guest's 1 GiB memory map.
 const RAM_BOUND: usize = 1 << 30;
 
-/// One delegation call per run head: a jump into the middle of a delegation run is illegal, as in
-/// airbender-host's simulator.
+/// One delegation call per run head: a jump into the middle of a delegation run is illegal.
 const PROTECT_AGAINST_MID_DELEGATION_JUMPS: bool = true;
 
 /// The guest's `.bin` (ROM image) and `.text` (instructions) files.
@@ -35,7 +30,6 @@ pub struct GuestFiles {
 }
 
 impl GuestFiles {
-    /// The files next to `base`, a path without extension (a trailing `.bin` is dropped).
     pub fn at(base: &Path) -> Result<Self> {
         let base = if base.extension().is_some_and(|e| e == "bin") {
             base.with_extension("")
@@ -71,17 +65,14 @@ fn utf8(path: &Path) -> Result<String> {
         .ok_or_else(|| eyre!("path {} is not valid UTF-8", path.display()))
 }
 
-/// The guest, decoded once for any number of simulator runs.
 pub struct Guest {
     pub files: GuestFiles,
     bin_words: Vec<u32>,
     instructions: Vec<Instruction>,
-    /// PC of the self-loop that ends the guest's exit sequence (finish_success). Every other way
-    /// the guest stops (finish_error, fatal(), abort, the trap handler) is a self-loop elsewhere.
+    /// PC of finish_success's self-loop; finish_error, fatal(), abort and traps loop elsewhere.
     pub exit_pc: u32,
 }
 
-/// The machine state at the end of a simulator run.
 #[derive(Clone, Debug)]
 pub struct RunOutcome {
     pub cycles: u64,
@@ -127,11 +118,7 @@ impl Guest {
         })
     }
 
-    /// Runs the guest on `oracle` (the input words it reads from CSR 0x7C0) for at most
-    /// `max_cycles` cycles, with a flamegraph written to `flamegraph` if given (slower).
-    ///
-    /// The simulator panics on an instruction the prover's machine cannot execute (a signed
-    /// multiply or divide, among others) and on a read past the input: such a run is an error.
+    /// Runs on `oracle` (CSR 0x7C0 words) for <= `max_cycles`; bad instructions or overreads fail.
     pub fn run(
         &self,
         oracle: Vec<u32>,

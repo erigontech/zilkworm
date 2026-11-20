@@ -1,9 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// ecrecover reads the first 128 bytes of its input, zero-padded, and costs 3000 gas whatever the
-// input's size. A call from EVM memory pays for that memory once, so any copy of the whole input
-// lets each call allocate as much as the memory, on a guest heap that never frees.
+// ecrecover reads the first 128 bytes of its input, zero-padded, and costs 3000 gas whatever the input's size.
 
 #include <cstdlib>
 #include <new>
@@ -16,14 +14,12 @@
 
 namespace {
 
-size_t allocated = 0;  // Bytes allocated through operator new while counting is on.
+size_t allocated = 0;
 bool counting = false;
 
 }  // namespace
 
-// The default operators, counting. Every form that the library or a sanitizer runtime could
-// otherwise supply is replaced, so that no block is released by an operator of another family
-// (libstdc++'s temporary buffers take nothrow new, which ASan supplies itself).
+// The default operators, counting.
 namespace {
 void* counted_malloc(size_t size) noexcept {
     if (counting) allocated += size;
@@ -67,14 +63,12 @@ TEST_CASE("ecrecover reads its input as 128 bytes, zero-padded", "[precompile]")
     REQUIRE(exact);
     CHECK(to_hex(*exact) == kAddress);
 
-    // Bytes after the first 128 are ignored.
     Bytes long_input{kSignature};
     long_input.append(1000, 0xff);
     const auto long_result = ecrec_run(long_input);
     REQUIRE(long_result);
     CHECK(to_hex(*long_result) == kAddress);
 
-    // An input without bytes or without a signature recovers nothing.
     const auto empty = ecrec_run({});
     REQUIRE(empty);
     CHECK(empty->empty());
@@ -82,8 +76,6 @@ TEST_CASE("ecrecover reads its input as 128 bytes, zero-padded", "[precompile]")
     REQUIRE(no_signature);
     CHECK(no_signature->empty());
 
-    // A short input is the same as the input padded with zeros: without its last byte, s ends in
-    // a zero byte and recovers another address.
     for (const size_t size : {1u, 31u, 32u, 63u, 64u, 65u, 96u, 97u, 127u}) {
         INFO("size " << size);
         const ByteView short_input{kSignature.data(), size};
@@ -100,7 +92,6 @@ TEST_CASE("ecrecover reads its input as 128 bytes, zero-padded", "[precompile]")
 }
 
 TEST_CASE("ecrecover does not allocate per byte of its input", "[precompile]") {
-    // A valid and an invalid signature (v = 29), each followed by 1 MiB.
     for (const uint8_t v : {uint8_t{28}, uint8_t{29}}) {
         INFO("v " << int{v});
         Bytes input{kSignature};
@@ -112,7 +103,7 @@ TEST_CASE("ecrecover does not allocate per byte of its input", "[precompile]") {
         counting = false;
         REQUIRE(result);
         CHECK(result->size() == (v == 28 ? 32u : 0u));
-        CHECK(allocated < 128);  // At most the 32-byte output.
+        CHECK(allocated < 128);
     }
 }
 

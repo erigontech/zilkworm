@@ -222,7 +222,6 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // // Set up tracing with info level by default
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     fmt().with_env_filter(filter).init();
     dotenv::dotenv().ok();
@@ -331,7 +330,6 @@ async fn main() -> Result<()> {
 
     match args.command {
         Some(Command::Setup { pk_path: _, vk_path: _ }) => {
-            // app.setup_keys(SetupOptions { pk_path, vk_path }).await?;
         }
         Some(Command::Fetch {
             rpc_url,
@@ -388,11 +386,6 @@ async fn main() -> Result<()> {
             proof_path: _,
             vk_path: _,
         }) => {
-            //     app.verify_proof(VerifyOptions {
-            //         proof_path,
-            //         vk_path,
-            //     })
-            //     .await?;
         }
         None => {
             bail!("no command provided; pass --service or a subcommand");

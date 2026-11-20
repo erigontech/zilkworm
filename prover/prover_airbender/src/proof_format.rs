@@ -17,8 +17,7 @@ const PROOF_SECURITY: u8 = 100;
 /// Largest proof the verifier decompresses (a unified proof is about 1 MB).
 pub const MAX_DECOMPRESSED_PROOF_BYTES: u64 = 64 << 20;
 
-/// Version 2 carries the word stream the final unified full-statement verifier consumes
-/// (`build_unified_stream` of the final recursion layer), not a native proof structure.
+/// Version 2 carries the unified verifier's word stream (`build_unified_stream`), not a native proof structure.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct EncodedProof {
     magic: [u8; 8],
@@ -27,7 +26,6 @@ struct EncodedProof {
     proof_words: Vec<u32>,
 }
 
-/// The proof file of a final unified recursion proof: gzip(bincode2 EncodedProof).
 pub fn proof_file_bytes(artifact: &ProofArtifact) -> Result<Vec<u8>> {
     ensure!(
         artifact.target == ProofTarget::RecursionUnified,
@@ -46,7 +44,6 @@ pub fn proof_file_bytes(artifact: &ProofArtifact) -> Result<Vec<u8>> {
     gzip(&encode_envelope(words)?)
 }
 
-/// The unified verifier's word stream in a proof file.
 pub fn proof_words_from_file(file: &[u8]) -> Result<Vec<u32>> {
     decode_proof_words(&gunzip(file, MAX_DECOMPRESSED_PROOF_BYTES)?)
 }
@@ -62,8 +59,7 @@ fn encode_envelope(proof_words: Vec<u32>) -> Result<Vec<u8>> {
         .map_err(|e| eyre!("failed to encode the proof envelope: {e}"))
 }
 
-/// Decodes an uncompressed envelope: the fixed prefix is checked before the body, and the bytes
-/// must be consumed exactly.
+/// The fixed prefix is checked before the body, which must be consumed exactly.
 fn decode_proof_words(bytes: &[u8]) -> Result<Vec<u32>> {
     ensure!(
         bytes.len() >= 10 && bytes[..8] == PROOF_MAGIC,
@@ -112,8 +108,7 @@ pub fn gunzip(bytes: &[u8], limit: u64) -> Result<Vec<u8>> {
 pub(crate) mod tests {
     use super::*;
 
-    // ethereum-prover's golden vector: magic, version 2, security 100, then three words: 1, 300
-    // and u32::MAX cover the one-, three- and five-byte varint forms.
+    // ethereum-prover's golden vector; words 1, 300 and u32::MAX cover the one-, three- and five-byte varint forms.
     const THREE_WORD_ENVELOPE_HEX: &str = "4550524f4f46303102640301fb2c01fcffffffff";
 
     #[test]

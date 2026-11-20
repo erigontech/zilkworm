@@ -31,8 +31,7 @@ static void right_pad(Bytes& str, const size_t min_size) noexcept {
 uint64_t ecrec_gas(ByteView, evmc_revision) noexcept { return 3'000; }
 
 std::optional<Bytes> ecrec_run(ByteView input) noexcept {
-    // Only the first 128 bytes are read, zero-padded. A copy of the whole input would allocate its
-    // size on every call, which costs 3000 gas whatever the size, on a guest heap that never frees.
+    // Reads only the first 128 bytes, zero-padded: copying the whole input would allocate on a heap that never frees.
     std::array<uint8_t, 128> d{};
     if (!input.empty()) std::copy_n(input.data(), std::min(input.size(), d.size()), d.begin());
 
@@ -74,7 +73,6 @@ uint64_t rip160_gas(ByteView input, evmc_revision) noexcept {
 
 std::optional<Bytes> rip160_run(ByteView input) noexcept {
     Bytes out(32, 0);
-    // SILKWORM_ASSERT(input.size() <= std::numeric_limits<uint32_t>::max());
     evmone::crypto::ripemd160(reinterpret_cast<std::byte*>(&out[12]),
                               reinterpret_cast<const std::byte*>(input.data()),
                               input.size());
@@ -206,7 +204,6 @@ uint64_t point_evaluation_gas(ByteView, evmc_revision) noexcept {
     return 50000;
 }
 
-// https://eips.ethereum.org/EIPS/eip-4844#point-evaluation-precompile
 std::optional<Bytes> point_evaluation_run(ByteView input) noexcept {
     if (input.size() != 192) {
         return std::nullopt;

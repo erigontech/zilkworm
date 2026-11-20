@@ -12,8 +12,7 @@
 
 namespace silkworm {
 
-// Converts bytes to evmc::bytes32; input is cropped if necessary.
-// Short inputs are left-padded with 0s.
+// Crops long input, left-pads short input with zeros.
 evmc::bytes32 to_bytes32(ByteView bytes);
 
 std::string to_hex(const evmc::bytes32& value, bool with_prefix = false);

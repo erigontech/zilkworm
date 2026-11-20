@@ -1,8 +1,7 @@
 SHELL = /bin/bash
 .SHELLFLAGS = -o pipefail -c
 
-# EEST blockchain tests from the pinned fixture tarball (test-fixtures.json), fetched by
-# `tools/test-fixtures.sh test-fixtures.json test-fixtures-cache eest_stable` from the repo root.
+# EEST blockchain tests from the pinned fixture tarball, fetched by tools/test-fixtures.sh from the repo root.
 EEST_DIR  ?= ../../test-fixtures-cache/eest_stable/fixtures/blockchain_tests
 PROVER    := target/release/z6m_prover_airbender
 GUEST_BIN := ../guest_airbender/build/z6m_guest.bin

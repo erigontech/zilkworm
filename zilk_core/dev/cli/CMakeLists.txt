@@ -4,10 +4,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-# witness_trie / witness_input now live in zilk_core/core/types_zz/
-# (silkworm_types_zz, brought in transitively via silkworm_core), alongside
-# flat_bundle. silkworm_types_zz picks them up via its directory glob
-# (GLOB_RECURSE), the same way it does the other types_zz sources.
 add_executable(state_transition "runner.cpp")
 target_link_libraries(state_transition PRIVATE silkworm_dev)
 
@@ -21,37 +17,21 @@ endif()
 add_executable(json_witness_to_flat_bundle "json_witness_to_flat_bundle.cpp")
 target_link_libraries(json_witness_to_flat_bundle PRIVATE ${ZILK_CLI_TRIE_LIBS})
 
-# One-shot converter: legacy unifiedBlockAndStateRlp → flatWitnessBundle.
 add_executable(legacy_to_flat_bundle "legacy_to_flat_bundle.cpp")
 target_link_libraries(legacy_to_flat_bundle PRIVATE ${ZILK_CLI_TRIE_LIBS})
 
-# EEST JSON → MFBD-wrapped FlatBundle converter. Two modes:
-#   emit         --json <PATH> --index <N>          single subtest → stdout
-#   bulk-convert --input-dir <D> --output-dir <D>   parallel mirror tree
-# Uses silkworm::trie::HashBuilder (twice, with cross-verify) to build per-
-# account storage roots + the global state root, captures the produced
-# MPT nodes into the node-store, and assembles via build_flat_bundle.
+# EEST JSON -> MFBD-wrapped FlatBundle converter.
 add_executable(eest_to_flat_bundle "eest_to_flat_bundle.cpp")
 target_link_libraries(eest_to_flat_bundle PRIVATE ${ZILK_CLI_TRIE_LIBS})
 
 # mphf_map_test.cpp is a TU of the zilkworm.tests target (top-level CMakeLists.txt).
 
-# Soundness regression: a witness whose flat keys omit an existing account or slot
-# makes the EVM read it as empty, and check_root must reject it (flag-off: the
-# walk of the claim that the key is absent; with -DUSE_HASH_KEY=ON the read
-# recovers it instead). Standalone executable, exit code = failure count.
+# Soundness regression: check_root must reject a witness whose flat keys omit an existing account or slot. Exit code = failure count.
 add_executable(witness_hide_node_test "witness_hide_node_test.cpp")
 target_link_libraries(witness_hide_node_test PRIVATE ${ZILK_CLI_TRIE_LIBS})
 if(BUILD_TESTING)
     add_test(NAME witness_hide_node_test COMMAND witness_hide_node_test)
 endif()
-
-# file(GLOB STATE_TRANSITION_TESTS CONFIGURE_DEPENDS "state_transition_sample*.json")
-# add_custom_command(
-#   TARGET state_transition
-#   POST_BUILD
-#   COMMAND ${CMAKE_COMMAND} ARGS -E copy_if_different ${STATE_TRANSITION_TESTS} "${CMAKE_CURRENT_BINARY_DIR}"
-# )
 
 set(EEST_MFBD_DIR "" CACHE PATH "Directory of pre-converted MFBD EEST fixtures")
 set(EEST_JSON_DIR "" CACHE PATH "Directory of raw EEST JSON fixtures")
@@ -61,8 +41,7 @@ if(EEST_MFBD_DIR OR EEST_JSON_DIR)
     endif()
 endif()
 
-# The EEST fixtures the runner is known to get wrong, see the list for why. Each is registered WILL_FAIL,
-# so one that passes again fails ctest until it is taken off the list.
+# Known runner failures, each WILL_FAIL so one that passes again fails ctest until it is delisted.
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../eest-known-failures.txt" EEST_KNOWN_FAILURES REGEX "^[^#]")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../eest-known-failures.txt")
 
@@ -76,8 +55,7 @@ function(_register_eest_tests label ext fixtures_dir)
         # The list names fixtures by their JSON path under blockchain_tests/.
         string(REGEX REPLACE "^blockchain_tests/" "" fixture "${rel}")
         string(REGEX REPLACE "\\.${ext}$" ".json" fixture "${fixture}")
-        # The list describes the DirectState runner, which runs a test's blocks on one witness in
-        # place; the HashState arm rebuilds the state from each block's own witness.
+        # The list describes the DirectState runner; the HashState arm rebuilds state from each block's own witness.
         if(fixture IN_LIST EEST_KNOWN_FAILURES AND NOT Z6M_HASH_STATE)
             set_tests_properties("${test_name}" PROPERTIES WILL_FAIL TRUE)
         endif()

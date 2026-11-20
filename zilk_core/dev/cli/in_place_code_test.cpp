@@ -1,17 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// evmone runs legacy code where it lies, without the padded copy, when the code is inside the
-// region the host registered (set_in_place_code_region()) and the 33 bytes after it read zero.
-// The first case pins down when it does: a nonzero byte anywhere in those 33 bytes, at every
-// alignment of the code's end, makes it copy, and bytes just before or past them do not matter.
-// The second runs codes both ways, status, gas left, refund, output, logs and storage compared:
-// codes cut off inside each PUSH, without a final STOP, with a JUMPDEST in the last byte and
-// jumps to it and past it, cut off inside the PUSH4 of a selector test, every one-byte code, a
-// 24576-byte code and random ones. In place, the 33 zero bytes are followed by opcodes that
-// would change the outcome if the interpreter read them. Built with -DEVMONE_RV32_DISPATCH_TEST
-// (the native test build), the in-place path, the lazy byte-map scan and the rv32 dispatch with
-// its fusions run on the host; without it, there is no in-place path to test.
+// evmone runs legacy code where it lies, without the padded copy.
 
 #include <algorithm>
 #include <cstdint>
@@ -55,8 +44,6 @@ struct Placed {
     Placed(const bytes& code, size_t misalign, const bytes& after) : size{code.size()} {
         at = 8 + misalign;
         buf.assign(at + code.size() + kPadding + after.size() + 8, 0);
-        // std::copy, not memcpy: an empty code (size 0 is a case) or `after` has a null data(),
-        // which memcpy must not get.
         std::copy(code.begin(), code.end(), buf.data() + at);
         std::copy(after.begin(), after.end(), buf.data() + at + code.size() + kPadding);
     }
@@ -119,8 +106,7 @@ void check_same(const bytes& code, const bytes& after, size_t misalign = 0) {
     }
 }
 
-// Opcodes past the padding that would show if read: a JUMPDEST for a jump past the end, PUSHes
-// and LOGs and INVALID for an opcode walk.
+// Opcodes past the padding that would show if read: a JUMPDEST for a jump past the end.
 const bytes kAfter{0x5b, 0xa0, 0x5b, 0x60, 0xfe, 0x5b, 0x7f, 0x01, 0x5b, 0xff, 0x5b, 0xfe};
 
 enum : uint8_t {
@@ -162,7 +148,6 @@ bytes random_code(std::mt19937_64& rng, size_t size) {
         case 4:
         case 5:
         {
-            // A jump to any position up to past the end.
             const auto dst = u(size + 40);
             if (dst < 256)
                 code.insert(code.end(), {PUSH1, static_cast<uint8_t>(dst)});
@@ -186,7 +171,6 @@ bytes random_code(std::mt19937_64& rng, size_t size) {
             break;
         case 10:
         {
-            // A selector test: DUP1 PUSH4 EQ PUSH2 JUMPI, a fused group in the rv32 dispatch.
             const auto dst = u(size + 8);
             code.insert(code.end(), {PUSH1, 0, CALLDATALOAD, PUSH1, 0xe0, SHR, DUP1, PUSH4, 0xa9,
                 0x05, 0x9c, static_cast<uint8_t>(u(2) == 0 ? 0xbb : 0xbc), EQ, PUSH2,
@@ -204,7 +188,7 @@ bytes random_code(std::mt19937_64& rng, size_t size) {
             break;
         }
     }
-    code.resize(size);  // Often inside a PUSH.
+    code.resize(size);
     return code;
 }
 
@@ -217,7 +201,6 @@ TEST_CASE("in-place code: analyzed in place exactly when the 33 bytes after it r
     {
         for (const size_t size : std::initializer_list<size_t>{0, 1, 2, 3, 4, 5, 7, 8, 9, 31, 32, 33, 64, 65})
         {
-            // JUMPDESTs: the code's own bytes are nonzero up to its end.
             Placed p{bytes(size, JUMPDEST), misalign, bytes(8, 0xff)};
             uint8_t* const code = p.buf.data() + p.at;
             uint8_t* const end = code + size;
@@ -225,7 +208,6 @@ TEST_CASE("in-place code: analyzed in place exactly when the 33 bytes after it r
 
             p.register_region();
             CHECK(analyzed_in_place(code, size));
-            // A nonzero byte from 3 before the end to 35 past it: only the 33 after it count.
             for (ptrdiff_t q = -3; q < 36; ++q)
             {
                 uint8_t* const b = end + q;
@@ -236,7 +218,6 @@ TEST_CASE("in-place code: analyzed in place exactly when the 33 bytes after it r
                 *b = saved;
             }
 
-            // The region must hold the whole code: its end may be the code's end.
             set_in_place_code_region(code + 1, end);
             CHECK_FALSE(analyzed_in_place(code, size));
             if (size > 0)
@@ -250,7 +231,6 @@ TEST_CASE("in-place code: analyzed in place exactly when the 33 bytes after it r
             CHECK_FALSE(analyzed_in_place(code, size));
         }
     }
-    // An empty view of no code is never in place, whatever the region.
     set_in_place_code_region(reinterpret_cast<const uint8_t*>(uintptr_t{8}),
         reinterpret_cast<const uint8_t*>(UINTPTR_MAX - 64));
     CHECK_FALSE(analyzed_in_place(nullptr, 0));
@@ -269,14 +249,12 @@ TEST_CASE("in-place code: JUMPDESTs as in the copy", "[evmone][in_place_code]") 
         set_in_place_code_region(nullptr, nullptr);
         const auto copied = evmone::baseline::analyze({p.code(), p.size});
         REQUIRE(copied.code().data() != p.code());
-        // Descending: the first query scans the whole code, up to its end.
         for (size_t pos = code.size() + 40; pos-- > 0;)
             CHECK(in_place.check_jumpdest(pos) == copied.check_jumpdest(pos));
     }
 }
 
 TEST_CASE("in-place code: execution as in the copy", "[evmone][in_place_code]") {
-    // Cut off inside a PUSH of every size, after an observation of the state.
     for (size_t n = 1; n <= 32; ++n)
     {
         for (size_t k = 0; k < n; ++k)
@@ -288,12 +266,9 @@ TEST_CASE("in-place code: execution as in the copy", "[evmone][in_place_code]") 
             check_same(code, kAfter, (n + k) % 4);
         }
     }
-    // No final STOP, or a code of one opcode: every byte value.
     check_same({PUSH1, 1, PUSH1, 2, ADD}, kAfter);
     for (unsigned op = 0; op < 256; ++op)
         check_same({static_cast<uint8_t>(op)}, kAfter, op % 4);
-    // A JUMPDEST in the last byte, jumped to by JUMP and JUMPI, and jumps to the end and past it,
-    // where the bytes in place are padding and then a JUMPDEST.
     for (size_t pad = 0; pad < 8; ++pad)
     {
         for (const uint8_t jump : {JUMP, JUMPI})
@@ -303,7 +278,7 @@ TEST_CASE("in-place code: execution as in the copy", "[evmone][in_place_code]") 
                 bytes code = {PUSH1, 1, PUSH1, 0};
                 code.reserve(code.size() + pad + 3);
                 code.insert(code.end(), pad, JUMPDEST);
-                const size_t last = code.size() + 2;  // past the jump and the STOP
+                const size_t last = code.size() + 2;
                 code[3] = static_cast<uint8_t>(last + past);
                 code.push_back(jump);
                 code.push_back(STOP);
@@ -311,12 +286,11 @@ TEST_CASE("in-place code: execution as in the copy", "[evmone][in_place_code]") 
                 check_same(code, kAfter, pad % 4);
                 bytes tail = code;
                 tail.pop_back();
-                tail.push_back(PUSH1);  // the jump target is a PUSH cut off by the end
+                tail.push_back(PUSH1);
                 check_same(tail, kAfter, pad % 4);
             }
         }
     }
-    // A selector test cut off at every point: DUP1 PUSH4 ... reaches up to 10 bytes ahead.
     {
         const bytes full{PUSH1, 0, CALLDATALOAD, PUSH1, 0xe0, SHR, DUP1, PUSH4, 0xa9, 0x05, 0x9c,
             0xbb, EQ, PUSH2, 0, 19, JUMPI, STOP, STOP, JUMPDEST, PUSH1, 7, PUSH1, 0, SSTORE};
@@ -324,7 +298,6 @@ TEST_CASE("in-place code: execution as in the copy", "[evmone][in_place_code]") 
             check_same(bytes(full.begin(), full.begin() + static_cast<ptrdiff_t>(cut)), kAfter, cut % 4);
     }
     std::mt19937_64 rng{11};
-    // The largest code a contract can deploy.
     check_same(random_code(rng, 24576), kAfter, 1);
     for (int i = 0; i < 600; ++i)
         check_same(random_code(rng, 1 + rng() % 300), kAfter, static_cast<size_t>(i % 4));

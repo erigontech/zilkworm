@@ -1,14 +1,4 @@
-# Post-link check on the guest ELF: fails the build if it holds a signed multiply or divide.
-#
-# Airbender's v3 machine decodes RV32IM without the signed M instructions (mulh, mulhsu, div,
-# rem): they decode as illegal, and the prover panics when it executes one. GCC has no option to
-# leave them out of -march=rv32im code, and emits them for signed widening products and divisions
-# (int64_t values derived from 32-bit sizes, signed divisions by constants), so the source must
-# keep such arithmetic unsigned, and this check names any function that does not.
-#
-# The allowlisted functions come prebuilt from newlib and libgcc and run only on a failing guest:
-# __sfvwrite_r writes to a stdio stream (assert and terminate messages), execute_stack_op unwinds
-# an exception (the guest has none to catch).
+# Post-link: fail on signed mulh/mulhsu/div/rem, which Airbender decodes as illegal.
 #
 cmake_minimum_required(VERSION 3.20)  # IN_LIST in script mode
 

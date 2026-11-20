@@ -15,23 +15,18 @@
 namespace zilkworm {
 using ::silkworm::ByteView;
 
-// MphfBuilder<KeySize> — host-only construction. add() copies the body bytes
-// into the builder; finalize() consumes the builder and returns the ready-to-embed blob.
 template <size_t KeySize>
 class MphfBuilder {
   public:
     MphfBuilder(uint32_t magic, uint32_t version) noexcept
         : magic_{magic}, version_{version} {}
 
-    // Add a (key, body) pair. Body bytes are copied. Duplicate keys are marked with 0 body
-    // Existing value for a collision key is thrown to collision_bodies_
+    // Copies body; a duplicate key's existing value moves to collision_bodies_.
     void add(uint64_t key, ByteView body);
 
-    // Consume the builder, produce the final blob.
     std::vector<uint8_t> finalize() &&;
 
-    // Test-only overrides. 0 = use production defaults (kMaxSeedRetries /
-    // kMaxDisplacement). Per-instance — no process-wide state.
+    // Test-only overrides; 0 = production default.
     void set_max_retries_for_test(uint32_t v) noexcept { max_retries_override_ = v; }
     uint32_t max_retries_for_test() const noexcept { return max_retries_override_; }
     void set_max_displacement_for_test(uint32_t v) noexcept { max_displacement_override_ = v; }

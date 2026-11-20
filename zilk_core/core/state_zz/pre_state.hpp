@@ -18,7 +18,7 @@ namespace zilkworm {
 using ::silkworm::ByteView;
 using ::silkworm::Bytes;
 
-// Equality-only compare: 20-byte addrs need a 8-aligned for the 20-byte loads.
+// Both pointers must be 8-aligned (the 20-byte compare uses word loads).
 [[gnu::always_inline]] inline bool eq_addr20(const uint8_t* a, const uint8_t* b) noexcept {
     uint64_t a0, a1, b0, b1;
     uint32_t a2, b2;
@@ -37,7 +37,7 @@ using ::silkworm::Bytes;
     return ((a0 ^ b0) | (a1 ^ b1) | (a2 ^ b2) | (a3 ^ b3)) == 0;
 }
 
-inline constexpr uint32_t kMagic = 0x53455250u;  // 'PRES' little-endian
+inline constexpr uint32_t kMagic = 0x53455250u;
 inline constexpr uint32_t kVersion = 4u;
 
 inline constexpr uint32_t align8(uint32_t v) noexcept { return (v + 7u) & ~uint32_t{7u}; }

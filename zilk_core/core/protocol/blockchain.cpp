@@ -20,10 +20,7 @@ ValidationResult Blockchain::insert_block(Block& block, bool check_state_root) {
         return err;
     }
 #if defined(AIRBENDER) || defined(SP1)
-    // From Amsterdam the intrinsic gas reads the senders in pre_validate_block_body()
-    // (amsterdam_tx_gas_cost()), which would recover each one alone before
-    // ExecutionProcessor::execute_block() recovers them as a batch that shares inversions:
-    // recover them as that batch first.
+    // From Amsterdam, intrinsic gas reads senders in pre_validate_block_body(): batch-recover them first.
     if (config_.revision(block.header.number, block.header.timestamp) >= EVMC_AMSTERDAM) {
         Transaction::recover_senders(block.transactions);
     }
@@ -32,64 +29,7 @@ ValidationResult Blockchain::insert_block(Block& block, bool check_state_root) {
     if (err != ValidationResult::kOk) {
         return err;
     }
-    // Single-block witness flow: no fork resolution / canonical-chain
-    // bookkeeping. Just execute the block.
     return execute_block(block, check_state_root);
-
-    /* --------------------------
-
-    evmc::bytes32 hash{block.header.hash()};
-    if (auto it{bad_blocks_.find(hash)}; it != bad_blocks_.end()) {
-        return it->second;
-    }
-
-    uint64_t ancestor{canonical_ancestor(block.header, hash)};
-    uint64_t current_canonical_block{state_.current_canonical_block()};
-    unwind_last_changes(ancestor, current_canonical_block);
-
-    uint64_t block_num = block.header.number;
-
-    std::vector<BlockWithHash> chain{intermediate_chain(block_num - 1, block.header.parent_hash, ancestor)};
-    chain.push_back({block, hash});
-
-    size_t num_of_executed_chain_blocks{0};
-    for (const BlockWithHash& x : chain) {
-        err = execute_block(x.block, check_state_root);
-        if (err != ValidationResult::kOk) {
-            break;
-        }
-        ++num_of_executed_chain_blocks;
-    }
-
-    if (err != ValidationResult::kOk) {
-        bad_blocks_[hash] = err;
-        unwind_last_changes(ancestor, ancestor + num_of_executed_chain_blocks);
-        re_execute_canonical_chain(ancestor, current_canonical_block);
-        return err;
-    }
-
-    state_.insert_block(block, hash);
-
-    intx::uint256 current_total_difficulty{
-        *state_.total_difficulty(current_canonical_block, *state_.canonical_hash(current_canonical_block))};
-
-    // Non-strict comparison because of the Merge
-    if (state_.total_difficulty(block_num, hash) >= current_total_difficulty) {
-        // canonize the new chain
-        for (uint64_t i{current_canonical_block}; i > ancestor; --i) {
-            state_.decanonize_block(i);
-        }
-        for (const BlockWithHash& x : chain) {
-            state_.canonize_block(x.block.header.number, x.hash);
-        }
-    } else {
-        unwind_last_changes(ancestor, ancestor + num_of_executed_chain_blocks);
-        re_execute_canonical_chain(ancestor, current_canonical_block);
-    }
-
-    return ValidationResult::kOk;
-
-     ---------------------------- */
 }
 
 ValidationResult Blockchain::execute_block(const Block& block, bool check_state_root) {
@@ -100,7 +40,6 @@ ValidationResult Blockchain::execute_block(const Block& block, bool check_state_
     }
 
     if (check_state_root) {
-        // DirectState-backed Yellow-Paper state root.
         const auto state_root = direct_.state_root_hash();
         if (!state_root || *state_root != block.header.state_root) {
             return ValidationResult::kWrongStateRoot;

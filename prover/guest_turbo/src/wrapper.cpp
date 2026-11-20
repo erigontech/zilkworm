@@ -11,7 +11,6 @@
 #include <sstream>
 #include "include/sp1_syscalls.hpp"
 
-/* These magic symbols are provided by the linker.  */
 extern void (*__preinit_array_start[])(void);
 extern void (*__preinit_array_end[])(void);
 extern void (*__init_array_start[])(void);

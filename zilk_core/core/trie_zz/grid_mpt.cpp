@@ -21,9 +21,7 @@
 #include <zilk_core/core/common/util.hpp>
 #include <zilk_core/core/rlp/encode.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
-// The HashState fold (GridMPT<*, HashState>) is emitted when that backend is selected (Z6M_HASH_STATE)
-// or on a host build (!__riscv), where its unit test links; the DirectState guests pull in neither
-// hash_state.hpp nor the instantiation.
+// The HashState fold is emitted only with Z6M_HASH_STATE or on a host build.
 #if defined(Z6M_HASH_STATE) || !defined(__riscv)
 #include <zilk_core/core/state_zz/hash_state.hpp>
 #endif
@@ -31,14 +29,7 @@
 
 #include "fold_unfold.hpp"
 
-//------------------------- GRID_MPT -----------------------------
-// Here lies an optimized code for stateless Merkle Patricia Trie
-// The core idea is processing nodes in a stack/grid where
-// a node is inserted, processed and moved on to the next slot/node
-// Now if updates are sorted by keys, you never have to visit the
-// left sub-tree at any height of any branch once you are done processing that.
-//
-// ---------------------------------------------------------------
+// Stateless MPT: updates arrive in key order, so a branch's left subtree is never revisited once left.
 namespace zilkworm {
 
 // LCP byte length; assumes little-endian host for ctzll byte index.
@@ -58,9 +49,7 @@ namespace zilkworm {
     return i;
 }
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
-// lcp_nibbles(a, b + off, max) for 4-aligned a and b with off + max <= 64 (nibbles64 arrays): on this
-// strict-alignment target lcp_nibbles' uint64_t loads are 8 lbu + 8 sb each. Compares a's words with
-// b's words funnel-shifted by off % 4 bytes; the word after the last one compared stays within b[0..63].
+// lcp_nibbles(a, b + off, max) for 4-aligned a, b with off + max <= 64, via word loads shifted by off % 4.
 [[gnu::always_inline]] inline size_t lcp_nibbles_aligned(const uint8_t* a, const uint8_t* b, size_t off,
                                                           size_t max) noexcept {
     typedef uint32_t __attribute__((may_alias)) w32;
@@ -81,31 +70,19 @@ namespace zilkworm {
             lo = hi;
         }
     }
-    size_t k = 4 * static_cast<size_t>(pa - wa);  // the differing word's first byte, or the tail's
+    size_t k = 4 * static_cast<size_t>(pa - wa);
 #pragma GCC unroll 1
     for (; k < max && a[k] == b[off + k]; ++k) {}
     return k;
 }
 #endif
-// Find the least common path of current key from the top, with the last key as reference
-// (search_nibbles_ still holds the expansion of prev's key, or of whatever key came last when prev is null).
+// Least common path of the current key from the top, against the last key held in search_nibbles_.
 template <bool DeletionEnabled, class StateT>
 inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNodeFlat& cur, const TrieNodeFlat* prev) {
-    //================================================
-    // The last leaf must have been inserted to a branch, or deleted from it
-    //  --> lcp: lowest common point (between the last inserted and new_nibbles) <--
-    //  --> (note: lcp starts at 0 index, parent_consumed is a counter starting at 1) <--
-    // 3 cases arise:
-    // 1. If parent_consumed - 1 < lcp, the new leaf shares path, have to split
-    // 2. if lcp == parent_consumed - 1, we are at common parent branch
-    // 3. if lcp < parent_consumed - 1, fold the children and possibly more
-    //
-    // Tip: When we are searching for the next nibble, we don't need more than
-    // the first level of children from the common branch, ever again
-    //================================================
+    // lcp is 0-based, parent_consumed 1-based: parent_consumed - 1 < lcp splits, == is the common branch, > folds.
     if (grid_.size() <= 1 || depth_ == 0) {
         if (grid_.size() > 0 && is_empty(grid_[0])) {
-            grid_.clear();  // with every deleted line above the root, as cascade_delete() does
+            grid_.clear();
         }
         return;
     }
@@ -136,8 +113,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     if (prev != nullptr && parent_consumed <= 64) [[likely]] {
         lcp = std::min<size_t>(key_lcp_nibbles(cur, *prev), parent_consumed);
     } else {
-        // The first update of a call never gets here (depth_ is 0 after reset() or construction), nor does a
-        // well-formed trie have a branch past nibble 64: compare the expanded keys as before.
+        // Not reached by a call's first update; a well-formed trie has no branch past nibble 64.
         const nibbles64 new_nibbles = nibbles64::from_bytes32(cur.key);
         lcp = lcp_nibbles(new_nibbles.nib.data(), search_nibbles_.nib.data(), parent_consumed);
     }
@@ -150,17 +126,13 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
                 return;
             }
         }
-        // If last was not delete, the logic of splitting a leaf is there in the main loop for updates
     } else if (cur_parent_depth > 0) {
         unsigned next_parent_depth = grid_[cur_parent_depth].parent_depth;
-        parent_consumed = grid_[next_parent_depth].consumed;  // For the next parent
+        parent_consumed = grid_[next_parent_depth].consumed;
         while (parent_consumed > lcp && cur_parent_depth > 0) {
             for (auto i = grid_.size() - 1; i > cur_parent_depth; --i) {
                 if (grid_[i].parent_depth >= cur_parent_depth) {
-                    // Deletes line i alone: only an empty line takes more lines with it (cascade_delete deletes
-                    // the ancestors it leaves empty), which would leave i and the lines this loop climbs to
-                    // stale, and none gets here. A deletion's empty lines go in the cascade above, before any
-                    // fold; a read of an absent key inserts no leaf; decode_node() rejects a leaf without a value.
+                    // Deletes line i alone: lines a deletion empties were cascaded above, so no other line goes stale.
                     fold_line(i);
                 }
             }
@@ -174,7 +146,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     }
 
     if (depth_ == 0) {
-        search_nib_cursor_ = 0;  // No parent of 0'th element
+        search_nib_cursor_ = 0;
     } else {
         search_nib_cursor_ = parent_consumed;
     }
@@ -184,12 +156,7 @@ inline void GridMPT<DeletionEnabled, StateT>::seek_with_last_insert(const TrieNo
     }
 }
 
-// A key the walk inserts is absent from the pre-state trie, so its claimed pre-value must say so: none for a
-// created account or slot, 0x80 (zero) for a slot read as absent. Anything else is a value the block executed
-// with that no leaf binds. A read-only update inserts nothing, so at each insertion point this check comes
-// before its exit: the check is all that binds the claim of a read.
-// Out of line: insertions are rare (about 51K over the 200-block corpus), and inlined at the four insertion
-// sites the check cost the descent loop 3.4M cycles in register allocation and code layout.
+// An inserted key is absent pre-state: claim none or 0x80. Precedes the read-only exit: it alone binds a read.
 template <bool DeletionEnabled, class StateT>
 [[gnu::noinline]] bool GridMPT<DeletionEnabled, StateT>::claims_absent(const TrieNodeFlat& u) {
     const ByteView v = u.initial_value();
@@ -211,8 +178,7 @@ template <typename It>
 bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It updates_end) {
     if (root_pending_) {
         root_pending_ = false;
-        // Updates come in key order and a read changes nothing: the first slot of the root they change is the first
-        // nibble of the first key written. The scan stops there; a trie that is only read is scanned to its end.
+        // The first changed root slot is the first nibble of the first key written; read-only tries scan to the end.
         unsigned first_slot = kprefix::kNoSlot;
         for (It it = updates_it; it != updates_end; ++it) {
             const TrieNodeFlat& u = deref_update(*it);
@@ -225,10 +191,9 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
         init_from_root(prev_root_, first_slot);
     }
     if (failed_) [[unlikely]] {
-        return {};  // the root node could not be read: there is no trie to walk
+        return {};
     }
-    // The update search_nibbles_ was last expanded from: the seek compares the keys themselves, and expanding
-    // the new key straight into search_nibbles_ skips a zeroed temporary and its copy.
+    // The update search_nibbles_ was last expanded from.
     const TrieNodeFlat* prev = nullptr;
     for (; updates_it != updates_end; ++updates_it) {
         const TrieNodeFlat& trie_upd = deref_update(*updates_it);
@@ -236,23 +201,19 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
         search_nib_cursor_ = 0;
 
         if (!grid_.empty() && search_nibbles_.len > 0) {
-            // At this point a previous leaf exists on the grid,
-            // and it's in a branch, or just a leaf, or nothing (can't be ext -> leaf)
+            // A previous leaf exists on the grid, in a branch or alone (never ext -> leaf).
             seek_with_last_insert(trie_upd, prev);
         }
         search_nibbles_.assign_bytes32(trie_upd.key);
         prev = &trie_upd;
 
         if (grid_.empty()) {
-            // Either the very first update, or the preceding deletes emptied
-            // the whole trie (seek pops the last line then). Descending the
-            // main loop would read grid_[0] out of bounds; this key simply
-            // (re)seeds the trie as a single full-path leaf.
+            // First update, or deletes emptied the trie (seek pops the last line): reseed as a single full-path leaf.
             if (!claims_absent(trie_upd)) [[unlikely]] {
                 return {};
             }
             if (trie_upd.current_value().empty()) {
-                continue;  // a read of a key the empty trie does not have: nothing to insert, see below
+                continue;
             }
             last_was_delete_ = false;
             root_unfolded_ = false;
@@ -263,12 +224,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
 
         last_was_delete_ = false;
 
-        // MAIN LOOP
-        // Every step goes down at least one nibble of the key, and only a leaf is reached with all 64 of them
-        // consumed (a branch reads the nibble at the cursor). The bound is the key's, not the grid's: depth_ is
-        // a line index, and the grid holds up to kMaxLines lines. Leaving the walk here would drop the update
-        // unseen, so a node past nibble 63 that is not a leaf fails it.
-        while (true) {  // Searching down
+        // Every step consumes a nibble; only a leaf has all 64 consumed, so a non-leaf past nibble 63 fails.
+        while (true) {
             if (!(search_nib_cursor_ < 64 || grid_[depth_].kind == kLeaf)) [[unlikely]] {
                 failed_ = true;
                 sys_println("{\"err\":\"descent past nibble 63\"}");
@@ -279,16 +236,11 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 unsigned nib = search_nibbles_[search_nib_cursor_];
                 auto unfold_res = unfold_slot(nib);
                 if (unfold_res == UnfoldResult::kEmpty) {
-                    // Child is empty - insert here
                     if (!claims_absent(trie_upd)) [[unlikely]] {
                         return {};
                     }
                     if (trie_upd.current_value().empty()) {
-                        // A read of a key absent from the trie, which reaching this empty slot shows: nothing to
-                        // insert. An empty leaf would fold away again, but the cascade that deletes it can take
-                        // lines the seek still climbs through, and leave a branch with a single child the walk
-                        // folded already, whose new hash the witness cannot unfold. The next seek starts from
-                        // this branch, as after a deletion from it.
+                        // Insert nothing: an empty leaf's cascade could drop lines the seek still climbs.
                         last_was_delete_ = true;
                         break;
                     }
@@ -307,7 +259,6 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 search_nib_cursor_++;
                 continue;
             } else if (grid_line.kind == kExt) {
-                // go down till the first divergence point
                 unsigned m = 0;
                 while (m < grid_line.ext.path.len && (search_nib_cursor_ + m) < 64 && grid_line.ext.path[m] == search_nibbles_[search_nib_cursor_ + m]) ++m;
                 search_nib_cursor_ += m;
@@ -315,7 +266,6 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 unsigned old_child_depth{grid_line.child_depth[last_nib]};
 
                 if (m == grid_line.ext.path.len) {
-                    // Full match -> unfold child
                     if (old_child_depth == 0) {
                         ByteView rlp;
                         if (grid_line.ext.child_len < 32) {
@@ -345,16 +295,15 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     return {};
                 }
                 if (trie_upd.current_value().empty()) {
-                    // A read of a key absent from the trie: it leaves the extension inside its path. Nothing to
-                    // insert, as for an empty slot; the next seek starts from the parent branch.
+                    // A read of an absent key leaving the extension's path inserts nothing; the next seek starts at the parent.
                     depth_ = grid_line.parent_depth;
                     last_was_delete_ = true;
                     break;
                 }
-                auto old_ext_line{grid_line};  // cache the value;
+                auto old_ext_line{grid_line};
                 auto new_ext_len = old_ext_line.ext.path.len - m - 1;
                 unsigned d1{}, d2{};
-                // The split appends up to five lines: the old child moved twice, a branch, an extension, the leaf.
+                // The split appends up to five lines: old child moved twice, a branch, an extension, the leaf.
                 if (!has_room(5)) {
                     return {};
                 }
@@ -378,7 +327,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     }
                 }
 
-                if (m > 0) {  // orig_ext -> new_br -> (new_ext) -> old_child
+                if (m > 0) {
                     grid_line.consumed = grid_line.consumed - 1 - new_ext_len;
                     grid_line.ext.child_len = 1;
                     grid_line.ext.path.len = m;
@@ -386,31 +335,31 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     const unsigned new_slot = grid_line.ext.path[m - 1];
                     insert_line_at(d1, new_slot, depth_, BranchNode{});
                     grid_[d1].modified = true;
-                    d1 = 0;  // Used up
-                    // insert_line_at wrote child_depth[new_slot]; clearing last_nib when they alias would orphan the new branch.
+                    d1 = 0;
+                    // insert_line_at wrote child_depth[new_slot]; clearing last_nib on alias would orphan the new branch.
                     if (last_nib != new_slot) {
                         grid_line.child_depth[last_nib] = 0;
                     }
-                } else {     // new_br -> (new_ext) -> old_child
+                } else {
                     transform_line(grid_line, BranchNode{});
                     grid_line.modified = true;
-                    grid_line.child_depth[last_nib] = 0;  // Reset unfolded child
+                    grid_line.child_depth[last_nib] = 0;
                 }
 
                 auto br_depth = depth_;
-                if (new_ext_len > 0) {  // (orig_ext) -> new_br -> new_ext -> old_child
+                if (new_ext_len > 0) {
                     ExtensionNode ext_mplus1{};
                     ext_mplus1.path.len = new_ext_len;
                     std::memcpy(ext_mplus1.path.nib.data(),
                                 old_ext_line.ext.path.nib.data() + m + 1,
                                 new_ext_len);
                     ext_mplus1.set_child(ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
-                    if (d1 == 0) {  // To check if we need d2 slot
+                    if (d1 == 0) {
                         d1 = d2;
                     }
                     insert_line_at(d1, old_ext_line.ext.path[m], depth_, std::move(ext_mplus1));
                     grid_[d1].modified = true;
-                } else {  // () -> new_br -> old_child
+                } else {
                     grid_[depth_].branch.set_child(last_nib, ByteView{old_ext_line.ext.child.bytes, old_ext_line.ext.child_len});
                 }
 
@@ -421,10 +370,8 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                 auto l = make_cur_leaf(trie_upd.current_value());
                 insert_line(l.parent_slot, br_depth, std::move(l));
                 grid_[depth_].modified = true;
-                break;  // insertion complete
+                break;
             } else {
-                // It's a leaf:
-                // Find common path and create extension and push
 
                 size_t cp;
 #if defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32
@@ -438,12 +385,9 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                                      search_nibbles_.nib.data() + search_nib_cursor_,
                                      grid_line.leaf.path.len);
                 }
-                if (search_nib_cursor_ + cp == 64) {  // All 64 matched - this is the insertion leaf
-                    // Pre-value bind + read-only short-circuit: DirectState only. HashState's update set
-                    // carries no initial_value and no read-only entries; its reads are bound to prev_root
-                    // at build time (state_keeps_prevalue_check<HashState> == false, hash_state.hpp).
+                if (search_nib_cursor_ + cp == 64) {
+                    // DirectState only: HashState's updates carry no initial_value or read-only entries.
                     if constexpr (state_keeps_prevalue_check<StateT>) {
-                        // check pre-value matches
 #if (defined(AIRBENDER) && defined(__riscv) && __riscv_xlen == 32) || defined(EVMONE_RV32_DISPATCH_TEST)
                         const ByteView initial = trie_upd.initial_value();
                         const bool pre_value_ok = grid_line.leaf.value.size() == initial.size() &&
@@ -458,7 +402,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             return {};
                         }
                         if (trie_upd.current_value().size() == 0) {
-                            break;  // read-only check
+                            break;
                         }
                     }
                     if constexpr (DeletionEnabled) {
@@ -470,14 +414,14 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                             if (!grid_.empty()) {  // deleting a root leaf empties the grid
                                 grid_[depth_].modified = true;
                             }
-                            break;  // delete complete
+                            break;
                         }
                     }
                     if (grid_line.leaf.value != trie_upd.current_value()) {
                         grid_line.leaf.value = trie_upd.current_value();
                         grid_line.modified = true;
                     }
-                    break;  // update complete
+                    break;
                 }
 
                 if (!claims_absent(trie_upd)) [[unlikely]] {
@@ -497,32 +441,28 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                     std::memcpy(ext_common.path.nib.data(), grid_[depth_].leaf.path.nib.data(), cp);
                     ext_common.path.len = cp;
 
-                    // Make the line an extension and insert a branch with this extension as the parent
                     unsigned ext_last_nib = ext_common.path[cp - 1];
                     transform_line(grid_[depth_], std::move(ext_common));
                     search_nib_cursor_ += cp;
-                    insert_line(ext_last_nib, depth_, std::move(bn));  // sets the depth_ at the branch after
+                    insert_line(ext_last_nib, depth_, std::move(bn));
                 } else {
-                    // Make the line a branch
                     transform_line(grid_[depth_], std::move(bn));
                 }
                 old_leaf.path.len = old_leaf.path.len - cp - 1;  // cp: extension, 1: branch
                 old_leaf.parent_slot = old_leaf.path[cp];
 
-                // Shift the nibble array left by cp + 1
                 if (old_leaf.path.len > 0) {
                     std::memmove(old_leaf.path.nib.data(),
                                  old_leaf.path.nib.data() + cp + 1,
                                  static_cast<size_t>(old_leaf.path.len));
                 }
-                // Insert the leaves to the branch (which is at depth_ now) as parent
                 auto parent_depth = depth_;
-                auto l = make_cur_leaf(trie_upd.current_value());  // sets parent_slot too at l, with first nib
+                auto l = make_cur_leaf(trie_upd.current_value());
                 insert_line(old_leaf.parent_slot, parent_depth, std::move(old_leaf));
                 grid_[depth_].modified = true;
                 insert_line(l.parent_slot, parent_depth, std::move(l));
                 grid_[depth_].modified = true;
-                break;  // insertion complete
+                break;
             }
         }
     }
@@ -542,8 +482,6 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
     if (root_unfolded_ && !grid_[0].modified) {
         return prev_root_;
     }
-    // As fold_line() hashes such a branch, resumed from the state init_from_root() saved in row 0, the root's line,
-    // or a walk saved in DirectState's table.
     if (grid_[0].kind == kBranch && hashes_from_witness(grid_[0].branch)) {
         const kprefix::Resume r = take_resume_full(grid_[0].branch, 0);
         return std::bit_cast<bytes32>(grid_[0].branch.full_branch_hash(r.state, r.blocks));
@@ -561,7 +499,6 @@ template <bool DeletionEnabled, class StateT>
 void GridMPT<DeletionEnabled, StateT>::init_from_root(bytes32 previous_root_hash, unsigned first_slot) {
     root_unfolded_ = false;
     if (previous_root_hash != kEmptyRoot) {
-        // Row 0: the grid is empty, and the root's line is grid_[0].
         auto rlp = state_->find_node_rlp(previous_root_hash,
                                          [first_slot]() noexcept { return kprefix::SnapRequest{first_slot, 0}; });
         if (!rlp) [[unlikely]] {
@@ -587,9 +524,7 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_from_updates(std::span<const
     return calc_root_impl(updates_sorted.begin(), updates_sorted.end());
 }
 
-// Explicit template instantiations. DirectState is named rather than left to the StateT default, so
-// these emit GridMPT<*, DirectState> whichever backend Z6M_HASH_STATE selects; a defaulted trailing
-// template argument is omitted from the Itanium mangling, so the symbols are those of GridMPT<*>.
+// DirectState is named explicitly: a defaulted template argument is omitted from the symbol mangling.
 template class GridMPT<false, DirectState>;
 template class GridMPT<true, DirectState>;
 

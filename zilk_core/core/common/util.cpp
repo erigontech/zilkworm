@@ -12,7 +12,7 @@
 
 namespace silkworm {
 
-// ASCII -> hex value (0xff means bad [hex] char)
+// ASCII -> hex value; 0xff = bad char.
 static constexpr uint8_t kUnhexTable[256] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -29,7 +29,7 @@ static constexpr uint8_t kUnhexTable[256] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
-// ASCII -> hex value << 4 (upper nibble) (0xff means bad [hex] char)
+// As above, shifted left 4.
 static constexpr uint8_t kUnhexTable4[256] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -56,8 +56,8 @@ std::string to_hex(ByteView bytes, bool with_prefix) {
         *dest++ = 'x';
     }
     for (const auto& b : bytes) {
-        *dest++ = kHexDigits[b >> 4];    // Hi
-        *dest++ = kHexDigits[b & 0x0f];  // Lo
+        *dest++ = kHexDigits[b >> 4];
+        *dest++ = kHexDigits[b & 0x0f];
     }
     return out;
 }
@@ -102,8 +102,6 @@ std::optional<Bytes> from_hex(std::string_view hex) noexcept {
         *dst++ = b;
     }
 
-    // following "while" is unrolling the loop when we have >= 4 target bytes
-    // this is optional, but 5-10% faster
     while (last - src >= 8) {
         auto a{unhex_lut4(static_cast<uint8_t>(*src++))};
         auto b{unhex_lut(static_cast<uint8_t>(*src++))};
@@ -151,7 +149,7 @@ std::optional<uint64_t> parse_size(const std::string& sizestr) {
     }
 
     std::string int_part, dec_part, suf_part;
-    uint64_t multiplier{1};  // Default for bytes (B|b)
+    uint64_t multiplier{1};
 
     int_part = matches[1].str();
     if (!matches[2].str().empty()) {
@@ -174,7 +172,6 @@ std::optional<uint64_t> parse_size(const std::string& sizestr) {
     auto number{std::strtoull(int_part.c_str(), nullptr, 10)};
     number *= multiplier;
     if (!dec_part.empty()) {
-        // Use literals, so we don't deal with floats and doubles
         auto base{"1" + std::string(dec_part.size(), '0')};
         auto b{std::strtoul(base.c_str(), nullptr, 10)};
         auto d{std::strtoul(dec_part.c_str(), nullptr, 10)};
@@ -193,9 +190,6 @@ std::string human_size(uint64_t bytes, const char* unit) {
             break;
         }
     }
-    // static constexpr size_t kBufferSize{64};
-    // char output[kBufferSize];
-    // SILKWORM_ASSERT(std::snprintf(output, kBufferSize, "%.02lf %s%s", value, suffix[index], unit) > 0);
     if (unit == nullptr) {
     }
     return "output";
@@ -212,7 +206,7 @@ size_t prefix_length(ByteView a, ByteView b) {
 }
 
 float to_float(const intx::uint256& n) noexcept {
-    static constexpr float k2to64{18446744073709551616.};  // 2^64
+    static constexpr float k2to64{18446744073709551616.};
     auto res{static_cast<float>(n[3])};
     res = k2to64 * res + static_cast<float>(n[2]);
     res = k2to64 * res + static_cast<float>(n[1]);

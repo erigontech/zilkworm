@@ -1,18 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The CALL family builds its evmc_message field by field, with no clearing first, and on rv32 it
-// writes the target address and the value with byte copies of its own. The state Host runs a
-// call to the recipient's own code on the account it already holds for the recipient, and
-// is_precompile() tests an address from its first byte on.
-//
-// The messages are checked field by field against the rules of each instruction, twice, with the
-// native stack below the interpreter filled with two different patterns, so that a field left
-// unwritten shows. The state Host calls cover a recipient that exists, is absent, or is only an
-// access-list placeholder, with and without value, and messages whose code address is another
-// account, a delegate or a precompile. is_precompile() is compared with the comparison of whole
-// addresses it replaced, over every address of 18 leading zero bytes, every single non-zero
-// byte, and random addresses with 0 to 20 leading zero bytes, in every revision.
+// The CALL family builds its evmc_message field by field, with no clearing first.
 
 #include <algorithm>
 #include <array>
@@ -68,8 +56,7 @@ bytes designation(const address& to) {
     return code;
 }
 
-// Fills the native stack below the caller with a pattern: a message field that the interpreter
-// leaves unwritten then holds the pattern instead of what an earlier run left there.
+// Fills the native stack below the caller with a pattern.
 [[gnu::noinline]] void fill_stack(uint8_t pattern) {
     volatile uint8_t area[64 * 1024];
     for (auto& b : area)
@@ -85,11 +72,11 @@ struct CallCase {
     uint256 out_offset = 0x80;
     uint256 out_size;
     uint256 gas;
-    bytes target_code;           // the code of kTarget
+    bytes target_code;
     bool target_exists = true;
     uint32_t parent_flags = 0;
     uint256 parent_value;
-    bool rich = true;            // the caller can pay the value
+    bool rich = true;
     int64_t parent_gas = 1'000'000;
     int64_t parent_state_gas = 0;
 };
@@ -134,8 +121,7 @@ std::string mismatch(const Message& a, const Message& b) {
 }
 
 #ifdef EVMONE_WORD_LAYOUT
-// The test build keeps EVM memory in the word layout (see evmone/word_layout.hpp): a frame's
-// messages carry these flags, their input is a pointer into it, and their output is wanted in it.
+// The test build keeps EVM memory in the word layout (see evmone/word_layout.hpp).
 constexpr uint32_t kWordFlags = evmone::wl::FLAG_WORD_INPUT | evmone::wl::FLAG_WORD_OUTPUT;
 #else
 constexpr uint32_t kWordFlags = 0;
@@ -156,12 +142,11 @@ Message message_of(const evmc_message& m) {
     return r;
 }
 
-// Records the messages it gets, and returns success with 123 gas left and the output "returned",
-// in the layout the message wants.
+// Records the messages it gets, and returns success with 123 gas left and the output "returned".
 class RecordingHost final : public evmc::MockedHost {
 public:
     std::vector<Message> messages;
-    int64_t child_state_gas_left = 0;  // the state gas the child hands back
+    int64_t child_state_gas_left = 0;
 
     evmc::Result call(const evmc_message& msg) noexcept override {
         messages.push_back(message_of(msg));
@@ -172,10 +157,8 @@ public:
                             {.left = child_state_gas_left}};
 #ifdef EVMONE_WORD_LAYOUT
         if ((msg.flags & evmone::wl::FLAG_WORD_OUTPUT) != 0) {
-            // A frame takes an output it wants in the layout only in storage from
-            // wl::alloc_output() (see ReturnData::take()), where the state Host puts it.
             auto* const words = evmone::wl::alloc_output(sizeof(output));
-            std::memcpy(words, output, sizeof(output));  // whole words, already in the layout
+            std::memcpy(words, output, sizeof(output));
             auto raw = result.raw();
             raw.output_data = words;
             raw.release = evmone::wl::free_output;
@@ -191,7 +174,7 @@ struct CallOutcome {
     int64_t gas_left = 0;
     bytes output;
     std::optional<Message> message;
-    int64_t state_gas_left = 0;  // the state gas the frame returns
+    int64_t state_gas_left = 0;
 };
 
 constexpr uint256 kMemory0{0x0102030405060708, 0x1112131415161718, 0x2122232425262728,
@@ -206,7 +189,6 @@ CallOutcome run_call(const CallCase& c, uint8_t pattern, int64_t child_state_gas
     host.child_state_gas_left = child_state_gas_left;
     std::memset(host.accounts[kCaller].balance.bytes, c.rich ? 0xff : 0x00, 32);
     if (c.target_exists) {
-        // Not from an empty vector's iterators: they are null pointers, which memcpy must not get.
         if (!c.target_code.empty())
             host.accounts[kTarget].code = evmc::bytes(c.target_code.begin(), c.target_code.end());
         host.accounts[kTarget].nonce = 1;
@@ -224,7 +206,6 @@ CallOutcome run_call(const CallCase& c, uint8_t pattern, int64_t child_state_gas
     push32(code, c.in_offset);
     if (c.op == CALL || c.op == CALLCODE)
         push32(code, c.value);
-    // The address operand with high bytes the instruction must drop.
     push32(code, (uint256{0xa5a5a5a5a5a5a5a5, 0x5a5a5a5a5a5a5a5a, 0xa5a5a5a5a5a5a5a5,
                           0x5a5a5a5a5a5a5a5a} << 160) | intx::be::load<uint256>(kTarget));
     push32(code, c.gas);
@@ -312,7 +293,7 @@ TEST_CASE("CALL family messages are written in full", "[call_message]") {
                     for (const auto& code : codes)
                         for (const auto flags : parent_flags) {
                             if (op != CALL && op != CALLCODE && value != values[3])
-                                continue;  // no value operand: one value, the parent's
+                                continue;
                             CallCase c;
                             c.op = op;
                             c.rev = rev;
@@ -320,7 +301,6 @@ TEST_CASE("CALL family messages are written in full", "[call_message]") {
                             c.parent_value = op == DELEGATECALL ? value : 7;
                             c.in_offset = in_offset;
                             c.in_size = in_size;
-                            // With no input, no output either, at an offset never checked.
                             c.out_offset = in_size == 0 ? huge : 0x80;
                             c.out_size = in_size == 0 ? 0 : 5;
                             c.gas = 7000;
@@ -337,7 +317,6 @@ TEST_CASE("CALL family messages are written in full", "[call_message]") {
                             CHECK(b.output == a.output);
                             REQUIRE(b.message.has_value());
                             CHECK(mismatch(*b.message, *a.message) == "");
-                            // The pushed status and the copied output.
                             REQUIRE(a.output.size() == 0x220);
                             CHECK(a.output[0x21f] == 1);
                             const auto copied = std::min<size_t>(static_cast<size_t>(c.out_size), 8);
@@ -414,7 +393,6 @@ TEST_CASE("CALL family gas and failures before the message", "[call_message]") {
             REQUIRE(a.message.has_value());
             CHECK(a.status == EVMC_SUCCESS);
 #if defined(AIRBENDER) || defined(EVMONE_RV32_DISPATCH_TEST)
-            // The state Host never gives a frame state gas before Amsterdam, so the call skips it.
             CHECK(a.state_gas_left == (rev >= EVMC_AMSTERDAM ? 500 : 0));
 #else
             CHECK(a.state_gas_left == 500);
@@ -504,7 +482,6 @@ struct HostFixture {
         view.add(kDelegate, 0, returns_byte(0xdd));
         view.add(kNoCode, 0, {});
         view.add(kVanity, 0, returns_byte(0xee));
-        // Warmed by an access list: in the State, not yet loaded.
         state.access(kPlaceholder);
     }
 
@@ -591,8 +568,7 @@ TEST_CASE("a call runs its recipient's code from the recipient's account", "[cal
 
 namespace {
 
-// The rule is_precompile() had: the address as a number below the lookup table's size, then the
-// revision the table gives that number.
+// The rule is_precompile() had: the address as a number below the lookup table's size.
 std::optional<evmc_revision> precompile_since(unsigned n) {
     if (n >= 1 && n <= 4)
         return EVMC_FRONTIER;

@@ -2,9 +2,6 @@
 // Copyright 2025 The Original Silkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// RLP decoding functions as per
-// https://eth.wiki/en/fundamentals/rlp
-
 #pragma once
 
 #include <array>
@@ -19,15 +16,13 @@
 
 namespace silkworm::rlp {
 
-// Whether to allow or prohibit trailing characters in an input after decoding.
-// If prohibited and the input does contain extra characters, decode() returns DecodingResult::kInputTooLong.
+// kProhibit makes trailing bytes after the item a kInputTooLong error.
 enum class Leftover {
     kProhibit,
     kAllow,
 };
 
-// Consumes an RLP header unless it's a single byte in the [0x00, 0x7f] range,
-// in which case the byte is put back.
+// Consumes an RLP header unless it is a single byte in [0x00, 0x7f], which is put back.
 std::expected<Header, DecodingError> decode_header(ByteView& from) noexcept;
 
 DecodingResult decode(ByteView& from, Bytes& to, Leftover mode = Leftover::kProhibit) noexcept;

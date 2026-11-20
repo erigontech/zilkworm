@@ -3,22 +3,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-EEST Test Runner for z6m HyperCube prover.
-
-Discovers test shard directories under <fixtures>/blockchain_tests,
-launches z6m_prover --test-service --test-dir for each shard in parallel
-(staggered by a configurable delay), and aggregates results.
-
-If --fixtures is omitted, defaults (in order):
-  $EEST_MFBD_DIR (CI sets this from the actions/cache step), or
-  test-fixtures-cache/mfbd-<eest_sha>/ (local build via `make
-  eest-mfbd-build`; sha = pinned tarball sha from test-fixtures.json).
-
-Usage:
-    python3 eest_runner.py
-    python3 eest_runner.py --stagger 30 --max-parallel 4
-"""
+"""Runs z6m_prover --test-service per shard of <fixtures>/blockchain_tests in parallel (staggered) and aggregates the results."""
 
 import argparse
 import json
@@ -94,18 +79,10 @@ _FORMAT_EXTS = {
 
 
 def discover_shards(fixtures_dir: str, fmt: str) -> List[str]:
-    """Discover test shards under blockchain_tests/.
-
-    - blockchain_tests/{fork} (excluding static/, Testing/) -> one shard each
-    - blockchain_tests/static/state_tests/{subdir} -> one shard each
-
-    A directory qualifies as a shard if it contains at least one file with
-    an extension allowed by `fmt` ("mfbd", "json", or "auto" for either).
-    """
+    """Shards are blockchain_tests/{fork} (excluding static/, Testing/) and static/state_tests/{subdir}, each holding a file allowed by `fmt`."""
     bt = os.path.join(fixtures_dir, "blockchain_tests")
     shards = []
 
-    # Fork-level shards
     for name in sorted(os.listdir(bt)):
         if name in ("static", "Testing"):
             continue
@@ -116,7 +93,6 @@ def discover_shards(fixtures_dir: str, fmt: str) -> List[str]:
             continue
         shards.append(os.path.join("blockchain_tests", name))
 
-    # static/state_tests sub-shards
     static_st = os.path.join(bt, "static", "state_tests")
     if os.path.isdir(static_st):
         for name in sorted(os.listdir(static_st)):
@@ -170,7 +146,6 @@ def _stream_output(proc: subprocess.Popen, shard_name: str,
     for line in proc.stdout:
         line = line.rstrip("\n")
         output_lines.append(line)
-        # Print PASS/FAIL/summary lines and test progress in real time
         if any(k in line for k in ("[", "PASS", "FAIL", "Total:", "warn", "error")):
             print(f"    [{prefix}] {line}", flush=True)
     if proc.stdout:
@@ -220,7 +195,6 @@ def run_shards(prover: str, fixtures_dir: str, shards: List[str],
                     sr = ShardResult(shard=shard)
                     sp = ShardProc(result=sr, proc=proc,
                                    start_time=time.time(), log_path=shard_log)
-                    # Start background thread to stream output in real time
                     sp.reader_thread = threading.Thread(
                         target=_stream_output,
                         args=(proc, shard, sp.output_lines),
@@ -241,12 +215,10 @@ def run_shards(prover: str, fixtures_dir: str, shards: List[str],
                       f"{len(active)} active, {len(pending)} pending",
                       flush=True)
 
-        # Reap completed processes, collect results, free resources
         still_active = []
         for sp in active:
             ret = sp.proc.poll()
             if ret is not None:
-                # Wait for reader thread to finish draining stdout
                 if sp.reader_thread:
                     sp.reader_thread.join(timeout=5)
                 sp.proc.wait()
@@ -325,7 +297,6 @@ def print_report(results: List[ShardResult]) -> Tuple[int, int, int]:
         else:
             print(f"  prover_gas  not computed in this execution mode (all zero)")
 
-    # Print failed shards
     fail_shards = [r for r in results if r.failed > 0 or r.error]
     if fail_shards:
         print(f"\n  Failed shards:")
@@ -335,7 +306,6 @@ def print_report(results: List[ShardResult]) -> Tuple[int, int, int]:
             else:
                 print(f"    {r.shard}: {r.failed} failures")
 
-    # Print timing
     durations = [(r.shard, r.duration_s) for r in results if r.duration_s > 0]
     if durations:
         durations.sort(key=lambda x: -x[1])
@@ -350,14 +320,7 @@ def print_report(results: List[ShardResult]) -> Tuple[int, int, int]:
 
 
 def default_fixtures_dir(fmt: str) -> Optional[str]:
-    """Resolve the default fixtures path for `fmt`.
-
-    mfbd / auto → `$EEST_MFBD_DIR` if set (CI sets this via the cache step), or
-                  `<repo>/test-fixtures-cache/mfbd-<eest_short_sha>/`
-                  (the local default produced by `make eest-mfbd-build`).
-    json        → `<repo>/test-fixtures-cache/eest_stable/fixtures`
-                  (populated by `make test-fixtures`).
-    """
+    """Default fixtures path: `$EEST_MFBD_DIR` or the make eest-mfbd-build cache (mfbd/auto); the test-fixtures cache (json)."""
     here = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(here, "..", ".."))
     if fmt == "json":
@@ -417,7 +380,6 @@ def main() -> int:
         print(f"ERROR: prover not found: {prover}", file=sys.stderr)
         return 1
 
-    # Discover
     shards = discover_shards(fixtures, args.format)
     if args.filter:
         shards = [s for s in shards if args.filter in s]
@@ -431,7 +393,6 @@ def main() -> int:
     for s in shards:
         print(f"    {s}")
 
-    # Parallelism
     if args.max_parallel <= 0:
         mem_gb = get_available_memory_gb()
         max_par = max(1, int((mem_gb - 4) / RAM_PER_INSTANCE_GB))
@@ -440,18 +401,15 @@ def main() -> int:
         max_par = args.max_parallel
         print(f"  max_parallel={max_par} (user-set)")
 
-    # Log dir
     log_dir = args.log_dir or os.path.join(git_root, "temp", "eest_logs")
     os.makedirs(log_dir, exist_ok=True)
     print(f"  Log dir: {log_dir}")
 
-    # Run
-    max_file_size_bytes = args.max_file_size * 1024 * 1024  # MB to bytes
+    max_file_size_bytes = args.max_file_size * 1024 * 1024
     results = run_shards(prover, fixtures, shards, log_dir,
                          stagger=args.stagger, max_parallel=max_par,
                          max_file_size_bytes=max_file_size_bytes)
 
-    # Report
     total, passed, failed = print_report(results)
 
     if total == 0:

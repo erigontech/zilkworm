@@ -49,9 +49,7 @@ class StateTransition {
         evmc::bytes32 post_state_root{};  // state root of the last proven block
         evmc::bytes32 block_hash{};       // hash of the last proven block
         uint64_t chain_id{0};
-        // Set for a statelessInputBytes input, whose public values are the 43-byte SSZ
-        // StatelessValidationResult {new_payload_request_root, successful_validation, chain_id,
-        // schema_id}; all zero when the input could not be decoded.
+        // Set for a statelessInputBytes input: its 43-byte SSZ StatelessValidationResult; all zero if undecodable.
         bool sib{false};
         evmc::bytes32 new_payload_request_root{};
         bool successful_validation{false};

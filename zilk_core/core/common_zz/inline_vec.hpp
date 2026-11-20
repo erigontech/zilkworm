@@ -11,8 +11,7 @@
 
 namespace zilkworm {
 
-// A size-aligned vector<> replacement that can use the stack- and/or heap-allocated
-// memory for an array of objects. `N` should reasonably fit within stack budget
+// Size-aligned vector replacement on stack and/or heap memory; N must fit the stack budget.
 template <class T, std::size_t N>
 class InlineVec {
     static_assert(std::is_trivially_destructible_v<T>,

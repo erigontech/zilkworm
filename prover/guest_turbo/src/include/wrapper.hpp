@@ -4,7 +4,6 @@
 #pragma once
 #include <cstdint>
 #include <rust/cxx.h>
-// #include "stub_gthread_cond.hpp";
 
 #ifdef __cplusplus
 extern "C" {

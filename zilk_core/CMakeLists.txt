@@ -3,8 +3,6 @@
 # Copyright 2025 The Original Silkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# project(silkworm LANGUAGES CXX)
-
 if(SP1TURBO)
     add_compile_definitions(-DSP1)
     include_directories(${CMAKE_SOURCE_DIR}/../prover/guest_program/src/include)

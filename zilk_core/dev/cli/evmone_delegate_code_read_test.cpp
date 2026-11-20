@@ -1,9 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// evmone resolves an EIP-7702 call target by reading the delegate's code before the value
-// transfer can light-fail, as execution-specs does (calculate_delegation_cost, then get_code).
-// A stateless witness must therefore carry that code even when the call fails for balance.
+// evmone resolves an EIP-7702 call target by reading the delegate's code before the value transfer can light-fail.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -42,7 +40,6 @@ TEST_CASE("delegated CALL failing for balance still reads the delegate's code", 
     host.accounts[callee].code = evmc::bytes{0xef, 0x01, 0x00} + evmc::bytes{delegate.bytes, sizeof(delegate)};
     host.accounts[delegate].code = evmc::bytes{0x00};  // STOP
 
-    // CALL(gas, callee, value = 1, 0, 0, 0, 0), then return the success flag.
     evmc::bytes code{0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73};
     code += evmc::bytes{callee.bytes, sizeof(callee)};
     code += evmc::bytes{0x5a, 0xf1, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3};

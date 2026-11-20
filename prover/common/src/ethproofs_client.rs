@@ -10,13 +10,10 @@ pub struct EthProofsConfig {
     pub cluster_id: u64,
 }
 
-/// Attempts at posting a proof, and the longest wait between two of them.
 const PROVED_ATTEMPTS: u32 = 4;
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(120);
 
-/// A failed POST: the response status, if there was a response, and `retry_after` when
-/// repeating it can succeed (rate limited, server error or no response): the wait the server
-/// asked for, or a default.
+/// `retry_after` is Some only when a retry can succeed.
 struct PostError {
     msg: String,
     status: Option<StatusCode>,
@@ -49,7 +46,6 @@ impl EthproofsClient {
     async fn post_json(&self, path: &str, json: &serde_json::Value) -> Result<(), PostError> {
         let url = format!("{}{}", self.endpoint, path);
 
-        // Print the full request JSON (truncate proof field to avoid flooding logs)
         let mut debug_json = json.clone();
         if let Some(obj) = debug_json.as_object_mut() {
             if let Some(proof_val) = obj.get("proof") {
@@ -128,10 +124,7 @@ impl EthproofsClient {
         }
     }
 
-    /// Posts a proof. `proof_bytes` are the prover's proof file (for Airbender, gzip of the
-    /// EPROOF01 v2 envelope), sent base64 encoded; `proving_millis` is the proving time the
-    /// caller measured; `cycle_count` is the guest's own cycle count. A rate-limited or failed
-    /// post is retried (up to `PROVED_ATTEMPTS` posts), so callers run this in the background.
+    /// Posts a proof, retrying up to `PROVED_ATTEMPTS` times; callers run this in the background.
     pub async fn proved(
         &self,
         proof_bytes: &[u8],
@@ -188,7 +181,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    /// Reads one HTTP request (headers, then content-length bytes of body).
     async fn read_request(sock: &mut TcpStream) {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 8192];
@@ -208,8 +200,7 @@ mod tests {
         }
     }
 
-    /// Answers one request per connection with each (status line, body) in turn; returns the
-    /// endpoint and the number of requests served.
+    /// Serves one scripted (status, body) per connection; returns the endpoint and requests served.
     async fn serve(responses: Vec<(&'static str, &'static str)>) -> (String, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());

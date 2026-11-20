@@ -30,7 +30,6 @@ namespace protocol {
         bool operator==(const NoPreMergeConfig&) const = default;
     };
 
-    //! \see IRuleSet
     using PreMergeRuleSetConfig = std::variant<NoPreMergeConfig, EthashConfig>;
 
 }  // namespace protocol
@@ -44,14 +43,10 @@ struct BlobParams {
 };
 
 struct ChainConfig {
-    //! \brief Returns the chain identifier
-    //! \see https://eips.ethereum.org/EIPS/eip-155
     ChainId chain_id{0};
 
-    //! \brief Holds the hash of genesis block
     std::optional<evmc::bytes32> genesis_hash;
 
-    // https://github.com/ethereum/execution-specs/tree/master/network-upgrades/mainnet-upgrades
     std::optional<BlockNum> homestead_block{std::nullopt};
     std::optional<BlockNum> dao_block{std::nullopt};
     std::optional<BlockNum> tangerine_whistle_block{std::nullopt};
@@ -70,8 +65,7 @@ struct ChainConfig {
     std::optional<BlockNum> arrow_glacier_block{std::nullopt};
     std::optional<BlockNum> gray_glacier_block{std::nullopt};
 
-    //! \brief PoW to PoS switch
-    //! \see EIP-3675: Upgrade consensus to Proof-of-Stake
+    // EIP-3675: PoS switch
     std::optional<intx::uint256> terminal_total_difficulty{std::nullopt};
     std::optional<BlockNum> merge_netsplit_block{std::nullopt};  // FORK_NEXT_VALUE in EIP-3675
 
@@ -86,7 +80,6 @@ struct ChainConfig {
     std::optional<BlockTime> bpo4_time{std::nullopt};
     std::optional<BlockTime> amsterdam_time{std::nullopt};
 
-    //! \brief Returns the config of the (pre-Merge) protocol rule set
     protocol::PreMergeRuleSetConfig rule_set_config{protocol::NoPreMergeConfig{}};
 
     // The Shanghai hard fork has withdrawals, but Agra does not
@@ -94,41 +87,18 @@ struct ChainConfig {
     bool is_london(BlockNum block_num) const noexcept;
     bool is_prague(BlockNum block_num, BlockTime block_time) const noexcept;
 
-    //! \brief Returns the revision level at given block number
-    //! \details In other words, on behalf of Json chain config data
-    //! returns whether specific HF have occurred
     evmc_revision revision(BlockNum block_num, uint64_t block_time) const noexcept;
 
-    /// Returns the blob parameters for a given block time.
     BlobParams blob_params(uint64_t block_time) const noexcept;
 
     std::vector<BlockNum> distinct_fork_block_nums() const;
     std::vector<BlockTime> distinct_fork_times() const;
     std::vector<uint64_t> distinct_fork_points() const;
 
-    //! \brief Check invariant on pre-Merge config validity
     bool valid_pre_merge_config() const noexcept;
 
-    //! \brief Return the JSON representation of this object
     nlohmann::json to_json() const noexcept;
 
-    /*Sample JSON input:
-    {
-            "chainId":1,
-            "homesteadBlock":1150000,
-            "daoForkBlock":1920000,
-            "eip150Block":2463000,
-            "eip155Block":2675000,
-            "byzantiumBlock":4370000,
-            "constantinopleBlock":7280000,
-            "petersburgBlock":7280000,
-            "istanbulBlock":9069000,
-            "muirGlacierBlock":9200000,
-            "berlinBlock":12244000
-    }
-    */
-    //! \brief Try parse a JSON object into strongly typed ChainConfig
-    //! \remark Should this return std::nullopt the parsing has failed
     static std::optional<ChainConfig> from_json(const nlohmann::json& json) noexcept;
 
     friend bool operator==(const ChainConfig&, const ChainConfig&) = default;
@@ -147,14 +117,12 @@ constinit extern const ChainConfig kHoleskyConfig;
 inline constexpr evmc::bytes32 kSepoliaGenesisHash{0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9_bytes32};
 constinit extern const ChainConfig kSepoliaConfig;
 
-//! \brief Known chain names mapped to their respective chain IDs
 inline constexpr SmallMap<std::string_view, ChainId> kKnownChainNameToId{
     {"holesky", 17000},
     {"mainnet", 1},
     {"sepolia", 11155111},
 };
 
-//! \brief Known chain IDs mapped to their respective chain configs
 inline constexpr SmallMap<ChainId, const ChainConfig*> kKnownChainConfigs{
     {*kKnownChainNameToId.find("mainnet"), &kMainnetConfig},
     {*kKnownChainNameToId.find("holesky"), &kHoleskyConfig},

@@ -13,19 +13,13 @@
 
 namespace silkworm::trie {
 
-// Used in node/silkworm/trie/intermediate_hashes.hpp
-//
-// Presumed invariants:
-// 1) tree_mask ⊆ state_mask
-// 2) hash_mask ⊆ state_mask
-// 3) #hash_mask == #hashes
+// Invariants: tree_mask and hash_mask are subsets of state_mask; popcount(hash_mask) == #hashes.
 class Node {
   public:
     Node() = default;
     explicit Node(uint16_t state_mask, uint16_t tree_mask, uint16_t hash_mask, std::vector<evmc::bytes32> hashes,
                   const std::optional<evmc::bytes32>& root_hash = std::nullopt);
 
-    // copyable
     Node(const Node& other) = default;
     Node& operator=(const Node& other) = default;
 
@@ -41,10 +35,8 @@ class Node {
 
     friend bool operator==(const Node&, const Node&) = default;
 
-    //! \see Erigon's MarshalTrieNodeTyped
     Bytes encode_for_storage() const;
 
-    //! \see Erigon's UnmarshalTrieNodeTyped
     static DecodingResult decode_from_storage(ByteView raw, Node& node);
 
   protected:

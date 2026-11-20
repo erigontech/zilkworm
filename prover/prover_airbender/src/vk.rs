@@ -1,10 +1,6 @@
 //! The verification key (EVKEY001 v2) and proof verification against it.
 //!
-//! A key binds proofs to one guest: a proof is accepted only if the recursion chain hash its
-//! final verifier outputs (output[8..16]) is one of the key's three expected chain hashes, for
-//! zero, one, or two and more unrolled recursion layers. Those hashes are recomputed from the
-//! guest binary and the fsv recursion verifier binaries in FSV_DIR, with the Blake modes of the
-//! RECURSION_*_BLAKE variables, never taken from a proof.
+//! A proof's chain hash (output[8..16]) must match a key from the guest and FSV_DIR, not the proof.
 //!
 //! Adapted from matter-labs/ethereum-prover ethereum_prover/src/verification_key_format.rs,
 //! verifier_artifacts.rs and verification.rs (MIT OR Apache-2.0).
@@ -23,7 +19,6 @@ pub const VERIFICATION_KEY_MAGIC: [u8; 8] = *b"EVKEY001";
 const VERIFICATION_KEY_FORMAT_VERSION: u8 = 2;
 const VERIFICATION_KEY_SECURITY: u8 = 100;
 
-/// Stack of the threads that recompute setups (the key) and run the unified verifier.
 const SETUPS_STACK_SIZE: usize = 1 << 30;
 const VERIFIER_STACK_SIZE: usize = 1 << 27;
 
@@ -32,9 +27,7 @@ pub struct VerificationKey {
     magic: [u8; 8],
     version: u8,
     security: u8,
-    /// keccak256 of the guest's .bin file
     pub app_bin_keccak: [u8; 32],
-    /// keccak256 of the guest's .text file
     pub app_text_keccak: [u8; 32],
     pub expected_chain_hashes: [[u32; 8]; 3],
 }
@@ -81,8 +74,7 @@ impl VerificationKey {
         Ok(key)
     }
 
-    /// Computes the key of the guest. Recomputes the setups of the guest and of the fsv
-    /// verifier programs, which takes a while.
+    /// Recomputes the setups of the guest and the fsv verifier programs, which takes a while.
     pub fn compute(guest: &GuestFiles) -> Result<Self> {
         check_recursion_environment()?;
         let app_bin_keccak = keccak256(std::fs::read(&guest.bin)?).0;
@@ -104,8 +96,7 @@ impl VerificationKey {
     }
 }
 
-/// Verifies a proof file against the key and returns the verifier's output: output[0..8] is the
-/// guest's public output, output[8..16] the recursion chain, one the key trusts.
+/// Verifies a proof file: output[0..8] is the guest's output, output[8..16] the chain the key trusts.
 pub fn verify_proof_file(proof_file: &[u8], key: &VerificationKey) -> Result<[u32; 16]> {
     let words = proof_words_from_file(proof_file)?;
     let output = std::thread::Builder::new()
@@ -134,9 +125,7 @@ pub fn verify_proof_file(proof_file: &[u8], key: &VerificationKey) -> Result<[u3
     Ok(output)
 }
 
-/// The variables that select the recursion verifier programs, and with them the chain hashes:
-/// anything but their default (Blake2s with compression) makes proofs that no published key
-/// accepts.
+/// Picks the recursion verifiers and chain hashes; only the default (Blake2s) has a published key.
 const RECURSION_BLAKE_VARS: [&str; 4] = [
     "RECURSION_UNROLLED_BLAKE",
     "RECURSION_BRIDGE_BLAKE",
@@ -171,8 +160,8 @@ mod tests {
             .unwrap();
         let expected = format!(
             "{}{}{}{}{}{}",
-            "45564b4559303031", // magic
-            "0264",             // version 2, security 100
+            "45564b4559303031",
+            "0264",
             "11".repeat(32),
             "22".repeat(32),
             "01".repeat(8) + &"fb2c01".repeat(8),

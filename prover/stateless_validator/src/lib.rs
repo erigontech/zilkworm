@@ -1,10 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Host-side adapter that converts an Ethereum stateless-validation input into
-//! the Zilkworm MFBD (Multiple Flat Bundles) envelope consumed by
-//! the post-#90 zkEVM guest. The encoder is a pure-Rust port of the C++
-//! `json_witness_to_flat_bundle` flow; see [`mfbd`] for the section layout.
+//! Host-side adapter: converts an Ethereum stateless-validation input into the MFBD envelope for the guest.
 
 #[cfg(feature = "download")]
 pub mod download;
@@ -31,9 +28,7 @@ const MAINNET_FORK_NAME: &str = "Mainnet";
 
 #[derive(Clone, Debug)]
 pub struct StatelessValidatorZilkwormInput {
-    /// MFBD-wrapped FlatBundle bytes, ready to feed the guest as-is via SP1Stdin.
     pub flat_bundle: Vec<u8>,
-    /// Expected guest public values layout (see docs/architecture.md for details).
     pub public_values: Vec<u8>,
 }
 
@@ -47,28 +42,22 @@ impl StatelessValidatorZilkwormInput {
         Ok(Self { flat_bundle, public_values: Vec::new() })
     }
 
-    /// EEST canonical statelessInputBytes constructor: decode, extract the witness / block pieces / BAL,
-    /// derive `keys` from BAL, and MFBD-encode. Amsterdam-only. `valid_block` is the fixture's
-    /// validity expectation (`statelessOutputBytes.successful_validation` / no `expectException`);
-    /// it is not carried by statelessInputBytes itself.
+    /// From EEST statelessInputBytes (Amsterdam only); `valid_block` comes from the fixture, not the input.
     pub fn from_ere_eest(input_bytes: &[u8], valid_block: bool) -> Result<Self> {
         let (fork_id, si) = ere_eest::decode_stateless_input(input_bytes)
             .context("decode EEST statelessInputBytes")?;
         if fork_id != ProtocolFork::Amsterdam {
             bail!("statelessInputBytes fork {fork_id:?} unsupported (Amsterdam-only)");
         }
-        // Network label carried in the MFBD; the guest maps it to a hardcoded chain config
-        // (chain_id + blob schedule + fork activation) via its kNetworkConfig, so only
-        // networks known on both sides are accepted. Selected by the input's chain id.
+        // Network label carried in the MFBD; it must be known to the guest's kNetworkConfig.
         let fork = match si.chain_id {
-            1 => "Amsterdam", // generated EEST corpus (tests-zkevm-benchmark), Amsterdam from genesis
+            1 => "Amsterdam", // generated EEST corpus: Amsterdam from genesis
             0x1a62c8cb6 => "glamsterdam-devnet-7",
             0x1a6a8cc6e => "glamsterdam-devnet-8",
             11155111 => "sepolia",
             id => bail!("unknown chain id {id:#x}: no guest-side network config"),
         };
 
-        // Witness pieces: statelessInputBytes's List<List<u8>> becomes Vec<Bytes>.
         let witness_state: Vec<Bytes> =
             si.witness.state.iter().map(|n| Bytes::copy_from_slice(n)).collect();
         let witness_codes: Vec<Bytes> =
@@ -76,7 +65,6 @@ impl StatelessValidatorZilkwormInput {
         let witness_headers: Vec<Bytes> =
             si.witness.headers.iter().map(|h| Bytes::copy_from_slice(h)).collect();
 
-        // Block pieces from the Amsterdam (Gloas) payload variant.
         let gloas = match &si.new_payload_request {
             NewPayloadRequest::Gloas(g) => g,
             _ => bail!("statelessInputBytes new_payload_request is not the Amsterdam (Gloas) variant"),
@@ -103,9 +91,7 @@ impl StatelessValidatorZilkwormInput {
         let extra_data: Vec<u8> = payload.extra_data.iter().copied().collect();
         let block_access_list: Vec<u8> = payload.block_access_list.iter().copied().collect();
 
-        // `base_fee_per_gas` is an SSZ uint256 (little-endian); the block-RLP
-        // encoder wants big-endian. The other 32-byte payload fields are hashes
-        // and thus endianness-neutral.
+        // base_fee_per_gas is a little-endian SSZ uint256; the block-RLP encoder wants big-endian.
         let mut base_fee_be = payload.base_fee_per_gas;
         base_fee_be.reverse();
 
@@ -146,17 +132,14 @@ impl StatelessValidatorZilkwormInput {
             /* expect_invalid */ !valid_block,
         )?;
 
-        // Expected guest PV (#133 layout). A block rejected as expected leaves every
-        // field but chain_id zero.
+        // A block rejected as expected leaves every field but chain_id zero.
         let mut public_values = Vec::with_capacity(112);
         if !valid_block {
             public_values.resize(104, 0);
             public_values.extend_from_slice(&si.chain_id.to_le_bytes());
             return Ok(Self { flat_bundle, public_values });
         }
-        // pre_state_root is the parent header's state root (witness lists headers
-        // ascending, so parent is last); post_state_root / block_hash / gas_used are
-        // the payload's claimed values the guest recomputes and commits.
+        // pre_state_root is the parent (last) header's root; the rest are claims the guest recomputes.
         let pre_state_root: [u8; 32] = {
             let mut slice = witness_headers
                 .last()
@@ -177,19 +160,15 @@ impl StatelessValidatorZilkwormInput {
     }
 }
 
-/// Materialise EIP-7685 `ExecutionRequests` into `[type_byte, data...]` blobs,
-/// as expected by `alloy_eips::eip7685::Requests::requests_hash()`.
-///
-/// All request types are emitted in ascending type order.
+/// `[type_byte, data...]` blobs in ascending type order, as `Requests::requests_hash()` expects.
 fn collect_execution_requests(
     er: &stateless_validator_common::guest::input::new_payload_request::ExecutionRequestsGloas,
 ) -> Result<Vec<Bytes>> {
-    // EIP-7685 request type IDs.
     const REQ_TYPE_DEPOSIT: u8 = 0x00;
     const REQ_TYPE_WITHDRAWAL: u8 = 0x01;
     const REQ_TYPE_CONSOLIDATION: u8 = 0x02;
-    const REQ_TYPE_BUILDER_DEPOSIT: u8 = 0x03;  // EIP-8282: Builder Execution Requests
-    const REQ_TYPE_BUILDER_EXIT: u8 = 0x04;     // EIP-8282: Builder Execution Requests
+    const REQ_TYPE_BUILDER_DEPOSIT: u8 = 0x03;
+    const REQ_TYPE_BUILDER_EXIT: u8 = 0x04;
 
     fn encode_typed<T: SszEncode>(items: &[T], ty: u8) -> Option<Bytes> {
         if items.is_empty() {
@@ -223,7 +202,6 @@ fn collect_execution_requests(
     Ok(requests)
 }
 
-/// Map alloy's `ChainConfig` + block timestamp to the network config name expected by Zilkworm.
 fn fork_base_from_chain_config(cfg: &ChainConfig, timestamp: u64) -> String {
     if cfg.osaka_time.is_some_and(|t| timestamp >= t) {
         "Osaka".to_string()

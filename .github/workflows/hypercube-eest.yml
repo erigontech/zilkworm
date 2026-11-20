@@ -71,10 +71,7 @@ jobs:
           fi
 
       - name: Ensure C++23 host compiler (project standard g++-15)
-        # The prover build now compiles the C++ witness converter via
-        # prover/witness_ffi/build.rs, which needs g++ >= 14 on the host.
-        # The z6m_ci_base image (Ubuntu 25.10) already ships g++-15, so this
-        # normally no-ops; the fallback installs the project-standard g++-15.
+        # witness_ffi/build.rs needs g++ >= 14; the CI image ships g++-15, so this normally no-ops.
         run: |
           ver=$(g++ -dumpversion 2>/dev/null | cut -d. -f1 || true)
           if { [ -z "$ver" ] || [ "$ver" -lt 14 ]; } \

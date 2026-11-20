@@ -1,9 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// The roots ere-guests' stateless-validator-common asserts for its synthetic payloads and request
-// containers (new_payload_request.rs, progressive_container_roots_match_reference_vectors), built here
-// field by field from the same values.
+// The roots ere-guests' stateless-validator-common asserts for its synthetic payloads and request containers.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -205,11 +203,9 @@ TEST_CASE("ssz: the Gloas NewPayloadRequest decodes and hashes to the ere-guests
 TEST_CASE("ssz: merkleize pads to the limit and progressive merkleization is zero-terminated", "[ssz]") {
     const Node a{1};
     const Node b{2};
-    // One chunk under a 4-leaf limit: two zero levels above it.
     const std::array<Node, 1> one{a};
     Node expect = hash_nodes(hash_nodes(a, Node{}), hash_nodes(Node{}, Node{}));
     CHECK(merkleize(one, 4) == expect);
-    // Two chunks progressively: the first alone in a 1-leaf subtree, the second in a 4-leaf one, then zero.
     const std::array<Node, 2> two{a, b};
     const std::array<Node, 1> rest{b};
     expect = hash_nodes(a, hash_nodes(merkleize(rest, 4), Node{}));

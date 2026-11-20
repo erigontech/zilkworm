@@ -4,15 +4,13 @@
 #include <new>
 
 #ifdef GUEST_ALLOCATOR_HOST_TEST
-// The host test (zilk_core/dev/cli/guest_allocator_test.cpp, wired in CMakeLists.txt) compiles
-// this text with the operator names renamed; the guest's finish_error is rv32 CSR code the host
-// cannot run, so the test build ends the run with a throw the test observes instead.
+// The host test (guest_allocator_test.cpp) compiles this text with renamed operators and a throwing finish_error.
 #include <new>
 namespace airbender {
 [[noreturn]] void finish_error() {
     throw std::bad_alloc{};
 }
-}  // namespace airbender
+}
 #else
 #include "include/airbender_csr.hpp"
 #endif
@@ -22,28 +20,19 @@ extern uint8_t _sheap[];
 extern uint8_t _eheap[];
 }
 
-// The bump state: the next free byte and the end of the heap. Pointers rather than an offset
-// from _sheap, so operator new forms neither bound nor their difference. Two variables, not a
-// struct: each access then relaxes to one gp-relative lw or sw (link.x's gp window), where a
-// struct's fields share an address formed by an extra addi. heap_end holds _eheap so that it
-// is one load instead of an auipc+addi. Nothing writes it, so LTO would make it read-only and
-// fold it back into the symbol; externally_visible keeps it from assuming that. constinit keeps
-// both out of .init_array: constructors that run before main allocate.
+// externally_visible keeps LTO from folding heap_end; constinit, as constructors before main allocate.
 #if defined(__GNUC__) && !defined(__clang__)
 #define GUEST_EXTERNALLY_VISIBLE __attribute__((externally_visible))
 #else
-#define GUEST_EXTERNALLY_VISIBLE  // clang rejects the attribute (-Wunknown-attributes) and has no such LTO folding
+#define GUEST_EXTERNALLY_VISIBLE
 #endif
 constinit uint8_t* heap_next = _sheap;
 GUEST_EXTERNALLY_VISIBLE constinit uint8_t* heap_end = _eheap;
 
-// _sheap and _eheap are ALIGN(2097152) in link.x, so heap_next rounded up to any alignment up to
-// that stays at or below heap_end: the room left, heap_end minus the rounded pointer, cannot wrap.
+// _sheap/_eheap are 2 MiB-aligned (link.x): rounding heap_next to <= 2 MiB stays <= heap_end.
 static constexpr size_t kMaxAlign = 2097152;
 
-// Null when the request does not fit. The throwing operator new must never return null
-// (libstdc++'s containers store through what it returns unchecked), so it and its array and
-// aligned forms end the run instead; the nothrow forms and the C functions return null.
+// Null when the request does not fit; throwing operator new forms must never return null, so they end the run.
 static void* bump_allocate(size_t size) {
     // Align to 8 bytes so that any naturally-aligned type can be stored.
     uintptr_t p = (reinterpret_cast<uintptr_t>(heap_next) + 7u) & ~uintptr_t{7u};
@@ -55,8 +44,7 @@ static void* bump_allocate(size_t size) {
     return reinterpret_cast<void*>(p);
 }
 
-// A request past the free heap, such as a prover-supplied size, cannot continue: the run ends at
-// finish_error and cannot be proven.
+// A request past the free heap cannot continue: end at finish_error so it cannot be proven.
 static void* bump_allocate_or_finish(void* ptr) {
     if (ptr == nullptr) {
         airbender::finish_error();
@@ -95,9 +83,7 @@ static void* bump_allocate_aligned(size_t size, size_t align) {
     return reinterpret_cast<void*>(p);
 }
 
-// Over-aligned types (alignas(32) buffers, ...) must not fall through to the libstdc++
-// versions: those call newlib's memalign, which keeps chunk headers inside the heap and
-// writes them next to blocks this allocator has not handed out yet.
+// Over-aligned types must not reach libstdc++'s versions: newlib's memalign puts chunk headers in unallocated heap.
 void* operator new(size_t size, std::align_val_t al) {
     return bump_allocate_or_finish(bump_allocate_aligned(size, static_cast<size_t>(al)));
 }
@@ -114,13 +100,7 @@ void* operator new[](size_t size, std::align_val_t al, const std::nothrow_t&) no
     return bump_allocate_aligned(size, static_cast<size_t>(al));
 }
 
-// We do not free memory. Every replaceable delete is defined here, the sized ones included:
-// C++14 sized deallocation sends each std::allocator free to operator delete(void*, size_t),
-// which libstdc++ would otherwise supply as a jump to operator delete(void*). Seeing the empty
-// definitions, LTO drops the calls, and with them the destructor loops that only walk nodes to
-// free them; destructors with other effects still run. Do not mark these noinline: the calls go
-// because the empty bodies are found to have no side effects, not by inlining (the libraries
-// are -fPIC and this file is not, which blocks inlining across them).
+// Every delete is empty so LTO drops the calls and free-only destructor loops; do not mark them noinline.
 void operator delete(void*) noexcept {}
 void operator delete[](void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
@@ -134,14 +114,7 @@ void operator delete[](void*, size_t, std::align_val_t) noexcept {}
 void operator delete(void*, std::align_val_t, const std::nothrow_t&) noexcept {}
 void operator delete[](void*, std::align_val_t, const std::nothrow_t&) noexcept {}
 
-// C allocation entry points routed to the same bump allocator.
-//
-// Without these, malloc/realloc (used by evmone::Memory and newlib
-// internals) come from newlib's arena, which grows from `end`
-// (~0x0443xxxx) via an unbounded libnosys _sbrk while operator new hands
-// out memory from _sheap (0x04600000). Once the arena grows past _sheap
-// the two allocators serve overlapping bytes and EVM memory writes
-// corrupt the witness blob. One allocator, one heap.
+// C allocation shares the bump allocator: newlib's arena would overlap _sheap and corrupt the witness blob.
 extern "C" {
 
 void* malloc(size_t size) {
@@ -149,7 +122,6 @@ void* malloc(size_t size) {
 }
 
 void free(void*) {
-    // Bump allocator: no reuse.
 }
 
 void* calloc(size_t nmemb, size_t size) {
@@ -157,12 +129,7 @@ void* calloc(size_t nmemb, size_t size) {
     if (__builtin_mul_overflow(nmemb, size, &total)) {
         return nullptr;
     }
-    // No zeroing: the heap never hands a byte out twice (free and delete are no-ops, realloc
-    // copies into a fresh block), nothing writes past heap_next (the stack sits below
-    // .heap, the mem builtins and the input reader write exactly their n bytes, and newlib's
-    // memalign, the one writer outside its block, is replaced above), and RAM nobody has
-    // written reads 0, as .bss already relies on. _calloc_r inherits this. Reusing memory
-    // would need the zeroing back. Not malloc + memset: GCC folds that into a calloc call.
+    // No zeroing: no byte is handed out twice and untouched RAM reads 0; reusing memory would need zeroing back.
     return bump_allocate(total);
 }
 
@@ -175,10 +142,7 @@ void* realloc(void* ptr, size_t size) {
     }
     void* q = malloc(size);
     if (q != nullptr) {
-        // Old block size is not tracked; over-copying reads garbage past the
-        // old block but stays inside the flat RAM heap (no MMU). Callers like
-        // evmone::Memory::grow zero the extension themselves. memmove because
-        // the tail of the source range can overlap the new block.
+        // Size untracked: over-copy stays in RAM, callers zero the rest; memmove, the tail may overlap.
         __builtin_memmove(q, ptr, size);
     }
     return q;
@@ -208,7 +172,6 @@ int posix_memalign(void** out, size_t align, size_t size) {
     return 0;
 }
 
-// newlib reentrant variants — keep libc internals on the same heap.
 struct _reent;
 void* _malloc_r(struct _reent*, size_t size) { return malloc(size); }
 void _free_r(struct _reent*, void* ptr) { free(ptr); }

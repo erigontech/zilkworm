@@ -62,9 +62,7 @@ z6m_prover_turbo: z6m_guest_turbo
 execute-block: z6m_prover
 	prover/target/release/z6m_prover execute --file-name prover/temp/blocks/23519000/unifiedBlockAndStateRlp23519000.bin
 
-# Pinned EEST fixture releases (test-fixtures.json, erigon-style manifest):
-# `make test-fixtures` downloads, sha256-verifies and extracts every entry
-# into test-fixtures-cache/<key>/. Re-runs are no-ops while the pin matches.
+# Pinned EEST fixtures (test-fixtures.json): downloaded, sha256-verified, extracted to test-fixtures-cache/<key>/.
 FIXTURES_CACHE := $(CURDIR)/test-fixtures-cache
 # Manifest key selecting which pinned corpus to run.
 EEST_KEY ?= eest_stable
@@ -93,23 +91,15 @@ tests: z6m_prover eest-mfbd-build
 
 EEST_CONVERT_BIN := build/zilk_core/dev/cli/eest_to_flat_bundle
 
-# Build the C++ eest_to_flat_bundle binary (emit / bulk-convert). Phony — cmake handles freshness.
 z6m_eest_convert:
 	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S .
 	cmake --build build --target eest_to_flat_bundle -j$$(nproc)
 
-# MFBD fixtures tree, produced by the C++ `eest_to_flat_bundle bulk-convert`.
-# Content-addressed by the pinned tarball sha (test-fixtures.json) so
-# different pins coexist in test-fixtures-cache/mfbd-<sha>/. CI overrides
-# EEST_MFBD_DIR with a cache-keyed path.
+# MFBD corpus, keyed by the pinned tarball sha; CI overrides EEST_MFBD_DIR.
 EEST_SHA := $(shell python3 -c "import json;print(json.load(open('test-fixtures.json'))['$(EEST_KEY)']['sha256'][:12])" 2>/dev/null)
 EEST_MFBD_DIR ?= $(FIXTURES_CACHE)/mfbd-$(EEST_SHA)
 
-# Regenerate the MFBD corpus whenever it is missing OR the converter binary
-# changed. The binary hash covers every transitive source that affects the
-# output bytes (eest_to_flat_bundle.cpp, direct_state_builder.cpp, flat_bundle.*,
-# account.hpp, ...); ninja only relinks it when those change, so the hash is
-# stable across no-op runs and self-heals a stale corpus automatically.
+# Regenerates the corpus when missing or when the converter binary's hash changed.
 eest-mfbd-build: z6m_eest_convert
 	@conv_sha=$$(sha256sum "$(EEST_CONVERT_BIN)" | cut -c1-16); \
 	if [ -f "$(EEST_MFBD_DIR)/manifest.json" ] && \
@@ -152,25 +142,14 @@ tests-json: z6m_prover
 		--test-dir $(EEST_JSON_DIR)/$(TESTS_SUBDIR) \
 		--execution-log-dir $(TESTS_LOG_DIR)/$(TESTS_SUBDIR)
 
-# tests-zkevm StatelessInputBytes fixtures. These are ordinary blockchain_test
-# JSON cases except that each block carries a `statelessInputBytes` hex field,
-# the SSZ stateless input the HashState backend consumes. Sourced from the
-# ethereum/execution-specs release `tests-zkevm@$(ZKEVM_RELEASE_VERSION)` (asset
-# fixtures_zkevm.tar.gz, ~595 MiB), the release ere-guests tests against. The
-# cache directory carries the version, so a bump never runs on a stale corpus.
+# tests-zkevm fixtures: blockchain_test JSON whose blocks carry a `statelessInputBytes` field; the cache dir carries the version.
 ZKEVM_RELEASE_VERSION := v21.0.7
 ZKEVM_RELEASE_TAG  := tests-zkevm@$(ZKEVM_RELEASE_VERSION)
 ZKEVM_RELEASE_REPO := ethereum/execution-specs
 ZKEVM_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_stateless-$(ZKEVM_RELEASE_VERSION)/fixtures
 ZKEVM_JSON_DIR ?= $(ZKEVM_FIXTURES_DIR)/blockchain_tests
 
-# Download + extract the tests-zkevm fixtures. Mirrors eest-mfbd-build's
-# fixtures fetch (staged .tmp dir, `fixtures/blockchain_tests` allowlist, skip
-# when already present) but via `gh release download` instead of the
-# sha256-pinned test-fixtures.json manifest: the 524 MiB tarball has not been
-# fetched/pinned yet, and adding an unverifiable entry to test-fixtures.json
-# would break `make test-fixtures`, which verifies every manifest key. Once the
-# tarball is pinned this can move to the manifest idiom like eest_stable.
+# Fetched with `gh release download`, not test-fixtures.json: `make test-fixtures` verifies every manifest key's sha256.
 zkevm-fixtures:
 	@dst="$(FIXTURES_CACHE)/zkevm_stateless-$(ZKEVM_RELEASE_VERSION)"; \
 	tarball="$(FIXTURES_CACHE)/fixtures_zkevm-$(ZKEVM_RELEASE_VERSION).tar.gz"; \
@@ -188,8 +167,7 @@ zkevm-fixtures:
 	    echo "  zkevm fixtures ready at $$dst"; \
 	fi
 
-# Run the tests-zkevm StatelessInputBytes corpus through HashState (flag-on build in build/zkevm).
-# See docs/hashstate.md, "Build flag and test targets".
+# Flag-on (Z6M_HASH_STATE) build in build/zkevm.
 eest-zkevm-tests: zkevm-fixtures
 	cmake -B build/zkevm -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
 		-DZ6M_HASH_STATE=ON \
@@ -197,13 +175,9 @@ eest-zkevm-tests: zkevm-fixtures
 	cmake --build build/zkevm
 	ctest --test-dir build/zkevm --parallel
 
-# SP1 benchmark corpus: flat MFBD bundles converted from the raw mainnet
-# witness blocks under $(BENCH_SRC_DIR)/<N>/unifiedBlockAndStateRlp<N>.bin.
 BENCH_CORPUS_DIR ?= temp/200_benchmark_blocks_mfbd_v2
 BENCH_SRC_DIR    ?= temp/200_benchmark_blocks
 
-# Rebuild the benchmark corpus by converting each raw witness block to MFBD
-# with the C++ legacy_to_flat_bundle CLI.
 sp1-benchmark-corpus:
 	cmake -DCMAKE_BUILD_TYPE=Release -B build -G Ninja -S .
 	cmake --build build --target legacy_to_flat_bundle -j$$(nproc)
@@ -217,11 +191,9 @@ sp1-benchmark-corpus:
 	done
 	@echo "  SP1 benchmark corpus ready in $(BENCH_CORPUS_DIR)"
 
-# Run the SP1 benchmark. Regenerate the corpus and rebuild the prover first.
 sp1-benchmark: z6m_prover sp1-benchmark-corpus
 	python3 tools/scripts/sp1_benchmark.py --dir $(BENCH_CORPUS_DIR)
 
-# Stage release artifacts into ./temp/
 RELEASE_DIR := temp
 # Recursive: $(ERE_VK) is defined below.
 RELEASE_BINS = \
@@ -247,15 +219,6 @@ release-artifacts:
 	@echo "--- $(RELEASE_DIR)/SHA256SUMS.txt ---"
 	@cat $(RELEASE_DIR)/SHA256SUMS.txt
 
-# =============================================================================
-# HashState/slib SP1 cycle benchmark (tests-zkevm-benchmark@v0.8.2, Amsterdam)
-# =============================================================================
-# See docs/hashstate.md, "SP1 cycle benchmark".
-
-# The curated compute benchmark corpus: single heavy Amsterdam blocks packed to
-# a fixed gas budget, one tarball per budget (30M here). Same on-wire schema
-# (0x1501 || SSZ) as the eest-zkevm-tests corpus, only the content differs.
-# Sourced from the ethereum/execution-specs release tests-zkevm-benchmark@v21.0.5.
 ZKEVM_BENCH_RELEASE_VERSION := v21.0.5
 ZKEVM_BENCH_RELEASE_TAG  := tests-zkevm-benchmark@$(ZKEVM_BENCH_RELEASE_VERSION)
 ZKEVM_BENCH_ASSET        := fixtures_zkevm-benchmark_0030M.tar.gz
@@ -263,10 +226,6 @@ ZKEVM_BENCH_RELEASE_REPO := ethereum/execution-specs
 ZKEVM_BENCH_FIXTURES_DIR := $(FIXTURES_CACHE)/zkevm_benchmark-$(ZKEVM_BENCH_RELEASE_VERSION)/fixtures
 ZKEVM_BENCH_JSON_DIR ?= $(ZKEVM_BENCH_FIXTURES_DIR)/blockchain_tests
 
-# Download + extract the benchmark fixtures. Idempotent: skips when already
-# present. Same staged-.tmp / blockchain_tests-allowlist / gh-release-download
-# shape as zkevm-fixtures; the tarball is not yet pinned in test-fixtures.json,
-# so it uses `gh release download` rather than the sha256-verified manifest.
 zkevm-benchmark-fixtures:
 	@dst="$(FIXTURES_CACHE)/zkevm_benchmark-$(ZKEVM_BENCH_RELEASE_VERSION)"; \
 	tarball="$(FIXTURES_CACHE)/$(ZKEVM_BENCH_ASSET)"; \
@@ -284,9 +243,7 @@ zkevm-benchmark-fixtures:
 	    echo "  zkevm-benchmark fixtures ready at $$dst"; \
 	fi
 
-# The flag-ON guest is built in a DEDICATED tree ($(GUEST_SLIB_BUILD)) so the
-# normal OFF build cache is never contaminated with Z6M_HASH_STATE=ON. (A fresh
-# tree also re-applies the blst SP1 patch via its PATCH_COMMAND.)
+# Dedicated tree: keeps Z6M_HASH_STATE=ON out of the default build cache.
 GUEST_SLIB_BUILD := prover/guest_hypercube/build-slib
 
 z6m_guest_slib:
@@ -302,19 +259,12 @@ z6m_prover_slib: z6m_guest_slib
 	cd prover && Z6M_GUEST_ELF=$(CURDIR)/$(GUEST_SLIB_BUILD)/z6m_guest.elf \
 		cargo build --release --manifest-path prover_hypercube/Cargo.toml
 
-# slib benchmark run knobs. (Comments kept on their own lines: a trailing inline
-# comment would leave whitespace in the value and corrupt the paths.)
 SLIB_BENCH_WORK  ?= temp/slib_benchmark
-# one-case-per-file JSONs:
 SLIB_BENCH_CASES ?= $(SLIB_BENCH_WORK)/cases
-# cycle_stats.py-format log:
 SLIB_BENCH_LOG   ?= $(SLIB_BENCH_WORK)/execution.log
-# per-block (per-case) cycles:
 SLIB_BENCH_CSV   ?= $(SLIB_BENCH_WORK)/per_case.csv
 SLIB_PROVER      := prover/target/release/z6m_prover
 
-# Run the HashState/slib guest over every benchmark case, one prover run per case, and collect cycles.
-# See docs/hashstate.md, "SP1 cycle benchmark".
 slib-benchmark: zkevm-benchmark-fixtures z6m_prover_slib
 	@echo "  [slib-benchmark] splitting fixtures into one-case-per-file ..."
 	@rm -rf "$(SLIB_BENCH_CASES)"; mkdir -p "$(SLIB_BENCH_CASES)" "$(SLIB_BENCH_WORK)"
@@ -343,15 +293,11 @@ slib-benchmark: zkevm-benchmark-fixtures z6m_prover_slib
 		--output "$(SLIB_BENCH_WORK)/cycle_stats.png" --no-display \
 	    || echo "  (cycle_stats.py needs matplotlib+scipy; raw per-case numbers are in $(SLIB_BENCH_CSV))"
 
-# ERE benchmark integration: build the SP1 guest ELF + VK as expected by ere-hosts.
 ERE_BIN_DIR ?= $(CURDIR)/build/ere-bin
 ERE_GUEST_NAME ?= stateless-validator-zilkworm-sp1
 ERE_ELF := $(ERE_BIN_DIR)/$(ERE_GUEST_NAME).elf
 ERE_VK := $(ERE_BIN_DIR)/$(ERE_GUEST_NAME).vk
-# The SP1 SDK version in the published guest's name (guest handbook:
-# stateless-validator-<guest>-<zkVM>-<zkVM version>.{elf,vk}): the sp1-sdk tag derive_vk builds
-# against, which computes the published VK and must be the one ere resolves (ere-bin-link
-# checks that against the workload at benchmark time).
+# Must equal the SP1 version ere resolves (ere-bin-link checks).
 ERE_SP1_SDK_VERSION := $(shell sed -nE 's/^sp1-sdk = \{ git = "https:\/\/github\.com\/succinctlabs\/sp1", tag = "([^"]+)".*/\1/p' prover/stateless_validator/Cargo.toml)
 $(if $(ERE_SP1_SDK_VERSION),,$(error cannot read the sp1-sdk tag from prover/stateless_validator/Cargo.toml))
 DERIVE_VK_BIN := prover/target/release/derive_vk
@@ -362,8 +308,7 @@ derive_vk:
 z6m_guest_vk: z6m_guest derive_vk
 	SP1_PROVER=mock $(DERIVE_VK_BIN) prover/guest_hypercube/build/z6m_guest.elf prover/guest_hypercube/build/z6m_guest.vk
 
-# The ERE guest is the HashState build: ere-hosts feeds it the fixtures' statelessInputBytes
-# unchanged. The DirectState guest (MFBD input) is z6m_guest; z6m_guest_vk derives its VK.
+# The ERE guest is the HashState build; the DirectState (MFBD) guest is z6m_guest.
 ere-bin: z6m_guest_slib derive_vk
 	@mkdir -p $(ERE_BIN_DIR)
 	cp $(GUEST_SLIB_BUILD)/z6m_guest.elf $(ERE_ELF)
@@ -371,23 +316,16 @@ ere-bin: z6m_guest_slib derive_vk
 	@echo "ere-bin staged at $(ERE_BIN_DIR):"
 	@ls -la $(ERE_BIN_DIR)
 
-# ERE benchmark integration: validation/comparison.
 ERE_WORKLOAD_REPO   ?= https://github.com/eth-act/zkevm-benchmark-workload.git
 ERE_WORKLOAD_BRANCH ?= master
 ERE_WORKLOAD_DIR    ?= $(CURDIR)/temp/zkevm-benchmark-workload
 ERE_FIXTURE_FILTER  ?= 10M # scopes generation for tractable local runs. default: 10M-gas fixtures, i.e. the 1077-fixture subset
 ERE_TIMEOUT         ?= 60m
-# Registry hosting ere's prebuilt zkVM images; unset => ere builds them from source.
 ERE_IMAGE_REGISTRY  ?= ghcr.io/eth-act/ere
-# Optional local guest ELF dir; empty => download the published guest from the registry.
 ERE_BIN_PATH        ?=
-# Temporary while the workload [patch]es ere-guests: its build.rs cannot derive the guest download
-# source from a path dependency, so the reth leg of ere-compare needs the artifact base URL. Taken
-# from the registry of the ere-guests the workload actually resolves (dirname of the reth sp1 elf_url).
+# Needed while the workload [patch]es ere-guests (build.rs cannot derive the URL from a path dependency).
 ERE_RETH_ARTIFACT_URL ?= $(shell python3 $(CURDIR)/tools/ere_workload.py "$(ERE_WORKLOAD_DIR)" reth-artifact-url 2>/dev/null)
-# Fixture folder passed to ere-hosts (--input-folder); default: cached Sepolia batch.
 ERE_INPUT_FOLDER    ?= $(FIXTURES_CACHE)/ere-sepolia/eest_batch
-# Opt-in: set non-empty to (re)generate EEST fixtures via witness-generator-cli first.
 ERE_GEN_FIXTURES    ?=
 ERE_FIXTURE_ENV     := EF_TEST_TRIE=default RUST_MIN_STACK=16388608 RUST_LOG=info
 ERE_RUN_ENV         := ERE_IMAGE_REGISTRY=$(ERE_IMAGE_REGISTRY) RUST_LOG=info
@@ -405,8 +343,7 @@ ere-fixtures: ere-workload-checkout
 	    cargo run -p witness-generator-cli --release -- \
 	        tests $(if $(ERE_FIXTURE_FILTER),--include $(ERE_FIXTURE_FILTER))
 
-# ere-hosts loads <bin-path>/$(ERE_GUEST_NAME)-<SP1 SDK version>.{elf,vk}, the version being the one
-# of the ere the workload resolves; link the unversioned ere-bin outputs under that name.
+# ere-hosts loads <bin-path>/$(ERE_GUEST_NAME)-<SP1 SDK version>.{elf,vk}.
 ere-bin-link:
 	v=$$(python3 tools/ere_workload.py "$(ERE_WORKLOAD_DIR)" sp1-sdk-version) && \
 	if [ "$$v" != "$(ERE_SP1_SDK_VERSION)" ]; then \

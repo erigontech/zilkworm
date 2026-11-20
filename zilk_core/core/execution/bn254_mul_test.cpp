@@ -1,13 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// ECMUL's scalar multiplication against the plain double-and-add of ecc::mul(). The native build
-// sets -DEVMONE_RV32_DISPATCH_TEST, which compiles the guest's bn254::mul() on the host: GLV
-// halves, width-5 NAFs, a table of odd multiples on a common z and in-place point operations. The
-// scalars that matter are the ones whose halves sit on the lattice: c = r, 3r and 5r make the last
-// addition cancel the sum, 2r and 4r leave no digits at all, and the corners of the decomposition
-// give the longest halves. The reference does not depend on the build, so the test holds without
-// the macro too.
+// ECMUL's scalar multiplication against the plain double-and-add of ecc::mul().
 
 #include <cstdint>
 #include <random>
@@ -37,8 +30,6 @@ std::vector<uint256> scalars(std::mt19937_64& rng) {
                              (uint256{1} << 128) - 1, uint256{1} << 127, Curve::LAMBDA,
                              n - Curve::LAMBDA, Curve::X1, Curve::X2, Curve::Y2, Curve::MINUS_Y1,
                              Curve::FIELD_PRIME, Curve::FIELD_PRIME - 1};
-    // The multiples of the group order up to 5r, the most a 256-bit scalar holds, and their
-    // neighbours.
     for (uint64_t m = 1; m <= 5; ++m) {
         for (uint64_t d = 0; d <= 8; ++d) {
             out.push_back(m * n + d);
@@ -64,7 +55,6 @@ TEST_CASE("bn254 mul equals double-and-add") {
         const auto& p = points[rng() % points.size()];
         REQUIRE(bn254::mul(p, c) == reference_mul(p, c));
     }
-    // A cancelled sum ends at the point at infinity, whatever the point.
     for (const auto& p : points) {
         for (uint64_t m = 1; m <= 5; ++m) REQUIRE(bn254::mul(p, m * Curve::ORDER) == AffinePoint{});
     }

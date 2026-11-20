@@ -16,8 +16,6 @@
 
 namespace silkworm::trie {
 
-// See "Specification: Compact encoding of hex sequence with optional terminator"
-// at https://eth.wiki/fundamentals/patricia-tree
 static Bytes encode_path(ByteView nibbles, bool terminating) {
     Bytes res(nibbles.size() / 2 + 1, '\0');
     const bool odd{static_cast<bool>((nibbles.size() & 1u) != 0)};
@@ -74,7 +72,6 @@ static Bytes node_ref(ByteView rlp) {
 }
 
 void HashBuilder::add_leaf(Bytes key, ByteView value) {
-    // SILKWORM_ASSERT(key > key_);
     if (!key_.empty()) {
         gen_struct_step(key_, key);
     }
@@ -83,11 +80,9 @@ void HashBuilder::add_leaf(Bytes key, ByteView value) {
 }
 
 void HashBuilder::add_branch_node(Bytes nibbled_key, const evmc::bytes32& hash, bool is_in_db_trie) {
-    // SILKWORM_ASSERT(nibbled_key > key_ || (key_.empty() && nibbled_key.empty()));
     if (!key_.empty()) {
         gen_struct_step(key_, nibbled_key);
     } else if (nibbled_key.empty()) {
-        // known root hash
         stack_.push_back(wrap_hash(hash.bytes));
     }
     key_ = std::move(nibbled_key);
@@ -124,18 +119,14 @@ evmc::bytes32 HashBuilder::root_hash(bool auto_finalize) {
     return res;
 }
 
-// https://github.com/erigontech/erigon/blob/main/docs/programmers_guide/guide.md#generating-the-structural-information-from-the-sequence-of-keys
 void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
     for (bool build_extensions{false};; build_extensions = true) {
         const bool preceding_exists{!groups_.empty()};
 
-        // Calculate the prefix of the smallest prefix group containing current
         const size_t preceding_len{groups_.empty() ? 0 : groups_.size() - 1};
         const size_t common_prefix_len{prefix_length(succeeding, current)};
         const size_t len{std::max(preceding_len, common_prefix_len)};
-        // SILKWORM_ASSERT(len < current.size());
 
-        // Add the digit immediately following the max common prefix
         const uint8_t extra_digit{current[len]};
         if (groups_.size() <= len) {
             groups_.resize(len + 1);
@@ -164,26 +155,22 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
                 stack_.push_back(wrap_hash(std::get<evmc::bytes32>(value_).bytes));
                 if (node_collector) {
                     if (is_in_db_trie_) {
-                        // keep track of existing records in DB
                         tree_masks_[current.size() - 1] |= 1u << current.back();
                     }
-                    // register myself in parent's bitmaps
                     hash_masks_[current.size() - 1] |= 1u << current.back();
                 }
                 build_extensions = true;
             }
         }
 
-        if (build_extensions && !short_node_key.empty()) {  // extension node
+        if (build_extensions && !short_node_key.empty()) {
             if (node_collector && from > 0) {
-                // See node/silkworm/trie/intermediate_hashes.hpp
                 const auto flag{static_cast<uint16_t>(1u << current[from - 1])};
 
                 // DB trie can't use hash of an extension node
                 hash_masks_[from - 1] &= ~flag;
 
                 if (tree_masks_[current.size() - 1]) {
-                    // Propagate tree_masks flag along the extension node
                     tree_masks_[from - 1] |= flag;
                 }
             }
@@ -198,16 +185,13 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
             tree_masks_.resize(from);
         }
 
-        // Check for the optional part
         if (preceding_len <= common_prefix_len && !succeeding.empty()) {
             return;
         }
 
-        // Close the immediately encompassing prefix group, if needed
-        if (!succeeding.empty() || preceding_exists) {  // branch node
+        if (!succeeding.empty() || preceding_exists) {
             std::vector<Bytes> child_hashes{branch_ref(groups_[len], hash_masks_[len])};
 
-            // See node/silkworm/trie/intermediate_hashes.hpp
             if (node_collector) {
                 if (len > 0) {
                     hash_masks_[len - 1] |= 1u << current[len - 1];
@@ -216,12 +200,11 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
                 const bool store_in_db_trie{tree_masks_[len] || hash_masks_[len]};
                 if (store_in_db_trie) {
                     if (len > 0) {
-                        tree_masks_[len - 1] |= 1u << current[len - 1];  // register myself in parent bitmap
+                        tree_masks_[len - 1] |= 1u << current[len - 1];
                     }
 
                     std::vector<evmc::bytes32> hashes(child_hashes.size());
                     for (size_t i{0}; i < child_hashes.size(); ++i) {
-                        // SILKWORM_ASSERT(child_hashes[i].size() == kHashLength + 1);
                         std::memcpy(hashes[i].bytes, &child_hashes[i][1], kHashLength);
                     }
                     Node node{groups_[len], tree_masks_[len], hash_masks_[len], hashes};
@@ -242,7 +225,6 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
             return;
         }
 
-        // Update current key for the build_extensions iteration
         current = current.substr(0, preceding_len);
         while (!groups_.empty() && groups_.back() == 0) {
             groups_.pop_back();
@@ -250,9 +232,7 @@ void HashBuilder::gen_struct_step(ByteView current, const ByteView succeeding) {
     }
 }
 
-// Takes children from the stack and replaces them with branch node ref.
 std::vector<Bytes> HashBuilder::branch_ref(uint16_t state_mask, uint16_t hash_mask) {
-    // SILKWORM_ASSERT(is_subset(hash_mask, state_mask));
     std::vector<Bytes> child_hashes;
     child_hashes.reserve(static_cast<size_t>(std::popcount(hash_mask)));
 

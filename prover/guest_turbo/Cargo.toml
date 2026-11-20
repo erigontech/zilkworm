@@ -8,7 +8,7 @@ edition = "2021"
 
 
 [dependencies]
-cxx = "1.0.160"                 # runtime bridge
+cxx = "1.0.160"
 
 [dependencies.libm]
 version = "0.2.15"
@@ -28,6 +28,6 @@ package = "sp1_bls12_381"
 
 [build-dependencies]
 cmake = "0.1.54"
-cxx-build = "1.0.160"           # build-time codegen & C++ compilation
+cxx-build = "1.0.160"
 cc = "1.2.29"
 pkg-config = "0.3"

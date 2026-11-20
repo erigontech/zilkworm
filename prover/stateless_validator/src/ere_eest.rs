@@ -1,19 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! EEST canonical stateless-input adapter.
-//!
-//! Decodes `statelessInputBytes` through the canonical [`stateless_validator_common`] container
-//! and derives the plaintext `keys` (address/slot preimages) the MFBD encoder needs from the EIP-7928
-//! Block Access List (BAL).
-//!
-//! Wire format (Amsterdam, per EIP-8025 / execution-specs `projects/zkevm`):
-//!   `[schema_id: 2B big-endian = fork_index(0x15) << 8 | revision(0x01)] || SSZ(StatelessInput)`
-//!
-//! The schema-prefix parse and SSZ decode are handled by [`StatelessInput::from_schema_prefixed_ssz`];
-//! this module only adds the BAL → `keys` derivation, which statelessInputBytes does not carry directly.
-//! The BAL records every account/slot the block touched (reads and writes, per EIP-7928) which is exactly
-//! the preimage set the encoder resolves against the witness trie leaves.
+//! Decodes EEST `statelessInputBytes` and derives the MFBD `keys` preimages from the EIP-7928 BAL.
 
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_rlp::{Decodable, RlpDecodable};
@@ -21,22 +9,14 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use stateless_validator_common::guest::input::{ProtocolFork, StatelessInput};
 
-// ---------- Decode entry point ----------
-
-/// Decode `statelessInputBytes` into `(fork, StatelessInput)`. The 2-byte
-/// schema-id prefix (fork index ‖ revision) and the SSZ body are parsed by the
-/// canonical container; the active fork is carried in the prefix.
+/// The active fork is carried in the 2-byte schema-id prefix.
 pub fn decode_stateless_input(bytes: &[u8]) -> Result<(ProtocolFork, StatelessInput)> {
     StatelessInput::from_schema_prefixed_ssz(bytes)
         .map_err(|e| anyhow!("StatelessInput decode failed: {e:?}"))
 }
 
-// ---------- Block Access List (EIP-7928) — RLP payload ----------
-//
-// The BAL is stored inside `ExecutionPayloadV4.block_access_list` as opaque bytes; the encoding is RLP.
-// Only fields needed for key derivation carry strict types; leaf change data is decoded but unused.
+// The BAL is opaque RLP in `ExecutionPayloadV4.block_access_list`; only key-derivation fields are strictly typed.
 
-/// EIP-7928 `StorageChange` entry — one per (tx-index, slot) write.
 #[derive(Debug, Clone, RlpDecodable)]
 pub struct BalStorageChange {
     pub block_access_index: u64,
@@ -44,45 +24,36 @@ pub struct BalStorageChange {
     pub new_value: U256,
 }
 
-/// EIP-7928 `SlotChanges` — one per written storage slot.
 #[derive(Debug, Clone, RlpDecodable)]
 pub struct BalSlotChanges {
     /// 32-byte slot preimage.
     pub slot: U256,
-    /// Ordered per-tx-index writes.
     pub changes: Vec<BalStorageChange>,
 }
 
-/// EIP-7928 `BalanceChange`.
 #[derive(Debug, Clone, RlpDecodable)]
 pub struct BalBalanceChange {
     pub block_access_index: u64,
     pub new_balance: U256,
 }
 
-/// EIP-7928 `NonceChange`.
 #[derive(Debug, Clone, RlpDecodable)]
 pub struct BalNonceChange {
     pub block_access_index: u64,
     pub new_nonce: u64,
 }
 
-/// EIP-7928 `CodeChange`.
 #[derive(Debug, Clone, RlpDecodable)]
 pub struct BalCodeChange {
     pub block_access_index: u64,
     pub new_code: Bytes,
 }
 
-/// EIP-7928 `AccountChanges` entry — one per touched account. Accounts read
-/// but not modified appear here with empty change lists (EIP-7928: "Addresses
-/// with no state changes MUST still be present with empty change lists"), so
-/// their address preimage is always available for the encoder.
+/// Accounts read but not modified appear with empty change lists, so their address preimage is always present.
 #[derive(Debug, Clone, RlpDecodable)]
 pub struct BalAccountChanges {
     /// 20-byte address preimage.
     pub address: Address,
-    /// Per-slot writes.
     pub storage_changes: Vec<BalSlotChanges>,
     /// Slots read but not written (32-byte slot preimages).
     pub storage_reads: Vec<U256>,
@@ -91,7 +62,6 @@ pub struct BalAccountChanges {
     pub code_changes: Vec<BalCodeChange>,
 }
 
-/// Decode the raw BAL RLP blob into the strongly-typed structure.
 pub fn decode_bal(bal_rlp: &[u8]) -> Result<Vec<BalAccountChanges>> {
     let mut slice = bal_rlp;
     let list: Vec<BalAccountChanges> = <Vec<BalAccountChanges> as Decodable>::decode(&mut slice)
@@ -102,15 +72,10 @@ pub fn decode_bal(bal_rlp: &[u8]) -> Result<Vec<BalAccountChanges>> {
     Ok(list)
 }
 
-/// Derive the `witness.keys` preimage list from a decoded BAL. Contains every
-/// 20-byte address the block touched (read or written) and every 32-byte slot
-/// (both `storage_changes` and `storage_reads`). This is exactly what the MFBD
-/// encoder ([`crate::mfbd::build_mfbd_from_parts`]) consumes via `witness_keys`
-/// to reconstruct trie-leaf preimages.
+/// Every 20-byte address and 32-byte slot (changed or read) the block touched, as `witness.keys`.
 pub fn keys_from_bal(bal: &[BalAccountChanges]) -> Vec<Bytes> {
     let mut keys: Vec<Bytes> = Vec::with_capacity(bal.len() * 4);
     for ac in bal {
-        // 20-byte address preimage.
         keys.push(Bytes::copy_from_slice(ac.address.as_slice()));
         // 32-byte slot preimages: writes then reads.
         for sc in &ac.storage_changes {
@@ -123,7 +88,6 @@ pub fn keys_from_bal(bal: &[BalAccountChanges]) -> Vec<Bytes> {
     keys
 }
 
-/// Convenience: end-to-end BAL → keys given the raw payload bytes.
 pub fn keys_from_bal_bytes(bal_rlp: &[u8]) -> Result<Vec<Bytes>> {
     let bal = decode_bal(bal_rlp)?;
     Ok(keys_from_bal(&bal))
@@ -131,9 +95,7 @@ pub fn keys_from_bal_bytes(bal_rlp: &[u8]) -> Result<Vec<Bytes>> {
 
 #[cfg(all(test, feature = "parity-check"))]
 mod smoke {
-    //! Ad-hoc smoke test against a real canonical EEST fixture. Set
-    //! `Z6M_SIB_FIXTURE=<blockchain_tests/*.json>`; a no-op when unset.
-    //! Run: `cargo test --features parity-check from_ere_eest_smoke -- --nocapture`.
+    //! Smoke test on a canonical EEST fixture: set `Z6M_SIB_FIXTURE=<blockchain_tests/*.json>`; no-op when unset.
 
     #[test]
     fn from_ere_eest_smoke() {
@@ -168,10 +130,7 @@ mod smoke {
         );
     }
 
-    /// Per-block tx-gas-limit census over a folder of fixtures. Set
-    /// `Z6M_SIB_DIR=<dir of *.json>`; prints block#, tx count, max tx gas_limit
-    /// and block gas_used — to check EIP-7825 (2**24 = 16777216 per-tx cap).
-    /// Run: `cargo test --features parity-check tx_gas_limits -- --nocapture`.
+    /// With `Z6M_SIB_DIR=<dir>`: prints block#, tx count, max tx gas_limit, gas_used (EIP-7825 cap 2**24).
     #[test]
     fn tx_gas_limits() {
         use alloy_consensus::{Transaction, TxEnvelope};
@@ -188,7 +147,7 @@ mod smoke {
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
             .collect();
         files.sort();
-        const CAP: u64 = 0x1000000; // EIP-7825 2**24
+        const CAP: u64 = 0x1000000;
         for path in files {
             let raw = std::fs::read(&path).expect("read fixture");
             let json: serde_json::Value = serde_json::from_slice(&raw).expect("parse");

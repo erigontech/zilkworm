@@ -9,15 +9,12 @@
 
 namespace airbender {
 
-// --- CSR addresses ---
 constexpr uint32_t CSR_NON_DETERMINISM = 0x7C0;
 constexpr uint32_t CSR_BLAKE2S = 0x7C7;
 constexpr uint32_t CSR_BIGINT = 0x7CA;
 constexpr uint32_t CSR_KECCAK_THETA_RHO = 0x7CC;
 constexpr uint32_t CSR_KECCAK_COLUMN_PARITY = 0x7CD;
 constexpr uint32_t CSR_KECCAK_CHI5 = 0x7CE;
-
-// --- Basic CSR read/write ---
 
 inline void csr_write_word(uint32_t value) {
     asm volatile("csrrw x0, 0x7C0, %0" :: "r"(value) : "memory");
@@ -28,8 +25,6 @@ inline uint32_t csr_read_word() {
     asm volatile("csrrw %0, 0x7C0, x0" : "=r"(out) :: "memory");
     return out;
 }
-
-// --- UART output (QuasiUART protocol) ---
 
 namespace detail {
 
@@ -66,9 +61,7 @@ inline void uart_write_str(const char* data, size_t len) {
     }
 }
 
-}  // namespace detail
-
-// --- Blake2s ---
+}
 
 inline void blake_trigger_reduced_rounds(uint32_t* state, const uint32_t* input, uint32_t mask) {
     register uintptr_t x10 asm("x10") = reinterpret_cast<uintptr_t>(state);
@@ -99,8 +92,6 @@ inline void blake_trigger_full_rounds(uint32_t* state, const uint32_t* input, ui
     (void)x12;
 }
 
-// --- BigInt U256 ---
-
 [[gnu::always_inline]] inline uint32_t bigint_trigger(
     uint32_t* mut_ptr, const uint32_t* immut_ptr, uint32_t mask) {
     register uintptr_t x10 asm("x10") = reinterpret_cast<uintptr_t>(mut_ptr);
@@ -113,21 +104,16 @@ inline void blake_trigger_full_rounds(uint32_t* state, const uint32_t* input, ui
     return x12;
 }
 
-// Keccak-f[1600] (CSRs 0x7CD, 0x7CC, 0x7CE) is delegated from evmone's keccak.c, as 361 contiguous
-// csrrw.
-
-// --- Program termination ---
+// Keccak-f[1600] (CSRs 0x7CD, 0x7CC, 0x7CE) is delegated from evmone's keccak.c.
 
 [[noreturn]] inline void finish_error() {
     // CSR 0xC00 (cycle) is not supported by the GPU tracer — just loop forever
-    // asm volatile("csrrw x0, cycle, x0" ::: "memory");
     asm volatile("1: j 1b\n");
     __builtin_unreachable();
 }
 
 [[gnu::noinline]] [[noreturn]] inline void finish_success_extended(const uint32_t data[16]) {
-    // Must use x26 (s10) as base register to match the EXIT_SEQUENCE pattern
-    // expected by zksync-airbender's find_binary_exit_point.
+    // The base register must be x26 (s10) to match the EXIT_SEQUENCE pattern find_binary_exit_point expects.
     register const uint32_t* ptr asm("x26") = data;
     asm volatile(
         "lw x10, 0(x26)\n"  "lw x11, 4(x26)\n"
@@ -152,9 +138,8 @@ inline void blake_trigger_full_rounds(uint32_t* state, const uint32_t* input, ui
     finish_success_extended(extended);
 }
 
-}  // namespace airbender
+}
 
-// Global sys_print / sys_println — matches zilk_core/airbender_print.hpp interface.
 inline void sys_print(const char* msg) {
     airbender::detail::uart_write_str(msg, airbender::detail::strlen_(msg));
 }

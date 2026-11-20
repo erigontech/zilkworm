@@ -15,51 +15,30 @@
 
 namespace silkworm::trie {
 
-// Erigon HashCollector2
 using NodeCollector = std::function<void(ByteView nibbled_key, const Node&)>;
 
-// Calculates root hash of a Modified Merkle Patricia Trie.
-// See Appendix D "Modified Merkle Patricia Trie" of the Yellow Paper
-// and https://eth.wiki/fundamentals/patricia-tree
 class HashBuilder {
   public:
     HashBuilder() = default;
 
-    // Not copyable nor movable
     HashBuilder(const HashBuilder&) = delete;
     HashBuilder& operator=(const HashBuilder&) = delete;
 
-    //! \details Entries (leaves, nodes) must be added in the strictly increasing lexicographic order (by key).
-    //! Consequently, duplicate keys are not allowed.
-    //! The key should be unpacked, i.e. have one nibble per byte.
-    //! In addition, a leaf key may not be a prefix of another leaf key
-    //! (e.g. leaves with keys 0a0b & 0a0b0005 may not coexist).
-    //! Value is borrowed until the next add_*/root_hash.
+    // Keys strictly increasing and unpacked; a leaf key may not be a prefix of another leaf key.
     void add_leaf(Bytes nibbled_key, ByteView value);
 
-    //! \details Entries (leaves, nodes) must be added in the strictly increasing lexicographic order (by key).
-    //! Consequently, duplicate keys are not allowed.
-    //! The key should be unpacked, i.e. have one nibble per byte.
-    //! Nodes whose RLP is shorter than 32 bytes may not be added.
+    // Same key order as add_leaf; nodes whose RLP is shorter than 32 bytes may not be added.
     void add_branch_node(Bytes nibbled_key, const evmc::bytes32& hash, bool is_in_db_trie = false);
 
-    //! \brief Returns the root hash computed on behalf of added entries
-    //! \remarks If no entries in the stack_ the kEmptyRoot is returned
+    // Returns kEmptyRoot when nothing was added.
     evmc::bytes32 root_hash();
 
-    //! \brief Pointer to function for collecting nodes in etl.
     NodeCollector node_collector{nullptr};
 
-    //! \brief Optional per-node-RLP collector.
-    //! Fires once for every emitted node RLP whose length is >= 32 bytes
-    //! (the ones that get keccak-hashed and become referenced by hash).
-    //! The callback receives the raw node RLP bytes; the caller is
-    //! responsible for keccak'ing if a (hash → rlp) map is needed.
-    //! Default-nullptr — no cost for guest / non-witness-producer callers.
+    // Called with each node RLP of 32 bytes or more (those referenced by hash); the caller hashes.
     using RlpCollector = std::function<void(ByteView node_rlp)>;
     RlpCollector rlp_collector{nullptr};
 
-    //! \brief Resets the builder as newly created
     void reset();
 
   private:
@@ -67,7 +46,6 @@ class HashBuilder {
 
     void finalize();
 
-    // See Erigon GenStructStep
     void gen_struct_step(ByteView current, ByteView succeeding);
 
     std::vector<Bytes> branch_ref(uint16_t state_mask, uint16_t hash_mask);

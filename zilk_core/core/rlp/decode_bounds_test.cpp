@@ -1,11 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// Length bounds of the RLP decoder. A long-form length is read as 64 bits and must be checked against
-// the input before it is narrowed to size_t: on rv32 a length of 2^32 + n would otherwise pass as n.
-// The host has a 64-bit size_t, where these inputs are rejected for being longer than the input; the
-// narrowing itself only happens on the 32-bit guest. Also the typed transaction's inner list length,
-// which must equal the bytes its items consume.
+// Length bounds of the RLP decoder.
 
 #include <cstdint>
 #include <vector>
@@ -119,36 +114,30 @@ TEST_CASE("decode_header: valid canonical encodings") {
 }
 
 TEST_CASE("decode_header: lengths beyond the input are rejected") {
-    // 2^32 + 64, 2^56 + 64 and 2^32 + 64 as a list: a 32-bit size_t would read each of them as 64.
     CHECK(header_of(with_body({0xbc, 0x01, 0x00, 0x00, 0x00, 0x40}, 64)).error() == DecodingError::kInputTooShort);
     CHECK(header_of(with_body({0xbf, 0x01, 0, 0, 0, 0, 0, 0, 0x40}, 64)).error() == DecodingError::kInputTooShort);
     CHECK(header_of(with_body({0xfc, 0x01, 0x00, 0x00, 0x00, 0x40}, 64)).error() == DecodingError::kInputTooShort);
     CHECK(header_of(with_body({0xff, 0x01, 0, 0, 0, 0, 0, 0, 0x40}, 64)).error() == DecodingError::kInputTooShort);
 
-    // Exactly 2^32 and the largest 64-bit length: nothing in the low 32 bits.
     CHECK(header_of(with_body({0xbc, 0x01, 0x00, 0x00, 0x00, 0x00}, 64)).error() == DecodingError::kInputTooShort);
     CHECK(header_of(with_body({0xbf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, 64)).error() ==
           DecodingError::kInputTooShort);
     CHECK(header_of(with_body({0xbb, 0xff, 0xff, 0xff, 0xff}, 64)).error() == DecodingError::kInputTooShort);
 
-    // One byte short of the declared length, as a string and as a list.
     CHECK(header_of(with_body({0xb8, 0x40}, 63)).error() == DecodingError::kInputTooShort);
     CHECK(header_of(with_body({0xf8, 0x40}, 63)).error() == DecodingError::kInputTooShort);
     CHECK(header_of(with_body({0xb9, 0x01, 0x00}, 255)).error() == DecodingError::kInputTooShort);
 }
 
 TEST_CASE("decode_header: malformed long forms") {
-    // Long form below 56: non-canonical even when the input is too short for it.
     CHECK(header_of(with_body({0xb8, 0x37}, 55)).error() == DecodingError::kNonCanonicalSize);
     CHECK(header_of(with_body({0xb8, 0x37}, 0)).error() == DecodingError::kNonCanonicalSize);
     CHECK(header_of(with_body({0xf8, 0x00}, 0)).error() == DecodingError::kLeadingZero);
     CHECK(header_of(with_body({0xbc, 0x00, 0x00, 0x00, 0x37}, 55)).error() == DecodingError::kLeadingZero);
 
-    // Leading zero in the length.
     CHECK(header_of(with_body({0xb9, 0x00, 0x40}, 64)).error() == DecodingError::kLeadingZero);
     CHECK(header_of(with_body({0xf9, 0x00, 0x40}, 64)).error() == DecodingError::kLeadingZero);
 
-    // The length bytes themselves are missing.
     CHECK(header_of(Bytes{0xbc, 0x01}).error() == DecodingError::kInputTooShort);
     CHECK(header_of(Bytes{0xff}).error() == DecodingError::kInputTooShort);
 }
@@ -175,7 +164,7 @@ TEST_CASE("typed transaction: the inner list length equals the bytes its items c
 
         SECTION("overstated") {
             Split longer{s};
-            longer.items.push_back(0x80);  // the declared length covers one more byte than the items use
+            longer.items.push_back(0x80);
             CHECK(decode_raw(assemble(longer, n + 1, false)).error() == DecodingError::kUnexpectedListElements);
             CHECK(decode_wrapped(assemble(longer, n + 1, true)).error() == DecodingError::kUnexpectedListElements);
         }
@@ -188,7 +177,6 @@ TEST_CASE("typed transaction: the inner list length equals the bytes its items c
         }
 
         SECTION("items that end before `to`") {
-            // The list stops after gas_limit: peeking `to` must not read past the transaction.
             Bytes head;
             rlp::encode(head, *txn.chain_id);
             rlp::encode(head, txn.nonce);
@@ -210,7 +198,6 @@ TEST_CASE("typed transaction: long-form list lengths that do not fit are rejecte
     rlp::encode(raw, txn, /*wrap_eip2718_into_string=*/false);
     const Split s{split_typed(raw)};
 
-    // Replace the inner list header by a 5-byte length 2^32 + n, which a 32-bit size_t reads as n.
     const size_t n{s.items.size()};
     REQUIRE(n >= 56);
     Bytes forged{raw[0]};

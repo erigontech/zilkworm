@@ -1,13 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure-Rust MFBD encoder. Ports the C++ `json_witness_to_flat_bundle` flow into a
-//! self-contained library so the host-side adapter has no subprocess dependency.
-//!
-//! The encoder is deterministic and byte-equivalent to the C++ `json_witness_to_flat_bundle`
-//! counterpart for the same witness: every MPHF is built over keys in ascending key8 order
-//! (BTreeMap here, std::map in mphf_builder.cpp), and all other sections follow in sorted or
-//! witness-input order.
+//! Pure-Rust MFBD encoder, byte-identical to C++ `json_witness_to_flat_bundle` (MPHFs in key8 order).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -17,46 +11,36 @@ use alloy_rlp::Decodable;
 use anyhow::{anyhow, bail, Result};
 use stateless::StatelessInput;
 
-// ---------- Wire constants (docs/flat_witness_bundle.md) ----------
-
-// MFBD outer wrapper.
 pub const MFBD_MAGIC: u32 = 0x4442464D; // "MFBD"
 pub const MFBD_VERSION: u32 = 1;
 pub const MFBD_HEADER_SIZE: usize = 16;
 
-// FlatBundle inner header.
 const FLAT_BUNDLE_MAGIC: u32 = 0x444E4246; // "FBND"
 const FLAT_BUNDLE_VERSION: u32 = 14;
 const FLAT_BUNDLE_HEADER_SIZE: usize = 56;
 
-// PreStateMeta.
-// 9 u32 fields + 8 reserved u32 = 68 bytes (aligns up to 72).
+// 9 u32 fields + 8 reserved u32 = 68 bytes.
 const PRESTATE_MAGIC: u32 = 0x53455250; // "PRES"
 const PRESTATE_VERSION: u32 = 4;
 const PRESTATE_META_SIZE: usize = 68;
 
-// MphfMapHeader.
 const MPHF_MAP_VERSION: u32 = 3;
 const MPHF_MAP_HEADER_SIZE: usize = 56;
 const MPHF_ADDR_MAP_MAGIC: u32 = 0x4148504D; // "MPHA"
 const MPHF_CODE_STORE_MAGIC: u32 = 0x4348504D; // "MPHC"
 const MPHF_NODE_STORE_MAGIC: u32 = 0x4E48504D; // "MPHN"
 
-// MphfBuilder tuning.
 const MPHF_GOLDEN_RATIO: u64 = 0x9E3779B97F4A7C15;
 const MPHF_LAMBDA: u32 = 4;
 const MPHF_MAX_DISPLACEMENT: u32 = 1 << 20;
 const MPHF_MAX_SEED_RETRIES: u32 = 32;
 
-// Per-block flag bit.
 const BLOCK_FLAG_EXPECT_INVALID: u8 = 0x01;
 const BLOCK_FLAG_ENGINE_RECORD: u8 = 0x02;
 
 /// New-payload request data the block RLP does not carry; the guest checks it before execution.
 pub struct EngineRecord<'a> {
-    /// `execution_payload.block_hash` as claimed by the request.
     pub block_hash: [u8; 32],
-    /// `versioned_hashes` of the request, in order.
     pub versioned_hashes: &'a [[u8; 32]],
 }
 
@@ -89,8 +73,6 @@ fn align8_u32(v: u32) -> u32 {
     (v + 7) & !7
 }
 
-// ---------- key8 helpers ----------
-
 /// 7 MSB bytes of the addr + byte[19] in the MSB slot of the u64 (precompile-friendly).
 #[inline]
 fn addr_key8(addr: &[u8; 20]) -> u64 {
@@ -101,13 +83,10 @@ fn addr_key8(addr: &[u8; 20]) -> u64 {
     k
 }
 
-/// First 8 little-endian bytes of a 32-byte hash.
 #[inline]
 fn hash_key8(h: &[u8; 32]) -> u64 {
     u64::from_le_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]])
 }
-
-// ---------- MPHF builder (CHD with collision sidecar) ----------
 
 #[inline]
 fn mix64_body(z: u64) -> u64 {
@@ -126,8 +105,7 @@ struct CollisionEntry {
     offset: u64,
 }
 
-/// CHD result. `idx_for_key[i]` is the slot for `distinct_keys[i]`; keys whose
-/// bucket overflowed appear in `spilled_keys` (host-resolved via sidecar).
+/// `idx_for_key[i]` is the slot of `distinct_keys[i]`; keys from overflowed buckets go to `spilled_keys`.
 struct ChdSolution {
     n_buckets: u32,
     displacement_factors: Vec<u64>,
@@ -173,9 +151,7 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
             buckets[b as usize].push(i as u32);
         }
 
-        // Largest buckets first; the sort must be stable so equal-sized buckets
-        // keep ascending-index order (matches C++ std::stable_sort → deterministic
-        // seed search). slice::sort_by is stable.
+        // Stable sort: equal-sized buckets keep ascending-index order, matching C++ std::stable_sort.
         let mut order: Vec<u32> = (0..n_buckets).collect();
         order.sort_by(|a, b| buckets[*b as usize].len().cmp(&buckets[*a as usize].len()));
 
@@ -264,13 +240,9 @@ fn chd_solve(distinct_keys: &[u64]) -> Result<ChdSolution> {
     best.ok_or_else(|| anyhow!("MphfBuilder: CHD solve failed within retry budget"))
 }
 
-/// Build an MPHF blob (MphfMapHeader + tables + data section). Mirrors the C++
-/// `MphfBuilder<KeySize>::finalize`. The `entries` list of `(key8, body)` pairs
-/// may contain duplicate `key8` values; the second and later are routed through
-/// the collision sidecar.
+/// Mirrors C++ `MphfBuilder<KeySize>::finalize`; duplicate `key8`s after the first go to the collision sidecar.
 fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
-    // BTreeMap mirrors std::map on the C++ side: iteration is ascending by key,
-    // which keeps the MPHF layout deterministic and cross-encoder byte-equal.
+    // BTreeMap mirrors C++ std::map: ascending iteration keeps the layout cross-encoder byte-equal.
     let mut unique: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
     let mut collision_keys: Vec<CollisionEntry> = Vec::new();
     let mut collision_bodies: Vec<Vec<u8>> = Vec::new();
@@ -291,7 +263,6 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
     let distinct_keys: Vec<u64> = unique.keys().copied().collect();
     let mut sol = chd_solve(&distinct_keys)?;
 
-    // CHD-spilled keys join the sidecar.
     for &i in &sol.spilled_keys {
         let k = distinct_keys[i as usize];
         if let Some(body) = unique.get_mut(&k) {
@@ -335,7 +306,6 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
 
     let mut blob = vec![0u8; total_size];
 
-    // Header.
     write_u32(&mut blob, 0, magic);
     write_u32(&mut blob, 4, MPHF_MAP_VERSION);
     write_u32(&mut blob, 8, n_keys);
@@ -349,12 +319,10 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
     write_u32(&mut blob, 48, data_offset);
     write_u32(&mut blob, 52, data_size);
 
-    // Displacement factors.
     for (i, df) in sol.displacement_factors.iter().enumerate() {
         write_u64(&mut blob, displacement_offset as usize + i * 8, *df);
     }
 
-    // Data section + slot_offsets for non-sidecar entries.
     let mut data_cur: u32 = 8;
     for (i, &k) in distinct_keys.iter().enumerate() {
         let idx = sol.idx_for_key[i];
@@ -371,7 +339,6 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
         data_cur += entry_size(body.len());
     }
 
-    // Collision-sidecar entries.
     for (i, body) in collision_bodies.iter().enumerate() {
         let body_len = body.len() as u64;
         collision_keys[i].offset = u64::from(data_cur);
@@ -392,10 +359,7 @@ fn build_mphf(magic: u32, entries: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
     Ok(blob)
 }
 
-// ---------- MPHF runtime lookup (host-side, used during PreState build) ----------
-
-/// Look up the data offset for a `(addr, key8)` pair against an MPHF blob that
-/// stores 20-byte-keyed entries (the prestate map). Returns 0 if not found.
+/// Data offset for `addr20` in a 20-byte-keyed MPHF blob; 0 if not found.
 fn mphf_addr_lookup(mphf: &[u8], addr20: &[u8; 20]) -> u32 {
     let n_keys = u32::from_le_bytes(mphf[8..12].try_into().unwrap());
     if n_keys == 0 {
@@ -422,7 +386,6 @@ fn mphf_addr_lookup(mphf: &[u8], addr20: &[u8; 20]) -> u32 {
     let slot_off = slot_offsets_offset as usize + (idx as usize) * 4;
     let slot_value = u32::from_le_bytes(mphf[slot_off..slot_off + 4].try_into().unwrap());
 
-    // Direct singleton — verify by memcmp against the body's first 20 bytes (after the 8-byte length).
     if slot_value != 0 {
         let body_off = data_offset as usize + slot_value as usize + 8;
         if &mphf[body_off..body_off + 20] == addr20.as_slice() {
@@ -430,11 +393,9 @@ fn mphf_addr_lookup(mphf: &[u8], addr20: &[u8; 20]) -> u32 {
         }
     }
 
-    // Sidecar.
     if collisions_size > 0 {
         let n_c = (collisions_size / MPHF_COLLISION_ENTRY_SIZE as u32) as usize;
         let base = collisions_offset as usize;
-        // Binary search by key8.
         let mut lo = 0usize;
         let mut hi = n_c;
         while lo < hi {
@@ -451,7 +412,6 @@ fn mphf_addr_lookup(mphf: &[u8], addr20: &[u8; 20]) -> u32 {
                 hi = mid;
             }
         }
-        // Linear scan the equal-key run, disambiguating duplicates by memcmp on the body's key bytes.
         let mut i = lo;
         while i < n_c {
             let off_i = base + i * MPHF_COLLISION_ENTRY_SIZE;
@@ -473,24 +433,17 @@ fn mphf_addr_lookup(mphf: &[u8], addr20: &[u8; 20]) -> u32 {
     0
 }
 
-// ---------- MPT walker (decode_branch + decode_ext_or_leaf + walk_tree) ----------
-
 #[derive(Default)]
 struct BranchChildren {
-    /// 16 children; each is either empty (`Vec::new()`) or `[hash:32]` (hashref) or
-    /// `[header_byte || payload]` (embedded). The full RLP for embedded is reconstructed
-    /// by the walker for re-decoding.
+    /// 16 children: empty, `[hash:32]` (hashref) or `[header_byte || payload]` (embedded).
     children: [Vec<u8>; 16],
     /// True bits indicate non-empty children.
     mask: u16,
 }
 
-/// RLP header parsed from a node body.
 struct RlpHeader {
     payload_len: usize,
-    /// True iff this header introduces a list (rather than a byte-string).
     is_list: bool,
-    /// Total header byte count (1 + length-of-length bytes).
     header_bytes: usize,
 }
 
@@ -525,10 +478,7 @@ fn rlp_decode_header(input: &[u8]) -> Result<RlpHeader> {
     }
 }
 
-/// Decode a branch node body (the 17-element list payload, _after_ the outer list header).
-/// Returns the 16 children's stored forms plus the 17th value slice. Mirrors C++
-/// `decode_branch` including the embedded-vs-hashref distinction and the `>31`/`>32`
-/// bounds checks.
+/// Decodes a branch body (past its list header) into 16 children and the value, as C++ `decode_branch`.
 fn decode_branch(payload: &[u8]) -> Result<BranchChildren> {
     let mut out = BranchChildren::default();
     let mut remaining = payload;
@@ -541,12 +491,10 @@ fn decode_branch(payload: &[u8]) -> Result<BranchChildren> {
         let h = rlp_decode_header(remaining)?;
         let after_header = &remaining[h.header_bytes..];
         if h.payload_len == 0 {
-            // Empty child (0x80).
             remaining = &after_header[h.payload_len..];
             continue;
         }
         if child_start != 0xa0 {
-            // Embedded child: keep the header byte and the payload.
             if h.payload_len > 31 {
                 bail!("decode_branch: embedded child payload >31 at slot {}", i);
             }
@@ -565,7 +513,7 @@ fn decode_branch(payload: &[u8]) -> Result<BranchChildren> {
         remaining = &after_header[h.payload_len..];
     }
 
-    // 17th element: value slot. Must be a non-list. Ignored by leaf-collection.
+    // 17th element: value slot; must be a non-list.
     let hv = rlp_decode_header(remaining)?;
     if hv.is_list {
         bail!("decode_branch: 17th element is a list");
@@ -578,11 +526,7 @@ fn decode_branch(payload: &[u8]) -> Result<BranchChildren> {
     Ok(out)
 }
 
-/// Decode an extension or leaf node body. `path` is filled with up to 64 nibbles;
-/// `plen` is the count actually written. `second` is the second-element bytes:
-/// for leaves it's the value payload; for extensions with a 32-byte child hashref
-/// it's the 32 bytes; for embedded extension children it's the full RLP form
-/// (header + payload).
+/// Decodes an extension/leaf body: <= 64 nibbles into `path` (`plen` set); `second`: value or child.
 fn decode_ext_or_leaf<'a>(
     payload: &'a [u8],
 ) -> Result<(bool, [u8; 64], usize, &'a [u8])> {
@@ -619,7 +563,6 @@ fn decode_ext_or_leaf<'a>(
     Ok((is_leaf, path, plen, second))
 }
 
-/// Decode the hex-prefix (compact) encoding from an MPT extension/leaf path.
 fn hp_decode(input: &[u8]) -> Result<(bool, [u8; 64], usize)> {
     if input.is_empty() {
         bail!("hp_decode: empty");
@@ -660,7 +603,6 @@ fn walk_tree<F: FnMut(&[u8], &[u8])>(
     }
     let body = &node_rlp[outer.header_bytes..outer.header_bytes + outer.payload_len];
 
-    // Branch first (heuristic: 17-element lists decode via decode_branch).
     if let Ok(br) = decode_branch(body) {
         for slot in 0..16 {
             if br.mask & (1 << slot) == 0 {
@@ -676,14 +618,12 @@ fn walk_tree<F: FnMut(&[u8], &[u8])>(
                     walk_tree(nodes, child_rlp, path, depth + 1, cb)?;
                 }
             } else {
-                // Embedded child (header byte + payload).
                 walk_tree(nodes, child, path, depth + 1, cb)?;
             }
         }
         return Ok(());
     }
 
-    // Extension or leaf.
     let (is_leaf, ext_path, plen, second) = decode_ext_or_leaf(body)?;
     if depth + plen > 64 {
         return Ok(());
@@ -735,8 +675,6 @@ fn nibbles_to_bytes32(nibs: &[u8]) -> Option<B256> {
     Some(B256::from(out))
 }
 
-// ---------- TrieAccount decode (zilk_core/core/types_zz/account.cpp) ----------
-
 struct TrieAccount {
     nonce: u64,
     balance: U256,
@@ -757,8 +695,6 @@ fn decode_trie_account(leaf_value: &[u8]) -> Result<TrieAccount> {
     Ok(TrieAccount { nonce, balance, storage_root, code_hash })
 }
 
-// ---------- Account body builder (matches account_info_to_pre_account_bytes) ----------
-
 struct AccountInfo {
     addr: [u8; 20],
     nonce: u64,
@@ -777,9 +713,7 @@ fn account_info_to_body(info: &mut AccountInfo) -> Vec<u8> {
     let body_size = ACCOUNT_SIZE + (slot_count as usize) * SLOT_SIZE;
     let mut body = vec![0u8; body_size];
 
-    // Offsets mirror the C++ Account struct. Unwritten fields stay 0: deleted@20,
-    // acc_rlp_len@22, acc_rlp_sroot_off@23, modified@24, code_store_offset@128,
-    // acc_rlp_buf@140..256 (the trailing buf+padding fills the fixed 256 bytes).
+    // Offsets mirror the C++ Account struct; unwritten fields (deleted, acc_rlp_*, modified, ...) stay 0.
     body[0..20].copy_from_slice(&info.addr);
     body[24..32].copy_from_slice(&info.nonce.to_le_bytes());
     body[32..64].copy_from_slice(&info.balance);
@@ -798,8 +732,6 @@ fn account_info_to_body(info: &mut AccountInfo) -> Vec<u8> {
     }
     body
 }
-
-// ---------- DirectState blob builder (build_blob_from_accounts) ----------
 
 fn keccak_addr(addr: &[u8; 20]) -> [u8; 32] {
     let h = keccak256(addr);
@@ -854,7 +786,6 @@ fn build_direct_blob(
 
     let mut blob = vec![0u8; total_size];
 
-    // PreStateMeta.
     write_u32(&mut blob, 0, PRESTATE_MAGIC);
     write_u32(&mut blob, 4, PRESTATE_VERSION);
     write_u32(&mut blob, 8, n_accounts);
@@ -880,7 +811,6 @@ fn build_direct_blob(
             .copy_from_slice(&mphf_bytes);
     }
 
-    // Fill AddrHashEntry table with entry_offset resolved via the just-built MPHF.
     let prestate_view = if mphf_size > 0 {
         &blob[prestate_offset as usize..prestate_offset as usize + mphf_size as usize]
     } else {
@@ -906,8 +836,6 @@ fn build_direct_blob(
 
     Ok(blob)
 }
-
-// ---------- FlatBundle + MFBD envelope ----------
 
 fn build_flat_bundle(
     genesis_rlp: &[u8],
@@ -940,7 +868,6 @@ fn build_flat_bundle(
 
     let mut out = vec![0u8; total];
 
-    // FlatBundleHeader.
     write_u32(&mut out, 0, FLAT_BUNDLE_MAGIC);
     write_u32(&mut out, 4, FLAT_BUNDLE_VERSION);
     write_u32(&mut out, 8, genesis_off as u32);
@@ -992,15 +919,11 @@ fn wrap_mfbd(bundle: &[u8]) -> Vec<u8> {
     let mut env = Vec::with_capacity(MFBD_HEADER_SIZE + bundle.len());
     env.extend_from_slice(&MFBD_MAGIC.to_le_bytes());
     env.extend_from_slice(&MFBD_VERSION.to_le_bytes());
-    env.extend_from_slice(&1u64.to_le_bytes()); // n_bundles
+    env.extend_from_slice(&1u64.to_le_bytes());
     env.extend_from_slice(bundle);
     env
 }
 
-// ---------- Top-level entries ----------
-
-/// Convert a `stateless::StatelessInput` directly into the MFBD envelope expected
-/// by the post-#90 Zilkworm guest. Thin wrapper around [`build_mfbd_from_parts`].
 pub fn stateless_input_to_mfbd(si: &StatelessInput, valid_block: bool, fork: &str) -> Result<Vec<u8>> {
     let current_block_rlp = alloy_rlp::encode(&si.block);
     build_mfbd_from_parts(
@@ -1014,12 +937,7 @@ pub fn stateless_input_to_mfbd(si: &StatelessInput, valid_block: bool, fork: &st
     )
 }
 
-/// Build the MFBD envelope from raw witness components. Callable from any path
-/// that has the pieces in hand (RPC fetcher, StatelessInput adapter, tests).
-///
-/// `witness_headers` must be a non-empty list of RLP-encoded block headers;
-/// the *last* entry is the parent of `current_block_rlp` and its `state_root`
-/// is used as the pre-state root for the trie walk.
+/// `witness_headers` must be non-empty; the last is the parent of `current_block_rlp` and supplies the pre-state root.
 pub fn build_mfbd_from_parts(
     current_block_rlp: &[u8],
     witness_state: &[Bytes],
@@ -1056,9 +974,7 @@ fn build_mfbd(
         bail!("witness.headers must contain at least the parent header");
     }
 
-    // Build the node-store hash → rlp map, plus the (hash, rlp) list we feed into
-    // the MPHF. `ns_entries` retains witness.state's input order so MPHF input
-    // ordering is deterministic and matches the C++ host.
+    // Node-store (hash, rlp) list keeps witness.state input order so MPHF input is deterministic.
     let mut nodes: HashMap<B256, Vec<u8>> = HashMap::with_capacity(witness_state.len());
     let mut ns_entries: Vec<(B256, Vec<u8>)> = Vec::with_capacity(witness_state.len());
     for n in witness_state {
@@ -1077,18 +993,13 @@ fn build_mfbd(
         preimage_map.insert(keccak256(k.as_ref()), k.clone());
     }
 
-    // The parent header (last entry of `witness_headers`) furnishes the pre-state
-    // root for the trie walk. Last because the witness lists headers in ascending
-    // block-number order; the C++ `json_witness_to_flat_bundle` likewise treats
-    // `ancestors.back()` as the parent.
+    // The parent is the last header: the witness lists headers in ascending block-number order.
     let parent_header = {
         let mut slice = witness_headers.last().unwrap().as_ref();
         Header::decode(&mut slice)?
     };
     let pre_state_root: B256 = parent_header.state_root;
 
-    // Walk the state trie + each touched account's storage trie, building AccountInfos
-    // for leaves whose 20-byte preimage is in keys[].
     let mut accounts: Vec<AccountInfo> = Vec::new();
     let state_leaves = collect_leaves(&nodes, pre_state_root)?;
     for (path_bytes, value_rlp) in state_leaves {
@@ -1137,8 +1048,7 @@ fn build_mfbd(
             }
         }
 
-        // balance: write the U256 as little-endian bytes (native layout matches
-        // intx::uint256 memory order on LE hosts; guest runs RV64IM = LE too).
+        // Little-endian U256 matches intx::uint256 memory order (the RV64IM guest is little-endian too).
         let mut balance_le = [0u8; 32];
         let be = acc.balance.to_be_bytes::<32>();
         for i in 0..32 {
@@ -1156,7 +1066,6 @@ fn build_mfbd(
         });
     }
 
-    // Block hashes for ancestor lookups (BLOCKHASH opcode service).
     let mut block_hashes: Vec<(u64, [u8; 32])> = Vec::with_capacity(witness_headers.len());
     for hdr_rlp in witness_headers {
         let mut slice = hdr_rlp.as_ref();
@@ -1165,8 +1074,7 @@ fn build_mfbd(
         block_hashes.push((hdr.number, *h.as_ref()));
     }
 
-    // Code-store MPHF. Iterate witness_codes in input order (hash-dedup) so the
-    // MPHF input sequence is deterministic and matches the C++ json_witness_to_flat_bundle.
+    // Input order (hash-dedup) keeps the code-store MPHF deterministic and equal to C++.
     let code_store_blob = if !witness_codes.is_empty() {
         let mut entries: Vec<(u64, Vec<u8>)> = Vec::with_capacity(witness_codes.len());
         let mut seen: std::collections::HashSet<B256> =
@@ -1192,7 +1100,6 @@ fn build_mfbd(
 
     let direct_blob = build_direct_blob(accounts, block_hashes, code_store_blob)?;
 
-    // Node-store MPHF.
     let node_store_blob = if !ns_entries.is_empty() {
         let mut entries: Vec<(u64, Vec<u8>)> = Vec::with_capacity(ns_entries.len());
         for (h, rlp) in &ns_entries {
@@ -1206,14 +1113,12 @@ fn build_mfbd(
         Vec::new()
     };
 
-    // Genesis slot in the bundle holds the header-only previous block; ancestors
-    // section holds an RLP list of all witness headers (including parent).
+    // Genesis slot holds the header-only previous block; ancestors hold an RLP list of all witness headers.
     let prev_block_rlp = {
         let block = Block { header: parent_header.clone(), body: BlockBody::<TxEnvelope>::default() };
         alloy_rlp::encode(&block)
     };
 
-    // ancestors_rlp = RLP list(header_rlp_0 || header_rlp_1 || ...).
     let mut ancestors_payload: Vec<u8> = Vec::new();
     let mut total_payload = 0usize;
     for h in witness_headers {
@@ -1225,9 +1130,7 @@ fn build_mfbd(
         ancestors_payload.extend_from_slice(h.as_ref());
     }
 
-    // Match the C++ host: only emit block_flags when expect_invalid is true.
-    // (The guest treats an empty block_flags section as "all blocks are expected
-    // valid"; emitting [0] would be a no-op semantically but breaks byte parity.)
+    // Match C++: block_flags only when expect_invalid (an empty section means all valid; [0] would break byte parity).
     let invalid_flag = if expect_invalid { BLOCK_FLAG_EXPECT_INVALID } else { 0 };
     let block_flags_buf: Vec<u8> = match engine {
         Some(_) => vec![invalid_flag | BLOCK_FLAG_ENGINE_RECORD],
@@ -1248,10 +1151,6 @@ fn build_mfbd(
     Ok(wrap_mfbd(&bundle))
 }
 
-// ---------- EEST canonical (SIOB) entry point ----------
-
-/// Body-level bits an Amsterdam block reconstruction needs beyond the
-/// header. Passed by value into [`build_mfbd_from_amsterdam_parts`].
 #[derive(Debug, Clone)]
 pub struct AmsterdamWithdrawal {
     pub index: u64,
@@ -1260,18 +1159,7 @@ pub struct AmsterdamWithdrawal {
     pub amount: u64,
 }
 
-/// All primitive pieces needed to reconstruct an Amsterdam block from an
-/// EEST `statelessInputBytes` payload. The caller (typically
-/// [`crate::ere_eest`]) decodes the SSZ container and hands over plain Rust
-/// values — this keeps `mfbd.rs` decoupled from the SIOB SSZ types.
-///
-/// `transactions` are EIP-2718 encoded envelopes (raw wire bytes for typed
-/// txs; raw RLP for legacy). `execution_requests` entries are each
-/// `[request_type_byte, request_data...]` per EIP-7685. `block_access_list`
-/// is the raw RLP payload from `ExecutionPayloadV4.block_access_list`; the
-/// same bytes serve both as the source of `witness.keys` (via
-/// [`crate::ere_eest::keys_from_bal_bytes`]) and as the input to the
-/// `block_access_list_hash` (Amsterdam header field, per EIP-7928).
+/// Primitive pieces of an Amsterdam block from EEST `statelessInputBytes`; keeps mfbd.rs decoupled from the SSZ types.
 #[derive(Debug, Clone)]
 pub struct AmsterdamBlockParts<'a> {
     pub parent_hash: [u8; 32],
@@ -1291,21 +1179,16 @@ pub struct AmsterdamBlockParts<'a> {
     pub excess_blob_gas: u64,
     pub slot_number: u64,
     pub parent_beacon_block_root: [u8; 32],
-    /// EIP-7685 typed requests: `[type_byte, data...]` per entry.
+    /// EIP-7685 requests, each `[type_byte, data...]`.
     pub execution_requests: &'a [Bytes],
     pub transactions: &'a [Bytes],
     pub withdrawals: &'a [AmsterdamWithdrawal],
     pub block_access_list: &'a [u8],
-    /// `execution_payload.block_hash` claimed by the request.
     pub block_hash: [u8; 32],
-    /// `versioned_hashes` of the request, in order.
     pub versioned_hashes: &'a [[u8; 32]],
 }
 
-/// EEST canonical (SIOB) equivalent of [`build_mfbd_from_parts`].
-/// Reconstructs the Amsterdam block RLP from `parts`, derives `witness.keys`
-/// from the embedded Block Access List (EIP-7928), and delegates the rest to
-/// the existing MFBD encoder path.
+/// EEST canonical equivalent of [`build_mfbd_from_parts`]; keys come from the embedded EIP-7928 BAL.
 pub fn build_mfbd_from_amsterdam_parts(
     parts: &AmsterdamBlockParts<'_>,
     witness_state: &[Bytes],
@@ -1338,7 +1221,6 @@ fn amsterdam_block_rlp(parts: &AmsterdamBlockParts<'_>) -> Result<Vec<u8>> {
     use alloy_eips::Decodable2718;
     use alloy_primitives::{Address, Bloom, B256, B64};
 
-    // Decode raw tx envelopes.
     let mut txs: Vec<TxEnvelope> = Vec::with_capacity(parts.transactions.len());
     for tx_bytes in parts.transactions {
         let mut slice: &[u8] = tx_bytes.as_ref();
@@ -1347,7 +1229,6 @@ fn amsterdam_block_rlp(parts: &AmsterdamBlockParts<'_>) -> Result<Vec<u8>> {
         txs.push(tx);
     }
 
-    // Convert withdrawals to the alloy type (same fields, different crate).
     let withdrawals: Vec<Withdrawal> = parts
         .withdrawals
         .iter()
@@ -1359,7 +1240,6 @@ fn amsterdam_block_rlp(parts: &AmsterdamBlockParts<'_>) -> Result<Vec<u8>> {
         })
         .collect();
 
-    // Derived roots.
     let transactions_root = calculate_transaction_root(&txs);
     let withdrawals_root = calculate_withdrawals_root(&withdrawals);
     let requests_hash = Requests::new(parts.execution_requests.iter().map(|b| b.clone()).collect())
@@ -1413,7 +1293,6 @@ fn amsterdam_block_rlp(parts: &AmsterdamBlockParts<'_>) -> Result<Vec<u8>> {
     Ok(alloy_rlp::encode(&block))
 }
 
-/// Walk an MPT exhaustively from `root` and return every leaf as `(path, value_rlp)`.
 fn collect_leaves(
     nodes: &HashMap<B256, Vec<u8>>,
     root: B256,
@@ -1424,8 +1303,6 @@ fn collect_leaves(
     })?;
     Ok(out)
 }
-
-// ---------- LE writers ----------
 
 #[inline]
 fn write_u32(buf: &mut [u8], off: usize, v: u32) {
@@ -1441,7 +1318,6 @@ fn write_u64(buf: &mut [u8], off: usize, v: u64) {
 mod tests {
     use super::*;
 
-    // RLP byte-string element with the given payload.
     fn rlp_str(payload: &[u8]) -> Vec<u8> {
         let mut o = Vec::new();
         alloy_rlp::Header { list: false, payload_length: payload.len() }.encode(&mut o);
@@ -1449,7 +1325,6 @@ mod tests {
         o
     }
 
-    // RLP list wrapping already-encoded elements.
     fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
         let payload_len: usize = items.iter().map(Vec::len).sum();
         let mut o = Vec::new();
@@ -1460,7 +1335,6 @@ mod tests {
         o
     }
 
-    // Hex-prefix (compact) encoding — inverse of hp_decode.
     fn hp_encode(nibs: &[u8], is_leaf: bool) -> Vec<u8> {
         let odd = nibs.len() % 2 == 1;
         let flag = (if is_leaf { 2u8 } else { 0 }) | (if odd { 1 } else { 0 });
@@ -1487,7 +1361,6 @@ mod tests {
         v
     }
 
-    // EOA state-trie leaf for `addr` (path = the 63 nibbles below the root branch).
     fn eoa_leaf(addr: &[u8; 20]) -> (Vec<u8>, B256) {
         let account = rlp_list(&[
             alloy_rlp::encode(&7u64),
@@ -1512,8 +1385,7 @@ mod tests {
         unreachable!()
     }
 
-    // Two-account state trie (root branch → two leaves) with a complete witness.
-    // Encoding it twice must yield identical bytes: this proves its canonical form.
+    // Encoding a two-account state trie twice must give identical bytes.
     #[test]
     fn encoder_is_deterministic_and_wellformed() {
         let addr_a = addr_first_nibble(0x3);
@@ -1533,7 +1405,7 @@ mod tests {
                 items.push(rlp_str(&[]));
             }
         }
-        items.push(rlp_str(&[])); // 17th (value) slot: empty
+        items.push(rlp_str(&[]));
         let branch = rlp_list(&items);
         let state_root = keccak256(&branch);
 
@@ -1558,12 +1430,10 @@ mod tests {
         let out2 = enc().unwrap();
         assert_eq!(out1, out2, "encoder output must be deterministic");
 
-        // Well-formed envelope: MFBD wrapper + single FlatBundle.
         assert_eq!(out1[0..4], MFBD_MAGIC.to_le_bytes());
         assert_eq!(u64::from_le_bytes(out1[8..16].try_into().unwrap()), 1);
         assert_eq!(out1[16..20], FLAT_BUNDLE_MAGIC.to_le_bytes());
 
-        // Both accounts were recovered from the witness (PreStateMeta.n_accounts).
         let direct_off = 16 + u32::from_le_bytes(out1[48..52].try_into().unwrap()) as usize;
         let n_accounts = u32::from_le_bytes(out1[direct_off + 8..direct_off + 12].try_into().unwrap());
         assert_eq!(n_accounts, 2);

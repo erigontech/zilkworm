@@ -1,10 +1,7 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// The input reader that hashes the code store's payloads as it reads them (code_store_stream.hpp),
-// driven by a mock word source and a verify function written from its contract: the words reach
-// memory as the input has them, nothing is read or written out of bounds, and a bit is set only
-// for an entry whose payload hashes to the key beside it, in the bytes the reader left in memory.
+// The input reader that hashes the code store's payloads as it reads them (code_store_stream.hpp).
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -49,8 +46,7 @@ struct MockInput {
     void read(uint32_t* dst, size_t count) {
         for (size_t i = 0; i < count; ++i) dst[i] = word();
     }
-    /// The contract of io.verify(): the words to dst, then the Keccak-256 of the first `size`
-    /// bytes of them against the key. Whatever follows the payload in its last word is not hashed.
+    /// The contract of io.verify(): store the words to dst, then check the Keccak-256 of their first `size` bytes.
     bool verify(uint32_t* dst, uint32_t size, const uint32_t* key) {
         ++verify_calls;
         read(dst, (size + 3) / 4);
@@ -60,7 +56,7 @@ struct MockInput {
 };
 
 struct Outcome {
-    std::vector<uint64_t> mem;  // What the reader left in memory (the words, then the guard).
+    std::vector<uint64_t> mem;
     CodeStoreVerified handshake;
     std::vector<uint32_t> bits;
     uint32_t n_bits{0};
@@ -78,8 +74,7 @@ struct Outcome {
     }
 };
 
-/// Every bit set stands for an entry that is there in the memory left behind, and hashes to its
-/// key: the property sanitize() relies on, checked from the bytes alone.
+/// Every bit set stands for an entry that is there in the memory left behind, and hashes to its key.
 void check_marks_are_sound(const Outcome& o) {
     for (uint64_t idx = 0; idx < o.n_bits; ++idx) {
         if (((o.bits[idx >> 5] >> (idx & 31)) & 1) == 0) continue;
@@ -98,8 +93,7 @@ void check_marks_are_sound(const Outcome& o) {
     }
 }
 
-/// Runs the reader on the first n_bytes of the input, as the guest does (it reads the whole words;
-/// the last partial word is its caller's).
+/// Runs the reader on the first n_bytes of the input, as the guest does.
 Outcome run(const std::vector<uint8_t>& input, size_t n_bytes, uint32_t n_bits = 1u << 17) {
     REQUIRE(n_bytes <= input.size());
     Outcome o;
@@ -157,7 +151,7 @@ void set_u32(std::vector<uint8_t>& v, size_t off, uint32_t x) { std::memcpy(v.da
 struct Layout {
     size_t meta, store, data;
     uint32_t data_size;
-    std::vector<uint64_t> offsets;  // Entry offsets in the data section.
+    std::vector<uint64_t> offsets;
 };
 
 Layout layout_of(std::vector<uint8_t>& input) {
@@ -183,8 +177,7 @@ bool entry_hashes(const std::vector<uint8_t>& input, const Layout& l, uint64_t o
     return std::memcmp(h.bytes, body, 32) == 0;
 }
 
-/// A mix of the sizes the code store has: the 23-byte delegation designators, small and large
-/// contracts, and sizes on both sides of the 136-byte hash block and of the 4- and 8-byte words.
+/// A mix of the sizes the code store has: the 23-byte delegation designators, small and large contracts.
 std::vector<Bytes> mixed_codes(uint64_t seed) {
     std::vector<Bytes> codes;
     uint64_t s = seed;
@@ -272,7 +265,6 @@ TEST_CASE("a truncated input is read to its last whole word, with the marks it h
         const auto o = run(input, n);
         if (n < l.data + l.data_size) CHECK(o.handshake.data == nullptr);
     }
-    // The cut at the last byte and the byte count that is not a multiple of 4.
     for (size_t cut = 1; cut <= 7; ++cut) run(input, input.size() - cut);
 }
 
@@ -350,7 +342,6 @@ TEST_CASE("a changed payload or key unmarks its entry and no other", "[state_zz]
             const auto o = run(input, input.size());
             for (const auto off : l.offsets) CHECK(o.bit(off) == (off != victim && entry_hashes(base, l, off)));
         }
-        // The padding bytes are not part of the payload: changing them leaves the entry marked.
         const uint64_t padded = (len + 7) & ~uint64_t{7};
         if (padded != len) {
             auto input = base;
@@ -390,7 +381,6 @@ TEST_CASE("random changes to the bytes before and in the code store keep the rea
         auto input = base;
         const int flips = 1 + static_cast<int>(rng() % 3);
         for (int k = 0; k < flips; ++k) {
-            // The headers and the first entries, where a change moves the walk, or anywhere.
             const size_t at = (rng() & 1) ? rng() % (l.data + 600) : rng() % input.size();
             input[at] = static_cast<uint8_t>(rng());
         }
@@ -401,7 +391,6 @@ TEST_CASE("random changes to the bytes before and in the code store keep the rea
 
 TEST_CASE("the walk stops at the entry it cannot describe and returns the words it has read",
           "[state_zz][code_store_stream]") {
-    // A data section of hand-made entries: [len][key][payload][pad], after the zero sentinel.
     auto region = [](const std::vector<std::pair<uint64_t, size_t>>& entries) {
         std::vector<uint8_t> r(8, 0);
         for (const auto& [len, payload_bytes] : entries) {
@@ -438,7 +427,7 @@ TEST_CASE("the walk stops at the entry it cannot describe and returns the words 
         const auto r = region({{32 + 40, 40}, {32 + 5, 5}, {32 + 100, 100}});
         CHECK(walk(r, static_cast<uint32_t>(r.size()), 64, bits, overrun) == r.size());
         CHECK_FALSE(overrun);
-        CHECK(bits == ((1u << 1) | (1u << 17)));  // The entries at 8 and 136; the one at 88 is short.
+        CHECK(bits == ((1u << 1) | (1u << 17)));
     }
     SECTION("padding of 1 to 4 bytes of the 8 leaves a word the hash did not take") {
         for (size_t payload = 33; payload <= 48; ++payload) {
@@ -458,7 +447,7 @@ TEST_CASE("the walk stops at the entry it cannot describe and returns the words 
         for (const uint64_t lie : {uint64_t{31}, uint64_t{0}, uint64_t{32 + 41}, uint64_t{1} << 32,
                                    uint64_t{0xfffffff0}}) {
             auto bad = r;
-            std::memcpy(bad.data() + 88, &lie, 8);  // The second entry's length.
+            std::memcpy(bad.data() + 88, &lie, 8);
             const uint32_t read = walk(bad, static_cast<uint32_t>(bad.size()), 64, bits, overrun);
             CHECK(read == 8 + 80 + 40);
             CHECK_FALSE(overrun);
@@ -466,7 +455,6 @@ TEST_CASE("the walk stops at the entry it cannot describe and returns the words 
         }
     }
     SECTION("the padded payload does not fit the section") {
-        // 33 bytes of payload padded to 40, with only 36 left after the header.
         auto r = region({{32 + 33, 33}});
         r.resize(8 + 40 + 36);
         CHECK(walk(r, static_cast<uint32_t>(r.size()), 64, bits, overrun) == 8 + 40);
@@ -482,9 +470,6 @@ TEST_CASE("the walk stops at the entry it cannot describe and returns the words 
 
 TEST_CASE("a key that hashes the payload and the bytes after it does not pass for the payload",
           "[state_zz][code_store_stream][soundness]") {
-    // The last word of the payload carries 1 to 3 bytes that are not part of it: an absorb that
-    // takes the word whole would let the key of payload||b pass for the payload when they are
-    // (b ^ 1, 1, 0...). The contract of verify() is that they are not hashed.
     std::mt19937_64 rng{99};
     for (size_t payload_size = 33; payload_size < 300; ++payload_size) {
         const size_t pad_bytes = (4 - payload_size % 4) % 4;
@@ -514,7 +499,6 @@ TEST_CASE("a key that hashes the payload and the bytes after it does not pass fo
                              static_cast<uint32_t>(input.size()), bits.data(), 64);
         CHECK(io.verify_calls == 1);
         CHECK(bits[0] == 0);
-        // The words are stored whole, the extra bytes included.
         CHECK(std::memcmp(mem.data(), input.data(), input.size()) == 0);
     }
 }

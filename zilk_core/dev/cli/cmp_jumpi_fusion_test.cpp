@@ -1,21 +1,6 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: Apache-2.0
-//
-// The rv32 dispatch runs LT, GT, SLT and SGT followed by PUSH2 JUMPI, or by ISZERO PUSH2 JUMPI, as
-// one step, and so does every other build (EVMONE_JUMP_SKIPS_JUMPDEST, fused_cmp_push2_jumpi() and
-// fused_cmp_iszero_push2_jumpi() of the generic dispatch). Each program here runs twice: as
-// written, and with the jump destination pushed by PUSH3, which no fusion takes, so that the
-// separate instructions run. Status, gas left and output must match at every gas limit from below
-// the comparison to past the end of the group and at seven large ones (where the low-word charge
-// falls back or only just passes), on operands that are equal, differ only in the low word, only in
-// the high word or in the sign, or are random, with a valid destination and four invalid ones (a
-// PUSH1, a 0x5b byte in push data, the code end and 0xffff), in 3 layouts (plain, a JUMPDEST at the
-// fall-through, the group at the code end jumping back), with the stack too short, and with 1024
-// items. Built with -DEVMONE_RV32_DISPATCH_TEST (the rv32 test configuration), the native build
-// compiles the rv32 fused handlers on the host, where they compare words; the guest decides LT and
-// GT by the BigInt SUB delegation in the PUSH2 JUMPI shape only (the ISZERO shape compares words
-// there too). Without it, the native build runs the generic dispatch's fused handlers, which
-// compare with intx.
+// The rv32 dispatch runs LT, GT, SLT and SGT followed by PUSH2 JUMPI, or by ISZERO PUSH2 JUMPI, as one step.
 
 #include <cstdint>
 #include <random>
@@ -44,16 +29,16 @@ enum class Dest { valid, opcode, push_data, code_end, far };
 
 struct Case {
     uint8_t op = LT;
-    bool iszero = false;         // OP ISZERO PUSH2 JUMPI, else OP PUSH2 JUMPI
-    bool fall_jumpdest = false;  // a JUMPDEST right after the JUMPI
-    bool at_end = false;         // the group ends the code and jumps back
+    bool iszero = false;
+    bool fall_jumpdest = false;
+    bool at_end = false;
     Dest dest = Dest::valid;
-    int items = 2;               // operands: 0, 1 or 2 (on a sentinel), or 1024 items in all
-    uint256 a;                   // the top item
-    uint256 b;                   // the item under it
+    int items = 2;
+    uint256 a;
+    uint256 b;
 };
 
-constexpr uint64_t kSentinel = 0x5e5e5e5e;  // under the operands; the paths return it plus 1 or 2
+constexpr uint64_t kSentinel = 0x5e5e5e5e;
 
 bytes be32(const uint256& v) {
     bytes out(32);
@@ -73,21 +58,20 @@ void return_top_plus(bytes& code, uint8_t k) {
     code.insert(code.end(), {PUSH1, k, ADD, PUSH1, 0, MSTORE, PUSH1, 32, PUSH1, 0, RETURN});
 }
 
-// The program of c, the destination pushed by PUSH2, or by PUSH3 for the reference. The second
-// member is the gas the instructions before the comparison take.
+// The program of c, the destination pushed by PUSH2, or by PUSH3 for the reference.
 std::pair<bytes, int64_t> build(const Case& c, bool reference) {
     bytes code;
     int64_t before = 0;
-    size_t skip_at = 0;  // the PUSH2 immediate that jumps over the target block (at_end)
+    size_t skip_at = 0;
     size_t target = 0, opcode_pos = 0, data_pos = 0;
     const auto tail_blocks = [&] {
         target = code.size();
         code.push_back(JUMPDEST);
         return_top_plus(code, 2);
-        data_pos = code.size() + 5;  // 0x5b bytes inside PUSH32 data: never a destination
+        data_pos = code.size() + 5;
         push32(code, uint256{0x5b5b5b5b5b5b5b5b, 0x5b5b5b5b5b5b5b5b});
         code.push_back(POP);
-        opcode_pos = code.size();  // a PUSH1, not a JUMPDEST
+        opcode_pos = code.size();
         code.insert(code.end(), {PUSH1, 7, POP});
     };
     if (c.at_end) {
@@ -182,13 +166,12 @@ std::string describe(const Case& c, int64_t gas, evmc_revision rev) {
            " rev " + std::to_string(static_cast<int>(rev));
 }
 
-// The operands (top, second): equal, apart only in word 0 or only in word 7 (with and without a
-// sign change), across the sign boundary, and random.
+// The operands (top, second): equal, apart only in word 0 or only in word 7 (with and without a sign change).
 std::vector<std::pair<uint256, uint256>> operand_pairs() {
     const uint256 m255 = uint256{1} << 255;
     const uint256 minus1 = ~uint256{0};
-    const uint256 high = minus1 << 32;           // words 1-7 all ones: negative
-    const uint256 mid = uint256{0x1234} << 100;  // a middle word
+    const uint256 high = minus1 << 32;
+    const uint256 mid = uint256{0x1234} << 100;
     std::vector<std::pair<uint256, uint256>> v = {
         {0, 0}, {5, 5}, {m255, m255}, {minus1, minus1},
         {5, 7}, {7, 5}, {high | 5, high | 7}, {high | 7, high | 5},
@@ -211,15 +194,12 @@ std::vector<std::pair<uint256, uint256>> operand_pairs() {
 constexpr uint8_t kOps[] = {LT, GT, SLT, SGT};
 constexpr Dest kDests[] = {Dest::valid, Dest::opcode, Dest::push_data, Dest::code_end, Dest::far};
 constexpr evmc_revision kRevs[] = {EVMC_FRONTIER, EVMC_CANCUN};
-// Gas left at the comparison from 2^31 - 1 to 2^40 + 3, where the low-word charge falls back or
-// only just passes: it tests the low word alone, so it falls back although the gas suffices when
-// that word is below the group's cost or 2^31 or more above it.
+// Gas left at the comparison from 2^31 - 1 to 2^40 + 3, where the low-word charge falls back or only just passes.
 constexpr int64_t kLarge[] = {(int64_t{1} << 31) - 1, (int64_t{1} << 31) + 16,
     (int64_t{1} << 31) + 20, (int64_t{1} << 32) - 1, (int64_t{1} << 32) + 16,
     (int64_t{1} << 32) + 19, (int64_t{1} << 40) + 3};
 
-// Runs c fused and as the reference at every gas limit from just below the comparison to past
-// the group's end, and at a few large ones.
+// Runs c fused and as the reference at every gas limit from just below the comparison to past the group's end.
 size_t check_case(Runner& r, const Case& c) {
     const auto [code, before] = build(c, false);
     const auto ref = build(c, true).first;
@@ -291,7 +271,6 @@ TEST_CASE("comparison PUSH2 JUMPI fusions match the separate instructions", "[cm
                         }
                     }
                 }
-                // Both outcomes of the jump occur for every comparison and shape.
                 REQUIRE(taken > 0);
                 REQUIRE(not_taken > 0);
             }
@@ -313,7 +292,6 @@ TEST_CASE("comparison PUSH2 JUMPI fusions with a short or full stack", "[cmp_jum
                         check_semantics(r, c, taken, not_taken);
                     }
                 }
-                // 1024 items at the comparison: the PUSH2 refills the stack to the limit.
                 for (const auto& [a, b] : {std::pair<uint256, uint256>{3, 4}, {4, 3}}) {
                     for (const auto dest : {Dest::valid, Dest::opcode}) {
                         const Case c{op, iszero, false, false, dest, 1024, a, b};
@@ -329,9 +307,6 @@ TEST_CASE("comparison PUSH2 JUMPI fusions with a short or full stack", "[cmp_jum
 
 TEST_CASE("comparison PUSH2 JUMPI fusions do not match a group cut off by the code end",
           "[cmp_jumpi]") {
-    // The code ends inside the group: the peeks read the zero padding, which is not JUMPI, and
-    // the instructions run one by one, the PUSH2 immediate padded with zeros, up to the implicit
-    // STOP.
     Runner r{true};
     for (const auto op : kOps) {
         for (const bool iszero : {false, true}) {

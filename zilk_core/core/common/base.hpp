@@ -4,8 +4,6 @@
 
 #pragma once
 
-// The most common and basic macros, concepts, types, and constants.
-
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -14,12 +12,6 @@
 
 #include <intx/intx.hpp>
 #include <zilk_core/core/common/assert.hpp>
-
-// #if defined(__wasm__)
-// #define SILKWORM_THREAD_LOCAL static
-// #else
-// #define SILKWORM_THREAD_LOCAL thread_local
-// #endif
 
 namespace silkworm {
 
@@ -67,29 +59,24 @@ inline constexpr size_t kAddressLength{20};
 
 inline constexpr size_t kHashLength{32};
 
-// https://en.wikipedia.org/wiki/Binary_prefix
 inline constexpr uint64_t kKibi{1024};
 inline constexpr uint64_t kMebi{1024 * kKibi};
 inline constexpr uint64_t kGibi{1024 * kMebi};
 inline constexpr uint64_t kTebi{1024 * kGibi};
 
 inline constexpr uint64_t kGiga{1'000'000'000};   // = 10^9
-inline constexpr uint64_t kEther{kGiga * kGiga};  // = 10^18
+inline constexpr uint64_t kEther{kGiga * kGiga};
 
 consteval uint64_t operator""_Kibi(unsigned long long x) {
-    // SILKWORM_ASSERT(x <= std::numeric_limits<uint64_t>::max() / kKibi);
     return x * kKibi;
 }
 consteval uint64_t operator""_Mebi(unsigned long long x) {
-    // SILKWORM_ASSERT(x <= std::numeric_limits<uint64_t>::max() / kMebi);
     return x * kMebi;
 }
 consteval uint64_t operator""_Gibi(unsigned long long x) {
-    // SILKWORM_ASSERT(x <= std::numeric_limits<uint64_t>::max() / kGibi);
     return x * kGibi;
 }
 consteval uint64_t operator""_Tebi(unsigned long long x) {
-    // SILKWORM_ASSERT(x <= std::numeric_limits<uint64_t>::max() / kTebi);
     return x * kTebi;
 }
 

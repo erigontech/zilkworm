@@ -2,20 +2,7 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Query the ERE dependencies resolved by a zkevm-benchmark-workload checkout.
-
-Usage:
-    tools/ere_workload.py <workload-dir> sp1-sdk-version
-    tools/ere_workload.py <workload-dir> reth-artifact-url
-
-sp1-sdk-version     SP1 SDK version ere-hosts appends to guest artifact names
-                    (stateless-validator-<client>-sp1-<version>.elf), resolved as
-                    ere-catalog's build script does: the sp1-verifier dependency of
-                    ere-verifier-sp1 in the ere workspace lockfile.
-reth-artifact-url   Base URL of the reth sp1 guest artifacts, from the
-                    artifact-registry.json embedded by the resolved
-                    stateless-validator-downloader.
-"""
+"""Query the ERE dependencies a zkevm-benchmark-workload checkout resolves: `sp1-sdk-version` or `reth-artifact-url`."""
 import json
 import os
 import subprocess
