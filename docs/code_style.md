@@ -1,16 +1,16 @@
-# Silkworm code style
+# Code style
+
+Applies to all C++ in the repository, both state backends alike. The rules are inherited from
+Silkworm, whose core `zilk_core` forks.
 
 The codebase respects:
 1. [C++ Core Guidelines][cpp-core-guidelines]
 1. [Google's C++ Style Guide][cpp-google-style-guide] with amendments (see below)
-1. [clang-format](https://clang.llvm.org/docs/ClangFormat.html) rules according to our .clang-format config
-1. [clang-tidy](https://clang.llvm.org/extra/clang-tidy/) checks according to our .clang-tidy config
+1. [clang-format](https://clang.llvm.org/docs/ClangFormat.html) rules according to `zilk_core/.clang-format`
+1. [clang-tidy](https://clang.llvm.org/extra/clang-tidy/) checks according to `zilk_core/.clang-tidy`
 
-This is enforced by tools and code reviews.
-
-clang-format runs on CI for each PR as a part of "lint" job. It can be run locally using `make fmt`.
-
-clang-tidy runs on CI when a PR is merged to `master` as a part of integration workflow. The report is attached to the "ARTIFACTS" section of the linux-clang-tidy job that can be found [here](https://app.circleci.com/pipelines/github/erigontech/silkworm?branch=master).
+Neither tool runs in CI, and the repository has no `make fmt` or `make lint` target: run
+`clang-format` with the config above on the files you touch. Code review enforces the rest.
 
 ## Extra guidelines
 
@@ -19,8 +19,8 @@ This is a list of project-specific guidelines that take precedence over the rule
 ### Basic rules
 
 1. .cpp & .hpp file extensions for C++; .c & .h are reserved for C.
-1. Maximum line length is 120, indentation is 4 spaces. Use `make fmt` to reformat according to the code style.
-1. Every code file starts with the Apache license boilerplate. Use `make lint` to check this.
+1. Maximum line length is 120, indentation is 4 spaces.
+1. Every code file starts with the license boilerplate (P25).
 1. Use `#pragma once` in the headers instead of the classic `#ifndef` guards.
 1. Use `snake_case()` for function names.
 1. Exceptions are allowed outside of the `core` library.
@@ -349,7 +349,7 @@ Bad:
 
 Use SPDX short form like in evmone:
 
-	// Copyright 2025 The Silkworm Authors
+	// Copyright 2026 The Zilkworm Authors
 	// SPDX-License-Identifier: Apache-2.0
 
 ### P26 filename vs file name

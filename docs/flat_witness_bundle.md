@@ -1,89 +1,57 @@
 # Flat Witness Bundle
 
-> The design rationale and the normative verifier requirements for this format
-> are in [mfbd_design_specs.md](mfbd_design_specs.md); this document is the
-> implementation-side layout reference. Where the two differ, the design spec
-> is normative.
+**Backend: DirectState.** This is the implementation-side layout reference of the MFBD flat witness
+bundle, the input of the DirectState guests. The design rationale and the normative verifier
+requirements are in [mfbd_design_specs.md](mfbd_design_specs.md); where the two differ, the design
+spec is normative. What the backend checks on a bundle and how it runs the blocks is in
+[directstate.md](directstate.md); how bundles are produced is in
+[mfbd_fixture_generation.md](mfbd_fixture_generation.md).
 
-The **flat witness bundle** is a flat format for stateless
-Ethereum block execution. A single byte buffer carries everything the guest
-needs to run a block (or a contiguous run of blocks) and verify its post-state
-root: the block RLPs, the ancestor headers, the pre-state accounts and their
-touched storage slots, the bytecodes, and the MPT proof nodes — all
-pre-laid-out so the guest can `reinterpret_cast` straight into POD views with
-zero RLP decoding on the hot path.
+A single byte buffer carries everything the guest needs to run a block, or a contiguous run of
+blocks, and verify its post-state root: the block RLPs, the ancestor headers, the pre-state accounts
+and their touched storage slots, the bytecodes and the MPT proof nodes. The guest
+`reinterpret_cast`s the bytes into POD views; nothing is decoded on the hot path.
 
-This document describes the bundle's layout, the input envelope that
-wraps it, how the state transition function consumes it,
-For the minimally perfect hash function we use the CHD scheme (Belazzougui, D., Botelho, F.C., Dietzfelbinger, M. (2009). Hash, Displace, and Compress. In: Fiat, A., Sanders, P. (eds) Algorithms - ESA 2009. ESA 2009. Lecture Notes in Computer Science, vol 5757. Springer, Berlin, Heidelberg. https://doi.org/10.1007/978-3-642-04128-0_61)
-- **CHD**: *Compress, Hash, Displace*, the minimal-perfect-hash construction
-  used by the bundle's `MphfMap` (see §2.4). It assigns each key to a bucket,
-  then picks a per-bucket *displacement* value that scatters that bucket's keys
-  to distinct final slots.
-- **fingerprint collision** — two distinct full keys (e.g. two 20-byte
-  addresses) whose 64-bit *fingerprint* (the short key the MPHF hashes over)
-  is identical. Distinct from CHD bucket overflow; see §2.3.1.
+The layout described here is `kFlatBundleVersion` 14 (`flat_bundle.hpp`), `PreStateMeta` version 4
+(`pre_state.hpp`) and `kMphfMapVersion` 3 (`mphf_map.hpp`). Those constants are the source of
+truth; a format change bumps them, see
+[the wire-format rule](mfbd_fixture_generation.md#5-wire-format-changes).
+
+Terms:
+
+- **CHD**: *Compress, Hash, Displace* (Belazzougui, Botelho, Dietzfelbinger, ESA 2009,
+  https://doi.org/10.1007/978-3-642-04128-0_61), the minimal-perfect-hash construction of the
+  bundle's `MphfMap` (§2.4). It assigns each key to a bucket, then picks a per-bucket
+  *displacement* that scatters that bucket's keys to distinct final slots.
+- **Fingerprint collision**: two distinct full keys (for example two 20-byte addresses) whose
+  64-bit *fingerprint*, the short key the MPHF hashes over, is identical. Distinct from CHD bucket
+  overflow; see §2.3.1.
 
 ## 1. Overview
 
 | Layer | Holds | Producer | Consumer |
 |---|---|---|---|
-| **Input envelope** (outer) | magic + version + N FlatBundles _or_ raw EEST JSON | `stdin_builders.rs`, `runner.cpp`, `json_witness_to_flat_bundle` | `StateTransition::run()` magic-dispatch |
-| **FlatBundle blob** (inner) | Flat Witness for one set of blocks | `json_witness_to_flat_bundle`, `legacy_to_flat_bundle`, `eest_to_flat_bundle` | `load_flat_bundle()` |
-| **`direct_state`** | accounts + storage + codes + addr/block hashes + collision sidecar | builder phase 10–12 | `DirectState::sanitize()` + EVM tx processor |
-
-Pipeline (host or guest):
-
-```
-on-disk file  →  read_vec / fstream  →  envelope ByteView
-                                              │
-                       magic dispatch ────────┤
-                                              │
-                ┌─────────────────────────────┴─────────────────────────────┐
-                │                                                           │
-            EJSN path                                                   MFBD path
-            run_ejsn():                                                 run_mfbd():
-              parse JSON                                                  loop N bundles:
-              blockchain_test()                                             load_flat_bundle()
-              return 0/1/2                                                  run_one_bundle(FlatBundle&):
-                                                                              direct.sanitize()
-                                                                              insert ancestors
-                                                                              Blockchain::insert_block × M
-                                                                              check_root / check_root_new_block
-                                                                            return Σ gas
-```
-
-Note where `load_flat_bundle()` sits: it runs in `run_mfbd()` (the caller), and
-`run_one_bundle()` receives an already-loaded `FlatBundle&` (see §3.1).
+| **MFBD envelope** (outer) | magic, version, N FlatBundles | the converters (`zilk_core/dev/cli/*_to_flat_bundle.cpp`) | `StateTransition::run_mfbd()` |
+| **FlatBundle blob** (inner, `FBND`) | the witness of one run of blocks | `build_flat_bundle()` | `load_flat_bundle()` |
+| **`direct_state`** | accounts, storage, codes, address and block hashes, collision sidecars | `direct_state_builder.cpp` | `DirectState` constructor and `sanitize()` |
+| **`node_store`** | MPT proof nodes | the converters | `DirectState::find_node_rlp` |
 
 ## 2. Wire format
 
 ### 2.1 Input envelope (outer)
 
-Every byte stream fed to `StateTransition` begins with a 4-byte little-endian
-**magic** and a 4-byte **version**. Everything in the bundle and its
-sub-bundles is 8-byte aligned.
+An MFBD input begins with a 4-byte little-endian magic and a 4-byte version. Everything in the
+bundle and its sub-bundles is 8-byte aligned: the reader `reinterpret_cast`s the bytes into POD
+structs (`FlatBundleHeader`, `PreStateMeta`, `MphfMapHeader`, `Account`, …), all `alignas(8)`, and
+casting a misaligned pointer to an over-aligned type is undefined behavior and a fault on some
+targets.
 
-> **Why 8-byte alignment?** The reader does not decode the wire — it
-> `reinterpret_cast`s the bytes in place into POD structs (`FlatBundleHeader`,
-> `PreStateMeta`, `MphfMapHeader`, `Account`, …), all declared `alignas(8)`.
-> Casting a misaligned pointer to an over-aligned type is undefined behavior
-> and, on some targets, a fault; aligning every section to 8 bytes lets the
-> in-place cast be both UB-free and efficient (no byte-by-byte assembly).
+The constants are in `zilk_core/core/types_zz/flat_bundle.hpp` (`kInputMagicMFBD`,
+`kInputVersionMFBD`, `kInputHeaderSizeMFBD`). The other input kinds the guest dispatches on are in
+[architecture.md](architecture.md#input-format-and-dispatch).
 
-Magics and versions are declared in `zilk_core/core/types_zz/flat_bundle.hpp`:
-
-```cpp
-inline constexpr uint32_t kInputMagicMFBD = 0x4442464Du;  // "MFBD"
-inline constexpr uint32_t kInputMagicEJSN = 0x4E534A45u;  // "EJSN"
-inline constexpr uint32_t kInputVersionMFBD = 1u;
-inline constexpr uint32_t kInputVersionEJSN = 1u;
-inline constexpr std::size_t kInputHeaderSizeMFBD = 16;
-inline constexpr std::size_t kInputHeaderSizeEJSN = 8;
-```
-
-**MFBD** (`MPHF-based Flat Bundle`) — 16-byte header in little-endian
-followed by N FlatBundle blobs, each starting at an 8-byte boundary:
+**MFBD** (`MPHF-based Flat Bundle`): a 16-byte little-endian header followed by N FlatBundle blobs,
+each starting at an 8-byte boundary:
 
 ```
 +0   u32  magic   == 'MFBD' (0x4442464D)
@@ -97,28 +65,9 @@ followed by N FlatBundle blobs, each starting at an 8-byte boundary:
 
 ```
 00000000: 4d46 4244 0100 0000 0100 0000 0000 0000   MFBD............
-00000010: 4642 4e44 0d00 0000 ...                   FBND....
+00000010: 4642 4e44 0e00 0000 ...                   FBND....
         └── FBND magic + version of bundle_0
 ```
-
-**EJSN** (`EEST JSON`) — 8-byte header followed by raw EEST `blockchain_test`
-JSON bytes (no inner length prefix — body runs to envelope end):
-
-```
-+0   u32  magic   == 'EJSN' (0x4E534A45)
-+4   u32  version == 1
-+8   <JSON bytes …>
-```
-
-Only `MFBD` and `EJSN` are declared in code today (`flat_bundle.hpp`). A few
-other four-character codes are *conventions referenced in prose only* — they are
-**not** defined as constants anywhere and the dispatch does not handle them:
-
-| Code | Hex | Status |
-|---|---|---|
-| `URLP` | `0x504C5255` | Legacy Unified RLP (pre-FlatBundle); not in code |
-| `SFBD` | `0x44424653` | Notional "single FlatBundle" — use MFBD with `n_bundles=1`; not in code |
-| `STBD` | `0x44425453` | Notional future single-transaction proving; not in code |
 
 ### 2.2 The inner bundle: FlatBundle blob (FBND)
 
@@ -129,7 +78,7 @@ A FlatBundle is a POD-mmap-able witness layout. The header is fixed-size
 ```cpp
 struct alignas(8) FlatBundleHeader {
     uint32_t magic;                 // 'FBND' (0x444E4246)
-    uint32_t version;               // 14
+    uint32_t version;               // kFlatBundleVersion
     uint32_t genesis_rlp_off;       uint32_t genesis_rlp_size;
     uint32_t blocks_rlp_off;        uint32_t blocks_rlp_size;
     uint32_t ancestors_rlp_off;     uint32_t ancestors_rlp_size;
@@ -150,18 +99,18 @@ Sections, in order they typically appear:
 | `node_store` | An MphfMap of MPT proof nodes keyed by 32-byte hash. A peer top-level section, **not** part of `direct_state` (see §2.6). |
 | `network` | UTF-8 string naming the target chain config (e.g. `"Mainnet"`, `"Prague"`, `"Cancun"`). Not null-terminated; size is the section length. `StateTransition::run_one_bundle` looks this up in `silkworm::test::kNetworkConfig` to pick the `ChainConfig`. |
 
-Current wire is `kFlatBundleVersion = 14`. Older bundles fail `load_flat_bundle` validation.
+A bundle of another version fails `load_flat_bundle`.
 
 ### 2.3 `direct_state` internals
 
 The `direct_state` blob is a flat sequence of sub-sections fronted by
 `PreStateMeta` (`zilk_core/core/state_zz/pre_state.hpp`). Magic
-`'PRES' = 0x53455250`, current version `4`:
+`'PRES' = 0x53455250` (`kMagic`), version `kVersion`:
 
 ```cpp
 struct PreStateMeta {
     uint32_t magic;                  // 'PRES'
-    uint32_t version;                // 4
+    uint32_t version;                // kVersion
     uint32_t n_accounts;
     uint32_t n_block_hashes;
 
@@ -202,30 +151,6 @@ Sub-section shapes:
   The `sanitize` pass resolves every `Account.code_store_offset` to point into
   this section's body, so `find_code` is an offset add at runtime — no MPHF lookup.
 
-#### The witness buffer is mutable end-to-end
-
-The pre-state and node-store spans are **mutable** (`std::span<uint8_t>`), not
-const, all the way from the `DirectState` constructor down through `MphfMap`.
-This is deliberate, not an accident of API drift:
-
-- The `DirectState` constructor takes `std::span<uint8_t>` for both the
-  pre-state and node-store windows; the member `prestate_view_` is
-  `std::span<uint8_t>`.
-- `MphfMap::data()` returns `uint8_t*` and `MphfMap::find()` returns
-  `std::optional<std::span<uint8_t>>` — both mutable.
-
-The buffer must be writable because `sanitize()` and the EVM both write
-*scratch fields inside each `Account` in place*: `deleted`, `modified`,
-`code_store_offset` / `code_store_len`, and the cached leaf RLP
-(`acc_rlp_buf` / `acc_rlp_len` / `acc_rlp_sroot_off`). For example, `sanitize()`
-sets `deleted = false`, stamps `modified`, and calls `rlp_into_cache(...)` on
-each account; the per-block root check later re-stamps `acc_rlp_buf` after the
-storage root changes. These writes land directly in the witness allocation. The
-de-const refactor made this honest: there is no `const_cast` in the
-execution path anymore — the mutation matches the declared type.
-
-`sanitize()` is the identity↔hash verifier — see §2.3.2.
-
 #### 2.3.1 Two kinds of collision
 
 The pipeline has to reckon with two **independent** notions of "collision",
@@ -254,174 +179,14 @@ they arise for different reasons.
    sidecar serves both populations interchangeably — the lookup path does not
    distinguish them.
 
-See §2.4 for the lookup mechanics, §2.5 for the builder mechanics, and the
-worked example in §2.5 for how each route resolves.
-
-#### 2.3.2 `sanitize()` — the threat model
-
-The witness is **untrusted**: it is synthesised from a geth
-`debug_executionWitness` response and could be truncated, reordered, or
-maliciously crafted. `sanitize()` (`zilk_core/core/state_zz/direct_state.cpp`)
-runs once per bundle, before any block executes, and makes the witness prove it
-is self-consistent. The checks it performs (in the order the function runs them):
-
-1. **Identity↔hash binding.** `sanitize()` sweeps the code-store
-   (`keccak256(code) == code_hash` for every body) and the node-store
-   (`keccak256(node_rlp) == node_hash` for every body) first, then binds every
-   account's identity to its hash as part of the coverage sweep below
-   (`keccak256(addr) == addr_hash`). The trie-fold can prove that a *value*
-   lives under a given hashed key, but it cannot, on its own, prove that the
-   hash belongs to the claimed *identity* — that is exactly the gap this binding
-   closes. Without it, a witness could hand the EVM the storage of address A
-   while claiming it belongs to address B. (Storage slot *keys* are hashed and
-   bound on the read path inside `check_root`, not in `sanitize()` — and the
-   same is true of MPHF *routing* for account reads; see check 4.)
-
-2. **`addr_hashes` 1-to-1 coverage sweep.** It walks the `addr_hashes` array
-   (sorted by `keccak256(addr)`) and requires it strictly increasing (no
-   duplicates — the comparison rejects `memcmp(prev, cur) >= 0`), with every
-   entry's `entry_offset` resolving to an `Account` whose 20-byte address
-   matches, while re-checking `keccak256(addr) == addr_hash` per entry. The
-   "exactly once" guarantee rides on the `modified` scratch flag: the body walk
-   runs first and stamps `modified = true` on every prestate account, the sweep
-   clears it per named entry, and a second body walk rejects if any account is
-   still `modified` (never named by `addr_hashes`). Gaps or duplicates fail the
-   sweep. This proves the `addr_hashes` ↔ walked-body bijection, but it
-   deliberately does **not** constrain the account *read path*, `find(addr)`;
-   see check 4.
-
-3. **Per-Account slot-extent bound.** This bound is enforced at `DirectState`
-   construction (via `validate_prestate_layout` / `validate_or_abort`), before
-   `sanitize()` runs, but it belongs to the same threat model. It is layered:
-   `validate_mphf<20>` first places every addr-map entry's `[len:u64][body]`
-   inside `data[]` with `body_len >= 20` (the generic MphfMap invariant, §2.4),
-   and `validate_prestate_layout`'s `check_entry` then requires the `Account`
-   and all its inline slots to fit inside that body:
-
-   ```cpp
-   uint64_t body_len; std::memcpy(&body_len, data + off, 8);
-   if (body_len < sizeof(Account)) [[unlikely]] { /* reject */ }
-   const auto* acc = reinterpret_cast<const Account*>(data + off + 8u);
-   const uint64_t slots_bytes = static_cast<uint64_t>(acc->slot_count) * sizeof(Slot);
-   if (slots_bytes > body_len - sizeof(Account)) [[unlikely]] { /* reject: slots exceed body */ }
-   ```
-
-   i.e. `sizeof(Account) + slot_count*sizeof(Slot) <= body_len` and, by the
-   MphfMap invariant, `off + 8 + body_len <= data_size`. This stops a forged
-   `slot_count` from steering reads out of bounds, or into a neighbouring entry.
-
-4. **MPHF routing.** This one is enforced at root-check time inside
-   `check_root`, not in `sanitize()`, but it belongs to the same threat model:
-   checks 1 and 2 prove that `addr_hashes` and the walked bodies are in
-   bijection, yet neither constrains where `find(addr)` actually lands — a
-   forged `MphfMapHeader` (e.g. a transposed `slot_offsets[]`) can make
-   `find(addr)` miss an account that the body walk and `addr_hashes` both
-   cover. The enforcement rides on the account read path never returning
-   "nothing". `DirectState::find_or_create_account(addr)` is the single
-   creation-capable lookup: the MPHF blob map first, then the
-   `created_accounts_` overlay, and on a *total* miss it *materializes* a
-   record in `created_accounts_` with `deleted = true`
-   (`materialize_absent_account_`, the cold path). "Account does not exist" is
-   thus a data property (`deleted`) on an always-present record, not a null
-   pointer. `DirectStateView::get_account` (the evmone `StateView` boundary)
-   routes through it and returns `std::nullopt` only when the record says
-   `deleted`, so EVM-visible semantics are unchanged — but `DirectState` now
-   owns a record for every address the EVM ever reads, from the first read.
-
-   The rule is **total miss only**. If either lookup finds a record, that
-   record is returned as it stands, `deleted` included. An honest selfdestruct
-   followed by a later read of the same account in the same block must *not*
-   materialize a twin: `keccak256(addr)` for that account already sits in
-   `addr_hashes`, so a twin would trip the clash check below on a perfectly
-   honest block. (Reviving a deleted record is a separate, explicit step —
-   `revive_if_deleted` — taken only by the mutating accessors.)
-
-   `read_code`, `read_storage` and `has_storage` observe the same way, through
-   `observe_account_` — the const-callable half of `find_or_create_account`,
-   and the reason `created_accounts_` is declared `mutable`. Their return
-   values are unchanged: a `deleted` record yields the same empty code, zero
-   slot value and `false` that a missing record used to. Code reads matter here
-   in their own right, because the system contracts (EIP-4788, EIP-2935,
-   EIP-7002, EIP-7251) reach an account only through its code, so a code read
-   may be the only read an account gets.
-
-   `read_account`, `get_balance`, `get_nonce`, `is_deleted` and
-   `is_empty_account` deliberately do **not** materialize; they resolve through
-   the plain `lookup_account_` and still answer "absent" and "deleted"
-   identically. `check_root_new_block` and `state_root_hash` iterate
-   `created_accounts_` while calling them, and an insert mid-iteration would
-   invalidate the iterator.
-
-   `check_root` then merges the pre-state `addr_hashes` with the created-set
-   hashes and rejects on any overlap ("Created and existing hashes clash") —
-   inside the merge loop, before it computes or compares a root at all. So a
-   routing forgery against an account named by `addr_hashes` is caught even
-   when the victim is only ever *read*: the misrouted read materializes an
-   overlay record whose `keccak256(addr)` collides with the `addr_hashes`
-   entry. Before materialization, only *written* accounts left such a trace.
-
-   `created_accounts_` is routinely non-empty on an honest block. Every
-   precompile the EVM touches lands there — `Host::access_account` calls
-   `get_or_insert` before its `is_precompile` early-out — as does every
-   genuinely new EOA or contract. A populated overlay is therefore never itself
-   a rejection signal; the hash clash is the only discriminator.
-
-Together these bind every byte of state the EVM will read to a verified
-identity and hash, so a malformed or adversarial witness cannot smuggle in
-mismatched accounts, code, or slots and still pass the post-state root check.
-
-Three gaps remain open, and the checks above should not be read as covering
-them:
-
-- **Pure omission.** An account whose leaf exists in the real pre-trie but
-  which is absent from *both* the addr-map and `addr_hashes`, and which the
-  block only reads, is not caught: the materialized `deleted = true` record
-  clashes with nothing and emits no trie update. A non-membership probe against
-  the witness trie was prototyped and removed — real witnesses carry no
-  exclusion-proof nodes for absent-account reads, so there is nothing to prove
-  non-membership against.
-- **Fabricated accounts.** An account present in the addr-map and `addr_hashes`
-  but absent from the real pre-trie is not rejected by a read check. Its
-  read-only update reaches a point in the trie that proves its key absent, and
-  `calc_root_from_updates` inserts a leaf there rather than failing (§3.1).
-- **`check_root_new_block`.** Every block after a bundle's first (§3.1) carries
-  no clash guard at all, and decides leaf inclusion via `is_deleted`, which
-  resolves through `find()` — so it inherits whatever routing the blob's MPHF
-  header dictates.
-
-Both directions of the account-read behaviour are pinned by tests in the
-`zilkworm.tests` target, built on the shared harness
-`zilk_core/core/state_zz/account_read_test_util.hpp`. The harness assembles a
-prestate blob and matching node store, signs real transactions, executes the
-block twice — once honestly, once against a forged bundle — reseals the forged
-header over the *spoofed* execution's `gas_used`, `receipts_root`,
-`logs_bloom` and `state_root`, and captures the guest's stdout so a test can
-assert which check fired:
-
-- `account_read_spoof_test.cpp` forges a bundle by transposing two
-  `slot_offsets` entries and nothing else, then drives eight reads of the
-  victim account through the EVM: `BALANCE`, `EXTCODESIZE`, `EXTCODEHASH`,
-  `EXTCODECOPY`, `STATICCALL`, `DELEGATECALL`, a value-bearing `CALL`, and a
-  `BALANCE` whose result is discarded. Because the header is resealed over the
-  spoofed run, the bundle would verify were it not for the clash check; every
-  case asserts the run is rejected on the clash message specifically, with no
-  "New Root" line ever emitted. The discarded-result case is the sharpest: the
-  forged block is byte-identical to the honest one — same gas, same receipts
-  root, same state root — so nothing but the overlay record distinguishes them.
-- `account_read_honest_test.cpp` pins the other direction, that the check does
-  not over-trigger: an honest read of an address absent from the witness, a
-  block whose only overlay entries are touched precompiles, a control case
-  where a witness-resident read materializes nothing at all, code and storage
-  reads of absent accounts, a selfdestruct followed by a read of the same
-  account (which must leave the overlay empty), and a read of an absent address
-  followed by a `CREATE2` that revives that record in place.
+§2.4 has the lookup, §2.5 the builder and a worked example of both routes.
 
 ### 2.4 MphfMap: the minimal perfect hash map
 
 There are three roles for an MphfMap in a bundle — the addr-map and the
 `code_store` (both inside `direct_state`) and the `node_store` (a peer
 section). All three share one wire format and one lookup engine. It is worth
-separating three things that the name "MphfMap" used to conflate:
+separating three things the name "MphfMap" covers:
 
 - **The conceptual map** — a u64 → bytes minimal-perfect-hash map with a
   collision sidecar.
@@ -486,179 +251,38 @@ The body for each entry is `[len:u64][body]`; the caller verifies membership by
 memcmp'ing the full key bytes embedded inside `body` (see §2.5 for the encoding
 the converters use).
 
-#### The wrapper class
+#### Lookup
 
-```cpp
-class MphfMap {
- public:
-    bool valid() const noexcept;                  // h_ != nullptr
-    uint32_t n_keys() const noexcept;
-    uint8_t* data() const noexcept;               // MUTABLE
-    const MphfMapHeader* header() const noexcept;
+The lookup function (`index_lookup`, the two-stage CHD hash with the `mix64_body` mixer and the
+Lemire reduction) is specified in
+[mfbd_design_specs.md §5](mfbd_design_specs.md#5-the-mphf-index-in-depth); the code is
+`MphfMapHeader::index_lookup`, `MphfMap::find` and `MphfMap::resolve_collision` in `mphf_map.hpp`.
+`MphfMap` is a view that owns no storage: it holds the header pointer and the derived table
+pointers. `DirectState` holds three, `pre_state_map_`, `code_store_map_` and `node_store_map_`.
 
-    uint32_t index_lookup(uint64_t key) const noexcept;
+What the read path relies on:
 
-    template <std::size_t KeySize, std::size_t KeyOffset,
-              uint64_t (*shorten_key)(const uint8_t (&)[KeySize])>
-    std::optional<std::span<uint8_t>> find(const uint8_t (&key)[KeySize]) const noexcept;
+- `slot_offsets[idx] == 0` is a sentinel for "no singleton body at this index" (`data[]` reserves
+  its first 8 bytes so a real offset is never `0`). Only a zero slot dispatches to the sidecar.
+- A non-zero slot whose embedded key fails the full-key `memcmp` is a definitive miss. An absent
+  key therefore resolves in at most one `memcmp`.
+- That is sound only under the builder's invariant: every key whose body lives in the sidecar has
+  `slot_offsets[index_lookup(key)] == 0` (§2.5).
+- `resolve_collision` binary-searches the sidecar by `.key`, then walks the equal-key cluster,
+  comparing the full key inside each body.
+- The returned span is mutable; see
+  [directstate.md](directstate.md#the-witness-buffer-is-written-in-place).
 
-    template <std::size_t KeySize = 32, std::size_t KeyOffset = 0, typename Cb>
-    void for_each(Cb&& cb) const noexcept;
+`find` takes the fingerprint function as a template parameter. The functions are in
+`zilk_core/core/common_zz/index_key.hpp`:
 
- private:
-    template <std::size_t KeySize, std::size_t KeyOffset = 0>
-    std::span<uint8_t> resolve_collision(uint64_t k8, const uint8_t (&key)[KeySize]) const noexcept;
+| Map | Call | Fingerprint |
+|---|---|---|
+| addr-map | `pre_state_map_.find<20, 0, &addr_key8>(addr.bytes)` | `addr_key8`: the address's first 7 bytes, with byte 19 as the top byte (precompile addresses differ only in byte 19) |
+| node store | `node_store_map_.find<32, 0, &hash_key8>(node_hash.bytes)` | `hash_key8`: the hash's first 8 bytes |
+| code store | `code_store_map_.find<32, 0, &hash_key8>(h.bytes)` | `hash_key8` |
 
-    const MphfMapHeader*      h_{nullptr};
-    const uint32_t*           slot_offsets_{nullptr};
-    uint8_t*                  data_{nullptr};        // MUTABLE
-    const MphfCollisionEntry* collisions_{nullptr};
-    const uint64_t*           displacement_{nullptr};
-    uint32_t n_keys_{0}, n_buckets_{0}, n_collisions_{0};
-    uint64_t seed_factor_{0};
-};
-```
-
-`DirectState` holds three of these — `pre_state_map_`, `code_store_map_`,
-`node_store_map_` — each constructed (or `reset()`) over the corresponding
-section. The cached pointers/scalars are derived once from the header so the
-hot path never re-reads offsets.
-
-#### CHD: the lookup, with intuition
-
-A *minimal perfect hash* maps `n` known keys onto exactly `[0, n)` with no gaps
-and no collisions — but no single fixed hash function does that for an arbitrary
-key set. CHD's trick is two-stage. First it hashes a key into one of
-`n_buckets` *buckets*. Buckets are intentionally coarse, so several keys share a
-bucket. Then, per bucket, it stores a *displacement* value chosen at build time
-so that adding it to the key before a second hash scatters that bucket's keys to
-distinct final slots in `[0, n_keys)`. The displacement table is small (one u64
-per bucket) and is the only thing the lookup needs beyond the two hashes.
-
-`seed` and `seed_factor` are the build-time tuning knobs: `seed_factor` is added
-to the key before hashing, and the builder retries with fresh seeds until a
-displacement assignment succeeds (the `mix64_body` mixer ensures each retry
-produces a genuinely different bucket layout). At read time only `seed_factor`
-matters.
-
-`index_lookup(key)` computes the final `[0, n_keys)` index:
-
-```cpp
-uint32_t MphfMap::index_lookup(uint64_t key) const noexcept {
-    const uint64_t z1 = key + seed_factor_;
-    const uint64_t h1 = mix64_body(z1);                                 // first hash
-    const uint32_t b  = fast_mod_u32((uint32_t)h1, n_buckets_);         // bucket
-    const uint64_t df = displacement_[b];                               // per-bucket displacement
-    const uint64_t h2 = mix64_body(z1 + df);                            // second hash
-    return fast_mod_u32((uint32_t)h2, n_keys_);                         // final index
-}
-```
-
-where `mix64_body` is the SplitMix64 stage-1 mixer and `fast_mod_u32` is
-Lemire's multiply-shift reduction (`(x * n) >> 32`):
-
-```cpp
-inline uint64_t mix64_body(uint64_t z) noexcept {
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    return z ^ (z >> 31);
-}
-```
-
-#### The lookup path: singleton slot, then sidecar
-
-`MphfMap::find` is the read entry point. It takes the full key as a fixed-size
-byte array and a `shorten_key` *non-type template parameter* — the function that
-derives the 64-bit fingerprint. Callers pass `addr_key8` for 20-byte addresses
-or `hash_key8` for 32-byte hashes:
-
-```cpp
-template <std::size_t KeySize, std::size_t KeyOffset,
-          uint64_t (*shorten_key)(const uint8_t (&)[KeySize])>
-std::optional<std::span<uint8_t>>
-MphfMap::find(const uint8_t (&key)[KeySize]) const noexcept {
-    if (h_ == nullptr || n_keys_ == 0) return std::nullopt;
-    const uint64_t k8  = shorten_key(key);          // 64-bit fingerprint
-    const uint32_t idx = index_lookup(k8);
-    const uint32_t off = slot_offsets_[idx];
-    if (off != 0) [[likely]] {                      // singleton slot occupied
-        uint8_t* body = data_ + off + 8u;
-        if (std::memcmp(body + KeyOffset, key, KeySize) == 0) [[likely]] {
-            uint64_t len; std::memcpy(&len, data_ + off, 8);
-            return std::span<uint8_t>{body, static_cast<size_t>(len)};
-        }
-    } else if (n_collisions_ > 0) [[unlikely]] {    // empty slot → sidecar
-        const std::span<uint8_t> b = resolve_collision<KeySize, KeyOffset>(k8, key);
-        if (!b.empty()) return b;
-    }
-    return std::nullopt;
-}
-```
-
-The `slot_offsets[idx] == 0` value is a **sentinel**: it means "no singleton
-body lives at this index" (recall `data[]` reserves its first 8 bytes precisely
-so a real offset can never be `0`). Only a zero slot dispatches to the sidecar;
-a non-zero slot whose embedded key fails the memcmp is a **definitive miss**
-(`std::nullopt`). Absent keys therefore resolve in at most one memcmp, which is
-the common case now that every EVM account read probes the map (§2.3.2).
-
-That is sound only because the builder upholds the matching invariant: **every
-key whose body lives in the sidecar has `slot_offsets[index_lookup(key)] == 0`**.
-Since `find` never reaches the sidecar from an occupied slot, a sidecar key
-whose index were owned by another key's singleton body would be unreachable.
-§2.5 describes how the builder guarantees the slot is empty.
-
-`resolve_collision` (a private member) binary-searches `collisions_` by `.key`,
-then walks the contiguous equal-key cluster, memcmp'ing the full key inside each
-body:
-
-```cpp
-template <std::size_t KeySize, std::size_t KeyOffset>
-std::span<uint8_t>
-MphfMap::resolve_collision(uint64_t k8, const uint8_t (&key)[KeySize]) const noexcept {
-    if (n_collisions_ == 0) return {};
-    auto it = std::lower_bound(collisions_, collisions_ + n_collisions_, k8,
-        [](const MphfCollisionEntry& e, uint64_t kk) noexcept { return e.key < kk; });
-    for (; it != collisions_ + n_collisions_ && it->key == k8; ++it) {
-        // it->offset is u64 over a u32 arena; validate_mphf bounded it, no guard here.
-        uint8_t* body = data_ + it->offset + 8u;
-        if (std::memcmp(body + KeyOffset, key, KeySize) == 0) {
-            uint64_t len; std::memcpy(&len, data_ + it->offset, 8);  // the data-section header
-            return std::span<uint8_t>{body, static_cast<size_t>(len)};
-        }
-    }
-    return {};
-}
-```
-
-The returned span is **mutable** — that is what lets the execution path stamp
-the `Account` scratch fields in place (§2.3).
-
-Concrete call patterns in `DirectState`:
-
-```cpp
-// addr-map: 20-byte address, fingerprint = addr_key8
-pre_state_map_.find<20, 0, &addr_key8>(addr.bytes);
-
-// node-store: 32-byte node hash, fingerprint = hash_key8
-node_store_map_.find<32, 0, &hash_key8>(node_hash.bytes);
-
-// code-store: 32-byte code hash, fingerprint = hash_key8
-code_store_map_.find<32, 0, &hash_key8>(h.bytes);
-```
-
-The fingerprint functions live in
-`zilk_core/core/state_zz/direct_state.hpp`:
-
-```cpp
-inline uint64_t hash_key8(const uint8_t (&h)[32]) noexcept {
-    uint64_t v; std::memcpy(&v, h, 8); return v;   // first 8 bytes
-}
-// 7 MSBs + 19th byte (LSB): precompile addrs vary only in byte 19
-inline uint64_t addr_key8(const uint8_t (&a)[20]) noexcept {
-    uint64_t k; std::memcpy(&k, a, 8);
-    k = (k & 0x00FFFFFFFFFFFFFFull) | (uint64_t(a[19]) << 56); return k;
-}
-```
+#### Validation
 
 `for_each<KeySize, KeyOffset>(cb)` iterates every singleton slot (skipping the
 `0` sentinels) and then every sidecar entry, so it visits all bodies. It is
@@ -806,11 +430,6 @@ Read paths:
   single-entry cluster `{D}` → memcmp confirms → return D. The read path never
   knew or cared that D was a *bucket spill* rather than a fingerprint clash; the
   full-key memcmp is correct either way.
-
-This is why §2.3.1 stresses that the sidecar serves both populations
-interchangeably: the lookup logic is identical, only the build-time reason for
-spilling differs.
-
 ### 2.6 `node_store` — read-only MPT proof nodes (a peer section)
 
 The `node_store` is **not** part of `direct_state`/`PreStateMeta`. It is a peer
@@ -828,389 +447,22 @@ are written into adjacent sections of the same `FlatBundle` allocation.
 layout of each store is validated by `validate_mphf<32>` in the `DirectState`
 constructor, where the maps are built (§2.4).
 
-At runtime the `node_store` is **read-only** — there is no append path. The
-`DirectState` constructor takes the node-store byte window as a separate `span`
-parameter (parallel to the prestate span) and stores it in `node_store_map_`
-(an `MphfMap`). `DirectState::find_node_rlp(node_hash)` looks up a node's RLP
-through it and is what the state-root recompute path calls:
-
-```cpp
-std::optional<ByteView>
-DirectState::find_node_rlp(const evmc::bytes32& node_hash) const noexcept {
-    if (auto b = node_store_map_.find<32, 0, &hash_key8>(node_hash.bytes))
-        return ByteView{b->data() + FlatKv::kPayloadOffset, b->size() - FlatKv::kPayloadOffset};
-    return std::nullopt;
-}
-```
-
-There are **three** runtime call sites of `find_node_rlp`, all inside the shared
-`GridMPT<DeletionEnabled>` template body (so they serve both the `<true>`
-storage-trie and `<false>` account-trie instantiations), all reached only during
-the block-0 state-root recompute:
-
-- **`GridMPT::unfold_slot` (`zilk_core/core/trie_zz/fold_unfold.hpp`)** — when
-  unfolding a node whose child is a 32-byte hash reference rather than an
-  embedded RLP, it calls `state_->find_node_rlp(child)` to fetch the child node's
-  RLP.
-- **`GridMPT::init_from_root` (`zilk_core/core/trie_zz/grid_mpt.cpp`)** — fetches
-  the previous block's `state_root` node to seed the trie. (The `GridMPT`
-  constructor calls `init_from_root`, so this is how block 0 seeds the account
-  trie from the parent header's committed root.)
-- **`GridMPT::calc_root_from_updates` (`zilk_core/core/trie_zz/grid_mpt.cpp`)** —
-  in the extension-node full-match branch, when the extension's child is a
-  hash reference (`child_len >= 32`) it fetches that child via
-  `state_->find_node_rlp(ext.child)`.
-
-> All three call sites take a 32-byte child hash and resolve it through the same
-> `MphfCollisionEntry[]` sidecar mechanism as any other `hash_key8` lookup; two
-> MPT nodes whose first 8 hash bytes collide are disambiguated by the full
-> 32-byte memcmp inside `find`.
-
-There is also a third, fallback reader — `DirectState::recover_account_from_nodestore`,
-compiled only under `USE_HASH_KEY` (CMake option, `-DUSE_HASH_KEY=ON` at configure
-time; OFF by default for host, hypercube and qemu builds, ON in the Airbender guest, whose
-Makefile, CMake and image default to it): when neither
-the prestate map nor the created-accounts overlay holds the address, it walks the
-account trie from the parent `state_root` along `keccak(addr)` to recover an
-account whose preimage was missing from the addr-map. An empty child or a
-diverging path is a valid absence (the caller materializes an absent record); a
-missing or malformed node halts execution. `recover_slot_from_nodestore` does the
-same for a slot, from the account's storage root (the empty root once the block has
-wiped its storage). Neither runs past block 0: the node store holds the tries of the
-parent state only, so `check_root` ends recovery. Later blocks run on the records the
-guest holds (the witness's, and those block 0 created or recovered), which it has
-checked rebuild to block 0's state root (`state_root_hash()`), and
-`check_root_new_block` rebuilds their roots from the same records. Nor is an address the witness carries a record of (its hash
-in `addr_hashes`) recovered: only a forged addr-map lookup misses one, and the
-created/existing clash in `check_root` rejects that, as without the option.
-`witness_hide_node_test.cpp` documents the gap this guards against.
-
-`check_root` (block 0 of a bundle) and `check_root_new_block` (subsequent
-blocks) in `state_transition.cpp` drive the recomputes (§3.1). The only
-"updates" to anything node-related are in-memory mutations of each `Account`'s
-`acc_rlp_buf` / `acc_rlp_len` / `acc_rlp_sroot_off` cache after a successful root
-check, so the next block's `HashBuilder`-based path can reuse them. The
-`node_store` bytes themselves are never written through.
-
-## 3. Full block run
-
-Entry point: `StateTransition::run()` in
-`zilk_core/dev/state_transition.cpp`. The leading 4 bytes are read and matched
-against `kInputMagicEJSN` / `kInputMagicMFBD`:
-
-```cpp
-switch (magic) {
-    case kInputMagicEJSN: return run_ejsn();
-    case kInputMagicMFBD: return run_mfbd();
-    default: sys_println("ERROR: unsupported input magic"); return kRunFailure;
-}
-```
-
-### 3.1 MFBD path
-
-`run_mfbd()` validates the 16-byte header, reads `n_bundles`, and walks the
-envelope at 8-byte alignment. For each bundle it calls
-`::zilkworm::load_flat_bundle(tail)` — which validates the FBND magic +
-version, RLP-decodes `genesis`, `blocks` (the `<u64 N>` blocks-RLP header plus N
-8-aligned payloads), and `ancestors`, and constructs the `FlatBundle`'s
-`DirectState` over the prestate and node-store byte windows (no POD decoding) —
-then passes the already-loaded bundle to `run_one_bundle(*fb)`. After each
-bundle it advances the cursor by `align8(cursor + fb->blob.size())`.
-
-`run_one_bundle(::zilkworm::FlatBundle& bundle)`:
-
-1. `bundle.direct.sanitize()` — identity↔hash verification across every account,
-   code, and node (§2.3.2). A failure returns `{0, false}`.
-2. `bundle.direct.insert_header(h)` for each ancestor header (so `BLOCKHASH`
-   resolves).
-3. Resolves `bundle.network` against `silkworm::test::kNetworkConfig` and
-   constructs `Blockchain{bundle.direct, cfg, bundle.genesis}`. Sets
-   `bundle.direct.set_multi_block(block_rlps.size() > 1)` so the per-block
-   journal arms for incremental validation.
-4. For each `block` in the bundle:
-   - `blockchain.insert_block(block, /*check_state_root=*/false)`; on any
-     non-`kOk` result return `{0, false}`.
-   - The *first* block that reaches the root check → `check_root(...)`; every
-     subsequent block → `check_root_new_block(...)`. (The split is gated by a
-     `first_root_check` flag flipped after the first non-skipped block, so for a
-     normal all-valid bundle this is just "block 0 vs blocks 1..N-1".) Either
-     path compares the recomputed root against `header.state_root` (see below).
-   - `bundle.direct.insert_header(block.header)` so the next block's `BLOCKHASH`
-     resolves.
-   - Accumulate `cumulative_gas += block.header.gas_used`.
-
-Returns cumulative gas across all bundles, or `0` on any failure.
-
-#### Why block 0 and blocks 1+ check the root differently
-
-The two root-check strategies are not arbitrary; they reflect what state is
-available at each point.
-
-**Block 0 — full recompute via GridMPT (`check_root`).** The first block of a
-bundle has no prior cached leaf RLPs to lean on, so it rebuilds the account
-trie and every touched storage trie *from scratch* out of the witness
-`node_store`. The flow:
-
-1. Merge the pre-state `addr_hashes` with any newly created accounts into one
-   sorted-by-`addr_hash` sequence, rejecting outright — before any root is
-   computed — if the two sets intersect ("Created and existing hashes clash").
-   This is the disjointness check that backstops MPHF routing (§2.3.2, check 4).
-2. For each account, walk its pre-state and newly created slots, caching
-   `keccak256(slot_key)` and encoding initial/current values, then drive
-   `GridMPT<true>` to recompute that account's storage root over the witness
-   nodes (`reset(storage_root)` → `calc_root_from_updates()`).
-3. Re-encode each account leaf (`addr_hash` + account RLP, now carrying the new
-   storage root) into `acc_updates`. Read-only pre-state accounts
-   (`modified == false`) contribute a check node instead: `initial` set to the
-   cached leaf RLP, `current` left empty.
-4. Drive a `GridMPT` over the account trie (the recompute path constructs it as
-   `GridMPT<true>` — `state_transition.cpp` declares `mpt::GridMPT<true>
-   acc_trie(direct_state, prev_root)`), seeding from the previous block's
-   `state_root` (unfolded out of the keccak-verified `node_store` via
-   `init_from_root`) and layering the account updates on top.
-5. Compare the computed new root against `header.state_root`.
-
-This is the expensive path: it unfolds and folds real MPT nodes for both the
-account layer and every touched storage trie. It is also the *trust anchor* — it
-starts from a `state_root` the parent header committed to and rebuilds forward
-using only nodes whose `keccak256(node_rlp)` `sanitize()` already verified, so a
-correct result proves the post-state without trusting the witness's structure.
-
-An update with empty `current` is a **read check**. When its path resolves to a
-leaf, `calc_root_from_updates` requires that leaf's value to equal `initial`
-("Pre value mismatch in existing leaf") and then stops without inserting
-anything, which binds the pre-state bytes the EVM read to the trie the parent
-header committed to. It does not bind *existence*: if the path instead reaches a
-point that proves the key absent — the empty-trie seed, a branch's nil child, an
-extension divergence, a leaf divergence — the update inserts a leaf there rather
-than failing, which is the fabricated-account gap listed in §2.3.2. Deletions
-(`current = {0x80}`) and genuine inserts (non-empty `current`) follow their own
-paths. All of this lives in the shared `GridMPT` template body, so it applies
-identically to the account layer and every touched storage trie.
-
-**Blocks 1+ — incremental rebuild via HashBuilder (`check_root_new_block`).**
-After block 0, every account already carries a cached leaf RLP
-(`acc_rlp_buf`) that the previous block's root check stamped in place. A
-subsequent block need not re-walk the MPT at all:
-
-1. For each account the EVM changed this block, re-encode its leaf with the new
-   storage root (`rlp_into_cache(storage_root)` updates `acc_rlp_buf` /
-   `acc_rlp_len` / `acc_rlp_sroot_off`).
-2. Collect leaves (`addr_hash` + RLP) from pre-state and created accounts,
-   skipping deleted/empty accounts, and sort by `addr_hash`.
-3. Feed them to `silkworm::trie::HashBuilder` (`add_leaf` per leaf,
-   `root_hash()` at the end) — a pure leaf-to-root fold that touches **no
-   node_store and no GridMPT**.
-4. Compare against `header.state_root`.
-
-This works because each account leaf already embeds its current storage root,
-and only accounts the EVM actually changed need their leaf re-encoded; the
-account layer is then re-hashed directly from leaves. It trades the full witness
-walk for a single leaf-to-root pass, which is why it is markedly faster than
-block 0's recompute. It also performs **no read checks and no clash guard**: the
-leaf rebuild trusts every cached leaf, and it never compares the created set
-against `addr_hashes`. Both guarantees therefore hold only for a bundle's first
-root check (§2.3.2 lists this as an open gap).
-
-| Aspect | Block 0 | Blocks 1+ |
-|---|---|---|
-| Engine | `GridMPT` full recompute | `HashBuilder` incremental rebuild |
-| Storage tries | recomputed via witness `node_store` | reused via cached `acc_rlp_buf` |
-| Account trie | `GridMPT` unfold/fold from prev `state_root` | `HashBuilder.add_leaf()` from leaves |
-| Node-store use | heavy (storage + account layers) | none |
-| Read / clash checks | pre-value check on read-only leaves; created vs existing hash clash rejected | none |
-| Relative cost | slower (full witness walk) | faster (leaf hash only) |
-
-### 3.2 EJSN path
-
-`run_ejsn()` strips the 8-byte envelope header, parses the body as an EEST
-`blockchain_test` JSON document, and runs each test sub-object via the
-`blockchain_test()` helper (which constructs an in-memory `DirectState` from the
-test's `pre` block and exercises one `Blockchain::insert_block` per entry in
-`blocks`). Exit codes mirror the legacy EEST contract:
-
-- `0` — all passed
-- `1` — any failed
-- `2` — any skipped (no failures)
-
-## 4. SP1 input building
-
-The Rust prover host builds an `SP1Stdin` carrying exactly one envelope per
-proof request. See `prover/prover_hypercube/src/stdin_builders.rs` (and the
-equivalent `prover_turbo` variant):
-
-```rust
-const INPUT_MAGIC_EJSN: u32 = 0x4E534A45;
-const INPUT_VERSION_EJSN: u32 = 1;
-
-pub fn build_stdin_from_eth_tests(path: &Path) -> Result<SP1Stdin> {
-    let mut stdin = SP1Stdin::new();
-    let raw = fs::read_to_string(path)?;
-    let minified = serde_json::to_string(&serde_json::from_str::<Value>(&raw)?)?;
-    let json_bytes = minified.as_bytes();
-
-    let mut envelope = Vec::with_capacity(8 + json_bytes.len());
-    envelope.extend_from_slice(&INPUT_MAGIC_EJSN.to_le_bytes());
-    envelope.extend_from_slice(&INPUT_VERSION_EJSN.to_le_bytes());
-    envelope.extend_from_slice(json_bytes);
-    stdin.write_vec(envelope);
-    Ok(stdin)
-}
-
-pub fn build_stdin_from_mfbd(path: &Path) -> Result<SP1Stdin> {
-    let mut stdin = SP1Stdin::new();
-    let raw = fs::read(path)?;        // file is already MFBD-wrapped on disk
-    stdin.write_vec(raw);
-    Ok(stdin)
-}
-```
-
-The MFBD path slurps the on-disk bundle file unmodified — the converters
-(`json_witness_to_flat_bundle`, `legacy_to_flat_bundle`, `eest_to_flat_bundle`)
-write the MFBD envelope at file-write time, so no re-wrapping is required.
-
-`SP1Stdin` layout is a single `Vec<u8>`. The guest does ONE `read_vec_raw()` and
-hands the bytes straight to `StateTransition`
-(`prover/guest_hypercube/src/main.cpp`):
-
-```cpp
-ReadVecResult input_buf = read_vec_raw();
-std::span<uint8_t> envelope{input_buf.ptr, input_buf.len};
-auto st = silkworm::cmd::state_transition::StateTransition(envelope);
-uint64_t result = st.run();
-```
-
-Note: the Rust constants are an independent mirror of the C++ values in
-`flat_bundle.hpp`. They are kept in sync by convention; a future binding
-generator could collapse them.
-
-## 5. Native run
-
-The native runner is `zilk_core/dev/cli/runner.cpp` (built as the
-`state_transition` executable). It accepts either a file or a directory:
-
-- **`.json`** — `run_json_test_file()` reads the file, wraps it in an in-memory
-  EJSN envelope, constructs `StateTransition`, and returns the run's exit code
-  (0/1/2 per EEST semantics).
-- **`.bin` / unknown** — `run_flat_bundle_file()` reads the file straight into a
-  vector. The on-disk file is already MFBD-wrapped (the converters emit it that
-  way), so the bytes pass through unmodified into `StateTransition`. The runner
-  prints `Cumulative Gas Used: <n>` and returns 0.
-- **Directory** — iterates recursively, dispatching per file extension.
-
-The runner is the same binary the EEST harness (`make eest-blockchain-tests`)
-drives via ctest.
-
-## 6. QEMU run
-
-`qemu_runner/` cross-compiles `zilk_core` to a RISC-V target (rv32im or rv64im)
-and runs the resulting binary under QEMU semihosting. Used for cycle-accurate
-instruction profiling without paying SP1 prover overhead.
-
-`qemu_runner/src/main.cpp` reads the envelope file via semihosting into a static
-200 MB buffer:
-
-```cpp
-static char ENV_BUF[200 * 1024 * 1024];
-
-int h = sh::open_file_read("stdin_payload.bin");
-// chunked read into ENV_BUF until EOF …
-std::string envelope_str(ENV_BUF, ENV_BUF + total);
-const uint64_t res = sample_run_wrapped(envelope_str);
-sh::exit(static_cast<int>(res));
-```
-
-`qemu_runner/src/cppextern.cpp::sample_run_wrapped` constructs a
-`std::span<uint8_t>` over the envelope bytes and hands them to
-`StateTransition::run()` — the magic dispatch chooses MFBD or EJSN exactly as in
-the SP1 guest. The wire format is the same `stdin_payload.bin` that the prover
-host would have written for an SP1 run.
-
-## 7. EEST JSON tests
-
-The EEST corpus on disk lives at
-`test-fixtures-cache/eest_stable/fixtures/blockchain_tests/` (populated by
-`make test-fixtures` from the `test-fixtures.json` pin).
-Two harness paths consume it:
-
-- **Native runner** — `runner.cpp::run_json_test_file` reads a `.json` file
-  byte-for-byte, prepends an 8-byte EJSN header in memory, and feeds the
-  envelope to `StateTransition`. EEST JSON files on disk are never re-encoded.
-- **SP1 prover via `.mfbd`** — `eest_to_flat_bundle bulk-convert` converts the
-  EEST corpus into a parallel `.mfbd` tree. Freshness is managed by the
-  `Makefile` (not the converter binary): `make eest-blockchain-tests` writes a
-  `manifest.json` recording both the fixture submodule SHA (`eest_sha`) and the
-  converter SHA (`converter_sha`), and re-runs `bulk-convert` only when that
-  manifest is absent or its `converter_sha` no longer matches. The SP1 prover
-  then ingests the `.mfbd` files via the MFBD path.
-
-Both paths land in the same `StateTransition::run()` magic dispatch.
-
-## 8. Converters
-
-Three converters produce MFBD-wrapped FlatBundle files that the runner, the
-QEMU runner, and the SP1 host can all consume unmodified.
-
-### 8.1 `legacy_to_flat_bundle`
-
-`zilk_core/dev/cli/legacy_to_flat_bundle.cpp`. One-shot converter from the old
-`unifiedBlockAndStateRlp<N>.bin` shape (5 RLP items, in order: genesis block
-[decoded as `genesis_rlp` and passed as the bundle's genesis], current block,
-pre-state, ancestors, pre-trie) to a v14 FlatBundle wrapped in MFBD with
-`n_bundles=1`. The output bundle's `network` section is hardcoded to
-`"Mainnet"`. Self-contained — keeps the legacy decoders out of the main code
-paths. Usage: `legacy_to_flat_bundle <legacy.bin> <flat.bin>`.
-
-### 8.2 `json_witness_to_flat_bundle`
-
-`zilk_core/dev/cli/json_witness_to_flat_bundle.cpp`. Reads a witness JSON
-document on stdin (the `{block, headers, state, codes, keys}` payload that
-`prover/common/src/fetcher.rs` synthesises from a geth `debug_executionWitness`
-response), walks the witness state trie and per-account storage tries in C++,
-fingerprints addresses, builds the addr-map and node-store MphfMaps, and
-assembles a v14 FlatBundle. The output bundle's `network` section is hardcoded
-to `"Mainnet"`. Output is MFBD-wrapped and written to stdout.
-
-### 8.3 `eest_to_flat_bundle`
-
-`zilk_core/dev/cli/eest_to_flat_bundle.cpp`. Converts EEST `blockchain_test`
-JSON fixtures into MFBD-wrapped FlatBundle files. Supports `emit` (single
-subtest by index) and `bulk-convert` (recursive directory walk that mirrors the
-input tree to per-file `.mfbd` outputs; the `manifest.json` freshness file is
-written by the `Makefile`, not by the converter). The output bundle's `network`
-section is taken from the fixture's `network` field (falling back to `"Mainnet"`
-when absent). Used by `make eest-blockchain-tests` to materialise an `.mfbd` mirror of
-the EEST corpus that the SP1 prover ingests via the MFBD path.
-
-All three converters call into the same `::zilkworm::build_flat_bundle`
-assembler declared in `flat_bundle.hpp` and then wrap the resulting FBND blob in
-a 16-byte MFBD header.
+At runtime the `node_store` is read-only. The `DirectState` constructor takes its byte window as a
+separate `span` and stores it in `node_store_map_`; `DirectState::find_node_rlp(node_hash)` looks a
+node up through it. Who calls it, and the `USE_HASH_KEY` recovery path that also reads it, are in
+[directstate.md](directstate.md#node-store-reads).
 
 ## Source references
 
-Prose cross-references above name functions and files (not line numbers, which
-rot). This table is the file-level index:
-
 | Topic | Symbol / File |
 |---|---|
-| Input envelope + FlatBundle header | `FlatBundleHeader`, `kInputMagic*` — `zilk_core/core/types_zz/flat_bundle.hpp` |
-| FlatBundle parser / assembler | `load_flat_bundle`, `build_flat_bundle` — `zilk_core/core/types_zz/flat_bundle.cpp` |
+| Input envelope and FlatBundle header | `FlatBundleHeader`, `kInputMagic*`: `zilk_core/core/types_zz/flat_bundle.hpp` |
+| FlatBundle parser and assembler | `load_flat_bundle`, `build_flat_bundle`: `zilk_core/core/types_zz/flat_bundle.cpp` |
 | `PreStateMeta`, `Slot`, `AddrHashEntry`, `BlockHashEntry` | `zilk_core/core/state_zz/pre_state.hpp` |
-| `Account` (POD + scratch fields) | `zilk_core/core/types_zz/account.hpp` |
-| `DirectState`, `sanitize`, `find_node_rlp`, `validate_prestate_layout` | `zilk_core/core/state_zz/direct_state.{hpp,cpp}` |
-| Never-null account reads: `find_or_create_account`, `observe_account_`, `materialize_absent_account_`, `DirectStateView::get_account` | `zilk_core/core/state_zz/direct_state.{hpp,cpp}` |
-| `MphfMapHeader` + `MphfMap` class + `index_lookup` / `find` / `resolve_collision` | `zilk_core/core/common_zz/mphf_map.hpp` |
-| `MphfBuilder` (host-side construction), `chd_solve` co-spilling + the sidecar invariant | `zilk_core/core/common_zz/mphf_builder.{hpp,cpp}` |
-| Blob assembly, `entry_offset_for_addr` two-stage probe | `zilk_core/core/state_zz/direct_state_builder.cpp` |
-| `addr_key8` / `hash_key8` | `zilk_core/core/common_zz/index_key.hpp` |
-| `GridMPT` (storage/account trie recompute) | `GridMPT::unfold_slot` — `zilk_core/core/trie_zz/fold_unfold.hpp`; `GridMPT::init_from_root`, `GridMPT::calc_root_from_updates` — `zilk_core/core/trie_zz/grid_mpt.cpp` |
-| `StateTransition::run` dispatch, `run_one_bundle`, `check_root` / `check_root_new_block` | `zilk_core/dev/state_transition.{hpp,cpp}` |
-| Account-read spoofing / honest-block tests + shared harness | `zilk_core/dev/cli/account_read_spoof_test.cpp`, `zilk_core/dev/cli/account_read_honest_test.cpp`, `zilk_core/core/state_zz/account_read_test_util.hpp` |
-| Native runner | `zilk_core/dev/cli/runner.cpp` |
-| SP1 guest entry | `prover/guest_hypercube/src/main.cpp` |
-| SP1 host stdin builders | `prover/prover_hypercube/src/stdin_builders.rs` |
-| QEMU entry | `qemu_runner/src/{main.cpp,cppextern.cpp}` |
-| Legacy → FlatBundle converter | `zilk_core/dev/cli/legacy_to_flat_bundle.cpp` |
-| Witness JSON → FlatBundle builder | `zilk_core/dev/cli/json_witness_to_flat_bundle.cpp` |
-| EEST JSON → FlatBundle converter | `zilk_core/dev/cli/eest_to_flat_bundle.cpp` |
-| Fetcher (geth `debug_executionWitness` → JSON payload) | `prover/common/src/fetcher.rs` |
+| `Account` (POD and scratch fields) | `zilk_core/core/types_zz/account.hpp` |
+| `FlatKv` body encoding | `zilk_core/core/types_zz/flat_kv.hpp` |
+| `MphfMapHeader`, `MphfMap`, `validate_mphf` | `zilk_core/core/common_zz/mphf_map.hpp` |
+| `MphfBuilder`, `chd_solve` | `zilk_core/core/common_zz/mphf_builder.{hpp,cpp}` |
+| Blob assembly, `entry_offset_for_addr` | `zilk_core/core/state_zz/direct_state_builder.cpp` |
+| `addr_key8`, `hash_key8` | `zilk_core/core/common_zz/index_key.hpp` |
+| Rust mirror of the wire constants | `prover/stateless_validator/src/mfbd.rs` |

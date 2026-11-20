@@ -17,7 +17,7 @@ prover/target/release/z6m_prover --service --rpc-url <URL> --data-dir temp/mainn
 
 ## Required Flags
 
-- `--rpc-url`: URL of the RPC server to fetch blocks from (required). Use the `$RPC_URL` environment variable, which should be configured in `.claude/settings.local.json` under the `env` key. If `$RPC_URL` is not set, ask the user for the URL.
+- `--rpc-url`: URL of the RPC server to fetch blocks from (required). Use the `$RPC_URL` environment variable. If `$RPC_URL` is not set, ask the user for the URL.
 
 ## Usage Patterns
 

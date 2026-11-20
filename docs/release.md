@@ -29,7 +29,8 @@ to the `vX.Y.Z` GitHub release with the CHANGELOG section as the body.
 
 ## Hypercube guests
 
-The release builds the SP1 Hypercube guest twice and publishes both:
+`make release-artifacts` stages the files named in the Makefile's `RELEASE_BINS`, among them the
+SP1 Hypercube guest built twice, once per state backend:
 - `z6m_guest_hypercube_mfbd.{elf,vk}`: the DirectState guest (`make z6m_guest`), which takes
   MFBD bundles; the `z6m_prover_hypercube` binary embeds it.
 - `stateless-validator-zilkworm-sp1-<SP1 SDK version>.{elf,vk}`: the HashState guest
@@ -40,7 +41,7 @@ The release builds the SP1 Hypercube guest twice and publishes both:
   it, both the `release/*` runs and the one `release.yml` triggers after publishing.
 
 After the release, point the `zilkworm` entry of `artifact-registry.json` in the ere-guests fork
-(`som/ere-v0.19.5`) at the `stateless-validator-zilkworm-sp1-<SP1 SDK version>` assets, with their sha256 from `SHA256SUMS.txt`, and bump
+(the branch `ere_guests_ref` defaults to in `ere-benchmark.yml`) at the `stateless-validator-zilkworm-sp1-<SP1 SDK version>` assets, with their sha256 from `SHA256SUMS.txt`, and bump
 the fork's version strings; the fork's corpus test and the upstream ere-guests PR resolve the
 guest through that entry. The zkevm-benchmark-workload fork then pins its `[patch]` to the new
 ere-guests fork commit.
