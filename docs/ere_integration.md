@@ -166,7 +166,10 @@ batches: <base>/exports/batches/<start>-<end>.tar.zst   # each holds blockchain_
 ```
 
 Each fixture carries one `engineNewPayloads` entry whose `statelessInputBytes` use the
-layout [hashstate.md](hashstate.md#wire-layout) decodes.
+layout [hashstate.md](hashstate.md#wire-layout) decodes. Its `statelessOutputBytes` carry the
+request root of the tests-zkevm version the export's generator implements. The Sepolia export
+still has v21.0.6 roots, so on the v21.0.7 guest `make ere-validate` mismatches every block in
+bytes 0..31 (`new_payload_request_root`) until the export is regenerated.
 
 They are cached under `test-fixtures-cache/ere-sepolia/` (gitignored):
 `batches8.jsonl` (catalog), `archives/*.tar.zst` (downloads), `eest_batch/` (first

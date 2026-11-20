@@ -64,7 +64,7 @@ The guest dispatches on the input's first bytes: `MFBD`, `EJSN`, or the `0x1501`
 #### Corpus results
 
 - ere-guests `executes_registered_guest` on tests-zkevm v21.0.6 (SP1): 33,854/33,854, no expected failures; the cases the other guests list as expected failures pass.
-- `make eest-zkevm-tests` (the JSON corpus through the HashState runner): 3450/3450 files, 124 skipped for lacking a witness. The witness-validation negatives (deliberately broken witnesses on valid blocks) are scored pass iff rejected; an expected-invalid label is waived only when the witness pruned an account a validation gate reads.
+- `make eest-zkevm-tests` (the JSON corpus through the HashState runner) on tests-zkevm v21.0.6: 3450/3450 files, 3326 pass, 124 skipped for lacking a witness, 0 fail, 31 expected-invalid labels waived. The skips are a ctest double count (each prints twice): 3388 pass, 62 skipped. The witness-validation negatives (deliberately broken witnesses on valid blocks) are scored pass iff rejected; an expected-invalid label is waived only when the witness pruned an account a validation gate reads.
 - SSZ merkleization is checked against the ere-guests reference roots; the sample fixture test rebuilds a v21 block from its payload and matches its `statelessOutputBytes`.
 
 Documentation: `docs/hashstate.md` (design), `docs/slib_corpus_validation.md`, `docs/slib_benchmark.md`.
@@ -82,7 +82,8 @@ Documentation: `docs/hashstate.md` (design), `docs/slib_corpus_validation.md`, `
 | Zilkworm v0.1.0-alpha.4 (DirectState guest + adapter) | 100/100 | 7,653,392,292,202 | 0.494 |
 
   Reth's two mismatched blocks are the only ones where it is cheaper: it stops early on them.
-- tests-zkevm-benchmark v21.0.5, 30M-gas blocks, through ERE's cost estimator: 1109 cases, median 36.06B, total 65.72T; the `make slib-benchmark` route (raw SP1 cycles) covers 1200 of its 1203 cases, median 259.6M. The run found the unmemoized BLOCKHASH walk (`test_blockhash[block_1]`, 4.12T → 47B).
+- tests-zkevm-benchmark v21.0.5, 30M-gas blocks, through ERE's cost estimator: 1109 cases, median 36.06B, total 65.72T; the `make slib-benchmark` route (raw SP1 cycles) covers 1200 of its 1203 cases, median 259.6M (min 4.9M, mean 334.1M, max 8.00B), total 400,868,140,263 cycles over 49.4G gas. The run found the unmemoized BLOCKHASH walk (`test_blockhash[block_1]`, 4.12T → 47B).
+- tests-zkevm-benchmark v0.8.2, all three gas budgets, `make slib-benchmark` route: 3464/3464 guest passed, median 277M (10M / 30M / 60M: 119.8M / 319.4M / 608.4M), max 16.21B (a 60M `blake2f` case), total 1,864,870,513,045 cycles (~1.86T).
 
 ### Fixes and improvements
 
@@ -367,6 +368,14 @@ Validated under SP1 on tests-zkevm v21.0.1: 33,635 / 33,637 `output_matched`; th
 
 Validated on the latest Sepolia batch (blocks 11899400..11899499): 100 / 100 `output_matched`. Estimated prover cost on blocks 11871300..11871399 is 0.500x Reth 0.1.0-rc.4's (Zilkworm cheaper on 98 / 100).
 
+On the previous stack (tests-zkevm v0.8.4 layout, ere v0.17.0, SP1 v6.4.0; guest from `canepat/ere_benchmark_workflow` `266b94e`, Reth 0.1.0-rc.3):
+
+| Corpus | Zilkworm `output_matched` | Estimated cost Z/R (Zilkworm / Reth) |
+|---|---|---|
+| glamsterdam-devnet-8, full catalog (blocks 93300..257519) | 72,732/72,732 | |
+| glamsterdam-devnet-8, blocks 93300..93309 | 10/10 | **0.495** (120,970,645,141 / 244,559,852,848), cheaper on 10/10 |
+| tests-zkevm-benchmark v0.8.2 | 3464/3464 | **0.257** (265,634,675,644,496 / 1,032,071,340,802,973) over the 3444 Reth completes (its 20 `test_modexp` time out), cheaper on 3019/3444 |
+
 #### Prover
 
 - SP1 v6.6.0, up from v6.0.2; the prover builds on `erigontech/sp1` `erigon/patches-v6.6.0` (v6.6.0 plus `prove_with_cycles`) with the `cuda` feature
@@ -501,6 +510,7 @@ The Hypercube guest now commits the chain id, pre-state root, post-state root an
 - Dropped the v1 EVM host legacy path and the remaining bor code
 - Build on macOS with the xPack RISC-V toolchain auto-detected by the Makefile (first external contribution, thanks @developeruche)
 - Fixed the cargo cache sources for the prover build
+- The EIP-2 low-s check in `pre_validate_transaction` is no longer commented out (#106): a legacy transaction with `s = SECP256K1N//2 + 1` is `kInvalidSignature`, not `kInsufficientFunds` (EEST `bad_v_r_s`)
 
 #### ZVM1/EVMone changes
 

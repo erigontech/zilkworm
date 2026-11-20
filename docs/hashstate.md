@@ -170,8 +170,9 @@ and never calls a GridMPT method. It decodes no whole node:
   sweep's path buffer (the grammar of `hp_decode`). A branch is only pushed; its
   children are read one item at a time as the main loop reaches them, with the
   three-case child grammar of `fill_branch_child_rlp` (`0x80` empty, `0xa0` plus
-  32 bytes a hash ref, `0xc0..0xf7` an embedded node of at most 31 payload
-  bytes) and a bounds check against the payload's end on every item. A hash ref
+  32 bytes a hash ref, `0xc0..0xf7` an embedded node), narrowed to at most 30
+  payload bytes for an embedded node, since a node of 32 bytes or more is hashed,
+  never embedded. Every item gets a bounds check against the payload's end. A hash ref
   is probed in place, and an embedded child is decoded in place from the
   parent's bytes.
 - One `nibbles64` path buffer serves the whole sweep. Each child visit resets
@@ -206,6 +207,14 @@ string, a malformed branch child item, and a branch whose 17th item (its value)
 is not the lone `0x80` that ends the payload. The account and storage tries have
 fixed-length keys, so no branch carries a value. A hash-ref child absent from the
 node index is not malformed, it is a pruned boundary.
+
+Four shapes decode but are refused by execution-specs (the tests-zkevm v21.0.7
+witness rules): a branch with fewer than two children, a hash ref to a node under
+32 bytes, an extension whose child is an extension or leaf, and a leaf that does
+not end at nibble 64 or an extension that is empty or reaches it (`secured_path_fits`, the
+spec's `_check_secured_path`). The sweep derives nothing at or below such a node.
+A read that reaches it is refused by the absence walk and stays unconfirmed, so the
+block is rejected only when it reads there.
 
 The traversal lives in one private helper, `sweep(root, emit_leaf)`, and both
 kinds of pass run through it:
@@ -368,13 +377,15 @@ much of it as the one path needs:
   whole: there is no `BranchNode`, no unpacked path and no copy of a child.
 - At a branch, the target's next nibble selects the slot. The nibble is read in
   place from the key byte (`target_nibble`) rather than from a 64-nibble unpack
-  of the key, since a walk looks at only a few of them. The walk reads the
-  child items from the first up to that slot, one at a time with the strict
-  three-case child grammar (`next_branch_child`, shared with the sweep: `0x80`
-  is an empty slot, `0xa0` plus 32 bytes a hash ref, `0xc0..0xf7` an embedded
-  node of at most 31 payload bytes; anything else, or an item past the
-  payload's end, is malformed), and stops there. The siblings past the slot and
-  the value item are never read. A hash child is fetched from the store
+  of the key, since a walk looks at only a few of them. The walk first counts
+  the branch's children up to two (`count_branch_children`, shared with the
+  sweep), then reads the child items from the first up to that slot, one at a
+  time with the strict three-case child grammar (`next_branch_child`, shared
+  with the sweep: `0x80` is an empty slot, `0xa0` plus 32 bytes a hash ref,
+  `0xc0..0xf7` an embedded node of at most 30 payload bytes; anything else, or
+  an item past the payload's end, is malformed), and stops there. The value
+  item, and the siblings past both the slot and the second occupied child, are
+  never read. A hash child is fetched from the store
   straight from its bytes in the node; an embedded child is followed in place,
   since node bytes live in the input blob or `owned_bytes_` and never move
   (should node storage ever become transient, an embedded child would need a
@@ -387,7 +398,8 @@ much of it as the one path needs:
   comes within a few nibbles.
 
 Validation is lazy, as it is in the sweep: a malformed child item at or before
-the target's slot stops the walk unconfirmed, one past it is not seen. Both are
+the target's slot or the second occupied child stops the walk unconfirmed, one
+past both is not seen. Both are
 confined to shapes a keccak-bound root cannot reach (see
 [Building state from the trie](#building-state-from-the-trie)); the slot of a
 genuine branch is read exactly.
@@ -397,9 +409,8 @@ node handling:
 
 - At a branch, the child slot for the target's next nibble is the empty marker
   `0x80`, so nothing hangs below that nibble.
-- At an extension or leaf, the node's own path nibbles diverge from the target:
-  a nibble mismatch, or a path that outlasts the target. The target cannot lie
-  below this node.
+- At an extension or leaf, a nibble of the node's own path differs from the
+  target's. The target cannot lie below this node.
 - The trie is empty (`root == kEmptyRoot`), which proves every key absent.
 
 It cannot prove absence (returns `false`) when:
@@ -411,6 +422,11 @@ It cannot prove absence (returns `false`) when:
   depth 64 (no nibble is left to index it), a path of more than 64 nibbles, a
   leaf without a value, or an extension whose child is not a 32-byte hash.
   Emptiness is then unknown and must not be guessed.
+- A node on the path has one of the four shapes the sweep refuses (see
+  [Building state from the trie](#building-state-from-the-trie)): a branch with
+  fewer than two children, a hash-referenced node under 32 bytes, an
+  extension's child that is an extension or leaf, or a leaf that does not end at
+  nibble 64 or an extension that is empty or reaches it.
 - A leaf's path matches the target exactly. The key is then actually present,
   not absent.
 
@@ -667,7 +683,7 @@ ProtocolFork.Amsterdam) into a populated `HashState`.
 ### Scope of the decoder
 
 The decoder is a hand-written reader for this one container, not a general SSZ
-library. The wire layout below is the tests-zkevm v21.0.1 schema
+library. The wire layout below is the tests-zkevm v21.0.7 schema
 (execution-specs `amsterdam/stateless.py`), the one ere-guests
 `stateless-validator-common` decodes.
 
@@ -720,11 +736,14 @@ ExecutionWitness      fixed region 12 bytes
 execution_requests: ExecutionRequestsGloas}`. `decode_slib_payload` cuts it into
 views with the same offset discipline (the fixed regions are 44, 540 and 20
 bytes; the withdrawals and the five request lists are fixed-size items back to
-back), and two functions consume the result:
+back) and refuses more than 4096 versioned hashes
+(`MAX_BLOB_COMMITMENTS_PER_BLOCK`), so such a request yields the all-zero
+result. Two functions consume the result:
 
 - `slib_payload_root` is `hash_tree_root(NewPayloadRequest)`, the root the
-  validation result commits to. The payload and the requests are EIP-7495
-  progressive containers, the lists EIP-7916 progressive lists; the
+  validation result commits to. The request, the payload and the requests are
+  EIP-7495 progressive containers, `versioned_hashes` is a
+  `List[Bytes32, 4096]` and the other lists are EIP-7916 progressive lists; the
   merkleization lives in `common_zz/ssz_merkle.hpp` and follows libssz-merkle,
   whose reference roots `ssz_merkle_test.cpp` reproduces.
 - `slib_payload_block` is the block the request describes: the header fields
@@ -819,7 +838,11 @@ In words, a block is accepted only when all of these hold:
 
 A write whose fold has to descend into a pruned boundary is caught: the fold
 fails on the absent node (`GridMPT` sets its failure flag), and a failed
-storage walk is rejected on the spot.
+storage walk is rejected on the spot. A deletion's collapse sibling is the one
+node no read walks, so `GridMPT` refuses the sweep's shapes there itself and sets
+its failure flag: an unfolded leaf or extension off the 64-nibble key, a hash ref
+to a node under 32 bytes (`unfold_slot`), and a collapse onto a branch with fewer
+than two children (`fold_line`).
 
 ### Supplying the write set
 
@@ -1191,7 +1214,10 @@ Fixture notes:
 - **Malformed shapes.** One hand-built node per shape `decode_node` rejects, each expected to
   give `kMalformed`, with a well-formed twin as the control; a branch stops at its first
   malformed child with the children before it cached. Two cases pin the tests-zkevm
-  `witness_state_overlength` leaves.
+  `witness_state_overlength` leaves. An embedded child of 31 payload bytes is one of the shapes,
+  against a 30-byte control.
+- **Refused shapes.** Each of the four shapes the sweep refuses has a case in which a read
+  reaches it and the block is refused.
 - **Arena give-back.** A hashed leaf whose value is not an account is counted, not cached, and
   the accounts swept after it land intact.
 - A build from an absent root followed by a build from a present one on the same instance.
@@ -1220,6 +1246,10 @@ The expected root is computed by hand, not by a DirectState fold: DirectState re
 nodes. The tests compute the post-write root with the canonical encoders the fold uses
 (`encode_line` in `rlp_sw.hpp` sends a branch to `encode_branch` and a leaf to `encode_leaf`), so
 `keccak(encode_branch(post-state root))` is a valid oracle.
+
+One case per shape the fold refuses on a collapse sibling no read walked (a branch with one child,
+a hash ref to a short node, a leaf ending short of the key length), with a collapse onto an
+extension as the control.
 
 ### Accept check tests
 
@@ -1252,7 +1282,7 @@ that number. A read of a present ancestor records nothing.
 
 Two kinds of input are decoded into a HashState and built:
 
-1. The tests-zkevm v21.0.1 sample in `slib_sample_fixture.hpp`: the payload's hash tree root is
+1. The tests-zkevm v21.0.7 sample in `slib_sample_fixture.hpp`: the payload's hash tree root is
    checked against the root its `statelessOutputBytes` commits to, the rebuilt block's hash
    against the payload's `block_hash`, and the pre-state is built against the parent header's
    state root.
@@ -1264,10 +1294,12 @@ cases: a non-monotone offset part-way through leaves exactly the elements before
 contract that the caller discards a partially fed `HashState`), a list announcing more than the
 count cap is rejected before any store is sized, and counts past `kMaxReserve` size the indexes
 like `kMaxReserve`. `ssz_merkle_test.cpp` reproduces the roots ere-guests asserts for its
-synthetic payloads and request containers.
+synthetic payloads and request containers. Two slib cases pin tests-zkevm v21.0.7: the
+execution-specs known-answer input hashes to its request root, and 4096 versioned hashes decode
+while 4097 give the all-zero result.
 
 `slib_sample_fixture.hpp` is generated; do not edit it by hand. Its source is the tests-zkevm
-v21.0.1 corpus as ere-guests ships it (`crates/stateless-validator-test/fixtures`), case
+v21.0.7 corpus, case
 `shanghai/eip4895_withdrawals/withdrawals/newly_created_contract.json`, the smallest
 single-payload valid block with a transaction and a withdrawal. The constants are the fixture's
 `statelessInputBytes`, `statelessOutputBytes` and `blockHash`, and the counts the SSZ framing

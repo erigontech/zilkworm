@@ -28,9 +28,13 @@ version, so a bump never runs on a stale corpus.
 
 ## Reading a native run
 
+At tests-zkevm v21.0.7 a run scores the 3340 fixture files 3271 pass, 63 skipped and 6 failed, the
+6 being the runner gap below. The same ctest run also holds the unit tests.
+
 - **Pass.** Every witnessed block of the file was decided as the fixture expects.
 - **Skip.** A file whose blocks carry no `statelessInputBytes`, such as the pre-fork blocks of a
-  fork-transition test.
+  fork-transition test. ctest prints each skipped test twice, so count the files, not the
+  `Skipped` lines.
 - **Known failures.** `zilk_core/dev/eest-known-failures.txt` is not applied under the flag
   (`zilk_core/dev/cli/CMakeLists.txt`): it describes the DirectState runner, which runs a test's
   blocks on one witness in place, while the slib arm rebuilds the state from each block's own
@@ -44,3 +48,8 @@ version, so a bump never runs on a stale corpus.
   ([Expected-invalid label relaxation](hashstate.md#expected-invalid-label-relaxation)).
 - **Witness headers.** They must form one parent-hash chain ending at the block's parent
   ([Witness ancestor headers](hashstate.md#witness-ancestor-headers)).
+- **Runner gap: `witness_state_malformed_nodes`.** Six files of this family, new in tests-zkevm
+  v21.0.7, fail here with `parent header is not the last witness header`, most likely because their
+  `statelessInputBytes` re-seal the parent while the runner takes the block from `rlp`. The runner
+  cannot score them; `executes_registered_guest` checks the guest on them
+  ([ere_integration.md](ere_integration.md#the-ere-guests-corpus-test)).
