@@ -33,11 +33,21 @@ set(common_flags "-march=rv64im -mabi=lp64 -ffunction-sections -fdata-sections -
 # rejects on every block ("LD must be aligned to 8 bytes"). With rocket's
 # table the flag changes nothing. Measured -0.470% guest cycles on the
 # 200-block corpus; see the commit message for the share of each price.
+#
+# -fno-schedule-insns turns off the instruction scheduling pass that runs
+# before register allocation. Hiding latency gains nothing on SP1, and the
+# reordering lengthens live ranges, so the allocator spills or rebuilds more
+# values. Without it 17 interpreter handlers that byte-swap into a stack word
+# (CALLER, CALLVALUE, ADDRESS, EXTCODESIZE, TLOAD, ...) build the bswap mask
+# constant twice instead of copying it, 3 instructions each (+0.010%); the rest
+# of the guest more than pays for that. The pass after allocation
+# (-fschedule-insns2) cannot change the instruction count and stays on.
+# Measured -0.024% guest cycles on the 200-block corpus.
 set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap \
 -funroll-loops \
 --param inline-unit-growth=100 --param max-inline-insns-auto=60 \
 --param large-function-growth=200 \
--mtune=size -mstrict-align")
+-mtune=size -mstrict-align -fno-schedule-insns")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
 # Not in common_flags: CMAKE_ASM_FLAGS must not force-include a C header.

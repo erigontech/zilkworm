@@ -25,10 +25,13 @@ set(common_flags "-march=rv32im_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany
 # cost table's one-instruction divide makes GCC emit div for signed division by a power of two
 # (libstdc++'s sort midpoints) and mulh for signed widening products by a constant, neither of
 # which Airbender implements. 200-block cycles -0.18%.
+# -fno-schedule-insns turns off the scheduling pass before register allocation, as the SP1 guest
+# does: latency hiding gains nothing here and its longer live ranges cost spills and rematerialized
+# constants. 200-block cycles -0.026%.
 set(opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-tree-loop-distribute-patterns -fipa-pta -funroll-loops -flto -flto-partition=one -g -fomit-frame-pointer \
 --param inline-unit-growth=100 --param max-inline-insns-auto=60 \
 --param large-function-growth=200 \
--mbranch-cost=1")
+-mbranch-cost=1 -fno-schedule-insns")
 set(no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
 set(CMAKE_C_FLAGS   "${common_flags} ${opt_flags}" CACHE STRING "" FORCE)
