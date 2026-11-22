@@ -36,3 +36,9 @@ tracing = { version = "0.1", optional = true }
 url = { version = "2.5", optional = true }
 base64 = { version = "0.22", optional = true }
 z6m_witness_ffi = { path = "../witness_ffi", optional = true }
+
+[dev-dependencies]
+# Temp-dir fixtures for the disk-cache witness-source test. Already in
+# Cargo.lock (tempfile 3.20.0, lock-transitive), so the explicit entry only
+# makes it importable and leaves Cargo.lock unchanged.
+tempfile = "3"
