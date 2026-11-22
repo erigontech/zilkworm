@@ -130,6 +130,7 @@ inline bool hp_decode(ByteView in, bool& is_leaf, std::array<uint8_t, 64>& out, 
     uint8_t flag = in[0] >> 4;
     is_leaf = (flag & 0x2) != 0;
     const bool odd = (flag & 0x1) != 0;
+    if (flag > 3 || (!odd && (in[0] & 0x0F) != 0)) [[unlikely]] return false;
     // At most 64 nibbles (odd + 2 * (in.size() - 1) <= 64), checked once rather than per byte.
     if (in.size() - 1 > (odd ? 31u : 32u)) [[unlikely]] return false;
     uint8_t* o = out.data();
