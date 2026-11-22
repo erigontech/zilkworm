@@ -89,7 +89,7 @@ The three MPHF maps and the plain arrays of §1.4 live in `pre_state` and `node_
 
 ```
 MFBD envelope  [16 B: magic "MFBD" 0x4442464D · version 1 · n_bundles u64]
-└─ FlatBundle × n_bundles, each padded to 8 B  [header "FBND" v13, 56 B]
+└─ FlatBundle × n_bundles, each padded to 8 B  [header "FBND" v14, 56 B]
    ├─ genesis     RLP-encoded block
    ├─ blocks      [n_blocks u64] · block RLPs · optional flags[n_blocks], 1 B each
    ├─ ancestors   RLP list of headers, oldest first; the last is the parent
@@ -101,7 +101,7 @@ MFBD envelope  [16 B: magic "MFBD" 0x4442464D · version 1 · n_bundles u64]
    ├─ node_store  "MPHN" node_hash → [node_hash : 32][MPT node RLP]
    └─ network     chain name, raw UTF-8, no terminator
 
-each MPHF map:  [MphfMapHeader 56 B, v2] · displacement[n_buckets] u64 · slot_offsets[n_keys] u32 · collisions[] 16 B each · data arena of [body_len u64][body], 8-B padded
+each MPHF map:  [MphfMapHeader 56 B, v3] · displacement[n_buckets] u64 · slot_offsets[n_keys] u32 · collisions[] 16 B each · data arena of [body_len u64][body], 8-B padded
 records:        Account 256 B · Slot 96 B, inline after its Account · hash-keyed body = [key : 32][payload], variable length
 ```
 
