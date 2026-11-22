@@ -427,6 +427,7 @@ DirectState::DirectState(DirectState&& other) noexcept
     ancestors_number_ = other.ancestors_number_;
     ancestors_end_ = other.ancestors_end_;
     witness_incomplete_ = other.witness_incomplete_;
+    walk_missed_ = other.walk_missed_;
     require_block_hash_headers_ = other.require_block_hash_headers_;
     touched_ = std::move(other.touched_);
     changed_addresses_journal_ = std::move(other.changed_addresses_journal_);
@@ -1025,15 +1026,21 @@ DirectState::recover_account_from_nodestore(const evmc::address& addr) const {
     const auto leaf = walk_nodestore_leaf(parent->state_root, want, embedded_scratch);
     if (!leaf) {
         if (leaf.error() == WalkMiss::kAbsent) return nullptr;  // valid empty; caller materializes
-        [[unlikely]] fatal("ERROR: USE_HASH_KEY: account walk hit missing/malformed node");
+        // The witness's node store cannot resolve its own recovery root. The account the caller
+        // materializes for the miss is not the one the trie holds, so the run is refused
+        // (walk_missed(), run_one_bundle) — this used to halt the guest instead of refusing it.
+        [[unlikely]] walk_missed_ = true;
+        return nullptr;
     }
 
     auto acc = std::make_unique<Account>();
     std::memset(acc.get(), 0, sizeof(Account));
     std::memcpy(acc->addr, addr.bytes, sizeof(addr.bytes));
     std::memcpy(acc->storage_root, kEmptyRoot.bytes, 32);
-    if (!decode_trie_account(*leaf, *acc)) [[unlikely]]
-        fatal("ERROR: USE_HASH_KEY: malformed account leaf RLP");
+    if (!decode_trie_account(*leaf, *acc)) {
+        [[unlikely]] walk_missed_ = true;  // the leaf does not decode: refuse the run, do not halt
+        return nullptr;
+    }
     if (std::memcmp(acc->code_hash, kEmptyHash.bytes, 32) != 0) {
         // Setting acc->code_store_len is fine here, checked in read_code
         if (auto b = code_entry_by_hash_(acc->code_hash)) {
@@ -1081,13 +1088,18 @@ DirectState::recover_slot_from_nodestore(const Account& pa, const evmc::address&
     const auto leaf = walk_nodestore_leaf(sroot, want, embedded_scratch);
     if (!leaf) {
         if (leaf.error() == WalkMiss::kAbsent) return &per_acct[key];  // negative: walk proved absence
-        [[unlikely]] fatal("ERROR: USE_HASH_KEY: slot walk hit missing/malformed node");
+        // The witness's node store cannot resolve the account's own storage root: the run is refused
+        // (walk_missed(), run_one_bundle) — this used to halt the guest instead of refusing it.
+        [[unlikely]] walk_missed_ = true;
+        return &per_acct[key];  // negative meanwhile; the refusal never lets it reach a root
     }
 
     intx::uint256 v;
     ByteView body = *leaf;
-    if (!silkworm::rlp::decode(body, v)) [[unlikely]]
-        fatal("ERROR: USE_HASH_KEY: malformed slot leaf RLP");
+    if (!silkworm::rlp::decode(body, v)) {
+        [[unlikely]] walk_missed_ = true;  // the leaf does not decode: refuse the run, do not halt
+        return &per_acct[key];
+    }
     const auto value = intx::be::store<evmc::bytes32>(v);
 
     auto& e = per_acct[key];
