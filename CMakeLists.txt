@@ -132,11 +132,13 @@ if(BUILD_TESTING)
     zilk_core/core/execution/div_mod_frontend_test.cpp
     zilk_core/core/execution/precompile_ecrec_test.cpp
     zilk_core/core/execution/precompile_lookup_test.cpp
+    zilk_core/core/execution/precompile_test.cpp
     zilk_core/core/execution/exp_pow2_base_test.cpp
     zilk_core/core/execution/kzg_pairing_test.cpp
     zilk_core/core/execution/mulmod_sparse_test.cpp
     zilk_core/core/execution/secp256k1_ecrecover_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
+    zilk_core/core/protocol/validation_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/receipt_logs_test.cpp
     zilk_core/core/types/max_gas_cost_test.cpp
@@ -144,6 +146,7 @@ if(BUILD_TESTING)
     zilk_core/core/types/receipt_test.cpp
     zilk_core/core/types/transaction_rlp_view_test.cpp
     zilk_core/core/types/transaction_senders_test.cpp
+    zilk_core/core/types/transaction_test.cpp
     zilk_core/core/trie_zz/grid_mpt_delete_test.cpp
     zilk_core/core/trie_zz/grid_mpt_absent_read_test.cpp
     zilk_core/core/trie_zz/grid_mpt_fold_orphan_test.cpp
@@ -154,6 +157,7 @@ if(BUILD_TESTING)
     zilk_core/core/trie_zz/full_branch_hash_test.cpp
     zilk_core/core/trie_zz/grid_mpt_word_loads_test.cpp
     zilk_core/core/trie_zz/account_leaf_rlp_test.cpp
+    zilk_core/core/trie_zz/test/grid_mpt_test.cpp
     zilk_core/core/common_zz/bytes_cmp_test.cpp
     zilk_core/core/state_zz/node_verify_test.cpp
     zilk_core/core/state_zz/block_hash_cache_test.cpp
