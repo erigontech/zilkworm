@@ -825,6 +825,13 @@ uint64_t StateTransition::run_mfbd() {
     }
     uint64_t n_bundles = 0;
     std::memcpy(&n_bundles, envelope_.data() + 8, sizeof(uint64_t));
+#ifdef Z6M_SINGLE_BUNDLE
+    if (n_bundles > 1) [[unlikely]] {
+        sys_println("ERROR: MFBD envelope holds more than one bundle");
+        failed_ = true;
+        return kRunFailure;
+    }
+#endif
 
     const std::size_t end = envelope_.size();
     std::size_t cursor = ::zilkworm::kInputHeaderSizeMFBD;
