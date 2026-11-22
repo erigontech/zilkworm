@@ -261,6 +261,10 @@ extern "C" __attribute__((cold)) [[noreturn]] void sys_panic(const uint8_t *msg_
     syscall_halt(1);
 }
 
+extern "C" [[noreturn]] void abort() {
+    syscall_halt(1);
+}
+
 
 /* ───────── Global constructors (linker-provided arrays) ───────── */
 
