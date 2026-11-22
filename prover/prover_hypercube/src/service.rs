@@ -29,6 +29,12 @@ use url::Url;
 
 pub const Z6M_ELF: Elf = include_elf!("z6m_guest");
 
+/// A failed run writes `2^64-1` and a skipped run `2^64-2` in place of the gas
+/// used (`zilk_core/dev/state_transition.hpp:37-38`); neither executed a block.
+pub(crate) fn run_failed(gas_used: u64) -> bool {
+    gas_used == 0 || gas_used == u64::MAX || gas_used == u64::MAX - 1
+}
+
 /// Wall-clock ms since the Unix epoch. Used by the inline phase-boundary
 /// markers (BEGIN_FETCH / BEGIN_EXEC / END_EXEC) emitted from the live
 /// service loop, all of which tag a `now_ms=` field. fetcher.rs emits its
@@ -1162,11 +1168,11 @@ impl Z6mProverService {
         let cycle_count = report.total_instruction_count();
         let prover_gas = report.gas().unwrap_or_default();
         let syscall_count = report.total_syscall_count();
-        if gas_used == 0 {
-            error!(block_number = opts.block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used=0)");
+        if run_failed(gas_used) {
+            error!(block_number = opts.block_number, cycles = cycle_count, prover_gas, "block execution FAILED (gas_used={})", gas_used);
             println!(
-                "FAILED block {} (gas_used=0, cycles={}, prover_gas={}, syscall_count={})",
-                opts.block_number, cycle_count, prover_gas, syscall_count
+                "FAILED block {} (gas_used={}, cycles={}, prover_gas={}, syscall_count={})",
+                opts.block_number, gas_used, cycle_count, prover_gas, syscall_count
             );
         } else {
             info!(
@@ -1327,5 +1333,19 @@ fn matches_interval(interval: Option<u64>, block_number: u64) -> bool {
         Some(0) => false,
         Some(n) => block_number % n == 0,
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_failed;
+
+    /// `2^64-1` is the failure sentinel and `2^64-2` the skipped one.
+    #[test]
+    fn run_failed_sees_both_sentinels_as_not_executed() {
+        assert!(run_failed(0));
+        assert!(run_failed(u64::MAX));
+        assert!(run_failed(u64::MAX - 1));
+        assert!(!run_failed(21_000));
     }
 }
