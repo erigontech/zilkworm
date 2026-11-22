@@ -185,6 +185,28 @@ if(BUILD_TESTING)
     zilk_core/dev/cli/hash_index_test.cpp
     zilk_core/core/common_zz/ssz_merkle_test.cpp
     zilk_core/dev/cli/hash_state_test.cpp
+    zilk_core/core/types/block_test.cpp
+    zilk_core/core/common/util_test.cpp
+    zilk_core/core/chain/config_test.cpp
+    zilk_core/core/trie/hash_builder_test.cpp
+    zilk_core/core/common/endian_test.cpp
+    zilk_core/core/rlp/decode_test.cpp
+    zilk_core/core/rlp/encode_test.cpp
+    zilk_core/core/trie/node_test.cpp
+    zilk_core/core/types/eip_7685_requests_test.cpp
+    zilk_core/core/trie/nibbles_test.cpp
+    zilk_core/core/trie/vector_root_test.cpp
+    zilk_core/core/types/log_test.cpp
+    zilk_core/core/types/bloom_test.cpp
+    zilk_core/core/crypto/secp256k1n_test.cpp
+    zilk_core/core/common/empty_hashes_test.cpp
+    zilk_core/core/protocol/rule_set_test.cpp
+    zilk_core/core/types/withdrawal_test.cpp
+    zilk_core/core/common/small_map_test.cpp
+    zilk_core/core/types/address_test.cpp
+    zilk_core/core/common/bytes_test.cpp
+    zilk_core/core/protocol/ethash_rule_set_test.cpp
+    zilk_core/core/types/hash_test.cpp
   )
   # These drive block execution over a DirectState witness; the flag-ON processor takes HashState.
   if(NOT Z6M_HASH_STATE)

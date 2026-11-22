@@ -1,55 +1,55 @@
-// // Copyright 2025 The Silkworm Authors
-// // SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 The Silkworm Authors
+// SPDX-License-Identifier: Apache-2.0
 
-// #include "block.hpp"
+#include "block.hpp"
 
-// #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-// #include <zilk_core/core/common/bytes_to_string.hpp>
-// #include <zilk_core/core/common/empty_hashes.hpp>
+#include <zilk_core/core/common/bytes_to_string.hpp>
+#include <zilk_core/core/common/empty_hashes.hpp>
 
-// namespace silkworm {
+namespace silkworm {
 
-// // Just for literals
-// using namespace intx;
+// Just for literals
+using namespace intx;
 
-// TEST_CASE("BlockBody RLP") {
-//     // https://etherscan.io/block/3
-//     const char* rlp_hex{
-//         "f90219c0f90215f90212a0d4e56740f876aef8c010b86a40d5f56745a118d090"
-//         "6a34e69aec8c0db1cb8fa3a01dcc4de8dec75d7aab85b567b6ccd41ad312451b"
-//         "948a7413f0a142fd40d4934794c8ebccc5f5689fa8659d83713341e5ad193494"
-//         "48a01e6e030581fd1873b4784280859cd3b3c04aa85520f08c304cf5ee63d393"
-//         "5adda056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e3"
-//         "63b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5"
-//         "e363b421b9010000000000000000000000000000000000000000000000000000"
-//         "0000000000000000000000000000000000000000000000000000000000000000"
-//         "0000000000000000000000000000000000000000000000000000000000000000"
-//         "0000000000000000000000000000000000000000000000000000000000000000"
-//         "0000000000000000000000000000000000000000000000000000000000000000"
-//         "0000000000000000000000000000000000000000000000000000000000000000"
-//         "0000000000000000000000000000000000000000000000000000000000000000"
-//         "0000000000000000000000000000000000000000000000000000000000000000"
-//         "000000000000008503ff80000001821388808455ba42429a5961746573205261"
-//         "6e64616c6c202d2045746865724e696e6a61a0f8c94dfe61cf26dcdf8cffeda3"
-//         "37cf6a903d65c449d7691a022837f6e2d994598868b769c5451a7aea"};
+TEST_CASE("BlockBody RLP") {
+    // https://etherscan.io/block/3
+    const char* rlp_hex{
+        "f90219c0f90215f90212a0d4e56740f876aef8c010b86a40d5f56745a118d090"
+        "6a34e69aec8c0db1cb8fa3a01dcc4de8dec75d7aab85b567b6ccd41ad312451b"
+        "948a7413f0a142fd40d4934794c8ebccc5f5689fa8659d83713341e5ad193494"
+        "48a01e6e030581fd1873b4784280859cd3b3c04aa85520f08c304cf5ee63d393"
+        "5adda056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e3"
+        "63b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5"
+        "e363b421b9010000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000008503ff80000001821388808455ba42429a5961746573205261"
+        "6e64616c6c202d2045746865724e696e6a61a0f8c94dfe61cf26dcdf8cffeda3"
+        "37cf6a903d65c449d7691a022837f6e2d994598868b769c5451a7aea"};
 
-//     Bytes rlp_bytes{*from_hex(rlp_hex)};
-//     ByteView in{rlp_bytes};
-//     BlockBody bb{};
+    Bytes rlp_bytes{*from_hex(rlp_hex)};
+    ByteView in{rlp_bytes};
+    BlockBody bb{};
 
-//     REQUIRE(rlp::decode(in, bb));
+    REQUIRE(rlp::decode(in, bb));
 
-//     CHECK(bb.transactions.empty());
-//     REQUIRE(bb.ommers.size() == 1);
-//     CHECK(bb.ommers[0].number == 1);
-//     CHECK(bb.ommers[0].beneficiary == 0xc8ebccc5f5689fa8659d83713341e5ad19349448_address);
-//     CHECK(bb.ommers[0].difficulty == 17'171'480'576);
+    CHECK(bb.transactions.empty());
+    REQUIRE(bb.ommers.size() == 1);
+    CHECK(bb.ommers[0].number == 1);
+    CHECK(bb.ommers[0].beneficiary == 0xc8ebccc5f5689fa8659d83713341e5ad19349448_address);
+    CHECK(bb.ommers[0].difficulty == 17'171'480'576);
 
-//     Bytes out{};
-//     rlp::encode(out, bb);
-//     CHECK(to_hex(out) == rlp_hex);
-// }
+    Bytes out{};
+    rlp::encode(out, bb);
+    CHECK(to_hex(out) == rlp_hex);
+}
 
 // TEST_CASE("BlockBody RLP 2") {
 //     BlockBody body{};
@@ -104,157 +104,157 @@
 //     CHECK(decoded == body);
 // }
 
-// TEST_CASE("Invalid Block RLP") {
-//     // Ethereum EL test RLP_InputList_TooManyElements_HEADER_DECODEINTO_BLOCK_EXTBLOCK_HEADER
-//     const char* rlp_hex{
-//         "0xf90260f90207a068a61c4a05db4913009de5666753258eb9306157680dc5da0d93656550c9257ea01dcc4de8dec75d7aab85b567b6cc"
-//         "d41ad312451b948a7413f0a142fd40d49347948888f1f195afa192cfee860698584c030f4c9db1a0ef1552a40b7165c3cd773806b9e0c1"
-//         "65b75356e0314bf0706f279c729f51e017a0b6c9fd1447d0b414a1f05957927746f58ef5a2ebde17db631d460eaf6a93b18da0bc37d797"
-//         "53ad738a6dac4921e57392f145d8887476de3f783dfa7edae9283e52b90100000000000000000000000000000000000000000000000000"
-//         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-//         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-//         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-//         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-//         "0000000000000000000000008302000001832fefd8825208845509814280a00451dd53d9c09f3cfb627b51d9d80632ed801f6330ee584b"
-//         "ffc26caac9b9249f88c7bffe5ebd94cc2ff861f85f800a82c35094095e7baea6a6c7c4c2dfeb977efac326af552d870a801ba098c3a099"
-//         "885a281885f487fd37550de16436e8c47874cd213531b10fe751617fa044b6b81011ce57bffcaf610bf728fb8a7237ad261ea2d937423d"
-//         "78eb9e137076c0"};
+TEST_CASE("Invalid Block RLP") {
+    // Ethereum EL test RLP_InputList_TooManyElements_HEADER_DECODEINTO_BLOCK_EXTBLOCK_HEADER
+    const char* rlp_hex{
+        "0xf90260f90207a068a61c4a05db4913009de5666753258eb9306157680dc5da0d93656550c9257ea01dcc4de8dec75d7aab85b567b6cc"
+        "d41ad312451b948a7413f0a142fd40d49347948888f1f195afa192cfee860698584c030f4c9db1a0ef1552a40b7165c3cd773806b9e0c1"
+        "65b75356e0314bf0706f279c729f51e017a0b6c9fd1447d0b414a1f05957927746f58ef5a2ebde17db631d460eaf6a93b18da0bc37d797"
+        "53ad738a6dac4921e57392f145d8887476de3f783dfa7edae9283e52b90100000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000008302000001832fefd8825208845509814280a00451dd53d9c09f3cfb627b51d9d80632ed801f6330ee584b"
+        "ffc26caac9b9249f88c7bffe5ebd94cc2ff861f85f800a82c35094095e7baea6a6c7c4c2dfeb977efac326af552d870a801ba098c3a099"
+        "885a281885f487fd37550de16436e8c47874cd213531b10fe751617fa044b6b81011ce57bffcaf610bf728fb8a7237ad261ea2d937423d"
+        "78eb9e137076c0"};
 
-//     Bytes rlp_bytes{*from_hex(rlp_hex)};
-//     ByteView view{rlp_bytes};
-//     Block block;
+    Bytes rlp_bytes{*from_hex(rlp_hex)};
+    ByteView view{rlp_bytes};
+    Block block;
 
-//     CHECK(!rlp::decode(view, block));
-// }
+    CHECK(!rlp::decode(view, block));
+}
 
-// TEST_CASE("EIP-2718 Block RLP") {
-//     const char* rlp_hex{
-//         "f90319f90211a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd4"
-//         "1ad312451b948a7413f0a142fd40d49347948888f1f195afa192cfee860698584c030f4c9db1a0ef1552a40b7165c3cd773806b9e0c165"
-//         "b75356e0314bf0706f279c729f51e017a0e6e49996c7ec59f7a23d22b83239a60151512c65613bf84a0d7da336399ebc4aa0cafe75574d"
-//         "59780665a97fbfd11365c7545aa8f1abf4e5e12e8243334ef7286bb9010000000000000000000000000000000000000000000000000000"
-//         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-//         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-//         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-//         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-//         "000000000000000000000083020000820200832fefd882a410845506eb0796636f6f6c65737420626c6f636b206f6e20636861696ea0bd"
-//         "4472abb6659ebe3ee06ee4d7b72a00a9f4d001caca51342001075469aff49888a13a5a8c8f2bb1c4f90101f85f800a82c35094095e7bae"
-//         "a6a6c7c4c2dfeb977efac326af552d870a801ba09bea4c4daac7c7c52e093e6a4c35dbbcf8856f1af7b059ba20253e70848d094fa08a8f"
-//         "ae537ce25ed8cb5af9adac3f141af69bd515bd2ba031522df09b97dd72b1b89e01f89b01800a8301e24194095e7baea6a6c7c4c2dfeb97"
-//         "7efac326af552d878080f838f7940000000000000000000000000000000000000001e1a000000000000000000000000000000000000000"
-//         "0000000000000000000000000001a03dbacc8d0259f2508625e97fdfc57cd85fdd16e5821bc2c10bdd1a52649e8335a0476e10695b183a"
-//         "87b0aa292a7f4b78ef0c3fbe62aa2c42c84e1d9c3da159ef14c0"};
+TEST_CASE("EIP-2718 Block RLP") {
+    const char* rlp_hex{
+        "f90319f90211a00000000000000000000000000000000000000000000000000000000000000000a01dcc4de8dec75d7aab85b567b6ccd4"
+        "1ad312451b948a7413f0a142fd40d49347948888f1f195afa192cfee860698584c030f4c9db1a0ef1552a40b7165c3cd773806b9e0c165"
+        "b75356e0314bf0706f279c729f51e017a0e6e49996c7ec59f7a23d22b83239a60151512c65613bf84a0d7da336399ebc4aa0cafe75574d"
+        "59780665a97fbfd11365c7545aa8f1abf4e5e12e8243334ef7286bb9010000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000083020000820200832fefd882a410845506eb0796636f6f6c65737420626c6f636b206f6e20636861696ea0bd"
+        "4472abb6659ebe3ee06ee4d7b72a00a9f4d001caca51342001075469aff49888a13a5a8c8f2bb1c4f90101f85f800a82c35094095e7bae"
+        "a6a6c7c4c2dfeb977efac326af552d870a801ba09bea4c4daac7c7c52e093e6a4c35dbbcf8856f1af7b059ba20253e70848d094fa08a8f"
+        "ae537ce25ed8cb5af9adac3f141af69bd515bd2ba031522df09b97dd72b1b89e01f89b01800a8301e24194095e7baea6a6c7c4c2dfeb97"
+        "7efac326af552d878080f838f7940000000000000000000000000000000000000001e1a000000000000000000000000000000000000000"
+        "0000000000000000000000000001a03dbacc8d0259f2508625e97fdfc57cd85fdd16e5821bc2c10bdd1a52649e8335a0476e10695b183a"
+        "87b0aa292a7f4b78ef0c3fbe62aa2c42c84e1d9c3da159ef14c0"};
 
-//     Bytes rlp_bytes{*from_hex(rlp_hex)};
-//     ByteView view{rlp_bytes};
-//     Block block;
+    Bytes rlp_bytes{*from_hex(rlp_hex)};
+    ByteView view{rlp_bytes};
+    Block block;
 
-//     REQUIRE(rlp::decode(view, block));
-//     CHECK(view.empty());
+    REQUIRE(rlp::decode(view, block));
+    CHECK(view.empty());
 
-//     REQUIRE(block.transactions.size() == 2);
+    REQUIRE(block.transactions.size() == 2);
 
-//     CHECK(block.transactions[0].type == TransactionType::kLegacy);
-//     CHECK(block.transactions[0].access_list.empty());
+    CHECK(block.transactions[0].type == TransactionType::kLegacy);
+    CHECK(block.transactions[0].access_list.empty());
 
-//     CHECK(block.transactions[1].type == TransactionType::kAccessList);
-//     CHECK(block.transactions[1].access_list.size() == 1);
-// }
+    CHECK(block.transactions[1].type == TransactionType::kAccessList);
+    CHECK(block.transactions[1].access_list.size() == 1);
+}
 
-// TEST_CASE("EIP-1559 Header RLP") {
-//     BlockHeader h{
-//         .number = 13'500'000,
-//         .base_fee_per_gas = 2'700'000'000,
-//     };
+TEST_CASE("EIP-1559 Header RLP") {
+    BlockHeader h{
+        .number = 13'500'000,
+        .base_fee_per_gas = 2'700'000'000,
+    };
 
-//     Bytes rlp;
-//     rlp::encode(rlp, h);
+    Bytes rlp;
+    rlp::encode(rlp, h);
 
-//     ByteView view{rlp};
-//     BlockHeader decoded;
-//     REQUIRE(rlp::decode(view, decoded));
+    ByteView view{rlp};
+    BlockHeader decoded;
+    REQUIRE(rlp::decode(view, decoded));
 
-//     CHECK(view.empty());
-//     CHECK(decoded == h);
-// }
+    CHECK(view.empty());
+    CHECK(decoded == h);
+}
 
-// TEST_CASE("Cancun Header RLP") {
-//     BlockHeader h{
-//         .ommers_hash = kEmptyListHash,
-//         .number = 17'000'000,
-//         .prev_randao = 0xd01681d2b3acdebff0288a02a1648b3910500961982d5ecdbef064af7c34090b_bytes32,
-//         .base_fee_per_gas = 2'700'000'000,
-//         .withdrawals_root = 0xbac9348581b0ee244d6eb61076b63c4e4afa70430c804ab0e6a0ab69d9a9d323_bytes32,
-//         .blob_gas_used = 456,
-//         .excess_blob_gas = 789633,
-//         .parent_beacon_block_root = 0x22_bytes32,
-//     };
+TEST_CASE("Cancun Header RLP") {
+    BlockHeader h{
+        .ommers_hash = kEmptyListHash,
+        .number = 17'000'000,
+        .prev_randao = 0xd01681d2b3acdebff0288a02a1648b3910500961982d5ecdbef064af7c34090b_bytes32,
+        .base_fee_per_gas = 2'700'000'000,
+        .withdrawals_root = 0xbac9348581b0ee244d6eb61076b63c4e4afa70430c804ab0e6a0ab69d9a9d323_bytes32,
+        .blob_gas_used = 456,
+        .excess_blob_gas = 789633,
+        .parent_beacon_block_root = 0x22_bytes32,
+    };
 
-//     Bytes rlp;
-//     rlp::encode(rlp, h);
+    Bytes rlp;
+    rlp::encode(rlp, h);
 
-//     ByteView view{rlp};
-//     BlockHeader decoded;
-//     REQUIRE(rlp::decode(view, decoded));
+    ByteView view{rlp};
+    BlockHeader decoded;
+    REQUIRE(rlp::decode(view, decoded));
 
-//     CHECK(view.empty());
-//     CHECK(decoded == h);
-// }
+    CHECK(view.empty());
+    CHECK(decoded == h);
+}
 
-// TEST_CASE("Prague Header RLP") {
-//     BlockHeader h{
-//         .ommers_hash = kEmptyListHash,
-//         .number = 17'000'000,
-//         .prev_randao = 0xd01681d2b3acdebff0288a02a1648b3910500961982d5ecdbef064af7c34090b_bytes32,
-//         .base_fee_per_gas = 2'700'000'000,
-//         .withdrawals_root = 0xbac9348581b0ee244d6eb61076b63c4e4afa70430c804ab0e6a0ab69d9a9d323_bytes32,
-//         .blob_gas_used = 456,
-//         .excess_blob_gas = 789633,
-//         .parent_beacon_block_root = 0x22_bytes32,
-//         .requests_hash = 0x33_bytes32,
-//     };
+TEST_CASE("Prague Header RLP") {
+    BlockHeader h{
+        .ommers_hash = kEmptyListHash,
+        .number = 17'000'000,
+        .prev_randao = 0xd01681d2b3acdebff0288a02a1648b3910500961982d5ecdbef064af7c34090b_bytes32,
+        .base_fee_per_gas = 2'700'000'000,
+        .withdrawals_root = 0xbac9348581b0ee244d6eb61076b63c4e4afa70430c804ab0e6a0ab69d9a9d323_bytes32,
+        .blob_gas_used = 456,
+        .excess_blob_gas = 789633,
+        .parent_beacon_block_root = 0x22_bytes32,
+        .requests_hash = 0x33_bytes32,
+    };
 
-//     Bytes rlp;
-//     rlp::encode(rlp, h);
+    Bytes rlp;
+    rlp::encode(rlp, h);
 
-//     ByteView view{rlp};
-//     BlockHeader decoded;
-//     REQUIRE(rlp::decode(view, decoded));
+    ByteView view{rlp};
+    BlockHeader decoded;
+    REQUIRE(rlp::decode(view, decoded));
 
-//     CHECK(view.empty());
-//     CHECK(decoded == h);
-// }
+    CHECK(view.empty());
+    CHECK(decoded == h);
+}
 
-// TEST_CASE("Hash header boundary computation") {
-//     BlockHeader h;
-//     h.difficulty = 0x13009de5666753258eb9306157680dc5da0d_u256;
+TEST_CASE("Hash header boundary computation") {
+    BlockHeader h;
+    h.difficulty = 0x13009de5666753258eb9306157680dc5da0d_u256;
 
-//     CHECK(to_hex(h.boundary().bytes) == "00000000000000000000000000000000000d78d369778f29e54c2b9e37d107e1");
-// }
+    CHECK(to_hex(h.boundary().bytes) == "00000000000000000000000000000000000d78d369778f29e54c2b9e37d107e1");
+}
 
-// TEST_CASE("Hash header boundary computation when we have difficulty with power of 2") {
-//     BlockHeader h;
-//     h.difficulty = 0x10000000000_u256;
-//     CHECK(to_hex(h.boundary().bytes) == "0000000001000000000000000000000000000000000000000000000000000000");
-// }
+TEST_CASE("Hash header boundary computation when we have difficulty with power of 2") {
+    BlockHeader h;
+    h.difficulty = 0x10000000000_u256;
+    CHECK(to_hex(h.boundary().bytes) == "0000000001000000000000000000000000000000000000000000000000000000");
+}
 
-// TEST_CASE("Hash header boundary computation when the difficulty is equal to 0") {
-//     BlockHeader h;
-//     h.difficulty = 0;
-//     CHECK(to_hex(h.boundary().bytes) == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
-// }
+TEST_CASE("Hash header boundary computation when the difficulty is equal to 0") {
+    BlockHeader h;
+    h.difficulty = 0;
+    CHECK(to_hex(h.boundary().bytes) == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+}
 
-// TEST_CASE("Hash of blockHeader") {
-//     BlockHeader header{};
-//     CHECK(0xc3bd2d00745c03048a5616146a96f5ff78e54efb9e5b04af208cdaff6f3830ee_bytes32 == header.hash());
-// }
+TEST_CASE("Hash of blockHeader") {
+    BlockHeader header{};
+    CHECK(0xc3bd2d00745c03048a5616146a96f5ff78e54efb9e5b04af208cdaff6f3830ee_bytes32 == header.hash());
+}
 
-// TEST_CASE("seal-Hash of blockHeader") {
-//     BlockHeader header{};
-//     std::string extra_data_str = "d883010a0d846765746888676f312e31372e33856c696e7578000000000000002ab85c52944f7ced556a";
-//     extra_data_str.append("389a8044be45c006fca6ab41adf927f05f8c66a5debd68218cc4cf4e578581ca7db3c77efd6bbdabf0d435c5cfa68b5e80aa0798fece01");
-//     header.extra_data = *from_hex(extra_data_str);
-//     CHECK(0xa6bb746de2cafea987306daa79ebcaa2f2d68a8e7ce1967623b05cfc913c8995_bytes32 == header.hash(false, true));
-// }
+TEST_CASE("seal-Hash of blockHeader") {
+    BlockHeader header{};
+    std::string extra_data_str = "d883010a0d846765746888676f312e31372e33856c696e7578000000000000002ab85c52944f7ced556a";
+    extra_data_str.append("389a8044be45c006fca6ab41adf927f05f8c66a5debd68218cc4cf4e578581ca7db3c77efd6bbdabf0d435c5cfa68b5e80aa0798fece01");
+    header.extra_data = *from_hex(extra_data_str);
+    CHECK(0xa6bb746de2cafea987306daa79ebcaa2f2d68a8e7ce1967623b05cfc913c8995_bytes32 == header.hash(false, true));
+}
 
-// }  // namespace silkworm
+}  // namespace silkworm
