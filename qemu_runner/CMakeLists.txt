@@ -36,6 +36,12 @@ endif()
 # QEMU_DEBUG flag — propagates to zilk_core via add_subdirectory
 option(QEMU_DEBUG "Enable QEMU debug mode" OFF)
 
+# As in the top-level and guest projects: set before zilk_core is added, so that its sources see the macro.
+option(Z6M_POST_MERGE_ONLY "Leave out the pre-merge rules: reject every block with a non-zero difficulty" OFF)
+if(Z6M_POST_MERGE_ONLY)
+  add_compile_definitions(Z6M_POST_MERGE_ONLY)
+endif()
+
 include(CableBuildInfo)
 cable_add_buildinfo_library(
     PROJECT_NAME zilkworm
