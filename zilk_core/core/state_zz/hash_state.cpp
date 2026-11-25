@@ -226,7 +226,9 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
         while (true) {
             // rlp::decode_header: fast_decode_header misreads <8-byte nodes.
             auto oh = rlp::decode_header(node_rlp);
-            if (!oh || !oh->list) {
+            // A node is one RLP list and nothing else: bytes after the list would also defeat
+            // the size checks below, which measure the stored bytes.
+            if (!oh || !oh->list || oh->payload_length != node_rlp.size()) {
                 malformed_witness_ = true;
                 return;
             }
@@ -433,7 +435,8 @@ bool HashState::confirm_absent(const evmc::bytes32& root,
         // As descend(): handles <8-byte embedded nodes.
         ByteView node_rlp{p, n};
         auto oh = rlp::decode_header(node_rlp);
-        if (!oh || !oh->list) return false;  // malformed node -> cannot confirm
+        // Malformed node, or bytes after its list (as in descend()) -> cannot confirm.
+        if (!oh || !oh->list || oh->payload_length != node_rlp.size()) return false;
         const std::uint8_t* const q = node_rlp.data();
         const std::uint8_t* const end = q + std::min(oh->payload_length, node_rlp.size());
 

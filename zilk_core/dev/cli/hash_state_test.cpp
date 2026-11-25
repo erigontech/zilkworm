@@ -2193,6 +2193,118 @@ TEST_CASE("GridMPT over HashState refuses a collapse onto a sibling no read walk
 
 namespace {
 
+// A node's bytes followed by zeros: the list is unchanged, the stored entry is longer.
+Bytes with_tail(const Bytes& node, std::size_t stored_size) {
+    Bytes out = node;
+    out.append(stored_size - node.size(), 0x00);
+    return out;
+}
+
+// A branch of 32 bytes or more: two hashed children.
+Bytes hashed_branch() {
+    BranchNode b;
+    set_dangling_child(b, 0x1);
+    set_dangling_child(b, 0x2);
+    return Bytes{zilkworm::encode_branch(b)};
+}
+
+}  // namespace
+
+// A node is stored under the keccak of its bytes; bytes after its list must not make it a different
+// node, nor make a node short enough to embed look like one of 32 bytes.
+TEST_CASE("HashState refuses a hashed node with bytes after its RLP list", "[hash_state][witness_shape]") {
+    const Bytes sb = short_branch();
+    REQUIRE(sb.size() < 32u);
+    const Bytes hb = hashed_branch();
+    REQUIRE(hb.size() >= 32u);
+    const Key through = key_with(0x5, 0, 0);  // slot 0x5, then the node's empty slot 0 (behind ext[0x0] too)
+    const uint8_t nib0[1]{0x0};
+
+    SECTION("a short branch stored with a tail to 32 bytes, in a branch slot") {
+        ShapeTrie t;
+        const evmc::bytes32 h = t.hs.add_node(ByteView{with_tail(sb, 32)});
+        CHECK(t.hs.build_state_from_trie(t.root_with(ByteView{h.bytes, 32})) == HashState::BuildStatus::kMalformed);
+        CHECK(t.hs.get_account(through.hash()) == nullptr);
+        CHECK(t.hs.unconfirmed_read_count() == 1u);
+    }
+    SECTION("the control: the same branch embedded") {
+        ShapeTrie t;
+        t.build_and_check_a(t.root_with(ByteView{sb}));
+        CHECK(t.hs.get_account(through.hash()) == nullptr);
+        CHECK(t.hs.unconfirmed_read_count() == 0u);
+    }
+    SECTION("a short branch stored with a tail to 32 bytes, below an extension") {
+        ShapeTrie t;
+        const evmc::bytes32 h = t.hs.add_node(ByteView{with_tail(sb, 32)});
+        const evmc::bytes32 hExt = t.hs.add_node(ByteView{zilkworm::encode_ext(make_ext(nib0, 1, ByteView{h.bytes, 32}))});
+        CHECK(t.hs.build_state_from_trie(t.root_with(ByteView{hExt.bytes, 32})) == HashState::BuildStatus::kMalformed);
+        CHECK(t.hs.get_account(through.hash()) == nullptr);
+        CHECK(t.hs.unconfirmed_read_count() == 1u);
+    }
+    SECTION("the control: an extension to a branch of 32 bytes or more") {
+        ShapeTrie t;
+        const evmc::bytes32 h = t.hs.add_node(ByteView{hb});
+        const evmc::bytes32 hExt = t.hs.add_node(ByteView{zilkworm::encode_ext(make_ext(nib0, 1, ByteView{h.bytes, 32}))});
+        t.build_and_check_a(t.root_with(ByteView{hExt.bytes, 32}));
+        CHECK(t.hs.get_account(through.hash()) == nullptr);
+        CHECK(t.hs.unconfirmed_read_count() == 0u);
+    }
+    SECTION("that branch stored with a tail, below the extension") {
+        ShapeTrie t;
+        const evmc::bytes32 h = t.hs.add_node(ByteView{with_tail(hb, hb.size() + 1)});
+        const evmc::bytes32 hExt = t.hs.add_node(ByteView{zilkworm::encode_ext(make_ext(nib0, 1, ByteView{h.bytes, 32}))});
+        CHECK(t.hs.build_state_from_trie(t.root_with(ByteView{hExt.bytes, 32})) == HashState::BuildStatus::kMalformed);
+        CHECK(t.hs.get_account(through.hash()) == nullptr);
+        CHECK(t.hs.unconfirmed_read_count() == 1u);
+    }
+}
+
+TEST_CASE("GridMPT over HashState refuses a collapse onto a node with bytes after its RLP list",
+          "[hash_state][fold][witness_shape]") {
+    // Deleting A collapses the root onto slot 0x5, which the fold fetches and unfolds.
+    ShapeTrie t;
+    const auto delete_a = [&t](const evmc::bytes32& prev_root) {
+        (void)t.hs.build_state_from_trie(prev_root);
+        std::vector<zilkworm::TrieNodeFlat> updates;
+        auto& node = updates.emplace_back(t.kA.hash());
+        node.buf[0] = 0x80;
+        node.current_off = 0;
+        node.current_len = 1;
+        zilkworm::GridMPT<true, HashState> trie(t.hs, prev_root);
+        const evmc::bytes32 root = trie.calc_root_from_updates({updates.data(), updates.size()});
+        return std::pair{trie.failed(), root};
+    };
+    // The collapsed root: ext[0x5] over slot 0x5's child reference.
+    const auto collapsed = [](ByteView child_ref) {
+        const uint8_t nib5[1]{0x5};
+        return std::bit_cast<evmc::bytes32>(silkworm::keccak256(ByteView{zilkworm::encode_ext(make_ext(nib5, 1, child_ref))}));
+    };
+    const Bytes sb = short_branch();
+    const Bytes hb = hashed_branch();
+
+    SECTION("a short branch stored with a tail to 32 bytes") {
+        const evmc::bytes32 h = t.hs.add_node(ByteView{with_tail(sb, 32)});
+        CHECK(delete_a(t.root_with(ByteView{h.bytes, 32})).first);
+    }
+    SECTION("a branch of 32 bytes or more stored with a tail") {
+        const evmc::bytes32 h = t.hs.add_node(ByteView{with_tail(hb, hb.size() + 1)});
+        CHECK(delete_a(t.root_with(ByteView{h.bytes, 32})).first);
+    }
+    SECTION("the control: the short branch embedded") {
+        const auto [failed, root] = delete_a(t.root_with(ByteView{sb}));
+        CHECK_FALSE(failed);
+        CHECK(eq32(root, collapsed(ByteView{sb})));
+    }
+    SECTION("the control: the branch of 32 bytes or more, hashed") {
+        const evmc::bytes32 h = t.hs.add_node(ByteView{hb});
+        const auto [failed, root] = delete_a(t.root_with(ByteView{h.bytes, 32}));
+        CHECK_FALSE(failed);
+        CHECK(eq32(root, collapsed(ByteView{h.bytes, 32})));
+    }
+}
+
+namespace {
+
 // Deterministic, so failures reproduce.
 struct Xorshift64 {
     uint64_t s;
