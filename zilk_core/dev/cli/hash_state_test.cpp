@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <span>
 #include <optional>
@@ -2095,6 +2096,130 @@ TEST_CASE("HashState refuses a branch with one child where a read reaches it",
     CHECK(t.hs.unconfirmed_read_count() == 2u);
     CHECK(t.hs.get_account(key_with(0x6, 4, 4).hash()) == nullptr);  // an empty slot of the embedded one
     CHECK(t.hs.unconfirmed_read_count() == 3u);
+}
+
+namespace {
+
+Bytes rlp_string(ByteView s) {
+    Bytes out;
+    silkworm::rlp::encode(out, s);
+    return out;
+}
+
+// A leaf or an extension, [hex-prefix path, item], built by hand so the item may be anything.
+Bytes two_item_node(const uint8_t* nib, unsigned n, bool leaf, const Bytes& item) {
+    Bytes path;
+    const auto flag = static_cast<uint8_t>((leaf ? 0x20 : 0x00) | ((n & 1u) ? 0x10 : 0x00));
+    unsigned i = 0;
+    if (n & 1u) {
+        path.push_back(static_cast<uint8_t>(flag | nib[0]));
+        i = 1;
+    } else {
+        path.push_back(flag);
+    }
+    for (; i < n; i += 2) path.push_back(static_cast<uint8_t>((nib[i] << 4) | nib[i + 1]));
+    Bytes p = rlp_string(ByteView{path});
+    p += item;
+    return rlp_list_of(p);
+}
+
+Bytes hash_ref(HashState& hs, const Bytes& node) {
+    const evmc::bytes32 h = hs.add_node(ByteView{node});
+    return Bytes{h.bytes, 32};
+}
+
+// The value item of a leaf: none (80, which decode_node rejects) or a well-formed one.
+Bytes value_item(bool bad, ByteView good) { return bad ? Bytes{0x80} : rlp_string(good); }
+
+// Below a shape a walk refuses, the build derives nothing, yet still meets a malformed node:
+// kMalformed with the malformed node, kOk with a well-formed one, and only account A derived in both.
+void check_swept_not_derived(const std::function<Bytes(HashState&, bool)>& slot5) {
+    for (const bool bad : {false, true}) {
+        ShapeTrie t;
+        const Bytes child = slot5(t.hs, bad);
+        const auto status = t.hs.build_state_from_trie(t.root_with(ByteView{child}));
+        CHECK(status == (bad ? HashState::BuildStatus::kMalformed : HashState::BuildStatus::kOk));
+        CHECK(t.hs.account_count() == 1u);
+        CHECK(t.hs.storage_slot_count() == 0u);
+    }
+}
+
+const Key kHidden = key_with(0x5, 7, 1);
+const Bytes kHiddenAccount = account_leaf_value(91, silkworm::kEmptyRoot);
+
+}  // namespace
+
+TEST_CASE("HashState sweeps below a branch with one child", "[hash_state][witness_shape]") {
+    check_swept_not_derived([](HashState& hs, bool bad) {
+        const Bytes leaf = two_item_node(&kHidden.nib[2], 62, true, value_item(bad, ByteView{kHiddenAccount}));
+        BranchNode one;
+        const Bytes h = hash_ref(hs, leaf);
+        one.set_child(kHidden.nib[1], ByteView{h});
+        return hash_ref(hs, Bytes{zilkworm::encode_branch(one)});
+    });
+}
+
+TEST_CASE("HashState sweeps below an extension reached through an extension", "[hash_state][witness_shape]") {
+    check_swept_not_derived([](HashState& hs, bool bad) {
+        const Bytes leaf = two_item_node(&kHidden.nib[3], 61, true, value_item(bad, ByteView{kHiddenAccount}));
+        const Bytes inner = two_item_node(&kHidden.nib[2], 1, false, rlp_string(ByteView{hash_ref(hs, leaf)}));
+        return hash_ref(hs, two_item_node(&kHidden.nib[1], 1, false, rlp_string(ByteView{hash_ref(hs, inner)})));
+    });
+}
+
+TEST_CASE("HashState sweeps below an extension with an empty path", "[hash_state][witness_shape]") {
+    check_swept_not_derived([](HashState& hs, bool bad) {
+        const Bytes leaf = two_item_node(&kHidden.nib[1], 63, true, value_item(bad, ByteView{kHiddenAccount}));
+        return hash_ref(hs, two_item_node(nullptr, 0, false, rlp_string(ByteView{hash_ref(hs, leaf)})));
+    });
+}
+
+TEST_CASE("HashState sweeps the storage of an account leaf that ends short of the key",
+          "[hash_state][witness_shape]") {
+    check_swept_not_derived([](HashState& hs, bool bad) {
+        const Key slot = key_with(0x3, 3, 5);
+        const uint8_t one = 0x01;
+        const Bytes sleaf = two_item_node(slot.nib.data(), 64, true, value_item(bad, ByteView{&one, 1}));
+        const evmc::bytes32 sroot = hs.add_node(ByteView{sleaf});
+        const Bytes acc = account_leaf_value(92, sroot);
+        return hash_ref(hs, two_item_node(&kHidden.nib[1], 62, true, rlp_string(ByteView{acc})));
+    });
+}
+
+TEST_CASE("HashState sweeps a short node an extension holds by hash", "[hash_state][witness_shape]") {
+    check_swept_not_derived([](HashState& hs, bool bad) {
+        const uint8_t one = 0x01;
+        const Bytes small = two_item_node(&kHidden.nib[2], 2, true, value_item(bad, ByteView{&one, 1}));
+        REQUIRE(small.size() < 32u);
+        return hash_ref(hs, two_item_node(&kHidden.nib[1], 1, false, rlp_string(ByteView{hash_ref(hs, small)})));
+    });
+}
+
+TEST_CASE("HashState sweeps a short node a branch holds by hash", "[hash_state][witness_shape]") {
+    check_swept_not_derived([](HashState& hs, bool bad) {
+        const uint8_t one = 0x01;
+        const Bytes small = two_item_node(&kHidden.nib[1], 2, true, value_item(bad, ByteView{&one, 1}));
+        REQUIRE(small.size() < 32u);
+        return hash_ref(hs, small);
+    });
+}
+
+TEST_CASE("HashState sweeps below an extension that ends at nibble 64", "[hash_state][witness_shape]") {
+    // The extension's child is at depth 64: a branch there has no nibble left (malformed);
+    // a leaf with an empty path is well formed, but nothing below the extension is derived.
+    check_swept_not_derived([](HashState& hs, bool bad) {
+        const Bytes leaf = two_item_node(nullptr, 0, true, rlp_string(ByteView{kHiddenAccount}));
+        Bytes child = leaf;
+        if (bad) {
+            BranchNode two;
+            const Bytes h = hash_ref(hs, leaf);
+            two.set_child(0x0, ByteView{h});
+            two.set_child(0x1, ByteView{h});
+            child = Bytes{zilkworm::encode_branch(two)};
+        }
+        REQUIRE(child.size() >= 32u);
+        return hash_ref(hs, two_item_node(&kHidden.nib[1], 63, false, rlp_string(ByteView{hash_ref(hs, child)})));
+    });
 }
 
 TEST_CASE("HashState refuses a leaf that does not end at the key length where a read reaches it",

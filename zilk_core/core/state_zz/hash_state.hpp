@@ -314,10 +314,11 @@ class HashState : public BlockState {
     std::optional<evmc::bytes32> state_root_hash() const { return std::nullopt; }
 
   private:
-    // Explicit-stack DFS over one trie, calling emit_leaf(path, value) at each leaf.
+    // Explicit-stack DFS over one trie, calling emit_leaf(path, value, derive) at each leaf.
+    // derive is false below a node a walk refuses: the subtree is still checked, nothing is derived.
     // See docs/hashstate.md, "Building state from the trie".
     template <class EmitLeaf>
-    bool sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf);
+    bool sweep(const evmc::bytes32& root, bool derive, EmitLeaf&& emit_leaf);
 
     // See docs/hashstate.md, "Building state from the trie".
     struct SweepFrame {
@@ -325,6 +326,7 @@ class HashState : public BlockState {
         const std::uint8_t* end;
         std::uint8_t next_slot;
         std::uint8_t path_len;
+        bool derive;
     };
 
     // Single-path walk toward target_hash; true only when it proves the key absent below root.

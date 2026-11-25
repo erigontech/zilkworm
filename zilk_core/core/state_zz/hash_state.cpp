@@ -208,7 +208,7 @@ void HashState::emit_slot_(const evmc::bytes32& account_key, const evmc::bytes32
 }
 
 template <class EmitLeaf>
-bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
+bool HashState::sweep(const evmc::bytes32& root, bool derive_root, EmitLeaf&& emit_leaf) {
     sweep_stack_.clear();
 
     // Look up the seeding root by hash. Absence is REPORTED to the caller (return false),
@@ -221,7 +221,7 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
     nibbles64 path{};
 
     // A loop, so extension chains don't recurse.
-    const auto descend = [&](ByteView node_rlp) {
+    const auto descend = [&](ByteView node_rlp, bool derive) {
         bool via_ext = false;
         while (true) {
             // rlp::decode_header: fast_decode_header misreads <8-byte nodes.
@@ -247,11 +247,8 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
                     malformed_witness_ = true;
                     return;
                 }
-                if (const BranchCount bc = count_branch_children(p, end); !bc.bad && bc.occupied < 2) {
-                    if (!ends_with_empty_value(bc.cur, end)) malformed_witness_ = true;
-                    return;
-                }
-                sweep_stack_.push_back(SweepFrame{p, end, 0, path.len});
+                if (const BranchCount bc = count_branch_children(p, end); !bc.bad && bc.occupied < 2) derive = false;
+                sweep_stack_.push_back(SweepFrame{p, end, 0, path.len, derive});
                 return;
             }
 
@@ -287,8 +284,8 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
                 malformed_witness_ = true;
                 return;
             }
-            // Derive nothing below a node a walk must refuse; confirm_absent refuses it on use.
-            if (via_ext || !secured_path_fits(is_leaf, path.len, static_cast<unsigned>(n))) return;
+            // Derive nothing at or below a node a walk must refuse (confirm_absent refuses it on use), but sweep on.
+            if (via_ext || !secured_path_fits(is_leaf, path.len, static_cast<unsigned>(n))) derive = false;
             std::uint8_t* out = path.nib.data() + path.len;
             if (odd) *out++ = hp[0] & 0x0F;
             for (std::size_t i = 1; i < hp_len; ++i) {
@@ -298,21 +295,19 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
             path.len = static_cast<std::uint8_t>(path.len + n);
 
             if (is_leaf) {
-                emit_leaf(path_to_bytes32(path), ByteView{second, second_len});
+                emit_leaf(path_to_bytes32(path), ByteView{second, second_len}, derive);
                 return;
             }
 
             auto child = find_node_rlp(second);
-            if (!child || child->size() < 32) {
-                // Pruned boundary, not a missing node; a short node is refused on use.
-                return;
-            }
+            if (!child) return;  // Pruned boundary, not a missing node.
+            if (child->size() < 32) derive = false;  // a short node is refused on use
             node_rlp = *child;
             via_ext = true;
         }
     };
 
-    descend(*root_rlp);  // seed: push or emit the root
+    descend(*root_rlp, derive_root);  // seed: push or emit the root
 
     while (!sweep_stack_.empty()) {
         // f dangles once descend() pushes.
@@ -352,15 +347,15 @@ bool HashState::sweep(const evmc::bytes32& root, EmitLeaf&& emit_leaf) {
 
         if (k == ChildKind::kHash) {
             auto child = find_node_rlp(ptr);
-            if (!child || child->size() < 32) {
-                // Pruned boundary (partial witness), or a short node refused on use: do not descend.
+            if (!child) {
+                // Pruned boundary (partial witness): do not descend.
                 // See docs/hashstate.md, "Fail-closed policy".
                 continue;
             }
-            descend(*child);
+            descend(*child, f.derive && child->size() >= 32);  // a short node is refused on use
         } else {
             // Parent bytes never move: decode in place.
-            descend(ByteView{ptr, len});
+            descend(ByteView{ptr, len}, f.derive);
         }
     }
 
@@ -382,18 +377,27 @@ HashState::BuildStatus HashState::build_state_from_trie(const evmc::bytes32& pre
     // trie, captured during the account pass so the storage passes can run once it ends.
     // storage_root is copied out immediately: the Account* emit_account_ returns is only
     // valid until the next emit grows the accounts arena.
-    std::vector<std::pair<evmc::bytes32, evmc::bytes32>> storage_roots;
+    // An account leaf a walk refuses derives nothing, but its storage trie is still swept, not derived.
+    struct StorageRoot {
+        evmc::bytes32 account_key;
+        evmc::bytes32 root;
+        bool derive;
+    };
+    std::vector<StorageRoot> storage_roots;
 
     // --- account pass ---
     // Empty account trie derives nothing, cleanly (design §2.6): no root to fetch.
     if (prev_root != silkworm::kEmptyRoot) {
         const bool root_present =
-            sweep(prev_root, [&](const evmc::bytes32& addr_hash, ByteView leaf_value) {
-                if (const Account* acc = emit_account_(addr_hash, leaf_value)) {
+            sweep(prev_root, true, [&](const evmc::bytes32& addr_hash, ByteView leaf_value, bool derive) {
+                Account checked{};
+                const Account* acc = derive ? emit_account_(addr_hash, leaf_value)
+                                            : (decode_trie_account(leaf_value, checked) ? &checked : nullptr);
+                if (acc) {
                     evmc::bytes32 sroot;
                     std::memcpy(sroot.bytes, acc->storage_root, 32);
                     if (sroot != silkworm::kEmptyRoot)
-                        storage_roots.emplace_back(addr_hash, sroot);
+                        storage_roots.push_back(StorageRoot{addr_hash, sroot, derive});
                 }
             });
         // A missing ACCOUNT root is the B2 fail-closed case — the anchor of everything.
@@ -402,11 +406,10 @@ HashState::BuildStatus HashState::build_state_from_trie(const evmc::bytes32& pre
 
     // --- storage passes --- one sweep per derived account; an absent storage root is skipped.
     // See docs/hashstate.md, "Fail-closed policy".
-    for (const auto& pr : storage_roots) {
-        const evmc::bytes32 account_key = pr.first;
-        const evmc::bytes32 sroot = pr.second;
-        sweep(sroot, [this, account_key](const evmc::bytes32& slot_hash, ByteView leaf_value) {
-            emit_slot_(account_key, slot_hash, leaf_value);
+    for (const auto& sr : storage_roots) {
+        const evmc::bytes32 account_key = sr.account_key;
+        sweep(sr.root, sr.derive, [this, account_key](const evmc::bytes32& slot_hash, ByteView leaf_value, bool derive) {
+            if (derive) emit_slot_(account_key, slot_hash, leaf_value);
         });
     }
 
