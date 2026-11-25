@@ -2204,6 +2204,24 @@ TEST_CASE("HashState sweeps a short node a branch holds by hash", "[hash_state][
     });
 }
 
+TEST_CASE("HashState sweeps below an extension that ends at nibble 64", "[hash_state][witness_shape]") {
+    // The extension's child is at depth 64: a branch there has no nibble left (malformed);
+    // a leaf with an empty path is well formed, but nothing below the extension is derived.
+    check_swept_not_derived([](HashState& hs, bool bad) {
+        const Bytes leaf = two_item_node(nullptr, 0, true, rlp_string(ByteView{kHiddenAccount}));
+        Bytes child = leaf;
+        if (bad) {
+            BranchNode two;
+            const Bytes h = hash_ref(hs, leaf);
+            two.set_child(0x0, ByteView{h});
+            two.set_child(0x1, ByteView{h});
+            child = Bytes{zilkworm::encode_branch(two)};
+        }
+        REQUIRE(child.size() >= 32u);
+        return hash_ref(hs, two_item_node(&kHidden.nib[1], 63, false, rlp_string(ByteView{hash_ref(hs, child)})));
+    });
+}
+
 TEST_CASE("HashState refuses a leaf that does not end at the key length where a read reaches it",
           "[hash_state][witness_shape]") {
     // embedded_leaf_short_of_key: _leaf(2, 0x01), a 2-nibble leaf embedded in the root.
