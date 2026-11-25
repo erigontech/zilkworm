@@ -114,7 +114,9 @@ bool GridMPT<DeletionEnabled, StateT>::unfold_node_from_rlp(ByteView payload, un
     // ~256 (3T+C) of jal/jalr per node read.
     const uint8_t* const node_begin = payload.data();
     auto hh{fast_decode_header(payload)};
-    if (!hh.list) [[unlikely]] {
+    // A node is one RLP list and nothing else: with bytes after it, a node short enough to embed
+    // would pass the size check of a hashed reference.
+    if (!hh.list || hh.payload_length != payload.size()) [[unlikely]] {
         failed_ = true;
         sys_println(("ERROR: unfold_node_from_rlp Invalid Payload Header, parent_slot_index: "
             + std::to_string(parent_slot_index) 
