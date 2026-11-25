@@ -329,6 +329,11 @@ bytes32 GridMPT<DeletionEnabled, StateT>::calc_root_impl(It updates_it, const It
                                 sys_println("ERROR: missing ext child rlp in node store (witness incomplete)");
                                 return {};
                             }
+                            if (rlp_opt->size() < 32) [[unlikely]] {  // a node under 32 bytes is embedded, never hashed
+                                failed_ = true;
+                                sys_println("{\"err\":\"hash ref to a node short enough to embed\"}");
+                                return {};
+                            }
                             rlp = *rlp_opt;
                         }
                         if (!unfold_node_from_rlp(rlp, grid_line.ext.path[m - 1], depth_)) [[unlikely]] {

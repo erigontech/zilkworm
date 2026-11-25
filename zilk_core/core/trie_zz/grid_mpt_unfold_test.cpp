@@ -5,6 +5,8 @@
 // node RLP as nodes are pulled into the grid. Add further unfold / malformed-
 // node cases here.
 
+#include <cstring>
+#include <map>
 #include <span>
 #include <vector>
 
@@ -14,10 +16,14 @@
 
 #include <zilk_core/core/common/bytes.hpp>
 #include <zilk_core/core/common/empty_hashes.hpp>
+#include <zilk_core/core/common_zz/mphf_builder.hpp>
 #include <zilk_core/core/rlp/encode.hpp>
 #include <zilk_core/core/state_zz/direct_state.hpp>
+#include <zilk_core/core/trie/hash_builder.hpp>
+#include <zilk_core/core/trie/nibbles.hpp>
 #include <zilk_core/core/trie_zz/mpt.hpp>
 #include <zilk_core/core/trie_zz/rlp_sw.hpp>
+#include <zilk_core/core/types_zz/flat_kv.hpp>
 
 using namespace zilkworm;
 using silkworm::Bytes;
@@ -92,6 +98,66 @@ bool unfolds_as_root(const Bytes& node) {
     const bool ok = trie.unfold_node_from_rlp(ByteView{node}, /*parent_slot=*/0, /*parent_depth=*/0);
     CHECK(trie.failed() == !ok);
     return ok;
+}
+
+struct Bytes32Less {
+    bool operator()(const bytes32& a, const bytes32& b) const noexcept {
+        return std::memcmp(a.bytes, b.bytes, 32) < 0;
+    }
+};
+using Bytes32Map = std::map<bytes32, Bytes, Bytes32Less>;
+
+bytes32 hashbuilder_root(const Bytes32Map& leaves, Bytes32Map* sink) {
+    silkworm::trie::HashBuilder hb;
+    if (sink != nullptr) {
+        hb.rlp_collector = [sink](ByteView node_rlp) { sink->emplace(keccak_bytes(node_rlp), Bytes{node_rlp}); };
+    }
+    for (const auto& [k, v] : leaves) {
+        hb.add_leaf(silkworm::trie::unpack_nibbles(ByteView{k.bytes, 32}), v);
+    }
+    return hb.root_hash();
+}
+
+std::vector<uint8_t> build_node_store(const Bytes32Map& nodes) {
+    MphfBuilder<32> nb{kMphfNodeStoreMagic, kMphfMapVersion};
+    for (const auto& [h, rlp] : nodes) {
+        std::vector<uint8_t> body;
+        FlatKv::encode(body, h, rlp);
+        nb.add(hash_key8(h), ByteView{body.data(), body.size()});
+    }
+    return std::move(nb).finalize();
+}
+
+bytes32 key_of(uint8_t fill, uint8_t last) {
+    bytes32 k;
+    std::memset(k.bytes, fill, 31);
+    k.bytes[31] = last;
+    return k;
+}
+
+// Writes k3 (absent before the block) and reads k2, keys sorted, against the witness `nodes` of `pre_root`.
+struct ExtChildRun {
+    bool failed;
+    bytes32 root;
+};
+ExtChildRun write_k3_read_k2(const Bytes32Map& nodes, const bytes32& pre_root, const bytes32& k2, ByteView k2_value,
+                             const bytes32& k3) {
+    std::vector<uint8_t> prestate = DirectState::build_blob_from_accounts({}, /*block_hashes=*/{}, /*code_store=*/{});
+    std::vector<uint8_t> nodestore = build_node_store(nodes);
+    DirectState direct{std::span<uint8_t>{prestate}, std::span<uint8_t>{nodestore}};
+    std::vector<TrieNodeFlat> flat;  // must never reallocate: GridMPT keeps views into TrieNodeFlat::buf
+    flat.reserve(2);
+    auto& write = flat.emplace_back(k3);
+    write.current_off = 40;
+    write.current_len = 1;
+    write.buf[40] = 0x44;
+    auto& read = flat.emplace_back(k2);
+    read.ext_initial = k2_value;
+    read.current_off = 40;
+    read.current_len = 0;
+    GridMPT<true, DirectState> trie{direct, pre_root};
+    const bytes32 root = trie.calc_root_from_updates({flat.data(), flat.size()});
+    return {trie.failed(), root};
 }
 
 }  // namespace
@@ -196,4 +262,53 @@ TEST_CASE("unfold_node_from_rlp bounds leaf and extension path lengths", "[trie]
         CHECK_FALSE(unfolds_as_root(path_node(n, /*leaf=*/false, /*value_len=*/32)));
     for (const size_t n : {1u, 2u, 31u, 63u})
         CHECK(unfolds_as_root(path_node(n, /*leaf=*/false, /*value_len=*/32)));
+}
+
+// A node under 32 bytes is embedded in its parent, never referenced by its hash. The extension child that
+// calc_root_from_updates fetches must refuse such a reference, as unfold_slot does for a branch child: a batch
+// that leaves the node alone would otherwise keep the reference in the root it returns, which is then not the
+// root of the resulting map.
+TEST_CASE("calc_root_from_updates refuses a hash reference to a short extension child", "[trie][gridmpt][unfold]") {
+    // k1 and k2 share 63 nibbles; k3 is absent before the batch.
+    const bytes32 k1 = key_of(0x5A, 0x50);
+    const bytes32 k2 = key_of(0x5A, 0x5F);
+    const bytes32 k3 = key_of(0x00, 0x01);
+    const Bytes v2{0x01, 0x02, 0x03, 0x04, 0x05};
+
+    // The branch at depth 63 over k1 -> 0x01 and k2 -> v2 is 27 bytes, so its parent embeds it.
+    Bytes branch_payload{0xC2, 0x20, 0x01};                      // slot 0: k1's leaf, empty path
+    branch_payload.append(14, silkworm::rlp::kEmptyStringCode);  // slots 1 to 14
+    branch_payload.append({0xC7, 0x20, 0x85});                   // slot 15: k2's leaf, empty path
+    branch_payload.append(v2);
+    branch_payload.push_back(silkworm::rlp::kEmptyStringCode);  // no value
+    Bytes branch;
+    silkworm::rlp::encode_header(branch, {.list = true, .payload_length = branch_payload.size()});
+    branch.append(branch_payload);
+    REQUIRE(branch.size() < 32);
+
+    SECTION("the root extension holds the short branch by its hash") {
+        const bytes32 branch_hash = keccak_bytes(ByteView{branch});
+        Bytes ext_payload{0xA0, 0x15};  // 63 nibbles: the odd extension flag and k1's first nibble, then 31 bytes
+        ext_payload.append(31, 0xA5);
+        ext_payload.push_back(0xA0);
+        ext_payload.append(branch_hash.bytes, 32);
+        Bytes ext;
+        silkworm::rlp::encode_header(ext, {.list = true, .payload_length = ext_payload.size()});
+        ext.append(ext_payload);
+        const bytes32 root = keccak_bytes(ByteView{ext});
+        // Not the root of {k1 -> 0x01, k2 -> v2}, whose extension embeds the branch.
+        REQUIRE(root != hashbuilder_root({{k1, Bytes{0x01}}, {k2, v2}}, nullptr));
+        const auto run = write_k3_read_k2({{branch_hash, branch}, {root, ext}}, root, k2, ByteView{v2}, k3);
+        CHECK(run.failed);
+    }
+    SECTION("the control: a 32-byte branch held by its hash") {
+        const Bytes32Map pre{{k1, Bytes{0x11, 0x12, 0x13, 0x14, 0x15}}, {k2, v2}};
+        Bytes32Map nodes;
+        const bytes32 root = hashbuilder_root(pre, &nodes);
+        const auto run = write_k3_read_k2(nodes, root, k2, ByteView{v2}, k3);
+        Bytes32Map post = pre;
+        post[k3] = Bytes{0x44};
+        CHECK_FALSE(run.failed);
+        CHECK(run.root == hashbuilder_root(post, nullptr));
+    }
 }
