@@ -34,10 +34,12 @@ inline ValidationResult MergeRuleSet::validate_block_header(const BlockHeader& h
     return RuleSet::validate_block_header(header, state, with_future_timestamp_check);
 }
 
-ValidationResult MergeRuleSet::validate_difficulty_and_seal(const BlockHeader& header, const BlockHeader&) {
+ValidationResult MergeRuleSet::validate_difficulty_and_seal(const BlockHeader& header, const BlockHeader& parent) {
+    // A parent past genesis with a zero difficulty is a proof-of-stake block, so its child is past the merge as well.
     const bool merged{!pre_merge_rule_set_ || std::holds_alternative<NoPreMergeConfig>(chain_config_.rule_set_config) ||
                       chain_config_.terminal_total_difficulty == 0 ||
-                      chain_config_.withdrawals_activated(header.timestamp)};
+                      chain_config_.withdrawals_activated(header.timestamp) ||
+                      (parent.number != 0 && parent.difficulty == 0)};
     if (merged && header.difficulty != 0) {
         return ValidationResult::kPoWBlockAfterMerge;
     }

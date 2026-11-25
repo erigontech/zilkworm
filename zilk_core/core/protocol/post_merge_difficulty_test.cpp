@@ -31,10 +31,11 @@ class ParentOnly final : public BlockState {
 };
 
 ValidationResult validate_header(const ChainConfig& config, uint64_t timestamp, const intx::uint256& difficulty,
-                                 BlockNum number = 100) {
+                                 BlockNum number = 100, std::optional<intx::uint256> parent_difficulty = std::nullopt) {
     BlockHeader parent;
     parent.ommers_hash = kEmptyListHash;
     parent.number = number - 1;
+    parent.difficulty = parent_difficulty.value_or(difficulty);  // a proof-of-work child gets a proof-of-work parent
     parent.timestamp = timestamp - 12;
     parent.gas_limit = 30'000'000;
     parent.base_fee_per_gas = 1'000'000'000;
@@ -70,6 +71,13 @@ TEST_CASE("a config with no pre-merge rules is merged at genesis without a termi
     config.rule_set_config = NoPreMergeConfig{};
     CHECK(validate_header(config, 1000, 0) == ValidationResult::kOk);
     CHECK(validate_header(config, 1000, 1) == ValidationResult::kPoWBlockAfterMerge);
+}
+
+TEST_CASE("a child of a proof-of-stake parent with a non-zero difficulty is rejected before Shanghai",
+          "[merge_rule_set]") {
+    const uint64_t before_shanghai{*kMainnetConfig.shanghai_time - 1};
+    CHECK(validate_header(kMainnetConfig, before_shanghai, 0, 17'000'000, 0) == ValidationResult::kOk);
+    CHECK(validate_header(kMainnetConfig, before_shanghai, 1, 17'000'000, 0) == ValidationResult::kPoWBlockAfterMerge);
 }
 
 #ifdef Z6M_POST_MERGE_ONLY
