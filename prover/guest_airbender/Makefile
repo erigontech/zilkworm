@@ -5,6 +5,9 @@ CMAKE_TOOLCHAIN := $(CURDIR)/cmake/riscv32im.cmake
 # that the block deletes (see docs/airbender-docker-service.md). `make z6m_guest USE_HASH_KEY=OFF`
 # (or `make z6m_guest_airbender USE_HASH_KEY=OFF` from the root) builds without it.
 USE_HASH_KEY ?= ON
+# Leave out the pre-merge rules: `make z6m_guest Z6M_POST_MERGE_ONLY=ON`
+# (or `make z6m_guest_airbender Z6M_POST_MERGE_ONLY=ON` from the root).
+Z6M_POST_MERGE_ONLY ?= OFF
 LINKER_SCRIPT := $(CURDIR)/link.x
 START_ASM := start.S
 
@@ -16,6 +19,7 @@ zilkworm:
 	cmake -B$(BUILD_DIR)/zilkworm -S../.. \
 		-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
 		-DUSE_HASH_KEY=$(USE_HASH_KEY) \
+		-DZ6M_POST_MERGE_ONLY=$(Z6M_POST_MERGE_ONLY) \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE \
 		-DCMAKE_VERBOSE_MAKEFILE=ON \
