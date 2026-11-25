@@ -73,6 +73,14 @@ TEST_CASE("a config with no pre-merge rules is merged at genesis without a termi
     CHECK(validate_header(config, 1000, 1) == ValidationResult::kPoWBlockAfterMerge);
 }
 
+TEST_CASE("an Ethash config with a terminal total difficulty of 0 is merged at genesis before Shanghai",
+          "[merge_rule_set]") {
+    ChainConfig config{test::kLondonConfig};
+    config.terminal_total_difficulty = 0;
+    CHECK(validate_header(config, 1000, 0) == ValidationResult::kOk);
+    CHECK(validate_header(config, 1000, 1) == ValidationResult::kPoWBlockAfterMerge);
+}
+
 TEST_CASE("a child of a proof-of-stake parent with a non-zero difficulty is rejected before Shanghai",
           "[merge_rule_set]") {
     const uint64_t before_shanghai{*kMainnetConfig.shanghai_time - 1};
