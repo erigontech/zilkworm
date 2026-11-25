@@ -32,12 +32,16 @@ clean:
 # USE_HASH_KEY=ON enables node-store account recovery. For the hypercube guest only: the
 # Airbender guest's own Makefile defaults it ON (don't export this one, which would turn it off).
 USE_HASH_KEY ?= OFF
+# Z6M_POST_MERGE_ONLY=ON leaves out the pre-merge rules (every non-zero difficulty is rejected). Passed on by
+# z6m_guest and z6m_guest_slib; a command-line value reaches the Airbender guest's own Makefile through make.
+Z6M_POST_MERGE_ONLY ?= OFF
 z6m_guest:
 	cmake -S prover/guest_hypercube -B prover/guest_hypercube/build \
 		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_hypercube/cmake/riscv64im-sp1.cmake \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DSP1=ON \
-		-DUSE_HASH_KEY=$(USE_HASH_KEY)
+		-DUSE_HASH_KEY=$(USE_HASH_KEY) \
+		-DZ6M_POST_MERGE_ONLY=$(Z6M_POST_MERGE_ONLY)
 	cmake --build prover/guest_hypercube/build -j$$(nproc)
 
 z6m_prover: z6m_guest
@@ -294,7 +298,8 @@ z6m_guest_slib:
 		-DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/prover/guest_hypercube/cmake/riscv64im-sp1.cmake \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DSP1=ON \
-		-DZ6M_HASH_STATE=ON
+		-DZ6M_HASH_STATE=ON \
+		-DZ6M_POST_MERGE_ONLY=$(Z6M_POST_MERGE_ONLY)
 	cmake --build $(GUEST_SLIB_BUILD) -j$$(nproc)
 
 # Z6M_GUEST_ELF: staging a copy blocks z6m_guest relinks.

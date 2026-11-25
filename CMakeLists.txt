@@ -62,6 +62,11 @@ endif()
 get_filename_component(SILKWORM_MAIN_DIR . ABSOLUTE)
 set(SILKWORM_MAIN_SRC_DIR "${SILKWORM_MAIN_DIR}/zilk_core")
 
+option(Z6M_POST_MERGE_ONLY "Leave out the pre-merge rules: reject every block with a non-zero difficulty" OFF)
+if(Z6M_POST_MERGE_ONLY)
+  add_compile_definitions(Z6M_POST_MERGE_ONLY)
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/compiler_settings.cmake)
 
 add_subdirectory(third_party)
@@ -137,6 +142,7 @@ if(BUILD_TESTING)
     zilk_core/core/execution/mulmod_sparse_test.cpp
     zilk_core/core/execution/secp256k1_ecrecover_test.cpp
     zilk_core/core/protocol/intrinsic_gas_test.cpp
+    zilk_core/core/protocol/post_merge_difficulty_test.cpp
     zilk_core/core/rlp/decode_bounds_test.cpp
     zilk_core/core/types/receipt_logs_test.cpp
     zilk_core/core/types/max_gas_cost_test.cpp
